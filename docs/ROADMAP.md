@@ -82,10 +82,15 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 - ⬜ Stand up the hosted control plane + the SST stack as the multi-tenant backend.
 - ⬜ Landing page + docs + self-serve onboarding.
 
+## Phase 9 — Stretch goals
+
+- ⬜ **gRPC + MessagePack transport** (internal/service-to-service) alongside WebSocket+JSON. The protocol is already transport-agnostic (the spec defines messages; each client has a `Transport` interface) — add a gRPC bidi-streaming binding carrying MessagePack-encoded protocol messages, for low-overhead internal hops (e.g. a TS Lambda → Rust engine) where WS+JSON isn't wanted. Browser clients stay on WS+JSON. Stretch, not blocking.
+- ⬜ **Adopt `modyne` (the "ElectroDB for Rust") in the DynamoDB adapter** — [modyne](https://github.com/neoeinstein/modyne) (mature, *DynamoDB Book*-aligned) gives ElectroDB-style single-table entity/projection/query ergonomics. The DynamoDB adapter ships first on raw `aws-sdk-dynamodb` (correct baseline), then refactors onto `modyne`. (Build a SmooAI-branded library only if `modyne`/[`deez`](https://github.com/Sife-ops/deez) fall short of our access patterns.)
+
 ---
 
 ### Current focus
 
-Done: Phase 0 (extraction), Phase 1 (protocol spec), Phase 2 (adapter trait + in-memory), Phase 3 skeleton (runtime consuming smooth-operator), Phase 5 (all five polyglot clients green).
+Done: Phase 0 (extraction), Phase 1 (protocol spec), Phase 2 (adapter trait + in-memory + **Postgres**), Phase 3 (knowledge-chat runtime + real-LLM E2E), Phase 5 (all five polyglot clients + live cross-language E2E vs llm.smoo.ai). Repo renamed to smooth-operator-agent.
 
-Next: the **first end-to-end knowledge-chat turn** — make the runtime a real smooth-operator `Workflow` (knowledge_search → response_gen → tool_execution), retrieving from the StorageAdapter's `KnowledgeBase`, tested with smooth-operator's `MockLlmClient` (no API keys). Build it on the in-memory adapter first, then add the Postgres and DynamoDB backends, then wrap it in a WS service + the SST/k8s deploys.
+In flight: the **DynamoDB adapter** (raw aws-sdk, DynamoDB-Local conformance) and the **k8s deploy path** (Dockerfile + Helm + ArgoCD). Next: the **SST/Rust-Lambda** serverless deploy (uses the DynamoDB adapter), then extract the shared `SmooAI/deploy` package, then the smooai cutover (Phase 7).
