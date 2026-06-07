@@ -1,0 +1,21 @@
+[package]
+name = "smooai-smooth-agent-adapter-memory"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-memory StorageAdapter for smooth-agent — the conformance/test baseline."
+
+[lib]
+name = "smooth_agent_adapter_memory"
+
+[dependencies]
+smooth-agent-core = { workspace = true }
+smooai-smooth-operator = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

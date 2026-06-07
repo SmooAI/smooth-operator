@@ -1,0 +1,376 @@
+//! Domain model for smooth-agent.
+//!
+//! These structs mirror `spec/domain/*.json` exactly (field names, optionality)
+//! and are storage-agnostic — no backend is named here. They are the shapes the
+//! `StorageAdapter` (see [`crate::adapter`]) reads and writes.
+//!
+//! Checkpoints are *not* redefined here: we re-use smooth-operator's
+//! [`Checkpoint`](smooth_operator::Checkpoint) directly so the engine plugs
+//! straight into the checkpoint slice. See [`crate::adapter`].
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+
+// Re-export the engine's Checkpoint so callers get the domain "Checkpoint"
+// from one place. spec/domain/checkpoint.schema.json documents this struct
+// as "the `Checkpoint` struct in the smooth-operator Rust crate".
+pub use smooth_operator::Checkpoint;
+
+/// The channel on which a conversation takes place.
+/// Mirrors `conversation.schema.json#/properties/platform`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Web,
+    Messenger,
+    Instagram,
+    Email,
+    Discord,
+    Phone,
+    Sms,
+    Slack,
+    Whatsapp,
+    Tiktok,
+}
+
+/// A conversation thread between participants.
+/// Mirrors `conversation.schema.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: String,
+    pub platform: Platform,
+    pub name: String,
+    pub organization_id: String,
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_json: Option<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Participant role discriminator.
+/// Mirrors `participant.schema.json#/properties/type` (`user` | `ai-agent` | `human-agent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParticipantType {
+    User,
+    AiAgent,
+    HumanAgent,
+}
+
+/// A participant in a conversation.
+/// Mirrors `participant.schema.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Participant {
+    pub id: String,
+    pub conversation_id: String,
+    pub organization_id: String,
+    #[serde(rename = "type")]
+    pub participant_type: ParticipantType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_info: Option<Value>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crm_contact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Message direction relative to the platform.
+/// Mirrors `message.schema.json#/properties/direction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Inbound,
+    Outbound,
+}
+
+/// A single content element within a message.
+/// Mirrors `message.schema.json#/$defs/ContentItem`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentItem {
+    /// Content item type discriminator. Currently only `"text"` is defined.
+    #[serde(rename = "type")]
+    pub item_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl ContentItem {
+    /// Build a `text` content item.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            item_type: "text".to_string(),
+            text: Some(text.into()),
+        }
+    }
+}
+
+/// Structured content of a message.
+/// Mirrors `message.schema.json#/$defs/MessageContent`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageContent {
+    #[serde(default)]
+    pub items: Vec<ContentItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_response: Option<Value>,
+}
+
+impl MessageContent {
+    /// Convenience: a single text item plus the flat-text mirror.
+    pub fn from_text(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            items: vec![ContentItem::text(text.clone())],
+            text: Some(text),
+            structured_response: None,
+        }
+    }
+}
+
+/// Abbreviated sender/recipient descriptor (wire shape).
+/// Mirrors `message.schema.json#/properties/from` (and `to`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticipantRef {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub participant_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// A single message within a conversation.
+/// Mirrors `message.schema.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub direction: Direction,
+    pub content: MessageContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<ParticipantRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<ParticipantRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_json: Option<Value>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Lifecycle status of a session.
+/// Mirrors `session.schema.json#/properties/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStatus {
+    Active,
+    Idle,
+    Ended,
+}
+
+/// An AI conversation session — ties a conversation to a smooth-operator
+/// workflow thread via `thread_id`.
+/// Mirrors `session.schema.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Session {
+    pub session_id: String,
+    pub conversation_id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub user_participant_id: String,
+    pub agent_participant_id: String,
+    /// smooth-operator workflow thread identifier (the historical
+    /// `langgraph_thread_id`). Resumes agent state across turns.
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SessionStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ts() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn participant_serializes_camelcase_and_kebab_type() {
+        let p = Participant {
+            id: "p1".into(),
+            conversation_id: "c1".into(),
+            organization_id: "org1".into(),
+            participant_type: ParticipantType::AiAgent,
+            external_id: None,
+            internal_id: Some("agent-uuid".into()),
+            browser_fingerprint: None,
+            browser_info: None,
+            name: "Smantha".into(),
+            email: None,
+            phone: None,
+            crm_contact_id: None,
+            metadata_json: None,
+            created_at: ts(),
+            updated_at: ts(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        // camelCase field names match the spec
+        assert!(v.get("conversationId").is_some());
+        assert!(v.get("organizationId").is_some());
+        assert!(v.get("internalId").is_some());
+        // `type` discriminator is kebab-cased per the enum spec
+        assert_eq!(v.get("type").unwrap(), &json!("ai-agent"));
+        // round-trip
+        let back: Participant = serde_json::from_value(v).unwrap();
+        assert_eq!(back.participant_type, ParticipantType::AiAgent);
+    }
+
+    #[test]
+    fn participant_type_variants_match_spec() {
+        assert_eq!(
+            serde_json::to_value(ParticipantType::User).unwrap(),
+            json!("user")
+        );
+        assert_eq!(
+            serde_json::to_value(ParticipantType::AiAgent).unwrap(),
+            json!("ai-agent")
+        );
+        assert_eq!(
+            serde_json::to_value(ParticipantType::HumanAgent).unwrap(),
+            json!("human-agent")
+        );
+    }
+
+    #[test]
+    fn message_serializes_direction_and_content_items() {
+        let m = Message {
+            id: "m1".into(),
+            external_id: None,
+            organization_id: Some("org1".into()),
+            conversation_id: Some("c1".into()),
+            direction: Direction::Inbound,
+            content: MessageContent::from_text("hello"),
+            from: Some(ParticipantRef {
+                id: "p1".into(),
+                participant_type: "user".into(),
+                name: Some("Visitor".into()),
+            }),
+            to: None,
+            metadata_json: None,
+            analytics_json: None,
+            created_at: ts(),
+            updated_at: None,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v.get("direction").unwrap(), &json!("inbound"));
+        assert_eq!(v["content"]["items"][0]["type"], json!("text"));
+        assert_eq!(v["content"]["items"][0]["text"], json!("hello"));
+        assert_eq!(v["content"]["text"], json!("hello"));
+        // `from` uses camelCase `id`/`type`
+        assert_eq!(v["from"]["type"], json!("user"));
+        let back: Message = serde_json::from_value(v).unwrap();
+        assert_eq!(back.direction, Direction::Inbound);
+    }
+
+    #[test]
+    fn session_uses_thread_id_camelcase() {
+        let s = Session {
+            session_id: "s1".into(),
+            conversation_id: "c1".into(),
+            agent_id: "a1".into(),
+            agent_name: "Smantha".into(),
+            user_participant_id: "pu".into(),
+            agent_participant_id: "pa".into(),
+            thread_id: "thread-xyz".into(),
+            status: Some(SessionStatus::Active),
+            token_count: Some(0),
+            message_count: Some(0),
+            metadata: None,
+            created_at: Some(ts()),
+            updated_at: Some(ts()),
+            ended_at: None,
+            last_activity_at: Some(ts()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("sessionId").is_some());
+        assert!(v.get("conversationId").is_some());
+        assert!(v.get("userParticipantId").is_some());
+        assert!(v.get("agentParticipantId").is_some());
+        assert_eq!(v.get("threadId").unwrap(), &json!("thread-xyz"));
+        assert_eq!(v.get("status").unwrap(), &json!("active"));
+        let back: Session = serde_json::from_value(v).unwrap();
+        assert_eq!(back.thread_id, "thread-xyz");
+        assert_eq!(back.status, Some(SessionStatus::Active));
+    }
+
+    #[test]
+    fn conversation_platform_and_camelcase() {
+        let c = Conversation {
+            id: "c1".into(),
+            platform: Platform::Web,
+            name: "Lead chat".into(),
+            organization_id: "org1".into(),
+            idempotency_key: "idem-1".into(),
+            metadata_json: Some(json!({"campaign": "spring"})),
+            analytics_json: None,
+            created_at: ts(),
+            updated_at: ts(),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v.get("platform").unwrap(), &json!("web"));
+        assert!(v.get("organizationId").is_some());
+        assert!(v.get("idempotencyKey").is_some());
+        assert_eq!(v["metadataJson"]["campaign"], json!("spring"));
+        let back: Conversation = serde_json::from_value(v).unwrap();
+        assert_eq!(back.platform, Platform::Web);
+    }
+}

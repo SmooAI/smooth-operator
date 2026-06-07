@@ -1,0 +1,23 @@
+[package]
+name = "smooai-smooth-agent-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reference core for smooth-agent: domain model + StorageAdapter seam over smooth-operator."
+
+[lib]
+name = "smooth_agent_core"
+
+[dependencies]
+# TODO: switch to crates.io once smooth-operator is published (roadmap Phase 0)
+smooai-smooth-operator = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
