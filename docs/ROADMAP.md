@@ -28,7 +28,7 @@ One trait, two backends. See [STORAGE.md](STORAGE.md).
 - ✅ Define the `StorageAdapter` trait surface (`rust/smooth-operator-agent-core/src/adapter.rs`): conversations, participants, messages, sessions, + sync `checkpoints()`/`knowledge()` accessors so smooth-operator's `CheckpointStore`/`KnowledgeBase` plug in unchanged.
 - ✅ **In-memory adapter** (`rust/adapters/in-memory`) — the conformance baseline; delegates checkpoints/knowledge to smooth-operator's `MemoryCheckpointStore`/`InMemoryKnowledge`. Integration test green.
 - ✅ **Postgres adapter** (`rust/adapters/postgres`, k8s path): conversation/participant/message/session tables; `PostgresCheckpointStore`; `pgvector` (HNSW cosine) + `tsvector` BM25 knowledge with RRF; pluggable `Embedder` (deterministic default + optional `text-embedding-3-small` gateway). Mirrors smooai's `knowledge_vectors`. testcontainers conformance green (pgvector/pgvector:pg16).
-- ⬜ **DynamoDB adapter** (AWS path): ElectroDB single-table for conversation/participant/message/session/checkpoint; **S3 Vectors** for knowledge embeddings.
+- ✅ **DynamoDB adapter** (`rust/adapters/dynamodb`, AWS path): raw aws-sdk single overloaded table (GSI1) for conversations/participants/messages/sessions + `DynamoCheckpointStore` (smooth-operator's sync trait); knowledge = brute-force cosine (testable) + real **S3 Vectors** (`s3-vectors` feature, aws-sdk-s3vectors v1.27). testcontainers conformance green (amazon/dynamodb-local). (modyne adoption = Phase 9.)
 - ⬜ Adapter conformance tests run against every backend (the in-memory test is the template).
 
 > **API note:** smooth-operator's `CheckpointStore`/`KnowledgeBase` are **synchronous** traits, and `CheckpointStore` keys on `agent_id` (not `thread_id`). The `Session.thread_id ↔ Checkpoint.agent_id` bridge lives in the Phase 3 runtime.
@@ -65,8 +65,8 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 
 ## Phase 6 — Deploy (`deploy/`)
 
-- ⬜ **SST** (`deploy/sst`): API Gateway WebSocket + Lambda handlers (`$connect`, `send_message`, …) + DynamoDB table + S3 Vectors + S3 blob bucket. One-command `deploy`.
-- ⬜ **Helm + ArgoCD** (`deploy/k8s`): service + Postgres + pgvector + ingress + ArgoCD Application. One-command `helm install`.
+- 🟡 **SST** (`deploy/sst`): API Gateway WebSocket + **Rust Lambda** (per-message; Management-API post-back; DynamoDB state) + DynamoDB table + S3 Vectors + S3 bucket. *(in flight)*
+- ✅ **Helm + ArgoCD** (`deploy/k8s`): Dockerfile + chart (deployment/service/WS-ingress/hpa/configmap/secret) + ArgoCD Application. helm lint + template + kubectl dry-run green. Server now binds `SMOOTH_AGENT_BIND` (0.0.0.0 in k8s). Expects external pgvector Postgres.
 - ⬜ `npx smooth-operator-agent deploy` UX wrapper.
 - ⬜ Extract the reusable pieces into a public **`SmooAI/deploy`** package (SST constructs + Helm/ArgoCD) once the first concrete deploy works; dogfood into smooai. See [DEPLOY.md](DEPLOY.md).
 
