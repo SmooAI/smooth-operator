@@ -49,11 +49,14 @@ One trait, two backends. See [STORAGE.md](STORAGE.md).
 
 ## Phase 5 — Polyglot clients & service (`typescript/`, `go/`, `dotnet/`, `python/`)
 
-- ⬜ **TypeScript** first (Lambda-native; this is what the smooai monorepo dogfoods). napi-rs in-process embedding of smooth-operator where it pays off.
-- ⬜ **C#/.NET** — first-class. Native protocol client + service host (ASP.NET/minimal API + WS).
-- ⬜ **Go** — native protocol client + service.
-- ⬜ **Python** — native protocol client; PyO3/uniffi in-process embedding optional.
-- ⬜ Each language: client conformance + a runnable "hello knowledge-chat" example.
+Every client is generated from `spec/` (protocol-first) and validates the shared conformance fixtures. Each has a transport-agnostic native client with `requestId` correlation, a streaming `MessageTurn` (awaitable terminal + iterate `stream_token`/`stream_chunk`), and HITL resume routing.
+
+- ✅ **TypeScript** (`@smooai/smooth-agent`) — Lambda-native; the dogfood target. 16 tests.
+- ✅ **C#/.NET** (`SmooAI.SmoothAgent`, net8.0) — first-class. System.Text.Json polymorphic event union. 21 tests.
+- ✅ **Go** (`github.com/SmooAI/smooth-agent/go`) — `ServerEvent`+`Raw` accessor pattern. 26 tests (race-clean).
+- ✅ **Python** (`smooth_agent`) — pydantic v2 discriminated unions, async client. 26 tests.
+- ⬜ Service hosts per language (WS server + agent runtime), and a runnable "hello knowledge-chat" example each.
+- ⬜ In-process FFI where it pays off: napi-rs (TS/Lambda), PyO3/uniffi (Python).
 
 ## Phase 6 — Deploy (`deploy/`)
 
@@ -77,4 +80,6 @@ One trait, two backends. See [STORAGE.md](STORAGE.md).
 
 ### Current focus
 
-Phase 0 (smooth-operator extraction) → Phase 1 (protocol) → Phase 2 (adapters). The first end-to-end milestone is a **Rust reference service** that: accepts a `send_message` over WS, runs a smooth-operator workflow with knowledge retrieval + one tool, streams `AgentEvent`s back as protocol events, and persists to **both** Postgres and DynamoDB adapters.
+Done: Phase 0 (extraction), Phase 1 (protocol spec), Phase 2 (adapter trait + in-memory), Phase 3 skeleton (runtime consuming smooth-operator), Phase 5 (all five polyglot clients green).
+
+Next: the **first end-to-end knowledge-chat turn** — make the runtime a real smooth-operator `Workflow` (knowledge_search → response_gen → tool_execution), retrieving from the StorageAdapter's `KnowledgeBase`, tested with smooth-operator's `MockLlmClient` (no API keys). Build it on the in-memory adapter first, then add the Postgres and DynamoDB backends, then wrap it in a WS service + the SST/k8s deploys.
