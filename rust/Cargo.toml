@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["smooth-operator-agent-core", "adapters/in-memory", "adapters/postgres", "smooth-operator-agent-server"]
+members = [
+    "smooth-operator-agent-core",
+    "adapters/in-memory",
+    "adapters/postgres",
+    "adapters/dynamodb",
+    "smooth-operator-agent-server",
+]
 
 [workspace.package]
 edition = "2021"
