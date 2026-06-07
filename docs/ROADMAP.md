@@ -27,7 +27,7 @@ One trait, two backends. See [STORAGE.md](STORAGE.md).
 
 - ✅ Define the `StorageAdapter` trait surface (`rust/smooth-operator-agent-core/src/adapter.rs`): conversations, participants, messages, sessions, + sync `checkpoints()`/`knowledge()` accessors so smooth-operator's `CheckpointStore`/`KnowledgeBase` plug in unchanged.
 - ✅ **In-memory adapter** (`rust/adapters/in-memory`) — the conformance baseline; delegates checkpoints/knowledge to smooth-operator's `MemoryCheckpointStore`/`InMemoryKnowledge`. Integration test green.
-- ⬜ **Postgres adapter** (k8s path): conversation/participant/message/session tables; Postgres checkpoint store (smooth-operator ships `PostgresCheckpointStore`); `pgvector` + `tsvector` knowledge with RRF + rerank. Mirror the smooai `knowledge_vectors` schema.
+- ✅ **Postgres adapter** (`rust/adapters/postgres`, k8s path): conversation/participant/message/session tables; `PostgresCheckpointStore`; `pgvector` (HNSW cosine) + `tsvector` BM25 knowledge with RRF; pluggable `Embedder` (deterministic default + optional `text-embedding-3-small` gateway). Mirrors smooai's `knowledge_vectors`. testcontainers conformance green (pgvector/pgvector:pg16).
 - ⬜ **DynamoDB adapter** (AWS path): ElectroDB single-table for conversation/participant/message/session/checkpoint; **S3 Vectors** for knowledge embeddings.
 - ⬜ Adapter conformance tests run against every backend (the in-memory test is the template).
 
