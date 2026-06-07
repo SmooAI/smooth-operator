@@ -1,0 +1,40 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+
+# Go
+/go/bin/
+
+# .NET
+bin/
+obj/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+
+# SST / deploy
+.sst/
+.open-next/
+cdk.out/
+
+# Env / secrets
+.env
+.env.local
+*.pem
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
