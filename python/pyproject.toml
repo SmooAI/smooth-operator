@@ -23,6 +23,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "datamodel-code-generator>=0.25",
     "ruff>=0.4",
+    # The live E2E (tests/test_e2e_live.py) drives the real WebSocketTransport,
+    # which needs the `websockets` library. Kept as an optional project extra for
+    # consumers; pinned into the dev group so `uv run pytest` can run the E2E.
+    "websockets>=12",
 ]
 
 [build-system]
