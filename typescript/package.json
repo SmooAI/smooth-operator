@@ -25,7 +25,8 @@
         "build": "tsc -p tsconfig.json",
         "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
         "test": "vitest run",
-        "test:watch": "vitest"
+        "test:watch": "vitest",
+        "test:e2e": "vitest run --config vitest.e2e.config.ts"
     },
     "devDependencies": {
         "@apidevtools/json-schema-ref-parser": "^11.7.3",
