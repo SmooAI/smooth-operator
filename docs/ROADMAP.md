@@ -40,6 +40,7 @@ One trait, two backends. See [STORAGE.md](STORAGE.md).
 - ⬜ Wire the real `KnowledgeBase` impl (vector-backed) into the workflow, replacing the in-memory stub.
 - ⬜ HITL: write-confirmation + OTP via the `human` module / `ConfirmationHook`, surfaced as protocol events.
 - ⬜ Checkpoint per session thread; resume on the next turn.
+- ⬜ **OpenTelemetry `gen_ai.*` semantic conventions** in the runtime (and upstream in smooth-operator, where OTel is a parity gap) — interops with the smooai monorepo's existing `gen_ai.*` spans and the Microsoft Agent Framework. See [DOTNET.md](DOTNET.md) §6.
 
 ## Phase 4 — Tools (`spec/` + runtime)
 
@@ -57,6 +58,7 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 - ✅ **Python** (`smooth_agent`) — pydantic v2 discriminated unions, async client. 26 tests.
 - ⬜ Service hosts per language (WS server + agent runtime), and a runnable "hello knowledge-chat" example each.
 - ⬜ In-process FFI where it pays off: napi-rs (TS/Lambda), PyO3/uniffi (Python).
+- ⬜ **.NET ecosystem interop** (see [DOTNET.md](DOTNET.md)): a `SmoothAgentChatClient : IChatClient` facade over the remote client (Microsoft.Extensions.AI), `services.AddSmoothAgent(...)` DI, a `SmoothAgentThread` handle, `AIFunction`-based tool authoring, and middleware mapping to smooth-operator's `ToolHook`. Borrowed from Microsoft Agent Framework idioms.
 
 ## Phase 6 — Deploy (`deploy/`)
 
