@@ -63,8 +63,9 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 ## Phase 6 — Deploy (`deploy/`)
 
 - ⬜ **SST** (`deploy/sst`): API Gateway WebSocket + Lambda handlers (`$connect`, `send_message`, …) + DynamoDB table + S3 Vectors + S3 blob bucket. One-command `deploy`.
-- ⬜ **Helm** (`deploy/k8s`): service + Postgres + pgvector + ingress. One-command `helm install`.
+- ⬜ **Helm + ArgoCD** (`deploy/k8s`): service + Postgres + pgvector + ingress + ArgoCD Application. One-command `helm install`.
 - ⬜ `npx smooth-agent deploy` UX wrapper.
+- ⬜ Extract the reusable pieces into a public **`SmooAI/deploy`** package (SST constructs + Helm/ArgoCD) once the first concrete deploy works; dogfood into smooai. See [DEPLOY.md](DEPLOY.md).
 
 ## Phase 7 — Dogfood in the smooai monorepo
 
