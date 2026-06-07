@@ -202,3 +202,75 @@ async fn runtime_accepts_any_llm_provider_trait_object() {
         .expect("run_turn");
     assert!(outcome.reply.is_empty());
 }
+
+/// Cross-turn memory (no network): two turns on the same conversation id. The
+/// runtime must replay turn 1's persisted messages into turn 2's agent via
+/// `with_prior_messages`, so the mock's turn-2 request carries turn 1's user
+/// message AND the turn-1 assistant reply as prior context. This is the
+/// no-network proof of the same fix the live `multi_turn_coherence` eval
+/// exercises end-to-end.
+#[tokio::test]
+async fn run_turn_replays_prior_messages_for_cross_turn_memory() {
+    let storage = seeded_storage();
+
+    // Turn 1: model just acknowledges. Turn 2: model recalls the name. We don't
+    // rely on the mock's reply for the assertion — we assert on what the mock
+    // SAW on turn 2 (the replayed prior messages).
+    let mock = MockLlmClient::new();
+    mock.push_text("Got it, Zog.")
+        .push_text("Your name is Zog.");
+
+    let runtime = KnowledgeChatRuntime::new(storage.clone(), test_llm())
+        .with_llm_provider(Arc::new(mock.clone()));
+
+    runtime
+        .run_turn("conv-mem", "My name is Zog. Just acknowledge.")
+        .await
+        .expect("turn 1");
+    let second = runtime
+        .run_turn("conv-mem", "What is my name?")
+        .await
+        .expect("turn 2");
+
+    assert_eq!(second.reply, "Your name is Zog.");
+
+    // Two turns × one mock call each (no tool round-trips) = 2 calls.
+    assert_eq!(mock.call_count(), 2, "one LLM call per turn");
+
+    // The turn-2 request must contain turn 1's content as prior messages: the
+    // user's "My name is Zog" turn and the assistant's "Got it, Zog." reply,
+    // both replayed before the current "What is my name?" turn.
+    let calls = mock.calls();
+    let turn2_call = &calls[1];
+    let saw_prior_user = turn2_call
+        .messages
+        .iter()
+        .any(|m| m.content.contains("My name is Zog"));
+    let saw_prior_assistant = turn2_call
+        .messages
+        .iter()
+        .any(|m| m.content.contains("Got it, Zog."));
+    assert!(
+        saw_prior_user,
+        "turn 2 should replay turn 1's user message as prior context; messages: {:?}",
+        turn2_call.messages
+    );
+    assert!(
+        saw_prior_assistant,
+        "turn 2 should replay turn 1's assistant reply as prior context; messages: {:?}",
+        turn2_call.messages
+    );
+
+    // Sanity: turn 1's request had NO prior messages about a name (nothing was
+    // persisted before it ran).
+    let turn1_call = &calls[0];
+    let turn1_user_turns = turn1_call
+        .messages
+        .iter()
+        .filter(|m| m.content.contains("My name is Zog"))
+        .count();
+    assert_eq!(
+        turn1_user_turns, 1,
+        "turn 1 should see its own user message exactly once (no prior replay)"
+    );
+}

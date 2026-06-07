@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use smooth_operator::llm_provider::LlmProvider;
 use smooth_operator::{
-    Agent, AgentConfig, AgentEvent, FnNode, LlmConfig, ToolRegistry, Workflow, WorkflowBuilder,
+    Agent, AgentConfig, AgentEvent, FnNode, LlmConfig, Message as EngineMessage, Role,
+    ToolRegistry, Workflow, WorkflowBuilder,
 };
 
-use crate::adapter::StorageAdapter;
+use crate::adapter::{MessageQuery, StorageAdapter};
 use crate::domain::{Direction, Message as DomainMessage, MessageContent};
 use crate::tools::KnowledgeSearchTool;
 
@@ -139,7 +140,13 @@ const KNOWLEDGE_CHAT_SYSTEM_PROMPT: &str =
     Answer the user's question accurately and concisely. When a question depends on \
     organization-specific facts (policies, products, documentation), call the \
     `knowledge_search` tool to retrieve them before answering, and ground your answer \
-    in what you retrieve. If the knowledge base has no relevant information, say so.";
+    in what you retrieve. If the knowledge base has no relevant information, say so. \
+    Remember facts the user tells you within the conversation and use them when asked.";
+
+/// Max prior turns to replay into the conversation for cross-turn memory.
+/// Bounds context growth on long sessions; the in-memory log is small, but a
+/// real backend (Postgres/DynamoDB) could be large.
+const MAX_PRIOR_MESSAGES: usize = 50;
 
 /// The outcome of running one knowledge-grounded turn through the agent.
 ///
@@ -244,9 +251,17 @@ impl KnowledgeChatRuntime {
     }
 
     /// Build the `Agent` for a turn: knowledge-grounded config + the
-    /// `knowledge_search` tool, with the mock LLM provider attached when one
-    /// was injected for tests.
-    fn build_agent(&self, events: Arc<Mutex<Vec<AgentEvent>>>) -> Agent {
+    /// `knowledge_search` tool + the conversation's prior turns replayed for
+    /// cross-turn memory, with the mock LLM provider attached when one was
+    /// injected for tests.
+    ///
+    /// `prior` is the conversation's persisted message log (oldest-first),
+    /// already converted to engine messages. Replaying it via
+    /// [`AgentConfig::with_prior_messages`] is what gives turn 2 memory of
+    /// turn 1: `Agent::new` randomizes the agent id every turn, so the
+    /// checkpoint-resume path can't be keyed stably — replaying the persisted
+    /// log is the robust, backend-agnostic way to carry memory.
+    fn build_agent(&self, events: Arc<Mutex<Vec<AgentEvent>>>, prior: Vec<EngineMessage>) -> Agent {
         // (1) Auto-injected knowledge context: the engine queries the KB with
         //     the user's message and prepends matches before the first call.
         let config = AgentConfig::new(
@@ -255,7 +270,10 @@ impl KnowledgeChatRuntime {
             self.llm.clone(),
         )
         .with_max_iterations(self.max_iterations)
-        .with_knowledge(self.storage.knowledge());
+        .with_knowledge(self.storage.knowledge())
+        // (1b) Cross-turn memory: replay the conversation's prior turns so the
+        //      model sees turn 1 when answering turn 2.
+        .with_prior_messages(prior);
 
         // (2) Agent-driven search: register the knowledge_search tool over the
         //     SAME knowledge handle, so a tool call hits the same store.
@@ -287,9 +305,15 @@ impl KnowledgeChatRuntime {
     /// fails.
     pub async fn run_turn(&self, conversation_id: &str, user_message: &str) -> Result<TurnOutcome> {
         let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
-        let agent = self.build_agent(Arc::clone(&events));
 
-        // Persist the inbound user message first.
+        // Load the conversation's prior turns for cross-turn memory BEFORE
+        // persisting the new inbound message, so `prior` is exactly the
+        // history-up-to-now (the new message is replayed by `Agent::run` as the
+        // current user turn, not as a duplicated prior message).
+        let prior = self.load_prior_messages(conversation_id).await?;
+        let agent = self.build_agent(Arc::clone(&events), prior);
+
+        // Persist the inbound user message.
         self.persist_message(conversation_id, Direction::Inbound, user_message)
             .await?;
 
@@ -347,6 +371,46 @@ impl KnowledgeChatRuntime {
         };
         self.storage.append_message(message).await?;
         Ok(())
+    }
+
+    /// Load the conversation's persisted messages (oldest-first, capped at
+    /// [`MAX_PRIOR_MESSAGES`]) and convert them to engine [`EngineMessage`]s for
+    /// replay: inbound → [`Role::User`], outbound → [`Role::Assistant`]. Empty
+    /// messages are skipped. This is the same approach the WS service runner
+    /// uses (`smooth-operator-agent-server/src/runner.rs`).
+    async fn load_prior_messages(&self, conversation_id: &str) -> Result<Vec<EngineMessage>> {
+        let page = self
+            .storage
+            .list_messages_by_conversation(MessageQuery::new(conversation_id, MAX_PRIOR_MESSAGES))
+            .await?;
+
+        let mut out = Vec::with_capacity(page.messages.len());
+        for m in page.messages {
+            let text = m
+                .content
+                .text
+                .clone()
+                .or_else(|| m.content.items.iter().find_map(|it| it.text.clone()))
+                .unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            let role = match m.direction {
+                Direction::Inbound => Role::User,
+                Direction::Outbound => Role::Assistant,
+            };
+            out.push(EngineMessage {
+                id: m.id,
+                role,
+                content: text,
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: vec![],
+                reasoning_content: None,
+                timestamp: m.created_at,
+            });
+        }
+        Ok(out)
     }
 }
 

@@ -24,7 +24,10 @@ pub use domain::{
     ParticipantRef, ParticipantType, Platform, Session, SessionStatus,
 };
 pub use runtime::{AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState};
-pub use tools::KnowledgeSearchTool;
+pub use tools::{
+    builtin_tools, ConversationHistoryTool, FetchUrlTool, KnowledgeSearchTool,
+    NoopWebSearchProvider, SearchResult, ToolContext, WebSearchProvider, WebSearchTool,
+};
 
 // Re-export the engine so adapter crates and consumers depend on one version.
 pub use smooth_operator;

@@ -221,35 +221,29 @@ async fn tool_calling_knowledge_grounded() {
     );
 }
 
-/// 4. **multi_turn / context** (optional) — two turns on the same runtime +
-///    conversation id, against the live model.
+/// 4. **multi_turn / context** — two turns on the same runtime + conversation
+///    id, against the live model.
 ///
-///    This test documents a real, verified limitation of the current reference
-///    [`KnowledgeChatRuntime`]: **cross-turn memory is not yet wired.** Each
-///    `run_turn` builds a *fresh* [`Agent`](smooth_operator::Agent) via
-///    `build_agent`, and `Agent::new` assigns a new random agent id every time.
-///    The engine's checkpoint-resume path (`Agent::resume_or_new`) keys on that
-///    agent id, so turn 2's agent finds no checkpoint from turn 1 and starts
-///    from a clean conversation. The runtime DOES persist both turns to the
-///    storage adapter's message log, but it does not replay that log into the
-///    agent's `prior_messages`.
+///    This test now PROVES cross-turn memory works. Previously the reference
+///    [`KnowledgeChatRuntime`] had no cross-turn memory: each `run_turn` built a
+///    *fresh* [`Agent`](smooth_operator::Agent) with a random id and no prior
+///    messages, so turn 2 forgot turn 1. That gap is now FIXED — before each
+///    turn, `run_turn` loads the conversation's persisted message log from the
+///    storage adapter (oldest-first; inbound → User, outbound → Assistant) and
+///    replays it via
+///    [`AgentConfig::with_prior_messages`](smooth_operator::AgentConfig::with_prior_messages),
+///    the same approach the WS service runner
+///    (`smooth-operator-agent-server/src/runner.rs`) uses. `Agent::new`
+///    randomizes the agent id every turn, so the checkpoint-resume path can't be
+///    keyed stably; replaying the persisted log is the robust, backend-agnostic
+///    way to carry memory.
 ///
-///    Verified live (claude-haiku-4-5): turn 1 "My name is Zog." → turn 2
-///    "What is my name?" returns "I don't have access to your personal
-///    information…" — the model genuinely has no memory of turn 1, confirming
-///    the gap is in the runtime wiring, not the gateway.
-///
-///    To make this assert a recall, `KnowledgeChatRuntime` would need to either
-///    (a) reuse a single `Agent` (stable id) across turns, or (b) load the
-///    persisted message log and pass it via `AgentConfig::with_prior_messages`,
-///    keyed by `conversation_id`. Tracked as future runtime work — out of scope
-///    for this live-gateway test, which only proves the engine ↔ gateway path.
-///
-///    The assertion below pins the CURRENT behavior so this test stays green
-///    and flips loudly (forcing a doc update) once cross-turn memory lands.
+///    So: turn 1 "My name is Zog." → turn 2 "What is my name?" must now recall
+///    "Zog", because turn 1 is replayed into turn 2's conversation as a prior
+///    user message before the live model answers.
 #[tokio::test]
-async fn multi_turn_context_documents_no_cross_turn_memory() {
-    let Some(key) = gate("multi_turn_context_documents_no_cross_turn_memory") else {
+async fn multi_turn_context_carries_cross_turn_memory() {
+    let Some(key) = gate("multi_turn_context_carries_cross_turn_memory") else {
         return;
     };
 
@@ -268,14 +262,11 @@ async fn multi_turn_context_documents_no_cross_turn_memory() {
         .expect("second turn");
     eprintln!("[multi_turn] turn 2 reply: {:?}", second.reply);
 
-    // CURRENT behavior: no cross-turn memory, so the model cannot recall "Zog".
-    // (If this assertion ever fails because the reply DOES contain "Zog", that's
-    //  good news — cross-turn memory got wired — and this test should be flipped
-    //  to assert recall.)
+    // FIXED behavior: cross-turn memory is wired, so turn 2 recalls "Zog" from
+    // turn 1 (replayed via with_prior_messages from the persisted message log).
     assert!(
-        !second.reply.to_ascii_uppercase().contains("ZOG"),
-        "runtime now appears to carry cross-turn memory (turn 2 recalled 'Zog'): {:?} \
-         — flip this test to assert recall and wire the docs accordingly",
+        second.reply.to_ascii_uppercase().contains("ZOG"),
+        "expected turn 2 to recall the name 'Zog' from turn 1 (cross-turn memory), got: {:?}",
         second.reply
     );
 }
