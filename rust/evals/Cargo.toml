@@ -1,0 +1,29 @@
+[package]
+name = "smooai-smooth-operator-agent-evals"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLM-as-judge evaluation harness for smooth-operator-agent: runs the agent on realistic scenarios against the live gateway, then scores its behavior with a judge model against a rubric."
+
+[lib]
+name = "smooth_operator_agent_evals"
+
+[dependencies]
+# The reference core runtime (KnowledgeChatRuntime, TurnOutcome) — read-only consumer.
+smooth-operator-agent-core = { workspace = true }
+# The engine — used directly for the JUDGE call (a raw LlmClient chat completion)
+# and for LlmConfig / Document construction.
+smooai-smooth-operator = { workspace = true }
+# In-memory StorageAdapter — the harness seeds each scenario's KB here.
+smooai-smooth-operator-agent-adapter-memory = { path = "../adapters/in-memory" }
+
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+# The gated live-gateway judge test is a normal tokio integration test.
+tokio = { workspace = true }
