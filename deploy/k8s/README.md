@@ -224,6 +224,42 @@ ingress:
 
 ---
 
+## 4b. Ephemeral-cluster smoke test (kind)
+
+`deploy/scripts/kind-smoke.sh` is a one-shot **deployment** smoke: it stands up
+this chart on a throwaway `kind` cluster (backed by a disposable
+`pgvector/pgvector:pg16` Postgres), then drives the wire protocol over a **live
+WebSocket** to the deployed pod — `ping`→`pong` and
+`create_conversation_session`→a valid session id (neither runs an LLM turn, so
+**no gateway key is needed**). It replicates the in-process
+`rust/.../tests/protocol_smoke.rs` checks across the network/Helm/container
+boundary.
+
+```bash
+# Full run: create cluster, build the image (cross-repo context), load, deploy, smoke, teardown.
+deploy/scripts/kind-smoke.sh
+
+# Fast local reruns against a cluster you keep up:
+KEEP_CLUSTER=1            deploy/scripts/kind-smoke.sh   # first run, leave cluster up
+SKIP_BUILD=1 KEEP_CLUSTER=1 deploy/scripts/kind-smoke.sh # reuse loaded image, skip docker build
+USE_EXISTING_CLUSTER=1   deploy/scripts/kind-smoke.sh   # target your current kube-context
+```
+
+It builds with the **cross-repo Docker context** (the parent dir holding both
+this repo and the sibling `smooth-operator`; override with `PARENT_DIR`), `kind
+load`s the image, `helm install`s with `server.bind=0.0.0.0` and an inline DB
+url (no gateway key), `port-forward`s the Service, and runs the protocol smoke
+using whichever WS client is available (`websocat`, python `websockets`, or node
+`ws`). The cluster is deleted on exit unless `KEEP_CLUSTER=1`.
+
+The CI counterpart is `.github/workflows/pr-kind-deploy-smoke.yml`
+(`workflow_dispatch` + PRs touching `deploy/**` / `rust/**` / `Dockerfile`),
+which checks out **both** repos as siblings (the cross-repo context), provisions
+kind via `helm/kind-action`, and runs the script. That workflow is the **live
+gate** — the script is also statically verified (`shellcheck`, `bash -n`).
+
+---
+
 ## 5. ArgoCD
 
 `argocd/application.yaml` is an ArgoCD `Application` pointing at this chart

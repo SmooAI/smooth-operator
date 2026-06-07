@@ -1,0 +1,102 @@
+name: kind deploy smoke
+
+# Onyx-gap G6: a kind-based deployment smoke test. Stands up the Helm chart in an
+# ephemeral kind cluster, backed by a throwaway pgvector Postgres, and drives the
+# wire protocol (ping -> pong, create_conversation_session -> session id) over a
+# live WebSocket to the deployed pod. No gateway key is needed — those actions
+# don't run an LLM turn. THIS WORKFLOW IS THE LIVE GATE: the local script is
+# statically verified (shellcheck/bash -n), but only a real run (here or via the
+# script on a developer box with a cluster) exercises the full build->deploy->probe path.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      # Deploy surface (chart, scripts) and the engine code that ships in the image.
+      - 'deploy/**'
+      - 'rust/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/pr-kind-deploy-smoke.yml'
+
+# One in-flight run per ref; cancel superseded runs to save runner minutes.
+concurrency:
+  group: kind-deploy-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  kind-deploy-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # ──────────────────────────────────────────────────────────────────────
+      #  CROSS-REPO CHECKOUT
+      # ──────────────────────────────────────────────────────────────────────
+      # The image build spans TWO repos: the Rust workspace path-deps on the
+      # sibling `smooth-operator` repo, so the Docker build context must be the
+      # PARENT dir that holds BOTH repos (see Dockerfile header + deploy/k8s/README.md).
+      # We lay them out as siblings under the runner workspace:
+      #
+      #     ${{ github.workspace }}/
+      #       ├── smooth-operator-agent/   (this repo)
+      #       └── smooth-operator/         (the engine; sibling)
+      #
+      # FOLLOW-UP: once `smooai-smooth-operator` is published to crates.io
+      # (roadmap Phase 0), the Rust workspace switches its path-dep to a version,
+      # the Docker context collapses to this repo alone, and this second checkout
+      # (plus the PARENT_DIR plumbing in kind-smoke.sh) can be deleted.
+      - name: Checkout smooth-operator-agent (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: smooth-operator-agent
+
+      - name: Checkout smooth-operator (sibling engine — cross-repo path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: SmooAI/smooth-operator
+          path: smooth-operator
+          # Private repo: a PAT/app token with read access is needed when this
+          # runs outside SmooAI/smooth-operator's own org-scoped GITHUB_TOKEN.
+          # Provide it as a secret and uncomment:
+          # token: ${{ secrets.SMOOTH_OPERATOR_RO_TOKEN }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      # Provisions a kind cluster on the runner. We let the script build + load
+      # the image, so this only stands up the empty cluster.
+      - name: Set up kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: smooth-agent-smoke
+          wait: 120s
+
+      # WS client for the protocol smoke — the script auto-detects python3
+      # 'websockets' (Ubuntu runners ship python3; we just add the package).
+      - name: Install WebSocket client (python websockets)
+        run: python3 -m pip install --user "websockets>=12,<14"
+
+      - name: Run kind deployment smoke
+        working-directory: smooth-operator-agent
+        env:
+          CLUSTER_NAME: smooth-agent-smoke
+          # The cluster is created by helm/kind-action above; don't let the
+          # script create/delete it — just build, load, deploy, smoke.
+          USE_EXISTING_CLUSTER: '0'
+          KEEP_CLUSTER: '0'
+          # PARENT_DIR is the runner workspace holding both sibling checkouts.
+          PARENT_DIR: ${{ github.workspace }}
+        run: bash deploy/scripts/kind-smoke.sh
+
+      # On failure, surface pod state for debugging (the script also dumps this
+      # in its trap, but this catches earlier-stage failures too).
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl -n smooth-agent-smoke describe pods || true
+          kubectl -n smooth-agent-smoke logs -l app.kubernetes.io/name=smooth-operator-agent --tail=120 || true
