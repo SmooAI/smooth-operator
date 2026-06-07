@@ -65,7 +65,7 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 
 ## Phase 6 — Deploy (`deploy/`)
 
-- 🟡 **SST** (`deploy/sst`): API Gateway WebSocket + **Rust Lambda** (per-message; Management-API post-back; DynamoDB state) + DynamoDB table + S3 Vectors + S3 bucket. *(in flight)*
+- ✅ **SST** (`deploy/sst`): API Gateway WebSocket + **Rust Lambda** (`rust/smooth-operator-agent-lambda`, per-message dispatch; Management-API post-back preserving streaming; DynamoDB state) + sst.aws.Dynamo table + S3 bucket + S3 Vectors (raw provider/CLI; brute-force fallback). Verified compile + 47 workspace tests + tsc (NOT deployed — SST v4 has no creds-free synth). cargo-lambda build documented.
 - ✅ **Helm + ArgoCD** (`deploy/k8s`): Dockerfile + chart (deployment/service/WS-ingress/hpa/configmap/secret) + ArgoCD Application. helm lint + template + kubectl dry-run green. Server now binds `SMOOTH_AGENT_BIND` (0.0.0.0 in k8s). Expects external pgvector Postgres.
 - ⬜ `npx smooth-operator-agent deploy` UX wrapper.
 - ⬜ Extract the reusable pieces into a public **`SmooAI/deploy`** package (SST constructs + Helm/ArgoCD) once the first concrete deploy works; dogfood into smooai. See [DEPLOY.md](DEPLOY.md).
