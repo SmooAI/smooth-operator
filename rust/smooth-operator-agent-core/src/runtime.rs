@@ -17,7 +17,12 @@ use smooth_operator::{
 
 use crate::adapter::{MessageQuery, StorageAdapter};
 use crate::domain::{Direction, Message as DomainMessage, MessageContent};
+use crate::telemetry::{
+    GEN_AI_CONVERSATION_ID, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_NAME,
+    GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+};
 use crate::tools::KnowledgeSearchTool;
+use tracing::Instrument;
 
 /// State threaded through the reference workflow: the user's message in, the
 /// agent's reply out. Mirrors (in miniature) the LangGraph `StateGraph` state.
@@ -164,6 +169,26 @@ pub struct TurnOutcome {
     pub events: Vec<AgentEvent>,
 }
 
+/// Extract `(input_tokens, output_tokens)` from the engine's terminal
+/// [`AgentEvent::Completed`] event, if one is present and carries usage. The
+/// engine reports `prompt_tokens` / `completion_tokens` on `Completed`; those
+/// map directly onto the GenAI `gen_ai.usage.input_tokens` /
+/// `gen_ai.usage.output_tokens` attributes. Returns `None` when there is no
+/// `Completed` event (e.g. a mock turn that didn't surface usage), so the
+/// caller omits the attributes rather than recording zeros.
+fn usage_from_events(events: &[AgentEvent]) -> Option<(u64, u64)> {
+    events.iter().find_map(|e| match e {
+        AgentEvent::Completed {
+            prompt_tokens,
+            completion_tokens,
+            ..
+        } if *prompt_tokens > 0 || *completion_tokens > 0 => {
+            Some((*prompt_tokens, *completion_tokens))
+        }
+        _ => None,
+    })
+}
+
 impl TurnOutcome {
     /// `true` if the agent invoked a tool named `tool_name` during the turn.
     #[must_use]
@@ -304,6 +329,73 @@ impl KnowledgeChatRuntime {
     /// Returns an error if the agent loop fails fatally or message persistence
     /// fails.
     pub async fn run_turn(&self, conversation_id: &str, user_message: &str) -> Result<TurnOutcome> {
+        // --- OpenTelemetry GenAI span for the whole turn ---
+        //
+        // A `gen_ai.chat` span (GenAI semantic conventions) carries the system,
+        // model, and conversation id up front, plus token usage recorded on
+        // completion. `tracing-opentelemetry` maps these fields onto an OTLP
+        // span when an exporter is installed (see `telemetry::init_telemetry`);
+        // with no collector configured they're simply captured locally.
+        //
+        // `input_tokens` / `output_tokens` are declared as empty fields here so
+        // they can be `record()`ed after the run if the engine reported usage.
+        let turn_span = tracing::info_span!(
+            SPAN_CHAT,
+            { GEN_AI_SYSTEM } = SYSTEM_NAME,
+            { GEN_AI_REQUEST_MODEL } = %self.llm.model,
+            { GEN_AI_CONVERSATION_ID } = %conversation_id,
+            { GEN_AI_USAGE_INPUT_TOKENS } = tracing::field::Empty,
+            { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
+        );
+
+        // Run the turn body inside the span so any engine-internal spans nest
+        // under it. `Instrument` keeps the span entered across awaits.
+        let outcome = self
+            .run_turn_inner(conversation_id, user_message)
+            .instrument(turn_span.clone())
+            .await?;
+
+        // Record token usage on the turn span if the engine reported it via the
+        // terminal `Completed` event (omitted otherwise, per the GenAI convs).
+        if let Some((input, output)) = usage_from_events(&outcome.events) {
+            turn_span.record(GEN_AI_USAGE_INPUT_TOKENS, input);
+            turn_span.record(GEN_AI_USAGE_OUTPUT_TOKENS, output);
+        }
+
+        // Emit a child `gen_ai.tool` span per tool call so each invocation is an
+        // independent, named, timed span in the trace. We materialize these from
+        // the collected events (rather than inside the event handler) so the
+        // spans hang off the turn span without restructuring the runtime.
+        for event in &outcome.events {
+            if let AgentEvent::ToolCallComplete {
+                tool_name,
+                duration_ms,
+                is_error,
+                ..
+            } = event
+            {
+                let _tool_span = tracing::info_span!(
+                    parent: &turn_span,
+                    SPAN_TOOL,
+                    { GEN_AI_TOOL_NAME } = %tool_name,
+                    duration_ms = *duration_ms,
+                    is_error = *is_error,
+                )
+                .entered();
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// The un-instrumented turn body. Split out from [`run_turn`] so the OTel
+    /// `gen_ai.chat` span wraps exactly the engine run + persistence without
+    /// cluttering the instrumentation logic.
+    async fn run_turn_inner(
+        &self,
+        conversation_id: &str,
+        user_message: &str,
+    ) -> Result<TurnOutcome> {
         let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
 
         // Load the conversation's prior turns for cross-turn memory BEFORE

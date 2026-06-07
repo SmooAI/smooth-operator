@@ -58,16 +58,10 @@ static SHARED: OnceLock<Shared> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // JSON tracing to CloudWatch; honors RUST_LOG (defaults to info).
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,smooai_smooth_operator_agent_lambda=info")
-            }),
-        )
-        .with_current_span(false)
-        .init();
+    // Tracing + OpenTelemetry GenAI export to CloudWatch / OTLP. Honors
+    // RUST_LOG; installs an OTLP exporter only when OTEL_EXPORTER_OTLP_ENDPOINT
+    // is set (otherwise local-only logging, no collector needed). Idempotent.
+    smooth_operator_agent_core::init_telemetry();
 
     // Build shared state once on cold start, so the handler closure can borrow
     // it for every invocation without rebuilding AWS clients.

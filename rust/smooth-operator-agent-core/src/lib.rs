@@ -16,6 +16,7 @@
 pub mod adapter;
 pub mod domain;
 pub mod runtime;
+pub mod telemetry;
 pub mod tools;
 
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
@@ -24,6 +25,7 @@ pub use domain::{
     ParticipantRef, ParticipantType, Platform, Session, SessionStatus,
 };
 pub use runtime::{AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState};
+pub use telemetry::init_telemetry;
 pub use tools::{
     builtin_tools, ConversationHistoryTool, FetchUrlTool, KnowledgeSearchTool,
     NoopWebSearchProvider, SearchResult, ToolContext, WebSearchProvider, WebSearchTool,

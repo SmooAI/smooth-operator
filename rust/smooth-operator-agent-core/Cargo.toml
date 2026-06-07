@@ -22,8 +22,21 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 
+# OpenTelemetry GenAI instrumentation (`telemetry.rs`): tracing spans mapped to
+# OTLP via tracing-opentelemetry. The OTLP exporter is gated on
+# OTEL_EXPORTER_OTLP_ENDPOINT so tests/binaries never need a live collector.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
+# The telemetry TDD test installs a capturing tracing layer to assert on the
+# recorded `gen_ai.*` span fields without a live OTLP collector.
+tracing-subscriber = { workspace = true }
 # Integration tests drive the runtime through the in-memory adapter (the
 # conformance baseline). Dev-dep only — the lib has no backend dependency.
 smooai-smooth-operator-agent-adapter-memory = { path = "../adapters/in-memory" }
