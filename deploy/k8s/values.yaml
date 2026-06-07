@@ -48,9 +48,10 @@ securityContext:
 # (or an external secret you reference). See `gateway.keySecretRef` and
 # `database`.
 server:
-  # SMOOTH_AGENT_PORT — TCP port the server binds. NOTE: the server currently
-  # binds 127.0.0.1; for k8s it must bind 0.0.0.0 (see README "0.0.0.0 bind
-  # follow-up"). The Service/probes target this port regardless.
+  # SMOOTH_AGENT_BIND — IP the server binds. 0.0.0.0 so the Service/Ingress can
+  # reach the pod (the server reads SMOOTH_AGENT_BIND; default 127.0.0.1 locally).
+  bind: "0.0.0.0"
+  # SMOOTH_AGENT_PORT — TCP port the server binds. The Service/probes target this.
   port: 8787
   # SMOOTH_AGENT_MODEL — model id requested from the gateway.
   model: "claude-haiku-4-5"

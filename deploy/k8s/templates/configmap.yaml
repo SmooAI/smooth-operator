@@ -6,6 +6,8 @@ metadata:
     {{- include "smooth-operator-agent.labels" . | nindent 4 }}
 data:
   # Non-secret runtime config — the env-var contract from rust/.../config.rs.
+  # Bind 0.0.0.0 so the Service/Ingress can reach the pod (default in chart values).
+  SMOOTH_AGENT_BIND: {{ .Values.server.bind | default "0.0.0.0" | quote }}
   SMOOTH_AGENT_PORT: {{ .Values.server.port | quote }}
   SMOOAI_GATEWAY_URL: {{ .Values.gateway.url | quote }}
   SMOOTH_AGENT_MODEL: {{ .Values.server.model | quote }}

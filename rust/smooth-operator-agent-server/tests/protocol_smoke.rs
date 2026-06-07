@@ -20,6 +20,7 @@ use smooth_operator_agent_server::config::ServerConfig;
 /// A config with NO gateway key — exactly the CI / no-creds scenario.
 fn keyless_config() -> ServerConfig {
     ServerConfig {
+        bind: "127.0.0.1".into(),
         port: 0,
         gateway_url: "https://example.invalid/v1".into(),
         gateway_key: None,

@@ -10,7 +10,8 @@
 //!
 //! | var | default | meaning |
 //! | --- | --- | --- |
-//! | `SMOOTH_AGENT_PORT` | `8787` | TCP port to bind on `127.0.0.1`. |
+//! | `SMOOTH_AGENT_BIND` | `127.0.0.1` | IP address to bind. Set `0.0.0.0` in k8s/containers so the Service/Ingress can reach the pod. |
+//! | `SMOOTH_AGENT_PORT` | `8787` | TCP port to bind. |
 //! | `SMOOAI_GATEWAY_URL` | `https://llm.smoo.ai/v1` | OpenAI-compatible LLM gateway base URL. |
 //! | `SMOOAI_GATEWAY_KEY` | *(unset)* | Gateway API key. When unset, `send_message` errors cleanly. |
 //! | `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id requested from the gateway. |
@@ -21,6 +22,8 @@
 use smooth_operator::llm::{ApiFormat, RetryPolicy};
 use smooth_operator::LlmConfig;
 
+/// Default bind address (loopback; override with `0.0.0.0` in containers).
+pub const DEFAULT_BIND: &str = "127.0.0.1";
 /// Default WebSocket bind port.
 pub const DEFAULT_PORT: u16 = 8787;
 /// Default OpenAI-compatible LLM gateway.
@@ -35,7 +38,9 @@ pub const DEFAULT_MAX_TOKENS: u32 = 512;
 /// Fully-resolved server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Port to bind on `127.0.0.1`.
+    /// IP address to bind (`127.0.0.1` for local dev, `0.0.0.0` in containers).
+    pub bind: String,
+    /// Port to bind.
     pub port: u16,
     /// LLM gateway base URL.
     pub gateway_url: String,
@@ -56,6 +61,12 @@ impl ServerConfig {
     /// Read configuration from the environment, applying documented defaults.
     #[must_use]
     pub fn from_env() -> Self {
+        let bind = std::env::var("SMOOTH_AGENT_BIND")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_BIND.to_string());
+
         let port = std::env::var("SMOOTH_AGENT_PORT")
             .ok()
             .and_then(|s| s.trim().parse::<u16>().ok())
@@ -93,6 +104,7 @@ impl ServerConfig {
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
         Self {
+            bind,
             port,
             gateway_url,
             gateway_key,
@@ -137,6 +149,7 @@ mod tests {
         // Build a config directly (env-independent) to assert default constants
         // line up with the documented contract.
         let cfg = ServerConfig {
+            bind: DEFAULT_BIND.to_string(),
             port: DEFAULT_PORT,
             gateway_url: DEFAULT_GATEWAY_URL.to_string(),
             gateway_key: None,
@@ -155,6 +168,7 @@ mod tests {
     #[test]
     fn llm_config_built_when_key_present() {
         let cfg = ServerConfig {
+            bind: DEFAULT_BIND.to_string(),
             port: 1,
             gateway_url: "https://example.test/v1".into(),
             gateway_key: Some("sk-test".into()),

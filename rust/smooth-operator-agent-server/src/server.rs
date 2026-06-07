@@ -68,14 +68,18 @@ pub fn seed_knowledge(storage: &InMemoryStorageAdapter) {
     ));
 }
 
-/// Bind on `127.0.0.1:<port>` and serve until the process is killed. Returns the
-/// bound [`TcpListener`] + the router, used by both the binary and tests (tests
-/// bind port 0 for an ephemeral port).
+/// Bind on `<SMOOTH_AGENT_BIND>:<port>` (default loopback) and serve until the
+/// process is killed. Returns the bound [`TcpListener`] + the router, used by
+/// both the binary and tests (tests bind port 0 for an ephemeral port).
 ///
 /// # Errors
 /// Returns an error if the TCP bind fails.
 pub async fn bind(config: ServerConfig) -> Result<(TcpListener, Router)> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let ip: std::net::IpAddr = config
+        .bind
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::new(ip, config.port);
     let state = build_state(config);
     let app = router(state);
     let listener = TcpListener::bind(addr)
@@ -186,6 +190,7 @@ mod tests {
     #[tokio::test]
     async fn build_state_without_key_has_no_llm() {
         let cfg = ServerConfig {
+            bind: "127.0.0.1".into(),
             port: 0,
             gateway_url: "https://example.test/v1".into(),
             gateway_key: None,

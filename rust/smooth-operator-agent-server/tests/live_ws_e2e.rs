@@ -58,6 +58,7 @@ fn gate(test_name: &str) -> Option<String> {
 /// A live config pointed at the gateway with the seeded KB enabled.
 fn live_config(key: String) -> ServerConfig {
     ServerConfig {
+        bind: "127.0.0.1".into(),
         port: 0,
         gateway_url: GATEWAY_URL.into(),
         gateway_key: Some(key),
