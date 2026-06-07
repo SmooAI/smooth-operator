@@ -8,6 +8,9 @@
         "typecheck": "tsc --noEmit",
         "sst": "sst"
     },
+    "dependencies": {
+        "@smooai/deploy": "file:../../../deploy/sst"
+    },
     "devDependencies": {
         "@types/node": "22.10.5",
         "sst": "4.13.0",

@@ -1,5 +1,37 @@
 # smooth-operator-agent — Kubernetes deploy (Helm + ArgoCD)
 
+> 📦 **The canonical chart now lives in [`SmooAI/deploy`](https://github.com/SmooAI/deploy)
+> (`helm/smooth-agent`).** That shared chart was extracted from this directory so
+> both `smooth-operator-agent` and the `smooai` monorepo can consume one chart.
+> This `deploy/k8s/` copy is retained as a **self-contained, deployable mirror**
+> (so this repo stays standalone-cloneable), but new chart changes should land in
+> `SmooAI/deploy` first and be mirrored back, or this dir should become a thin
+> values overlay that depends on the shared chart:
+>
+> ```yaml
+> # deploy/k8s/Chart.yaml (overlay form — depend on the shared chart)
+> apiVersion: v2
+> name: smooth-operator-agent
+> version: 0.1.0
+> dependencies:
+>   - name: smooth-agent
+>     version: 0.1.x
+>     repository: file://../../../deploy/helm/smooth-agent   # sibling SmooAI/deploy checkout
+>     # or, once published: repository: oci://ghcr.io/smooai/charts
+> ```
+>
+> ```yaml
+> # deploy/k8s/values.yaml (overlay form — overrides nested under the subchart name)
+> smooth-agent:
+>   image: { repository: ghcr.io/smooai/smooth-operator-agent, tag: "0.1.0" }
+>   gateway:  { keySecretRef: { name: smooth-operator-agent-gateway, key: SMOOAI_GATEWAY_KEY } }
+>   database: { urlSecretRef: { name: smooth-operator-agent-db, key: DATABASE_URL } }
+>   ingress:  { enabled: true, className: nginx, host: smooth-operator-agent.smoo.ai }
+> ```
+>
+> then `helm dependency update deploy/k8s && helm install … deploy/k8s`. See
+> [`SmooAI/deploy/docs/Consuming.md`](https://github.com/SmooAI/deploy/blob/main/docs/Consuming.md).
+
 The self-host / Kubernetes path for the `smooth-operator-agent` WebSocket
 server. This is the `deploy/k8s` half of the dual SST-(AWS)/k8s plan in
 [`../../docs/DEPLOY.md`](../../docs/DEPLOY.md): an axum `/ws` service backed by a

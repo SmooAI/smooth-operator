@@ -12,21 +12,21 @@ smooth-operator-agent ships **two first-class deploy paths** from one codebase, 
 | Checkpoints | DynamoDB | Postgres |
 | Blobs | S3 | S3-compatible |
 
-## The shared `SmooAI/deploy` package (planned)
+## The shared `SmooAI/deploy` package (extracted ✅)
 
-The deploy primitives are reused by **two consumers** — smooth-operator-agent and the smooai monorepo (dogfood) — which is the bar for a shared package. To avoid premature abstraction, we **build the concrete deploy in `smooth-operator-agent/deploy` first** (real, deployable, tested against the smooth-operator-agent service), designed to be extractable, then **lift the reusable pieces into a public `SmooAI/deploy`** once the pattern is proven. smooai already has battle-tested SST constructs (`infra/`) and k8s/ArgoCD charts (`k8s/charts`) we harvest from rather than invent.
+The deploy primitives are reused by **two consumers** — smooth-operator-agent and the smooai monorepo (dogfood) — which is the bar for a shared package. The concrete deploy was built in `smooth-operator-agent/deploy` first (real, designed to be extractable), then the reusable pieces were **lifted into the public [`SmooAI/deploy`](https://github.com/SmooAI/deploy)** package. `smooth-operator-agent` now **consumes** that package rather than carrying inline resources.
 
-`SmooAI/deploy` will expose two surfaces:
+`SmooAI/deploy` exposes two surfaces:
 
-1. **SST constructs (TypeScript)** — reusable SST v4 components, parameterized:
-   - `SmoothAgentApi` — API Gateway WebSocket API + the route Lambda handlers (`$connect`, `send_message`, …) + DynamoDB single table + S3 Vectors index + S3 blob bucket + the `@smooai/config` layer wiring.
-   - Smaller building blocks (`WebSocketApi`, `DynamoSingleTable`, `S3VectorsIndex`) so smooai can adopt them piecemeal.
-2. **Helm chart + ArgoCD Application (k8s)** — the smooth-operator-agent service + Postgres + pgvector + ingress, with an ArgoCD `Application` manifest and image-tag wiring (matching the smooai api-prime/ArgoCD pattern).
+1. **SST constructs (TypeScript, `@smooai/deploy`)** — reusable SST v4 components, parameterized:
+   - `SmoothAgentApi` (class) — API Gateway WebSocket API + the route Lambda handlers (`$connect`, `$disconnect`, `send_message`, `ping`, `$default`) + DynamoDB single table + S3 blob bucket + S3 Vectors env wiring (placeholder for the not-yet-native SST S3 Vectors component) + the gateway-key secret + IAM links.
+   - Smaller building blocks (`WebSocketLambdaApi`, `DynamoSingleTable`) so smooai can adopt them piecemeal.
+2. **Helm chart + ArgoCD Application (`helm/smooth-agent`)** — the smooth-operator-agent service + (external pgvector) Postgres + WebSocket ingress, with a templated ArgoCD `Application` manifest and image-tag wiring (matching the smooai api-prime/ArgoCD pattern).
 
 ### Consumption
-- `smooth-operator-agent/deploy/sst` re-exports/composes the SST constructs; `npx smooth-operator-agent deploy` is the UX wrapper.
-- `smooth-operator-agent/deploy/k8s` is the Helm chart + ArgoCD app.
-- **Dogfood**: smooai migrates its relevant infra onto the shared constructs once they're proven here.
+- **`smooth-operator-agent/deploy/sst`** consumes `@smooai/deploy` via `new SmoothAgentApi(...)`. The dependency is a local **path dep** today (`"@smooai/deploy": "file:../../../deploy/sst"`, a sibling `SmooAI/deploy` checkout); the npm-publish follow-up (path dep → published `@smooai/deploy`) is tracked in [`SmooAI/deploy/docs/Consuming.md`](https://github.com/SmooAI/deploy/blob/main/docs/Consuming.md#publish-follow-up).
+- **`smooth-operator-agent/deploy/k8s`** is retained as a self-contained deployable mirror; the canonical chart is now `SmooAI/deploy`'s `helm/smooth-agent`, and `deploy/k8s/README.md` documents the thin-overlay / chart-dependency form for consuming it.
+- **Dogfood**: smooai migrates its relevant infra onto the shared constructs/chart piecemeal.
 
 ## Status
-Skeleton dirs in place (`deploy/sst`, `deploy/k8s`). Concrete SST stack + Helm chart are tracked in [ROADMAP.md](ROADMAP.md) Phase 6; the `SmooAI/deploy` extraction follows once the first concrete deploy works end-to-end.
+Extracted. `SmooAI/deploy` holds the `@smooai/deploy` SST constructs + the `smooth-agent` Helm chart; `smooth-operator-agent/deploy/sst` consumes the construct. Verification is `tsc --noEmit` (both the package and the consuming config) + `helm lint`/`helm template`. The npm/OCI publish of the package + chart is the remaining follow-up (see `SmooAI/deploy/docs/Consuming.md`).

@@ -1,6 +1,21 @@
 # `deploy/sst` — AWS-serverless deploy path
 
-SST v4 app that provisions the AWS-serverless backend for `smooth-operator-agent`:
+> 📦 **The reusable resources now come from the shared
+> [`@smooai/deploy`](https://github.com/SmooAI/deploy) package** (`SmooAI/deploy`,
+> `sst/`). This `sst.config.ts` consumes them via the `SmoothAgentApi` construct
+> and keeps only the app-specific config (app name/stage/removal + the Lambda
+> artifact dir + model). The dependency is wired as a local **path dep** today —
+> `"@smooai/deploy": "file:../../../deploy/sst"` (a sibling `SmooAI/deploy`
+> checkout in the standard `~/dev/smooai/` layout). The npm-publish follow-up
+> (path dep → published `@smooai/deploy`) is tracked in
+> [`SmooAI/deploy/docs/Consuming.md`](https://github.com/SmooAI/deploy/blob/main/docs/Consuming.md#publish-follow-up).
+>
+> ⚠️ pnpm `file:` deps are **content-addressed at install time** — after editing
+> the sibling `@smooai/deploy` source, re-run `pnpm install --force` here to pick
+> up the change before typechecking.
+
+SST v4 app that consumes the shared `@smooai/deploy` `SmoothAgentApi` construct,
+which provisions the AWS-serverless backend for `smooth-operator-agent`:
 
 | Resource | SST component | Notes |
 | --- | --- | --- |
@@ -47,9 +62,13 @@ rust/target/lambda/smooai-smooth-operator-agent-lambda/bootstrap
 ## 2. Install SST + generate platform types
 
 ```bash
-pnpm install
+pnpm install          # also links the @smooai/deploy path dep (sibling SmooAI/deploy checkout)
 pnpm sst install      # installs providers + generates .sst/platform/config.d.ts (no AWS needed)
 ```
+
+> The `@smooai/deploy` construct package is a **sibling checkout** at
+> `../../../deploy` (clone `SmooAI/deploy` next to this repo). If you edit that
+> package, re-run `pnpm install --force` here so pnpm re-copies the `file:` dep.
 
 ## 3. Secrets
 

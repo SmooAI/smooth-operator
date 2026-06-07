@@ -8,6 +8,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@smooai/deploy':
+        specifier: file:../../../deploy/sst
+        version: file:../../../deploy/sst(sst@4.13.0)
     devDependencies:
       '@types/node':
         specifier: 22.10.5
@@ -148,6 +152,11 @@ packages:
   '@smithy/util-utf8@2.3.0':
     resolution: {integrity: sha512-R8Rdn8Hy72KKcebgLiv8jQcQkXoLMOGGv5uI1/k0l+snqkOzQ1R0ChUBCxWMlBsFMekWjq0wRudIweFs7sKT5A==}
     engines: {node: '>=14.0.0'}
+
+  '@smooai/deploy@file:../../../deploy/sst':
+    resolution: {directory: ../../../deploy/sst, type: directory}
+    peerDependencies:
+      sst: '>=4.13.0 <5'
 
   '@types/node@22.10.5':
     resolution: {integrity: sha512-F8Q+SeGimwOo86fiovQh8qiXfFEh2/ocYv7tU5pJ3EXMSSxk1Joj5wefpFK2fHTf/N6HKGSxIDBT9f3gCxXPkQ==}
@@ -496,6 +505,10 @@ snapshots:
     dependencies:
       '@smithy/util-buffer-from': 2.2.0
       tslib: 2.8.1
+
+  '@smooai/deploy@file:../../../deploy/sst(sst@4.13.0)':
+    dependencies:
+      sst: 4.13.0
 
   '@types/node@22.10.5':
     dependencies:
