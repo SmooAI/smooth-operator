@@ -158,14 +158,18 @@ pub trait Embedder: Send + Sync {
 
 `DeterministicEmbedder` is the default: a network-free, FNV-1a token-hashing,
 L2-normalized pseudo-embedder (1024-d) — same text → same vector, shared-token
-texts land closer. This is the **same `Embedder` seam** the Postgres adapter
-defines (`adapters/postgres/src/embedder.rs`), and the two `DeterministicEmbedder`
-implementations are byte-identical (same hashing, normalization, default
-dimension → same vectors). It is kept as a minimal local copy rather than a
-shared import so the ingestion crate doesn't drag in `deadpool-postgres` /
-`tokio-postgres`; if the seam ever moves to a shared crate, both sites adopt it.
-A provider-backed embedder (e.g. the gateway embedder) just implements the same
-trait.
+texts land closer. The `Embedder` trait, `InputType`, and `DeterministicEmbedder`
+now live in **one shared home**, `smooth_operator_agent_core::embedding`, which
+both this ingestion crate and the Postgres adapter import (re-exported as
+`ingestion::{Embedder, DeterministicEmbedder, …}` for compatibility). They used
+to each carry a byte-identical copy; consolidating them removes the drift risk —
+a document embedded at ingest and a query embedded at retrieval are guaranteed to
+go through the *same* projection, and a byte-identical-vector guard test in core
+pins a known input → known vector. Core stays lightweight (no
+`deadpool-postgres` / `tokio-postgres`), so the shared seam costs nothing here. A
+provider-backed embedder (e.g. the adapter's `GatewayEmbedder`) just implements
+the same trait, staying in its own crate so the paid HTTP client never reaches
+core or ingestion.
 
 ## Authoring a custom connector
 

@@ -34,7 +34,6 @@
 //! `get_conversation(id)` are single queries.
 
 mod checkpoint;
-mod embedder;
 mod keys;
 mod knowledge;
 #[cfg(feature = "s3-vectors")]
@@ -60,10 +59,15 @@ use smooth_operator_agent_core::adapter::{
 use smooth_operator_agent_core::domain::{Conversation, Message, Participant, Session};
 
 pub use checkpoint::{DynamoCheckpointStore, MAX_INLINE_BLOB};
-pub use embedder::{DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM};
 pub use knowledge::{DynamoKnowledgeBase, KnowledgeBackend};
 #[cfg(feature = "s3-vectors")]
 pub use s3vectors::{S3VectorsConfig, S3VectorsStore};
+// The shared embedding seam (trait + deterministic default + cosine helper)
+// lives in core; re-export so existing `dynamodb::{Embedder, …}` consumers keep
+// working.
+pub use smooth_operator_agent_core::embedding::{
+    DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
+};
 
 use checkpoint::aws_err;
 use keys::{attr, GSI1};

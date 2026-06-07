@@ -24,13 +24,19 @@ StorageAdapter
 
 The `checkpoints` and `knowledge` slices implement smooth-operator's `CheckpointStore` and `KnowledgeBase` traits directly, so the engine plugs straight in.
 
+## Embedding seam (shared) and the rerank stage
+
+**Embedding (`smooth_operator_agent_core::embedding`).** Text→vector is one shared seam, not a per-backend copy. The `Embedder` trait, the `InputType` (document vs. query) marker, the network-free `DeterministicEmbedder` (FNV-1a token hashing → L2-normalized 1024-d, reproducible with zero API calls), and the `cosine_similarity` helper all live in **core**. All three consumers — the Postgres adapter, the DynamoDB adapter, and the ingestion pipeline — import this one module (each re-exports it for source compatibility). They previously each carried a byte-identical copy, which risked silent drift (a doc embedded at ingest and a query embedded at retrieval only land close if they went through the *same* projection). A byte-identical-vector guard test pins a known input → known vector so the algorithm can't drift unnoticed. Provider-backed embedders stay with their consumer: the Postgres adapter's `GatewayEmbedder` (OpenAI-compatible `/v1/embeddings` over the SmooAI LiteLLM gateway, 1536-d) `impl`s the same core `Embedder` trait but keeps `reqwest` out of core's dense path.
+
+**Rerank (`smooth_operator_agent_core::rerank`, Onyx-gap G8).** After hybrid retrieval (dense ∪ sparse → RRF) the top-K can be **optionally** reordered by a sharper query↔candidate relevance model before it reaches the model's context. The `Reranker` trait (`rerank(query, candidates, top_k)`) has two in-tree impls: `NoopReranker` (identity — wiring it in changes nothing, which is what makes the stage opt-in) and `LexicalReranker` (deterministic, network-free query-term-overlap / BM25-ish lexical score, offline-testable). It is wired into the `knowledge_search` tool behind `KnowledgeSearchTool::with_reranker(...)`: when set, the tool overfetches candidates and reorders them; when unset (the default) behavior is unchanged. A production cross-encoder (`GatewayReranker` — Cohere/Voyage `rerank` over the gateway) would `impl Reranker` in the **adapter** crate alongside `GatewayEmbedder`, keeping the paid API out of core; swap it in by constructing the tool with `Some(Arc::new(GatewayReranker::…))`.
+
 ## Postgres adapter (k8s)
 
 Mirrors the smooai monorepo's schema (the north star) so dogfooding is a swap, not a rewrite:
 
 - `conversations`, `conversation_participants` (type ∈ {user, ai-agent, human-agent}), `conversation_messages` (direction ∈ {inbound, outbound}), `conversation_sessions`.
 - **Checkpoints**: `PostgresCheckpointStore` from smooth-operator (already merged — r2d2 pool, `checkpoints` table keyed `(agent_id/thread, created_at desc)`).
-- **Knowledge**: a `knowledge_vectors` table with `embedding vector(1024)` (Voyage `voyage-3-large`) + `content_tsv tsvector`, HNSW cosine index. Retrieval = dense (HNSW) ∪ sparse (BM25) → Reciprocal Rank Fusion → optional cross-encoder rerank.
+- **Knowledge**: a `knowledge_vectors` table with `embedding vector(1024)` (Voyage `voyage-3-large`) + `content_tsv tsvector`, HNSW cosine index. Retrieval = dense (HNSW) ∪ sparse (BM25) → Reciprocal Rank Fusion → optional rerank (the `Reranker` seam — see "Embedding seam (shared) and the rerank stage" above).
 
 ## DynamoDB adapter (AWS) — ElectroDB single-table
 

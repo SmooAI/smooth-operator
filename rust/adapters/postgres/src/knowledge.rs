@@ -30,7 +30,7 @@ use tokio::runtime::Handle;
 
 use smooth_operator::{Document, KnowledgeBase, KnowledgeResult};
 
-use crate::embedder::{Embedder, InputType};
+use smooth_operator_agent_core::embedding::{Embedder, InputType};
 
 /// RRF constant. 60 is the canonical value from the original RRF paper; it
 /// damps the contribution of low-ranked items without ignoring them.

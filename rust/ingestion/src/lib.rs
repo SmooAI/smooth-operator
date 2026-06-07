@@ -19,8 +19,9 @@
 //!   [`FileConnector`], [`WebConnector`]; [`MockConnector`] for tests.
 //! - [`Chunker`] — paragraph/size split with overlap, stable chunk ids, metadata
 //!   propagation (G2).
-//! - [`Embedder`] — text→vector seam, mirroring the Postgres adapter's; the
-//!   network-free [`DeterministicEmbedder`] is the default.
+//! - [`Embedder`] — text→vector seam, shared with the Postgres adapter via
+//!   [`smooth_operator_agent_core::embedding`]; the network-free
+//!   [`DeterministicEmbedder`] is the default.
 //! - [`ingest`] — the driver, idempotent on `(doc id, content hash)` via an
 //!   [`IngestLedger`].
 //!
@@ -50,11 +51,16 @@
 pub mod chunker;
 pub mod connector;
 pub mod connectors;
-pub mod embedder;
 pub mod pipeline;
 
 pub use chunker::{Chunk, Chunker, DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
 pub use connector::{Connector, MockConnector, RawDocument, Timestamp};
 pub use connectors::{FileConnector, WebConnector};
-pub use embedder::{DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM};
+// The text→vector seam (trait + deterministic default) lives in core, shared
+// with the Postgres adapter so ingestion and retrieval embed identically.
+// Re-exported here so existing `ingestion::{Embedder, DeterministicEmbedder, …}`
+// consumers keep working.
 pub use pipeline::{ingest, IngestLedger, IngestOptions, IngestReport};
+pub use smooth_operator_agent_core::embedding::{
+    DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
+};

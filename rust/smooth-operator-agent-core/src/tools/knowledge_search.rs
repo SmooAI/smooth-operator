@@ -20,17 +20,32 @@ use smooth_operator::tool::ToolSchema;
 use smooth_operator::{KnowledgeBase, Tool};
 
 use crate::access_control::{AccessContext, AclKnowledgeStore};
+use crate::rerank::{apply_optional_rerank, Reranker};
 
 /// Default number of results returned when the caller doesn't specify `limit`.
 const DEFAULT_LIMIT: usize = 3;
+
+/// Overfetch multiplier when a reranker is configured.
+///
+/// A reranker can only promote what it's given, so we pull a wider candidate set
+/// from the (cheaper, rank-based) knowledge query and let the reranker pick the
+/// final top-K. With no reranker this multiplier is unused — we fetch exactly
+/// `limit`, so default behavior is byte-for-byte unchanged.
+const RERANK_OVERFETCH: usize = 4;
 
 /// A [`Tool`] that searches the agent's knowledge base.
 ///
 /// Holds an `Arc<dyn KnowledgeBase>` — the exact handle returned by
 /// [`StorageAdapter::knowledge`](crate::adapter::StorageAdapter::knowledge) —
 /// so a tool call hits the same store the engine auto-injects from.
+///
+/// Optionally holds an `Arc<dyn Reranker>`: when set, the tool overfetches
+/// candidates from the knowledge query and reorders them with the reranker
+/// before returning the top-K (Onyx-gap G8). When unset (the default), behavior
+/// is unchanged — the knowledge query's own top-`limit` is returned as-is.
 pub struct KnowledgeSearchTool {
     knowledge: Arc<dyn KnowledgeBase>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl KnowledgeSearchTool {
@@ -41,9 +56,15 @@ impl KnowledgeSearchTool {
     /// in which case the tool's searches are document-level access-controlled.
     /// Use [`with_access_control`](Self::with_access_control) to build that
     /// reader from a store + requester in one step.
+    ///
+    /// No reranker is configured by default; add one with
+    /// [`with_reranker`](Self::with_reranker).
     #[must_use]
     pub fn new(knowledge: Arc<dyn KnowledgeBase>) -> Self {
-        Self { knowledge }
+        Self {
+            knowledge,
+            reranker: None,
+        }
     }
 
     /// Build the tool bound to a requester's [`AccessContext`] over an
@@ -54,7 +75,20 @@ impl KnowledgeSearchTool {
     pub fn with_access_control(store: &AclKnowledgeStore, context: AccessContext) -> Self {
         Self {
             knowledge: store.reader(context),
+            reranker: None,
         }
+    }
+
+    /// Attach an optional reranker stage (Onyx-gap G8).
+    ///
+    /// When set, the tool overfetches candidates and reorders the top-K with the
+    /// [`Reranker`] before returning. Pass a [`LexicalReranker`](crate::rerank::LexicalReranker)
+    /// for a deterministic offline reorder, or an adapter-side `GatewayReranker`
+    /// for a paid cross-encoder. Leaving it unset keeps default behavior.
+    #[must_use]
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
     }
 }
 
@@ -101,10 +135,24 @@ impl Tool for KnowledgeSearchTool {
             .and_then(serde_json::Value::as_u64)
             .map_or(DEFAULT_LIMIT, |n| (n as usize).clamp(1, 10));
 
+        // When a reranker is configured, overfetch a wider candidate set so the
+        // reranker has room to promote a lexically/semantically better doc that
+        // the rank-based query placed lower. With no reranker, fetch exactly
+        // `limit` so behavior is unchanged.
+        let fetch = if self.reranker.is_some() {
+            limit.saturating_mul(RERANK_OVERFETCH)
+        } else {
+            limit
+        };
+
         // `KnowledgeBase::query` is synchronous in smooth-operator; the in-memory
         // backend is a CPU-bound keyword scan, so calling it directly here is
         // fine (no blocking I/O to offload to a worker thread).
-        let results = self.knowledge.query(query, limit)?;
+        let candidates = self.knowledge.query(query, fetch)?;
+
+        // Opt-in rerank stage (Onyx-gap G8): reorder + truncate to `limit`. With
+        // `None` this is just a truncation, preserving the query's own order.
+        let results = apply_optional_rerank(self.reranker.as_ref(), query, candidates, limit).await;
 
         if results.is_empty() {
             return Ok(format!(
@@ -198,5 +246,37 @@ mod tests {
             .await
             .expect_err("missing query should error");
         assert!(err.to_string().contains("query"));
+    }
+
+    /// The reranker is opt-in: a tool with no reranker returns the knowledge
+    /// query's own results unchanged.
+    #[tokio::test]
+    async fn execute_without_reranker_is_unchanged() {
+        let tool = KnowledgeSearchTool::new(seeded_kb());
+        assert!(tool.reranker.is_none());
+        let out = tool
+            .execute(serde_json::json!({ "query": "return policy refund" }))
+            .await
+            .expect("execute");
+        assert!(out.contains("30 days"), "got: {out}");
+    }
+
+    /// Wiring smoke test: a tool built `with_reranker` runs the rerank stage and
+    /// still returns the relevant result.
+    #[tokio::test]
+    async fn execute_with_reranker_runs_and_returns_results() {
+        use crate::rerank::LexicalReranker;
+
+        let tool =
+            KnowledgeSearchTool::new(seeded_kb()).with_reranker(Arc::new(LexicalReranker::new()));
+        assert!(tool.reranker.is_some());
+        let out = tool
+            .execute(serde_json::json!({ "query": "return policy refund", "limit": 1 }))
+            .await
+            .expect("execute");
+        assert!(
+            out.contains("30 days") && out.contains("policies/returns.md"),
+            "reranked result should still surface the returns fact, got: {out}"
+        );
     }
 }

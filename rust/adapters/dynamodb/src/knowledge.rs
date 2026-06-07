@@ -29,8 +29,9 @@ use tokio::runtime::Handle;
 
 use smooth_operator::{Document, KnowledgeBase, KnowledgeResult};
 
+use smooth_operator_agent_core::embedding::{cosine_similarity, Embedder, InputType};
+
 use crate::checkpoint::aws_err;
-use crate::embedder::{cosine_similarity, Embedder, InputType};
 use crate::keys::{self, attr};
 
 /// Which dense-retrieval backend the knowledge slice uses.

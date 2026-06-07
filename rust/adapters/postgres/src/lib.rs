@@ -51,11 +51,15 @@ use smooth_operator_agent_core::domain::{
     Platform, Session, SessionStatus,
 };
 
-pub use embedder::{
-    DeterministicEmbedder, Embedder, GatewayEmbedder, InputType, DEFAULT_EMBEDDING_DIM,
-    OPENAI_SMALL_EMBEDDING_DIM,
-};
+// The shared embedding seam (trait + deterministic default) now lives in core;
+// re-export it here so existing `postgres::{Embedder, DeterministicEmbedder, …}`
+// consumers keep working. Only the adapter-specific `GatewayEmbedder` (+ its
+// 1536-d constant) is defined locally.
+pub use embedder::{GatewayEmbedder, OPENAI_SMALL_EMBEDDING_DIM};
 pub use knowledge::PgKnowledgeBase;
+pub use smooth_operator_agent_core::embedding::{
+    DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
+};
 
 /// Postgres + pgvector storage adapter.
 pub struct PostgresAdapter {

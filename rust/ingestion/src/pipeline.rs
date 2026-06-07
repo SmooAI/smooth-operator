@@ -30,7 +30,7 @@ use smooth_operator_agent_core::access_control::DocAcl;
 
 use crate::chunker::{Chunk, Chunker};
 use crate::connector::{Connector, Timestamp};
-use crate::embedder::{Embedder, InputType};
+use smooth_operator_agent_core::embedding::{Embedder, InputType};
 
 /// Durable dedup state for idempotent ingest.
 ///
@@ -296,8 +296,8 @@ fn store_chunk(
 mod tests {
     use super::*;
     use crate::connector::{MockConnector, RawDocument};
-    use crate::embedder::DeterministicEmbedder;
     use smooth_operator::InMemoryKnowledge;
+    use smooth_operator_agent_core::embedding::DeterministicEmbedder;
 
     fn kb() -> Arc<dyn KnowledgeBase> {
         Arc::new(InMemoryKnowledge::new())

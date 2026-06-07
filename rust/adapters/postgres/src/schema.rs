@@ -104,7 +104,8 @@ pub const VECTOR_EXTENSION: &str = "CREATE EXTENSION IF NOT EXISTS vector;";
 /// default N=1024) for dense retrieval, a generated `content_tsv tsvector` for
 /// BM25-style sparse retrieval, `metadata jsonb`, `organization_id`, and an HNSW
 /// cosine index on the embedding. The dimension is parameterized so the column
-/// width always matches the configured [`Embedder`](crate::embedder::Embedder).
+/// width always matches the configured
+/// [`Embedder`](smooth_operator_agent_core::embedding::Embedder).
 #[must_use]
 pub fn knowledge_vectors_schema(dim: usize) -> String {
     format!(

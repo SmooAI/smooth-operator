@@ -12,10 +12,18 @@
 //! - [`runtime`] — a minimal [`AgentRuntime`] that constructs a real
 //!   smooth-operator [`Agent`](smooth_operator::Agent) and
 //!   [`Workflow`](smooth_operator::Workflow), proving consumption.
+//!
+//! It also owns two shared retrieval seams both backends/consumers depend on:
+//! [`embedding`] (the text→vector [`Embedder`] + the network-free
+//! [`DeterministicEmbedder`], the one home for both the Postgres adapter and the
+//! ingestion pipeline) and [`rerank`] (the optional post-retrieval [`Reranker`]
+//! stage — Onyx-gap G8).
 
 pub mod access_control;
 pub mod adapter;
 pub mod domain;
+pub mod embedding;
+pub mod rerank;
 pub mod runtime;
 pub mod telemetry;
 pub mod tools;
@@ -26,6 +34,10 @@ pub use domain::{
     Checkpoint, ContentItem, Conversation, Direction, Message, MessageContent, Participant,
     ParticipantRef, ParticipantType, Platform, Session, SessionStatus,
 };
+pub use embedding::{
+    cosine_similarity, DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
+};
+pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
 pub use runtime::{AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState};
 pub use telemetry::init_telemetry;
 pub use tools::{
