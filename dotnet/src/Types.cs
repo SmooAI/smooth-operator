@@ -70,19 +70,15 @@ public static class ActionTypes
 /// subtype, then pattern-match (<c>is StreamTokenEvent</c>) or switch on
 /// <see cref="Type"/>.
 /// </summary>
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "type", UnknownDerivedTypeHandling = JsonUnknownDerivedTypeHandling.FailSerialization)]
-[JsonDerivedType(typeof(ImmediateResponseEvent), EventTypes.ImmediateResponse)]
-[JsonDerivedType(typeof(EventualResponseEvent), EventTypes.EventualResponse)]
-[JsonDerivedType(typeof(StreamChunkEvent), EventTypes.StreamChunk)]
-[JsonDerivedType(typeof(StreamTokenEvent), EventTypes.StreamToken)]
-[JsonDerivedType(typeof(KeepaliveEvent), EventTypes.Keepalive)]
-[JsonDerivedType(typeof(WriteConfirmationRequiredEvent), EventTypes.WriteConfirmationRequired)]
-[JsonDerivedType(typeof(OtpVerificationRequiredEvent), EventTypes.OtpVerificationRequired)]
-[JsonDerivedType(typeof(OtpSentEvent), EventTypes.OtpSent)]
-[JsonDerivedType(typeof(OtpVerifiedEvent), EventTypes.OtpVerified)]
-[JsonDerivedType(typeof(OtpInvalidEvent), EventTypes.OtpInvalid)]
-[JsonDerivedType(typeof(ErrorEvent), EventTypes.Error)]
-[JsonDerivedType(typeof(PongEvent), EventTypes.Pong)]
+// NOTE on the converter vs. [JsonPolymorphic]:
+// We deliberately do NOT use STJ's built-in [JsonPolymorphic]/[JsonDerivedType]
+// machinery for ServerEvent. On net8.0 that resolver requires the discriminator
+// (`type`) to appear FIRST in the JSON object — but the Rust server serializes
+// via serde_json without `preserve_order`, so object keys come out alphabetically
+// (`data` before `type`). The built-in resolver then fails trying to instantiate
+// the abstract base. ServerEventConverter below reads `type` regardless of its
+// position and dispatches to the concrete subtype, so real-server frames decode.
+[JsonConverter(typeof(ServerEventConverter))]
 public abstract class ServerEvent
 {
     /// <summary>The event <c>type</c> discriminator (also emitted by STJ on serialize).</summary>
@@ -92,6 +88,63 @@ public abstract class ServerEvent
     /// <summary>Echoes the originating action's <c>requestId</c>, where applicable.</summary>
     [JsonPropertyName("requestId")]
     public string? RequestId { get; set; }
+}
+
+/// <summary>
+/// Position-independent polymorphic converter for <see cref="ServerEvent"/>.
+/// Reads the <c>type</c> discriminator anywhere in the object (the Rust server
+/// emits keys alphabetically, so <c>type</c> is not first) and deserializes into
+/// the matching concrete subtype. On write, delegates to the concrete runtime
+/// type and injects the <c>type</c> discriminator.
+/// </summary>
+public sealed class ServerEventConverter : JsonConverter<ServerEvent>
+{
+    private static readonly IReadOnlyDictionary<string, Type> ByType = new Dictionary<string, Type>
+    {
+        [EventTypes.ImmediateResponse] = typeof(ImmediateResponseEvent),
+        [EventTypes.EventualResponse] = typeof(EventualResponseEvent),
+        [EventTypes.StreamChunk] = typeof(StreamChunkEvent),
+        [EventTypes.StreamToken] = typeof(StreamTokenEvent),
+        [EventTypes.Keepalive] = typeof(KeepaliveEvent),
+        [EventTypes.WriteConfirmationRequired] = typeof(WriteConfirmationRequiredEvent),
+        [EventTypes.OtpVerificationRequired] = typeof(OtpVerificationRequiredEvent),
+        [EventTypes.OtpSent] = typeof(OtpSentEvent),
+        [EventTypes.OtpVerified] = typeof(OtpVerifiedEvent),
+        [EventTypes.OtpInvalid] = typeof(OtpInvalidEvent),
+        [EventTypes.Error] = typeof(ErrorEvent),
+        [EventTypes.Pong] = typeof(PongEvent),
+    };
+
+    public override ServerEvent? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var doc = JsonDocument.ParseValue(ref reader);
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
+            throw new JsonException("ServerEvent frame is missing a string \"type\" discriminator.");
+
+        var discriminator = typeEl.GetString()!;
+        if (!ByType.TryGetValue(discriminator, out var target))
+            throw new JsonException($"Unknown ServerEvent type \"{discriminator}\".");
+
+        // Deserialize the concrete type directly (the subtypes have no converter,
+        // so this won't recurse back into this converter).
+        return (ServerEvent?)root.Deserialize(target, options);
+    }
+
+    public override void Write(Utf8JsonWriter writer, ServerEvent value, JsonSerializerOptions options)
+    {
+        // Serialize the concrete runtime type into a buffer, then re-emit it with
+        // the `type` discriminator injected (the subtypes don't carry `type`).
+        var concrete = JsonSerializer.SerializeToElement(value, value.GetType(), options);
+        writer.WriteStartObject();
+        writer.WriteString("type", value.Type);
+        foreach (var prop in concrete.EnumerateObject())
+        {
+            if (prop.NameEquals("type")) continue;
+            prop.WriteTo(writer);
+        }
+        writer.WriteEndObject();
+    }
 }
 
 /// <summary>Acknowledgement that an action was accepted; also carries the payload for non-streaming actions.</summary>
