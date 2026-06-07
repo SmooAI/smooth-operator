@@ -55,10 +55,11 @@ One trait, two backends. See [STORAGE.md](STORAGE.md).
 Every client is generated from `spec/` (protocol-first) and validates the shared conformance fixtures. Each has a transport-agnostic native client with `requestId` correlation, a streaming `MessageTurn` (awaitable terminal + iterate `stream_token`/`stream_chunk`), and HITL resume routing.
 
 - ✅ **TypeScript** (`@smooai/smooth-operator-agent`) — Lambda-native; the dogfood target. 16 tests.
-- ✅ **C#/.NET** (`SmooAI.SmoothAgent`, net8.0) — first-class. System.Text.Json polymorphic event union. 21 tests.
+- ✅ **C#/.NET** (`SmooAI.SmoothOperatorAgent`, net8.0) — first-class. Position-independent `ServerEventConverter` event union. 21 tests.
 - ✅ **Go** (`github.com/SmooAI/smooth-operator-agent/go`) — `ServerEvent`+`Raw` accessor pattern. 26 tests (race-clean).
 - ✅ **Python** (`smooth_operator_agent`) — pydantic v2 discriminated unions, async client. 26 tests.
-- ⬜ Service hosts per language (WS server + agent runtime), and a runnable "hello knowledge-chat" example each.
+- ✅ **Live cross-language E2E** — every client (TS/Go/.NET/Python) boots the real `smooth-operator-agent-server` subprocess (key in env, KB seeded) and drives a real `claude-haiku-4-5` turn over WebSocket: ≥1 streamed event, knowledge-grounded "17", per-session "Zog" memory. Gated on `SMOOTH_AGENT_E2E=1`+`SMOOAI_GATEWAY_KEY`; default suites stay credential-free + skip. Two real bugs the live E2E caught (mocks masked them): .NET `[JsonPolymorphic]` required `type` first but the Rust server emits keys alphabetically (→ custom converter); `agentId` is UUID-typed in `spec/` so pydantic rejects bare strings while Go/TS are lenient — **follow-up: pick string-vs-UUID `agentId` and align all clients.**
+- ⬜ Service hosts per language (the Rust server is the reference; TS/Go/.NET/Python service hosts next), and a runnable "hello knowledge-chat" example each.
 - ⬜ In-process FFI where it pays off: napi-rs (TS/Lambda), PyO3/uniffi (Python).
 - ⬜ **.NET ecosystem interop** (see [DOTNET.md](DOTNET.md)): a `SmoothAgentChatClient : IChatClient` facade over the remote client (Microsoft.Extensions.AI), `services.AddSmoothAgent(...)` DI, a `SmoothAgentThread` handle, `AIFunction`-based tool authoring, and middleware mapping to smooth-operator's `ToolHook`. Borrowed from Microsoft Agent Framework idioms.
 
