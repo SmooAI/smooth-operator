@@ -21,3 +21,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Integration tests drive the runtime through the in-memory adapter (the
+# conformance baseline). Dev-dep only — the lib has no backend dependency.
+smooai-smooth-agent-adapter-memory = { path = "../adapters/in-memory" }

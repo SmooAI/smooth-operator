@@ -6,14 +6,17 @@
 //! constructs the engine's primitives so the wiring is compile-checked and
 //! exercised by tests. Real inference arrives in roadmap Phase 3.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use smooth_operator::llm_provider::LlmProvider;
 use smooth_operator::{
-    Agent, AgentConfig, FnNode, LlmConfig, ToolRegistry, Workflow, WorkflowBuilder,
+    Agent, AgentConfig, AgentEvent, FnNode, LlmConfig, ToolRegistry, Workflow, WorkflowBuilder,
 };
 
 use crate::adapter::StorageAdapter;
+use crate::domain::{Direction, Message as DomainMessage, MessageContent};
+use crate::tools::KnowledgeSearchTool;
 
 /// State threaded through the reference workflow: the user's message in, the
 /// agent's reply out. Mirrors (in miniature) the LangGraph `StateGraph` state.
@@ -127,6 +130,225 @@ impl AgentRuntime {
 
 /// Convenience: an `Arc`-wrapped runtime.
 pub type SharedRuntime = Arc<AgentRuntime>;
+
+/// The system prompt the knowledge-chat agent runs with. Keeps the agent
+/// grounded: answer from the knowledge base, and search it before answering
+/// anything organization-specific.
+const KNOWLEDGE_CHAT_SYSTEM_PROMPT: &str =
+    "You are a helpful customer-support agent for the organization. \
+    Answer the user's question accurately and concisely. When a question depends on \
+    organization-specific facts (policies, products, documentation), call the \
+    `knowledge_search` tool to retrieve them before answering, and ground your answer \
+    in what you retrieve. If the knowledge base has no relevant information, say so.";
+
+/// The outcome of running one knowledge-grounded turn through the agent.
+///
+/// Carries the final assistant text plus every [`AgentEvent`] the engine
+/// emitted during the run — so callers (and tests) can inspect exactly what
+/// happened: which tools ran, what they returned, how many iterations.
+#[derive(Debug, Clone)]
+pub struct TurnOutcome {
+    /// The agent's final natural-language reply (the last assistant turn with
+    /// no pending tool calls). Empty string if the agent produced no text.
+    pub reply: String,
+    /// Every event the engine emitted, in order. Inspect for
+    /// [`AgentEvent::ToolCallStart`] / [`AgentEvent::ToolCallComplete`] to
+    /// prove a knowledge search happened.
+    pub events: Vec<AgentEvent>,
+}
+
+impl TurnOutcome {
+    /// `true` if the agent invoked a tool named `tool_name` during the turn.
+    #[must_use]
+    pub fn invoked_tool(&self, tool_name: &str) -> bool {
+        self.events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolCallStart { tool_name: name, .. } if name == tool_name
+            )
+        })
+    }
+
+    /// The completed result text of the first call to `tool_name`, if any.
+    /// Sourced from [`AgentEvent::ToolCallComplete`] (truncated to ~500 chars
+    /// by the engine), so a test can assert the tool returned the seeded doc.
+    #[must_use]
+    pub fn tool_result(&self, tool_name: &str) -> Option<&str> {
+        self.events.iter().find_map(|e| match e {
+            AgentEvent::ToolCallComplete {
+                tool_name: name,
+                result,
+                ..
+            } if name == tool_name => Some(result.as_str()),
+            _ => None,
+        })
+    }
+}
+
+/// A real, knowledge-grounded chat runtime over smooth-operator.
+///
+/// This is the first end-to-end "knowledge-chat turn" for smooth-agent: it
+/// wires a [`StorageAdapter`]'s [`KnowledgeBase`](smooth_operator::KnowledgeBase)
+/// into a smooth-operator [`Agent`] two ways —
+///
+/// 1. **Auto-injected context** via
+///    [`AgentConfig::with_knowledge`](smooth_operator::AgentConfig::with_knowledge):
+///    the engine queries the KB with the user's message and prepends the top
+///    matches as a `[Relevant knowledge]` system message before the first LLM
+///    call.
+/// 2. **Agent-driven search** via the [`KnowledgeSearchTool`]: the model can
+///    issue its own `knowledge_search` query mid-turn with its own phrasing.
+///
+/// Construct with [`KnowledgeChatRuntime::new`] for production (a real
+/// [`LlmClient`](smooth_operator::llm::LlmClient) is built from the
+/// [`LlmConfig`]), or inject a mock via
+/// [`KnowledgeChatRuntime::with_llm_provider`] for deterministic, key-free
+/// tests.
+pub struct KnowledgeChatRuntime {
+    storage: Arc<dyn StorageAdapter>,
+    llm: LlmConfig,
+    /// Optional test-injected LLM surface. When set, every `run_turn` builds
+    /// its `Agent` with this provider instead of a live client.
+    llm_provider: Option<Arc<dyn LlmProvider>>,
+    max_iterations: u32,
+}
+
+impl KnowledgeChatRuntime {
+    /// Build a production runtime over a storage adapter and LLM config.
+    #[must_use]
+    pub fn new(storage: Arc<dyn StorageAdapter>, llm: LlmConfig) -> Self {
+        Self {
+            storage,
+            llm,
+            llm_provider: None,
+            max_iterations: 8,
+        }
+    }
+
+    /// Inject a custom [`LlmProvider`] (e.g. a
+    /// [`MockLlmClient`](smooth_operator::llm_provider::MockLlmClient)) so the
+    /// agent loop runs deterministically with no network / API key. This is
+    /// the test seam.
+    #[must_use]
+    pub fn with_llm_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.llm_provider = Some(provider);
+        self
+    }
+
+    /// Cap on agent loop iterations (LLM call → tool calls → LLM call → …).
+    /// Defaults to 8.
+    #[must_use]
+    pub fn with_max_iterations(mut self, max: u32) -> Self {
+        self.max_iterations = max;
+        self
+    }
+
+    /// Build the `Agent` for a turn: knowledge-grounded config + the
+    /// `knowledge_search` tool, with the mock LLM provider attached when one
+    /// was injected for tests.
+    fn build_agent(&self, events: Arc<Mutex<Vec<AgentEvent>>>) -> Agent {
+        // (1) Auto-injected knowledge context: the engine queries the KB with
+        //     the user's message and prepends matches before the first call.
+        let config = AgentConfig::new(
+            "smooth-agent-chat",
+            KNOWLEDGE_CHAT_SYSTEM_PROMPT,
+            self.llm.clone(),
+        )
+        .with_max_iterations(self.max_iterations)
+        .with_knowledge(self.storage.knowledge());
+
+        // (2) Agent-driven search: register the knowledge_search tool over the
+        //     SAME knowledge handle, so a tool call hits the same store.
+        let mut tools = ToolRegistry::new();
+        tools.register(KnowledgeSearchTool::new(self.storage.knowledge()));
+
+        let agent = Agent::new(config, tools)
+            .with_checkpoint_store(self.storage.checkpoints())
+            .with_event_handler(move |event| {
+                events.lock().expect("event sink poisoned").push(event);
+            });
+
+        match &self.llm_provider {
+            Some(provider) => agent.with_llm_provider(Arc::clone(provider)),
+            None => agent,
+        }
+    }
+
+    /// Run one knowledge-grounded turn.
+    ///
+    /// Drives the smooth-operator agent loop to completion, then returns the
+    /// final assistant text plus every [`AgentEvent`] emitted. The inbound
+    /// user message and the outbound reply are also persisted to the storage
+    /// adapter's message log under `conversation_id` (best-effort: a persist
+    /// failure surfaces as an error so callers don't silently lose history).
+    ///
+    /// # Errors
+    /// Returns an error if the agent loop fails fatally or message persistence
+    /// fails.
+    pub async fn run_turn(&self, conversation_id: &str, user_message: &str) -> Result<TurnOutcome> {
+        let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+        let agent = self.build_agent(Arc::clone(&events));
+
+        // Persist the inbound user message first.
+        self.persist_message(conversation_id, Direction::Inbound, user_message)
+            .await?;
+
+        // Run the engine loop — this is where retrieval + tool calls happen.
+        let conversation = agent.run(user_message).await?;
+
+        let reply = conversation
+            .last_assistant_content()
+            .unwrap_or_default()
+            .to_string();
+
+        // Persist the outbound reply.
+        if !reply.is_empty() {
+            self.persist_message(conversation_id, Direction::Outbound, &reply)
+                .await?;
+        }
+
+        // Drop the agent so its event-handler closure releases the `events`
+        // Arc clone — then we hold the sole reference and can move the vec out.
+        drop(agent);
+
+        // The agent dropped its handler clone when `agent` went out of scope,
+        // so we hold the only reference — but fall back to a clone if not.
+        let events = match Arc::try_unwrap(events) {
+            Ok(mutex) => mutex
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Err(arc) => arc.lock().expect("event sink poisoned").clone(),
+        };
+
+        Ok(TurnOutcome { reply, events })
+    }
+
+    /// Append a single message to the conversation's log via the adapter.
+    async fn persist_message(
+        &self,
+        conversation_id: &str,
+        direction: Direction,
+        text: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        let message = DomainMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            external_id: None,
+            organization_id: None,
+            conversation_id: Some(conversation_id.to_string()),
+            direction,
+            content: MessageContent::from_text(text),
+            from: None,
+            to: None,
+            metadata_json: None,
+            analytics_json: None,
+            created_at: now,
+            updated_at: None,
+        };
+        self.storage.append_message(message).await?;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {

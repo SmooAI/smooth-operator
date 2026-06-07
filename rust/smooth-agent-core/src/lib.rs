@@ -16,13 +16,15 @@
 pub mod adapter;
 pub mod domain;
 pub mod runtime;
+pub mod tools;
 
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
 pub use domain::{
     Checkpoint, ContentItem, Conversation, Direction, Message, MessageContent, Participant,
     ParticipantRef, ParticipantType, Platform, Session, SessionStatus,
 };
-pub use runtime::{AgentRuntime, SharedRuntime, TurnState};
+pub use runtime::{AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState};
+pub use tools::KnowledgeSearchTool;
 
 // Re-export the engine so adapter crates and consumers depend on one version.
 pub use smooth_operator;
