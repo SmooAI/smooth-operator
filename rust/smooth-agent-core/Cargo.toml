@@ -24,3 +24,6 @@ tokio = { workspace = true }
 # Integration tests drive the runtime through the in-memory adapter (the
 # conformance baseline). Dev-dep only — the lib has no backend dependency.
 smooai-smooth-agent-adapter-memory = { path = "../adapters/in-memory" }
+# The live-gateway e2e test (`tests/e2e_llm_smoo_ai.rs`) consumes the engine's
+# `LlmClient::chat_stream` response, which is a `futures::Stream`.
+futures-util = "0.3"
