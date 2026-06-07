@@ -89,8 +89,39 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 
 ---
 
+## Phase 10 — Connectors & quality regression (partly done)
+
+- ✅ G1 ingestion framework (Connector/Chunker/pipeline + file/web). ✅ G3 document ACLs. ✅ G4 LLM-judge evals. ✅ G8 rerank. ✅ G5 widget Playwright e2e. ✅ G6 kind deploy smoke.
+- ⬜ **GitHub connector** (README/docs/md + code + issues/PRs/discussions; GitHub App installation token / PAT) + a live `github_search` tool — first consumer = `examples/dev-support`.
+- ⬜ Connector breadth (the other SaaS sources), per Onyx.
+
+## Phase 11 — Knowledge depth (Onyx parity)
+
+Recurring principle: **"Smoo-powered or bring-your-own"** — hosted lom.smoo.ai wires Smoo's apps (identity, GitHub App, Slack App, managed parsing); self-host brings their own. Same code, two postures.
+
+- ⬜ **Background / incremental indexing** — `Connector::pull(since)` (cursor) + idempotent ingest → EventBridge Scheduler → Step Functions/Lambda per connector (k8s: CronJob+worker); an `indexing_runs` status table surfaced live via the protocol's existing `job_status_updated` events.
+- ⬜ **Structured citations** (do early — sources are already retrieved): `citations[]` (id/title/url/snippet/score) in `eventual_response` + widget rendering.
+- ⬜ **Rich file parsing** — a `FileParser` seam: text/md/html inline; PDF/docx/pptx/xlsx+OCR → **Docling** in a container Lambda (off the hot path; feeds the chunker).
+- ⬜ **Document sets / curation / boosting** — membership table + retrieval filter + `boost` field.
+- ⬜ **Query-time features** — LLM query-rephrase, recency/time-decay boost in RRF, metadata filters.
+
+## Phase 12 — Management UI + Auth/RBAC
+
+- ⬜ **Next.js management app** (connector config, document sets, chat history, indexing status, settings) on `sst.aws.Nextjs` (OpenNext→Lambda) or containerized.
+- ⬜ **Auth** — Smoo identity (hosted) OR BYO **SST OpenAuth** (`@openauthjs/openauth` + `sst.aws.Auth`; OIDC/OAuth/password, SAML via OIDC bridge). **RBAC** roles (admin/curator/basic) on org scoping + `DocAcl`.
+
+## Phase 13 — Answer bots
+
+- ⬜ **Slack bot** — Slack Events API → Lambda → conversation/session → agent → post back (our model already has the `slack` platform). Hosted = smoo's Slack app; self-host = BYO. Teams/Discord later.
+
+## Phase 14 — Analytics & feedback
+
+- ⬜ Per-turn query log (query, retrieved docs, answer, latency, tokens) + 👍/👎 feedback events + a dashboard in the mgmt UI (OTel already covers traces).
+
+---
+
 ### Current focus
 
-Done: Phase 0 (extraction), Phase 1 (protocol spec), Phase 2 (adapter trait + in-memory + **Postgres**), Phase 3 (knowledge-chat runtime + real-LLM E2E), Phase 5 (all five polyglot clients + live cross-language E2E vs llm.smoo.ai). Repo renamed to smooth-operator-agent.
+Done through Phase 6 (dual deploy), Phase 5 (all clients + live cross-language E2E), Phase 10 majority (ingestion, ACLs, evals, rerank, widget e2e, kind CI), plus tool catalog, OTel, .NET MEAI, `SmooAI/deploy`, `SmooAI/chat-widget`.
 
-In flight: the **DynamoDB adapter** (raw aws-sdk, DynamoDB-Local conformance) and the **k8s deploy path** (Dockerfile + Helm + ArgoCD). Next: the **SST/Rust-Lambda** serverless deploy (uses the DynamoDB adapter), then extract the shared `SmooAI/deploy` package, then the smooai cutover (Phase 7).
+Queued: (1) **rename** `smooth-operator`→`smooth-operator-core`, `smooth-operator-agent`→`smooth-operator`; (2) **incredible DX-driven, TDD-forward READMEs** for all packages; (3) the **dev-support agent** (`examples/dev-support` + GitHub connector + full-page chat + citations). Then the Phase 11–14 Onyx-parity build-out, and the user-gated arcs (smooai cutover, crates.io/npm publish).
