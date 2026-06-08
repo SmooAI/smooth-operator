@@ -101,11 +101,12 @@ unchanged content.
 
 ## Built-in connectors
 
-| Connector        | Source                              | Tests                                  |
-| ---------------- | ----------------------------------- | -------------------------------------- |
-| `MockConnector`  | a fixed `Vec<RawDocument>`          | the contract test fixture (`unit`)     |
-| `FileConnector`  | a `.txt`/`.md` file or directory    | `unit` (temp dirs, no network)         |
-| `WebConnector`   | a public URL → HTML→text            | `unit` (offline strip/guard) + gated live |
+| Connector         | Source                                        | Tests                                     |
+| ----------------- | --------------------------------------------- | ----------------------------------------- |
+| `MockConnector`   | a fixed `Vec<RawDocument>`                    | the contract test fixture (`unit`)        |
+| `FileConnector`   | a `.txt`/`.md` file or directory             | `unit` (temp dirs, no network)            |
+| `WebConnector`    | a public URL → HTML→text                     | `unit` (offline strip/guard) + gated live |
+| `GithubConnector` | a GitHub repo: prose + code + issues/PRs     | `unit` (mock GitHub API) + gated live     |
 
 - **`FileConnector::new(path)`** — a file yields one document; a directory is
   walked recursively (`.non_recursive()` to stay top-level) yielding one document
@@ -117,12 +118,21 @@ unchanged content.
   strip/guard logic, shared with the agent's `fetch_url` tool — no drift. The
   SSRF guard runs *before* any request: loopback / private / link-local /
   metadata / non-http(s) URLs are rejected.
+- **`GithubConnector::new(config)`** — pulls a GitHub repository's **prose**
+  (READMEs / `docs/**` / `*.md`+`*.mdx`), **source code** (extension allowlist;
+  vendored/binary/lockfiles skipped, size-capped), and **issues / PRs /
+  discussions** (Q&A-style: title + body + top comments). Each document carries
+  rich metadata (`repo`, `path`, `url`, `kind`, `lang`/`state`/`labels`,
+  `updated_at`) for retrieval + citations, and a private repo stamps a restricting
+  ACL. It is the primary source behind the `examples/dev-support` dev-team
+  knowledge agent. Auth is a PAT or a GitHub App installation. **Full reference:
+  [CONNECTORS.md](CONNECTORS.md)** (content types, `GithubAuth` App-vs-PAT, the
+  Smoo-powered-vs-BYO note, and the companion live `github_search` tool).
 
 ### Stubbed (follow-up)
 
-A **`github`** connector (repo files / issues / wikis via the GitHub API) and the
-broader SaaS set Onyx covers (confluence, jira, notion, slack, salesforce, …) are
-intentionally not in this batch — each is a new `Connector` impl following the
+The broader SaaS set Onyx covers (confluence, jira, notion, slack, salesforce, …)
+is intentionally not in this batch — each is a new `Connector` impl following the
 authoring recipe below. Don't over-scope; add them one at a time with the same
 test split.
 
@@ -190,8 +200,8 @@ core or ingestion.
 
 | Tier        | What                                                  | When           |
 | ----------- | ---------------------------------------------------- | -------------- |
-| `unit`      | chunker, embedder, file connector, web strip/guard, `tests/ingestion_contract.rs` (chunk→embed→store→retrieve + idempotency) | every PR, no creds |
-| `external`  | `WebConnector::live_fetch_example` (real fetch)      | gated on `SMOOTH_AGENT_E2E=1`, nightly |
+| `unit`      | chunker, embedder, file connector, web strip/guard, GitHub path/issue/ACL filters + `tests/github_connector.rs` (mock GitHub API → prose/code/issue RawDocuments + ingest→retrieve), `tests/ingestion_contract.rs` (chunk→embed→store→retrieve + idempotency) | every PR, no creds |
+| `external`  | `WebConnector::live_fetch_example`, `GithubConnector` live pull | gated on `SMOOTH_AGENT_E2E=1`, nightly |
 
 The headline acceptance is `rust/ingestion/tests/ingestion_contract.rs`: it wires
 an in-memory `StorageAdapter` + `DeterministicEmbedder` + `MockConnector`, runs

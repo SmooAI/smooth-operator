@@ -34,6 +34,38 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # URL parsing for the `fetch_url` SSRF guard (host extraction + IP checks).
 url = "2"
+# GitHub API client for the `github` connector + `github_search` tool. Defaults
+# to rustls (rustls-ring) + jwt-rust-crypto — no OpenSSL, matching the rest of
+# the workspace's no-native-tls posture. `.base_uri(...)` lets tests point it at
+# a mock server (octocrab's own test-suite drives it the same way).
+octocrab = { version = "0.53", default-features = false, features = [
+    "default-client",
+    "follow-redirect",
+    "retry",
+    "rustls",
+    "rustls-ring",
+    "timeout",
+    "tracing",
+    "stream",
+    "jwt-rust-crypto",
+] }
+# Building a GitHub-App `EncodingKey` from a PEM private key (octocrab's
+# `.app(app_id, key)` takes a `jsonwebtoken::EncodingKey`). Pinned + featured to
+# match octocrab's own jsonwebtoken (v10, rust_crypto, no aws-lc / OpenSSL).
+jsonwebtoken = { version = "10", default-features = false, features = [
+    "use_pem",
+    "rust_crypto",
+] }
+# Decoding base64 blob bodies from the GitHub contents API.
+base64 = "0.22"
+# Mock GitHub API server for the offline connector contract test.
+wiremock = "0.6"
+# rustls is in the graph twice (octocrab's hyper-rustls + reqwest), and the
+# workspace also pulls aws-lc-rs (via the OTLP/tonic stack) alongside ring — so
+# rustls 0.23 can't auto-pick a process-level CryptoProvider. The GitHub client
+# installs the `ring` provider explicitly (once) before building; this dep gives
+# us that API. Pinned to the same rustls the rest of the graph resolves to.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # --- OpenTelemetry GenAI instrumentation (telemetry.rs) ---
 # Pinned compatible set: tracing-opentelemetry 0.33 ↔ opentelemetry/_sdk/-otlp 0.32.

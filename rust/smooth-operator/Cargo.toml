@@ -21,6 +21,13 @@ uuid = { workspace = true }
 # `fetch_url` built-in tool: HTTP GET + URL parsing for the SSRF guard.
 reqwest = { workspace = true }
 url = { workspace = true }
+# `github_search` tool: live GitHub code/issue search via the GitHub API.
+octocrab = { workspace = true }
+# GitHub-App auth for `github_search` (build an `EncodingKey` from a PEM key).
+jsonwebtoken = { workspace = true }
+# Install the `ring` rustls CryptoProvider before the GitHub client's first TLS
+# use (the workspace graph has both ring + aws-lc-rs, so rustls can't auto-pick).
+rustls = { workspace = true }
 
 # OpenTelemetry GenAI instrumentation (`telemetry.rs`): tracing spans mapped to
 # OTLP via tracing-opentelemetry. The OTLP exporter is gated on

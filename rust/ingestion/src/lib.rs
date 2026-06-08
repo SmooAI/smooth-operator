@@ -55,7 +55,10 @@ pub mod pipeline;
 
 pub use chunker::{Chunk, Chunker, DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
 pub use connector::{Connector, MockConnector, RawDocument, Timestamp};
-pub use connectors::{FileConnector, WebConnector};
+pub use connectors::{
+    FileConnector, GithubAuth, GithubConnector, GithubConnectorConfig, GithubInclude,
+    GithubVisibility, WebConnector,
+};
 // The text→vector seam (trait + deterministic default) lives in core, shared
 // with the Postgres adapter so ingestion and retrieval embed identically.
 // Re-exported here so existing `ingestion::{Embedder, DeterministicEmbedder, …}`

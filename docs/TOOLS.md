@@ -95,6 +95,27 @@ fn wire(storage: Arc<dyn StorageAdapter>) {
 > `builtin_tools` is the opt-in path for a runtime/service that wants the full
 > catalog — register them on the `ToolRegistry` you hand to `Agent::new`.
 
+### `github_search` — live GitHub lookups (registered separately)
+
+`GithubSearchTool` does **live** GitHub code/issue search — fresh lookups beyond
+the indexed knowledge snapshot. It is **not** part of `builtin_tools` because it
+needs an explicit `GithubAuth` + a default `owner/repo` scope; register it
+yourself:
+
+```rust
+use smooth_operator::tools::github_search::{GithubAuth, GithubSearchTool};
+
+tools.register(Box::new(GithubSearchTool::new(
+    GithubAuth::Token(token), "smooai", "smooth-operator",
+)));
+```
+
+Arguments: `{ "query": string, "kind"?: "code" | "issues" }`. The live network
+sits behind a pluggable `GithubSearchBackend` (default `OctocrabGithubSearch`),
+so arg-parsing + formatting are unit-tested offline and the live path is
+`SMOOTH_AGENT_E2E`-gated — same split as `web_search`. Full reference:
+[CONNECTORS.md](CONNECTORS.md#the-github_search-tool-live-fresh-lookups).
+
 ## `fetch_url` and the SSRF guard
 
 `fetch_url` is an agent-controllable URL fetcher — a classic

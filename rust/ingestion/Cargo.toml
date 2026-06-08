@@ -23,6 +23,16 @@ tokio = { workspace = true }
 # Web connector: HTTP fetch (rustls, no native-tls) — same shape as the engine's
 # fetch_url tool. URL parsing comes via fetch_url's re-exported SSRF guard.
 reqwest = { workspace = true }
+# GitHub connector: the GitHub API client. `.base_uri(...)` points it at the
+# real api.github.com in production and at the mock server in the contract test.
+octocrab = { workspace = true }
+# GitHub-App auth: build an `EncodingKey` from a PEM private key.
+jsonwebtoken = { workspace = true }
+# Decode base64 blob bodies returned by the GitHub contents API.
+base64 = { workspace = true }
+# Install the `ring` rustls CryptoProvider before the GitHub client's first TLS
+# use (the workspace graph has both ring + aws-lc-rs, so rustls can't auto-pick).
+rustls = { workspace = true }
 
 [dev-dependencies]
 # Contract test wires the in-memory StorageAdapter (knowledge slice) end-to-end.
@@ -31,3 +41,5 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 # Temp dirs for the FileConnector test.
 tempfile = "3"
+# Mock GitHub API for the offline GitHub-connector contract test.
+wiremock = { workspace = true }

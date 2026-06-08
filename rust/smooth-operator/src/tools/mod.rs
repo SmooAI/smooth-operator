@@ -14,18 +14,28 @@
 //!   (defaults to [`NoopWebSearchProvider`], which explains that no provider is
 //!   configured rather than silently returning nothing).
 //!
+//! Beyond the default catalog, [`GithubSearchTool`] does live GitHub code/issue
+//! search (fresh lookups beyond the indexed snapshot). It needs an explicit
+//! [`GithubAuth`] + a default `owner/repo` scope, so a deployment registers it
+//! separately (it is not part of [`builtin_tools`]). See `docs/CONNECTORS.md`.
+//!
 //! See `docs/TOOLS.md` for the tool shape, the catalog, and how to author a
 //! custom tool or plug in a web-search provider.
 
 pub mod context;
 pub mod conversation_history;
 pub mod fetch_url;
+pub mod github_search;
 pub mod knowledge_search;
 pub mod web_search;
 
 pub use context::ToolContext;
 pub use conversation_history::ConversationHistoryTool;
 pub use fetch_url::FetchUrlTool;
+pub use github_search::{
+    GithubAuth, GithubSearchBackend, GithubSearchKind, GithubSearchResult, GithubSearchTool,
+    OctocrabGithubSearch,
+};
 pub use knowledge_search::KnowledgeSearchTool;
 pub use web_search::{NoopWebSearchProvider, SearchResult, WebSearchProvider, WebSearchTool};
 
