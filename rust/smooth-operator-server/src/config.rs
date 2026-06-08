@@ -35,6 +35,35 @@ pub const DEFAULT_MAX_ITERATIONS: u32 = 6;
 /// Default `max_tokens` per LLM call.
 pub const DEFAULT_MAX_TOKENS: u32 = 512;
 
+/// Which storage backend the server runs on. Selected via `SMOOTH_AGENT_STORAGE`
+/// (`memory` / `postgres` / `dynamodb`); the **admin stores** (connector configs,
+/// settings, indexing runs) follow the same backend so they're durable wherever
+/// the conversations / knowledge live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    /// Process-local in-memory (the default — local dev / tests). Admin stores
+    /// are the in-memory impls (lost on restart).
+    Memory,
+    /// Postgres + pgvector. Admin stores persist to the same database.
+    Postgres,
+    /// DynamoDB single-table (AWS-serverless). Admin stores persist to the same
+    /// table.
+    Dynamodb,
+}
+
+impl StorageBackend {
+    /// Parse from the `SMOOTH_AGENT_STORAGE` wire value (case-insensitive).
+    /// Unknown / empty falls back to [`StorageBackend::Memory`].
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "postgres" | "pg" | "postgresql" => Self::Postgres,
+            "dynamodb" | "ddb" | "dynamo" => Self::Dynamodb,
+            _ => Self::Memory,
+        }
+    }
+}
+
 /// Fully-resolved server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -55,6 +84,9 @@ pub struct ServerConfig {
     pub max_iterations: u32,
     /// `max_tokens` per LLM call.
     pub max_tokens: u32,
+    /// Storage backend (drives both the storage adapter and the matching durable
+    /// admin stores). Defaults to [`StorageBackend::Memory`].
+    pub storage: StorageBackend,
 }
 
 impl ServerConfig {
@@ -103,6 +135,11 @@ impl ServerConfig {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
+        let storage = std::env::var("SMOOTH_AGENT_STORAGE")
+            .ok()
+            .map(|s| StorageBackend::parse(&s))
+            .unwrap_or(StorageBackend::Memory);
+
         Self {
             bind,
             port,
@@ -112,6 +149,7 @@ impl ServerConfig {
             seed_kb,
             max_iterations,
             max_tokens,
+            storage,
         }
     }
 
@@ -157,8 +195,10 @@ mod tests {
             seed_kb: false,
             max_iterations: DEFAULT_MAX_ITERATIONS,
             max_tokens: DEFAULT_MAX_TOKENS,
+            storage: StorageBackend::Memory,
         };
         assert_eq!(cfg.port, 8787);
+        assert_eq!(cfg.storage, StorageBackend::Memory);
         assert_eq!(cfg.gateway_url, "https://llm.smoo.ai/v1");
         assert_eq!(cfg.model, "claude-haiku-4-5");
         assert!(!cfg.has_llm());
@@ -176,6 +216,7 @@ mod tests {
             seed_kb: false,
             max_iterations: 4,
             max_tokens: 128,
+            storage: StorageBackend::Memory,
         };
         assert!(cfg.has_llm());
         let llm = cfg.llm_config().expect("llm config");
@@ -183,5 +224,22 @@ mod tests {
         assert_eq!(llm.model, "m");
         assert_eq!(llm.max_tokens, 128);
         assert!(matches!(llm.api_format, ApiFormat::OpenAiCompat));
+    }
+
+    #[test]
+    fn storage_backend_parse_maps_aliases_and_defaults_memory() {
+        assert_eq!(StorageBackend::parse("postgres"), StorageBackend::Postgres);
+        assert_eq!(StorageBackend::parse("  PG "), StorageBackend::Postgres);
+        assert_eq!(
+            StorageBackend::parse("PostgreSQL"),
+            StorageBackend::Postgres
+        );
+        assert_eq!(StorageBackend::parse("dynamodb"), StorageBackend::Dynamodb);
+        assert_eq!(StorageBackend::parse("ddb"), StorageBackend::Dynamodb);
+        assert_eq!(StorageBackend::parse("Dynamo"), StorageBackend::Dynamodb);
+        // Memory is the default for the explicit value, unknown values, and empty.
+        assert_eq!(StorageBackend::parse("memory"), StorageBackend::Memory);
+        assert_eq!(StorageBackend::parse("sqlite"), StorageBackend::Memory);
+        assert_eq!(StorageBackend::parse(""), StorageBackend::Memory);
     }
 }

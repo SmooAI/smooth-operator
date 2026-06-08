@@ -40,6 +40,7 @@ fn test_config() -> ServerConfig {
         seed_kb: false,
         max_iterations: 4,
         max_tokens: 128,
+        storage: smooth_operator_server::config::StorageBackend::Memory,
     }
 }
 

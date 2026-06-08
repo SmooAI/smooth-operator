@@ -81,6 +81,83 @@ pub fn build_state_from_env(config: ServerConfig) -> Result<AppState> {
     Ok(build_state(config).with_auth(Arc::from(verifier)))
 }
 
+/// Build an [`AppState`] selecting the **storage backend** (and the matching
+/// durable **admin stores**) from `config.storage`, then installing the
+/// env-configured auth verifier.
+///
+/// - [`StorageBackend::Memory`](crate::config::StorageBackend::Memory) — the
+///   in-memory adapter + in-memory admin stores (the [`build_state`] path; lost
+///   on restart). The default.
+/// - [`StorageBackend::Postgres`](crate::config::StorageBackend::Postgres) —
+///   the Postgres + pgvector adapter; the admin stores persist to the **same
+///   database** (`connector_configs` / `agent_settings` / `indexing_runs`).
+///   Connection string from `SMOOTH_AGENT_DATABASE_URL` / `DATABASE_URL`.
+/// - [`StorageBackend::Dynamodb`](crate::config::StorageBackend::Dynamodb) — the
+///   DynamoDB single-table adapter; the admin stores persist to the **same
+///   table**. Table from `SMOOTH_AGENT_DDB_TABLE`; the table is created if
+///   absent.
+///
+/// The admin store backend always matches the storage backend so a connector
+/// config / settings / indexing run survives a restart wherever the
+/// conversations and knowledge live.
+///
+/// # Errors
+/// Returns an error if the auth configuration is invalid, or if the selected
+/// persistent backend fails to connect / migrate.
+pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState> {
+    use crate::config::StorageBackend;
+    use smooth_operator::adapter::StorageAdapter;
+
+    let verifier = smooth_operator::auth::AuthConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("auth configuration error: {e}"))?;
+
+    let state =
+        match config.storage {
+            // The in-memory path is unchanged (synchronous, no external services).
+            StorageBackend::Memory => build_state(config),
+
+            StorageBackend::Postgres => {
+                use smooth_operator_adapter_postgres::PostgresAdapter;
+                let adapter =
+                    Arc::new(PostgresAdapter::from_env().await.map_err(|e| {
+                        anyhow::anyhow!("connecting Postgres storage backend: {e}")
+                    })?);
+                // Admin stores against the SAME database — durable.
+                let connectors = Arc::new(adapter.connector_config_store());
+                let settings = Arc::new(adapter.settings_store());
+                let indexing = Arc::new(adapter.indexing_store());
+                let storage: Arc<dyn StorageAdapter> = adapter;
+                AppState::new(storage, config)
+                    .with_connector_configs(connectors)
+                    .with_settings(settings)
+                    .with_indexing(indexing)
+            }
+
+            StorageBackend::Dynamodb => {
+                use smooth_operator_adapter_dynamodb::DynamoDbAdapter;
+                let adapter =
+                    Arc::new(DynamoDbAdapter::from_env(None).await.map_err(|e| {
+                        anyhow::anyhow!("connecting DynamoDB storage backend: {e}")
+                    })?);
+                adapter
+                    .create_table()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("creating DynamoDB table: {e}"))?;
+                // Admin stores against the SAME table — durable.
+                let connectors = Arc::new(adapter.connector_config_store());
+                let settings = Arc::new(adapter.settings_store());
+                let indexing = Arc::new(adapter.indexing_store());
+                let storage: Arc<dyn StorageAdapter> = adapter;
+                AppState::new(storage, config)
+                    .with_connector_configs(connectors)
+                    .with_settings(settings)
+                    .with_indexing(indexing)
+            }
+        };
+
+    Ok(state.with_auth(Arc::from(verifier)))
+}
+
 /// Seed a couple of distinctive demo docs so knowledge-grounded E2E is
 /// deterministic. The 17-day return window is deliberately unusual so an
 /// ungrounded answer can't accidentally match it. Both docs are tagged into the
@@ -121,7 +198,9 @@ pub async fn bind(config: ServerConfig) -> Result<(TcpListener, Router)> {
         .parse()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let addr = SocketAddr::new(ip, config.port);
-    let state = build_state_from_env(config)?;
+    // Async so a Postgres / DynamoDB storage backend (and its matching durable
+    // admin stores) can be wired; in-memory stays synchronous inside.
+    let state = build_state_from_env_async(config).await?;
     let app = router(state);
     let listener = TcpListener::bind(addr)
         .await
@@ -239,6 +318,7 @@ mod tests {
             seed_kb: true,
             max_iterations: 4,
             max_tokens: 128,
+            storage: crate::config::StorageBackend::Memory,
         };
         let state = build_state(cfg);
         assert!(!state.config.has_llm());

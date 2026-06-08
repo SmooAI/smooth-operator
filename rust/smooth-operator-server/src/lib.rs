@@ -40,5 +40,7 @@ pub mod server;
 pub mod state;
 
 pub use config::ServerConfig;
-pub use server::{bind, build_state, build_state_from_env, router, run};
+pub use server::{
+    bind, build_state, build_state_from_env, build_state_from_env_async, router, run,
+};
 pub use state::AppState;

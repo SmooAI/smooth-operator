@@ -12,9 +12,10 @@ gates, and how **org-scoping** and **"Basic sees own"** work.
 
 - Auth/RBAC core: [`rust/smooth-operator/src/auth.rs`](../rust/smooth-operator/src/auth.rs)
 - Admin routes + extractor (read **and** write): [`rust/smooth-operator-server/src/admin.rs`](../rust/smooth-operator-server/src/admin.rs)
-- Connector-config store + `auth_ref`: [`rust/smooth-operator/src/connector_config.rs`](../rust/smooth-operator/src/connector_config.rs)
-- Agent-settings store: [`rust/smooth-operator/src/settings.rs`](../rust/smooth-operator/src/settings.rs)
-- State wiring: [`rust/smooth-operator-server/src/state.rs`](../rust/smooth-operator-server/src/state.rs)
+- Connector-config store + `auth_ref` (trait + in-memory): [`rust/smooth-operator/src/connector_config.rs`](../rust/smooth-operator/src/connector_config.rs)
+- Agent-settings store (trait + in-memory): [`rust/smooth-operator/src/settings.rs`](../rust/smooth-operator/src/settings.rs)
+- Persistent admin stores: [`rust/adapters/postgres/src/admin.rs`](../rust/adapters/postgres/src/admin.rs), [`rust/adapters/dynamodb/src/admin.rs`](../rust/adapters/dynamodb/src/admin.rs)
+- State wiring + backend selection: [`rust/smooth-operator-server/src/state.rs`](../rust/smooth-operator-server/src/state.rs), [`rust/smooth-operator-server/src/server.rs`](../rust/smooth-operator-server/src/server.rs) (`build_state_from_env_async`)
 - Related: [ACCESS-CONTROL.md](ACCESS-CONTROL.md) (document-level ACL — RBAC sits on top), [INDEXING.md](INDEXING.md), [DOCUMENT-SETS.md](DOCUMENT-SETS.md)
 
 ---
@@ -246,20 +247,60 @@ documents* a retrieval returns.
 alongside the storage adapter and config:
 
 - `auth: Arc<dyn AuthVerifier>` — the env-selected verifier.
-- `indexing: Arc<dyn IndexingStore>` — an `InMemoryIndexingStore` for now;
-  the persistent Postgres/DynamoDB store is the follow-up (see [INDEXING.md](INDEXING.md)).
-- `connector_configs: Arc<dyn ConnectorConfigStore>` — an
-  `InMemoryConnectorConfigStore` (Phase 12 increment 3). CRUD'd by the
-  `/admin/connectors` write API, org-scoped, holds an `auth_ref` (secret **name**)
-  not a credential. The persistent follow-up is a Postgres/DynamoDB
-  `connector_configs` table keyed on `(org_id, id)`.
-- `settings: Arc<dyn SettingsStore>` — an `InMemorySettingsStore` (per-org agent
-  settings: model / system prompt / default tools), read/written by
-  `/admin/settings`. Persistent follow-up is an `agent_settings` table keyed on
-  `org_id`.
+- `indexing: Arc<dyn IndexingStore>` — the indexing-run ledger.
+- `connector_configs: Arc<dyn ConnectorConfigStore>` — connector configs, CRUD'd
+  by the `/admin/connectors` write API, org-scoped, holding an `auth_ref` (secret
+  **name**) not a credential.
+- `settings: Arc<dyn SettingsStore>` — per-org agent settings (model / system
+  prompt / default tools), read/written by `/admin/settings`.
 - a **document-set registry** (set name → doc count) — the in-memory knowledge
   backend drops document metadata on ingest, so `/admin/document-sets` reads set
   names + counts from this side registry, populated as docs are seeded/ingested.
+
+### Admin-store persistence (now durable)
+
+The three admin stores are **persistent** and follow the configured storage
+backend (`SMOOTH_AGENT_STORAGE` = `memory` / `postgres` / `dynamodb`), so a
+connector config, an agent-settings change, or an indexing run survives a restart
+wherever the conversations and knowledge live:
+
+- **`memory`** (default — local dev / tests): the in-memory impls
+  (`InMemoryConnectorConfigStore` / `InMemorySettingsStore` /
+  `InMemoryIndexingStore`). Lost on restart, but zero external dependencies.
+- **`postgres`**: the
+  [Postgres adapter](../rust/adapters/postgres/src/admin.rs) persists to the
+  **same database** as conversations/knowledge.
+- **`dynamodb`**: the
+  [DynamoDB adapter](../rust/adapters/dynamodb/src/admin.rs) persists to the
+  **same single table**.
+
+`build_state_from_env_async` selects the backend and wires the matching durable
+admin stores into `AppState` (`with_connector_configs` / `with_settings` /
+`with_indexing`). All three store traits are **synchronous**; both persistent
+adapters bridge them over their async pool / SDK with the same
+spawn-and-block-on-a-throwaway-OS-thread pattern the knowledge base and checkpoint
+store already use (never `Handle::block_on` on a runtime worker thread).
+
+**Cursor semantics + org-isolation are preserved across all three backends**:
+`latest_cursor(name)` is the **max cursor over `Succeeded` runs only** (a failed
+run never advances the cursor), `list_runs` is oldest-first, connector `list` /
+`get` / `delete` are strictly org-scoped (org A can never see/touch org B's row).
+
+#### Postgres schema (`adapters/postgres/src/schema.rs::ADMIN_SCHEMA`)
+
+| Table | Primary key | Notable columns / indexes |
+| --- | --- | --- |
+| `connector_configs` | `(org_id, id)` | `kind`, `config jsonb`, `enabled`, `created_at`, `updated_at`. `upsert` = `INSERT … ON CONFLICT (org_id, id) DO UPDATE`; `list` = `WHERE org_id = $1 ORDER BY name, id`. |
+| `agent_settings` | `org_id` | `model`, `system_prompt`, `default_tools jsonb`, `updated_at`. `put` = upsert; `get` of an absent org returns `AgentSettings::defaults`. |
+| `indexing_runs` | `id` | status / counts / `cursor`, index `(connector_name, started_at DESC)`. `latest_cursor` = `max(cursor) WHERE connector_name = $1 AND status = 'succeeded'`. |
+
+#### DynamoDB keys (`adapters/dynamodb/src/keys.rs`)
+
+| Item | PK | SK | Notes |
+| --- | --- | --- | --- |
+| ConnectorConfig | `ORG#<org>` | `CONNECTOR#<id>` | `list(org)` = single partition query (sorted by name in code); JSON body under `body`. |
+| AgentSettings | `ORG#<org>` | `SETTINGS#` | singleton per org; JSON body under `body`. |
+| IndexingRun | `IXCONN#<connector_name>` | `<zero-padded started_at millis>#<id>` | `list_runs` = partition query ascending; `latest_cursor` = max over succeeded items, computed in code. `IndexingRun` is stored as **discrete attributes** (not a JSON blob) because the ingestion crate's `IndexingRun` is intentionally not (de)serializable. |
 
 The `/ws` route, ACL, citations, and curation are unchanged — the admin router is
 merged into the same axum app.

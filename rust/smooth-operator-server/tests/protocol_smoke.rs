@@ -28,6 +28,7 @@ fn keyless_config() -> ServerConfig {
         seed_kb: true,
         max_iterations: 4,
         max_tokens: 128,
+        storage: smooth_operator_server::config::StorageBackend::Memory,
     }
 }
 

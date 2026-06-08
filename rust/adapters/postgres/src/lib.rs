@@ -29,6 +29,7 @@
 //! Postgres — the tables coexist (ours from [`schema`], theirs from their own
 //! `CREATE TABLE IF NOT EXISTS`).
 
+mod admin;
 mod embedder;
 mod knowledge;
 mod schema;
@@ -55,6 +56,7 @@ use smooth_operator_core::{CheckpointStore, KnowledgeBase};
 // re-export it here so existing `postgres::{Embedder, DeterministicEmbedder, …}`
 // consumers keep working. Only the adapter-specific `GatewayEmbedder` (+ its
 // 1536-d constant) is defined locally.
+pub use admin::{PgConnectorConfigStore, PgIndexingStore, PgSettingsStore};
 pub use embedder::{GatewayEmbedder, OPENAI_SMALL_EMBEDDING_DIM};
 pub use knowledge::PgKnowledgeBase;
 pub use smooth_operator::embedding::{
@@ -72,6 +74,9 @@ pub struct PostgresAdapter {
     checkpoints: Option<Arc<PostgresCheckpointStore>>,
     knowledge: Arc<PgKnowledgeBase>,
     embedding_dim: usize,
+    /// Captured runtime handle for the sync admin-store bridges (connector
+    /// configs / settings / indexing runs over the same async pool).
+    handle: tokio::runtime::Handle,
 }
 
 impl Drop for PostgresAdapter {
@@ -156,6 +161,10 @@ impl PostgresAdapter {
                 .await
                 .context("applying OLTP schema")?;
             client
+                .batch_execute(schema::ADMIN_SCHEMA)
+                .await
+                .context("applying admin schema")?;
+            client
                 .batch_execute(schema::VECTOR_EXTENSION)
                 .await
                 .context("creating pgvector extension")?;
@@ -178,13 +187,19 @@ impl PostgresAdapter {
 
         // --- pgvector knowledge base (shares the async pool) ---
         let handle = tokio::runtime::Handle::current();
-        let knowledge = Arc::new(PgKnowledgeBase::new(pool.clone(), embedder, handle, None));
+        let knowledge = Arc::new(PgKnowledgeBase::new(
+            pool.clone(),
+            embedder,
+            handle.clone(),
+            None,
+        ));
 
         Ok(Self {
             pool,
             checkpoints: Some(checkpoints),
             knowledge,
             embedding_dim,
+            handle,
         })
     }
 
@@ -204,6 +219,28 @@ impl PostgresAdapter {
     #[must_use]
     pub fn embedding_dim(&self) -> usize {
         self.embedding_dim
+    }
+
+    /// A Postgres-backed [`ConnectorConfigStore`](smooth_operator::connector_config::ConnectorConfigStore)
+    /// over this adapter's pool (the `connector_configs` table). Cheap to build
+    /// (clones the pool handle); make as many as you like.
+    #[must_use]
+    pub fn connector_config_store(&self) -> PgConnectorConfigStore {
+        PgConnectorConfigStore::new(self.pool.clone(), self.handle.clone())
+    }
+
+    /// A Postgres-backed [`SettingsStore`](smooth_operator::settings::SettingsStore)
+    /// over this adapter's pool (the `agent_settings` table).
+    #[must_use]
+    pub fn settings_store(&self) -> PgSettingsStore {
+        PgSettingsStore::new(self.pool.clone(), self.handle.clone())
+    }
+
+    /// A Postgres-backed [`IndexingStore`](smooth_operator_ingestion::indexing::IndexingStore)
+    /// over this adapter's pool (the `indexing_runs` table).
+    #[must_use]
+    pub fn indexing_store(&self) -> PgIndexingStore {
+        PgIndexingStore::new(self.pool.clone(), self.handle.clone())
     }
 }
 

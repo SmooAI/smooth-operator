@@ -94,6 +94,56 @@ CREATE INDEX IF NOT EXISTS idx_sessions_conversation
     ON conversation_sessions (conversation_id, created_at);
 "#;
 
+/// The admin-store tables (Phase 12 follow-up): the three management-console
+/// stores made durable — connector configs, per-org agent settings, and the
+/// indexing-run ledger. These have no dependency on pgvector, so they apply
+/// unconditionally alongside the OLTP schema.
+///
+/// - `connector_configs` — PK `(org_id, id)`, org-scoped CRUD. `upsert` is an
+///   `INSERT … ON CONFLICT (org_id, id) DO UPDATE`, `list` filters on `org_id`.
+/// - `agent_settings` — PK `org_id`, one row per org; `put` is an upsert, `get`
+///   falls back to defaults in the adapter when absent.
+/// - `indexing_runs` — PK `id`, indexed `(connector_name, started_at DESC)` so
+///   `list_runs` is an ordered scan and `latest_cursor` is a `max(cursor)` over
+///   `status = 'succeeded'` rows only (a failed run never advances the cursor).
+pub const ADMIN_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS connector_configs (
+    org_id     TEXT NOT NULL,
+    id         TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    config     JSONB NOT NULL,
+    enabled    BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (org_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_settings (
+    org_id        TEXT PRIMARY KEY,
+    model         TEXT NOT NULL,
+    system_prompt TEXT NOT NULL,
+    default_tools JSONB NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS indexing_runs (
+    id               TEXT PRIMARY KEY,
+    connector_name   TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    started_at       TIMESTAMPTZ NOT NULL,
+    finished_at      TIMESTAMPTZ,
+    documents_seen   BIGINT NOT NULL,
+    chunks_indexed   BIGINT NOT NULL,
+    documents_skipped BIGINT NOT NULL,
+    cursor           TIMESTAMPTZ,
+    error            TEXT
+);
+-- list_runs(name) orders by started_at; latest_cursor scans the succeeded rows.
+CREATE INDEX IF NOT EXISTS idx_indexing_runs_connector_started
+    ON indexing_runs (connector_name, started_at DESC);
+"#;
+
 /// pgvector extension. Requires a pgvector-enabled image
 /// (`pgvector/pgvector:pg16` or `ankane/pgvector`).
 pub const VECTOR_EXTENSION: &str = "CREATE EXTENSION IF NOT EXISTS vector;";

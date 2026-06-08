@@ -17,6 +17,10 @@ path = "src/main.rs"
 smooth-operator = { workspace = true }
 smooai-smooth-operator-core = { workspace = true }
 smooai-smooth-operator-adapter-memory = { path = "../adapters/in-memory" }
+# Persistent storage + admin-store backends, selected at runtime to match the
+# configured storage backend (Postgres / DynamoDB; default in-memory).
+smooai-smooth-operator-adapter-postgres = { path = "../adapters/postgres" }
+smooai-smooth-operator-adapter-dynamodb = { path = "../adapters/dynamodb" }
 # Admin API surfaces indexing-run status via the ingestion crate's IndexingStore.
 smooai-smooth-operator-ingestion = { path = "../ingestion" }
 

@@ -66,6 +66,7 @@ fn live_config(key: String) -> ServerConfig {
         seed_kb: true,
         max_iterations: 6,
         max_tokens: 512,
+        storage: smooth_operator_server::config::StorageBackend::Memory,
     }
 }
 

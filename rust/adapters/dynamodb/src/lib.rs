@@ -33,6 +33,7 @@
 //! by-id), so both `create_conversation` idempotency lookups and standalone
 //! `get_conversation(id)` are single queries.
 
+mod admin;
 mod checkpoint;
 mod keys;
 mod knowledge;
@@ -58,6 +59,7 @@ use smooth_operator::adapter::{
 use smooth_operator::domain::{Conversation, Message, Participant, Session};
 use smooth_operator_core::{CheckpointStore, KnowledgeBase};
 
+pub use admin::{DynamoConnectorConfigStore, DynamoIndexingStore, DynamoSettingsStore};
 pub use checkpoint::{DynamoCheckpointStore, MAX_INLINE_BLOB};
 pub use knowledge::{DynamoKnowledgeBase, KnowledgeBackend};
 #[cfg(feature = "s3-vectors")]
@@ -81,6 +83,9 @@ pub struct DynamoDbAdapter {
     table: String,
     checkpoints: Arc<DynamoCheckpointStore>,
     knowledge: Arc<DynamoKnowledgeBase>,
+    /// Captured runtime handle for the sync admin-store bridges (connector
+    /// configs / settings / indexing runs over the same single table).
+    handle: Handle,
 }
 
 impl DynamoDbAdapter {
@@ -103,7 +108,7 @@ impl DynamoDbAdapter {
             client.clone(),
             table.clone(),
             Arc::new(DeterministicEmbedder::new()),
-            handle,
+            handle.clone(),
             "default",
             KnowledgeBackend::BruteForce,
         ));
@@ -112,6 +117,7 @@ impl DynamoDbAdapter {
             table,
             checkpoints,
             knowledge,
+            handle,
         }
     }
 
@@ -163,6 +169,33 @@ impl DynamoDbAdapter {
     #[must_use]
     pub fn table_name(&self) -> &str {
         &self.table
+    }
+
+    /// A DynamoDB-backed [`ConnectorConfigStore`](smooth_operator::connector_config::ConnectorConfigStore)
+    /// over this adapter's table (items at `PK=ORG#<org>`, `SK=CONNECTOR#<id>`).
+    /// Cheap to build (clones the client handle).
+    #[must_use]
+    pub fn connector_config_store(&self) -> DynamoConnectorConfigStore {
+        DynamoConnectorConfigStore::new(
+            self.client.clone(),
+            self.table.clone(),
+            self.handle.clone(),
+        )
+    }
+
+    /// A DynamoDB-backed [`SettingsStore`](smooth_operator::settings::SettingsStore)
+    /// over this adapter's table (items at `PK=ORG#<org>`, `SK=SETTINGS#`).
+    #[must_use]
+    pub fn settings_store(&self) -> DynamoSettingsStore {
+        DynamoSettingsStore::new(self.client.clone(), self.table.clone(), self.handle.clone())
+    }
+
+    /// A DynamoDB-backed [`IndexingStore`](smooth_operator_ingestion::indexing::IndexingStore)
+    /// over this adapter's table (items at `PK=IXCONN#<connector_name>`,
+    /// `SK=<zero-padded started_at>#<id>`).
+    #[must_use]
+    pub fn indexing_store(&self) -> DynamoIndexingStore {
+        DynamoIndexingStore::new(self.client.clone(), self.table.clone(), self.handle.clone())
     }
 
     /// Create the single table with its overloaded primary key and `GSI1`, if it

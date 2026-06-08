@@ -858,7 +858,10 @@ mod tests {
         let v = AuthConfig::from_env().expect("default boots with admin disabled");
         assert_eq!(v.mode(), "disabled");
         // Every admin request is rejected until auth is configured.
-        assert!(matches!(v.verify("anything"), Err(AuthError::InvalidToken(_))));
+        assert!(matches!(
+            v.verify("anything"),
+            Err(AuthError::InvalidToken(_))
+        ));
         clear_auth_env();
     }
 

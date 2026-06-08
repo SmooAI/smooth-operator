@@ -38,6 +38,31 @@ pub mod attr {
     pub const SEQ: &str = "seq";
     /// Knowledge: stored embedding (list of numbers) for the brute-force path.
     pub const EMBEDDING: &str = "embedding";
+
+    // Indexing-run attributes. `IndexingRun` is not (de)serializable (the
+    // ingestion crate's contract is intentionally untouched), so a run is stored
+    // as discrete attributes — exactly as the Postgres adapter persists it
+    // per-column.
+    /// Indexing run id (uuid v4).
+    pub const IX_ID: &str = "ixId";
+    /// Indexing run connector name.
+    pub const IX_CONNECTOR: &str = "ixConnector";
+    /// Indexing run status (`running` / `succeeded` / `failed`).
+    pub const IX_STATUS: &str = "ixStatus";
+    /// Indexing run start time (RFC 3339).
+    pub const IX_STARTED_AT: &str = "ixStartedAt";
+    /// Indexing run finish time (RFC 3339; absent while running).
+    pub const IX_FINISHED_AT: &str = "ixFinishedAt";
+    /// Documents the connector returned this run.
+    pub const IX_DOCS_SEEN: &str = "ixDocumentsSeen";
+    /// Chunks newly embedded + stored this run.
+    pub const IX_CHUNKS: &str = "ixChunksIndexed";
+    /// Documents skipped as unchanged this run.
+    pub const IX_DOCS_SKIPPED: &str = "ixDocumentsSkipped";
+    /// New high-water cursor (RFC 3339; absent on failure / no-op runs).
+    pub const IX_CURSOR: &str = "ixCursor";
+    /// Failure message (absent unless status is `failed`).
+    pub const IX_ERROR: &str = "ixError";
 }
 
 /// GSI1 index name.
@@ -169,6 +194,56 @@ pub fn ckpt_sk(iteration: u32, checkpoint_id: &str) -> String {
 #[must_use]
 pub fn ckpt_id_gsi1pk(checkpoint_id: &str) -> String {
     format!("CKPTID#{checkpoint_id}")
+}
+
+// ---- admin: connector configs ----------------------------------------------
+
+/// Connector configs are partitioned per org so `list(org)` is a single query
+/// and one org can never see another's connectors.
+#[must_use]
+pub fn connector_pk(org: &str) -> String {
+    format!("ORG#{org}")
+}
+
+#[must_use]
+pub fn connector_sk(id: &str) -> String {
+    format!("CONNECTOR#{id}")
+}
+
+/// SK prefix for `begins_with` listing of an org's connector configs.
+pub const CONNECTOR_SK_PREFIX: &str = "CONNECTOR#";
+
+// ---- admin: per-org agent settings -----------------------------------------
+
+/// Agent settings live under the org partition at a fixed singleton SK — one
+/// settings row per org, read/written by `get`/`put`.
+#[must_use]
+pub fn settings_pk(org: &str) -> String {
+    format!("ORG#{org}")
+}
+
+pub const SETTINGS_SK: &str = "SETTINGS#";
+
+// ---- admin: indexing runs --------------------------------------------------
+
+/// Indexing runs are partitioned per connector so `list_runs(name)` is a single
+/// query and `latest_cursor(name)` scans only that connector's runs.
+#[must_use]
+pub fn indexing_pk(connector_name: &str) -> String {
+    format!("IXCONN#{connector_name}")
+}
+
+/// Indexing-run SK: `<zero-padded started_at millis>#<runId>` — sortable by
+/// start time (lexicographic == chronological), id-disambiguated so two runs
+/// that start in the same millisecond don't collide. `list_runs` queries this
+/// partition ascending (oldest-first, matching the in-memory contract).
+#[must_use]
+pub fn indexing_sk(started_at_millis: i64, run_id: &str) -> String {
+    // Offset into the non-negative u64 range so pre-epoch timestamps (negative
+    // millis) still pad to a fixed width and sort correctly. i64::MIN..i64::MAX
+    // maps monotonically onto 0..u64::MAX.
+    let ordered = (started_at_millis as i128 - i64::MIN as i128) as u128;
+    format!("{ordered:0SEQ_WIDTH$}#{run_id}", SEQ_WIDTH = SEQ_WIDTH)
 }
 
 // ---- knowledge -------------------------------------------------------------
