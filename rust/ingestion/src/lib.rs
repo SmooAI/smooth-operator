@@ -51,6 +51,7 @@
 pub mod chunker;
 pub mod connector;
 pub mod connectors;
+pub mod indexing;
 pub mod pipeline;
 
 pub use chunker::{Chunk, Chunker, DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
@@ -58,6 +59,13 @@ pub use connector::{Connector, MockConnector, RawDocument, Timestamp};
 pub use connectors::{
     FileConnector, GithubAuth, GithubConnector, GithubConnectorConfig, GithubInclude,
     GithubVisibility, WebConnector,
+};
+// Background / incremental indexing (Phase 11): the scheduled re-index loop —
+// per-connector cursor + per-run status tracking. Scheduling is infrastructure
+// (EventBridge Scheduler → Lambda, or k8s CronJob); see `docs/INDEXING.md`.
+pub use indexing::{
+    InMemoryIndexingStore, IndexingEvent, IndexingProgress, IndexingRun, IndexingRunStatus,
+    IndexingService, IndexingStore,
 };
 // The text→vector seam (trait + deterministic default) lives in core, shared
 // with the Postgres adapter so ingestion and retrieval embed identically.

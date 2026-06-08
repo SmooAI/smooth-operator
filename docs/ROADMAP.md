@@ -99,7 +99,7 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 
 Recurring principle: **"Smoo-powered or bring-your-own"** — hosted lom.smoo.ai wires Smoo's apps (identity, GitHub App, Slack App, managed parsing); self-host brings their own. Same code, two postures.
 
-- ⬜ **Background / incremental indexing** — `Connector::pull(since)` (cursor) + idempotent ingest → EventBridge Scheduler → Step Functions/Lambda per connector (k8s: CronJob+worker); an `indexing_runs` status table surfaced live via the protocol's existing `job_status_updated` events.
+- 🟡 **Background / incremental indexing** — engine done (`smooth_operator_ingestion::indexing`: `IndexingService::run_once` = `latest_cursor` → `pull(since)` → idempotent `ingest` → `IndexingRun`; `IndexingStore` trait + `InMemoryIndexingStore`; `IndexingProgress` seam for `job_status_updated`; cursor + failure-path + progress tests). See [INDEXING.md](INDEXING.md). Remaining: persistent `IndexingStore` adapters (Postgres/DynamoDB `indexing_runs` table) + the EventBridge Scheduler → Step Functions/Lambda (k8s: CronJob+worker) wiring.
 - ⬜ **Structured citations** (do early — sources are already retrieved): `citations[]` (id/title/url/snippet/score) in `eventual_response` + widget rendering.
 - ⬜ **Rich file parsing** — a `FileParser` seam: text/md/html inline; PDF/docx/pptx/xlsx+OCR → **Docling** in a container Lambda (off the hot path; feeds the chunker).
 - ⬜ **Document sets / curation / boosting** — membership table + retrieval filter + `boost` field.
