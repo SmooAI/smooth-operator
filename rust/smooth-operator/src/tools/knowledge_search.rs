@@ -13,14 +13,19 @@
 //! Construct it from the same `Arc<dyn KnowledgeBase>` the runtime hands
 //! `AgentConfig::with_knowledge`, so both paths read the same store.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use smooth_operator_core::tool::ToolSchema;
-use smooth_operator_core::{KnowledgeBase, Tool};
+use smooth_operator_core::{KnowledgeBase, KnowledgeResult, Tool};
 
 use crate::access_control::{AccessContext, AclKnowledgeStore};
 use crate::rerank::{apply_optional_rerank, Reranker};
+
+/// A shared sink the [`KnowledgeSearchTool`] records its structured results into,
+/// so the runtime can collect the sources a turn's `knowledge_search` calls
+/// actually surfaced (for citations) without re-parsing the tool's text output.
+pub type KnowledgeResultSink = Arc<Mutex<Vec<KnowledgeResult>>>;
 
 /// Default number of results returned when the caller doesn't specify `limit`.
 const DEFAULT_LIMIT: usize = 3;
@@ -46,6 +51,12 @@ const RERANK_OVERFETCH: usize = 4;
 pub struct KnowledgeSearchTool {
     knowledge: Arc<dyn KnowledgeBase>,
     reranker: Option<Arc<dyn Reranker>>,
+    /// Optional sink the tool records the structured results of every search
+    /// into. When set (via [`with_result_sink`](Self::with_result_sink)), the
+    /// runtime reads it after the turn to build citations from the documents the
+    /// agent's `knowledge_search` calls surfaced. `None` ⇒ no recording
+    /// (default), so existing behavior is byte-for-byte unchanged.
+    result_sink: Option<KnowledgeResultSink>,
 }
 
 impl KnowledgeSearchTool {
@@ -64,6 +75,7 @@ impl KnowledgeSearchTool {
         Self {
             knowledge,
             reranker: None,
+            result_sink: None,
         }
     }
 
@@ -76,7 +88,19 @@ impl KnowledgeSearchTool {
         Self {
             knowledge: store.reader(context),
             reranker: None,
+            result_sink: None,
         }
+    }
+
+    /// Record the structured results of every search into `sink` (Onyx-gap:
+    /// structured citations). The runtime drains the sink after a turn to build
+    /// the `eventual_response`'s `citations` from the documents the agent's
+    /// `knowledge_search` calls actually surfaced. Leaving it unset keeps the
+    /// tool's behavior unchanged.
+    #[must_use]
+    pub fn with_result_sink(mut self, sink: KnowledgeResultSink) -> Self {
+        self.result_sink = Some(sink);
+        self
     }
 
     /// Attach an optional reranker stage (Onyx-gap G8).
@@ -153,6 +177,15 @@ impl Tool for KnowledgeSearchTool {
         // Opt-in rerank stage (Onyx-gap G8): reorder + truncate to `limit`. With
         // `None` this is just a truncation, preserving the query's own order.
         let results = apply_optional_rerank(self.reranker.as_ref(), query, candidates, limit).await;
+
+        // Record the structured results so the runtime can build citations from
+        // the sources this search surfaced. Done before the empty-check so an
+        // empty search records nothing (no spurious citation).
+        if let Some(sink) = &self.result_sink {
+            if let Ok(mut guard) = sink.lock() {
+                guard.extend(results.iter().cloned());
+            }
+        }
 
         if results.is_empty() {
             return Ok(format!(

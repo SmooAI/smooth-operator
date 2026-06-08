@@ -90,7 +90,7 @@ pub trait Connector: Send + Sync {
 | field      | meaning                                                              |
 | ---------- | ------------------------------------------------------------------- |
 | `id`       | connector-stable identity (file path, URL, record id) — dedup key   |
-| `source`   | origin label (`"file"`, `"web"`, …)                                 |
+| `source`   | origin label or URL — for the GitHub connector the blob/issue **URL**, which the runtime surfaces as a citation `url` on `eventual_response` (see [CONNECTORS.md](CONNECTORS.md) and [PROTOCOL.md](PROTOCOL.md#citations-on-eventual_response)); for others a label (`"file"`, `"web"`, …) |
 | `title`    | optional human title (folded into chunk metadata)                   |
 | `content`  | textual content (HTML already stripped for the web case)            |
 | `metadata` | arbitrary source metadata, propagated onto every chunk              |

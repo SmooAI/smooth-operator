@@ -154,6 +154,123 @@ async fn knowledge_grounded_turn_searches_then_answers() {
     );
 }
 
+/// Citations (structured): a knowledge-grounded turn attaches the sources that
+/// actually grounded the answer to its [`TurnOutcome`]. Seeds two distinctive
+/// docs — one with a GitHub-style `http(s)` source (so it carries a citation
+/// `url`), one with a local path (no url) — runs a turn that retrieves the
+/// GitHub doc via `knowledge_search`, and asserts the citation carries the
+/// grounding doc's id + url + a snippet, deduplicated.
+#[tokio::test]
+async fn grounded_turn_attaches_deduped_citations_with_url_and_snippet() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let kb = storage.knowledge();
+    // (1) GitHub-sourced doc: `source` is the blob URL the connector stamps on
+    //     at ingest, so its citation must carry that `url`.
+    kb.ingest(Document::new(
+        "Quokkas are the friendliest marsupial and famously photogenic.",
+        "https://github.com/acme/handbook/blob/main/wildlife/quokka.md",
+        DocumentType::Documentation,
+    ))
+    .expect("ingest quokka doc");
+    // (2) Local doc with no web source: any citation for it carries no url.
+    kb.ingest(Document::new(
+        "Standard shipping takes 5 to 7 business days.",
+        "policies/shipping.md",
+        DocumentType::Documentation,
+    ))
+    .expect("ingest shipping doc");
+
+    // Script the mock: search for the quokka fact, then answer. The query is
+    // distinctive enough that only the quokka doc matches.
+    let mock = MockLlmClient::new();
+    mock.push_tool_call(
+        "call_kb_quokka",
+        "knowledge_search",
+        serde_json::json!({ "query": "quokka friendliest photogenic marsupial" }),
+    )
+    .push_text("Quokkas are the friendliest marsupial — and very photogenic!");
+
+    let runtime = KnowledgeChatRuntime::new(storage.clone(), test_llm())
+        .with_llm_provider(Arc::new(mock.clone()));
+
+    let outcome = runtime
+        .run_turn("conv-cite", "Tell me about quokkas")
+        .await
+        .expect("run_turn");
+
+    // The grounding doc shows up as a citation exactly once (deduped across the
+    // auto-injected context AND the knowledge_search tool result, both of which
+    // surfaced the same quokka doc).
+    let quokka: Vec<_> = outcome
+        .citations
+        .iter()
+        .filter(|c| c.snippet.contains("Quokkas"))
+        .collect();
+    assert_eq!(
+        quokka.len(),
+        1,
+        "the quokka doc should be cited exactly once (deduped); citations: {:?}",
+        outcome.citations
+    );
+    let cite = quokka[0];
+
+    // id is the source document's id (non-empty), url is the GitHub blob URL
+    // (from the doc's http(s) `source`), and the snippet is the retrieved chunk.
+    assert!(!cite.id.is_empty(), "citation must carry a document id");
+    assert_eq!(
+        cite.url.as_deref(),
+        Some("https://github.com/acme/handbook/blob/main/wildlife/quokka.md"),
+        "GitHub-sourced doc's citation must carry its blob url"
+    );
+    assert!(
+        cite.snippet.contains("friendliest marsupial"),
+        "citation snippet should be the retrieved chunk, got: {:?}",
+        cite.snippet
+    );
+    assert!(cite.score > 0.0, "citation should carry a relevance score");
+
+    // Sanity: the unrelated shipping doc did NOT ground this turn, so it is not
+    // cited (only the sources that actually grounded the answer appear).
+    assert!(
+        outcome
+            .citations
+            .iter()
+            .all(|c| !c.snippet.contains("shipping")),
+        "unrelated shipping doc should not be cited; citations: {:?}",
+        outcome.citations
+    );
+}
+
+/// The no-citations case: a turn that retrieves nothing carries no citations.
+/// A plain greeting matches no knowledge doc (the engine's auto-injection query
+/// returns empty) and the model answers directly without `knowledge_search`.
+#[tokio::test]
+async fn turn_with_no_retrieval_has_no_citations() {
+    let storage = seeded_storage();
+
+    let mock = MockLlmClient::new();
+    mock.push_text("Hi! How can I help you today?");
+
+    let runtime = KnowledgeChatRuntime::new(storage.clone(), test_llm())
+        .with_llm_provider(Arc::new(mock.clone()));
+
+    // A greeting with no overlap with any seeded policy doc → no retrieval.
+    let outcome = runtime
+        .run_turn("conv-nocite", "zzqq")
+        .await
+        .expect("run_turn");
+
+    assert!(
+        !outcome.invoked_tool("knowledge_search"),
+        "no knowledge_search on a no-match greeting"
+    );
+    assert!(
+        outcome.citations.is_empty(),
+        "a turn that retrieves nothing must carry no citations, got: {:?}",
+        outcome.citations
+    );
+}
+
 /// A simpler no-tool turn: the model answers directly with text, no
 /// knowledge_search. Proves the runtime returns cleanly without a tool call.
 #[tokio::test]

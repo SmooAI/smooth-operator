@@ -60,6 +60,36 @@ type Checkpoint struct {
 // name, bead ID).
 type CheckpointMetadata map[string]string
 
+// A source the agent used to ground its answer. Each citation points back at one
+// retrieved knowledge-base document — the chunk the model read, plus enough
+// metadata to render an attribution link. Citations are collected by the runtime
+// from the documents that actually grounded a turn (the auto-injected `[Relevant
+// knowledge]` context and any `knowledge_search` tool results) and attached to the
+// terminal `eventual_response`. For GitHub-sourced documents `url` is the
+// blob/issue URL; documents without a web source omit it.
+type Citation struct {
+	// Stable identifier of the cited source document (the knowledge-base
+	// `document_id`). Used to deduplicate citations within a turn.
+	ID string `json:"id"`
+
+	// Relevance score of this source for the turn's query (the knowledge-base
+	// similarity score). Higher is more relevant.
+	Score float64 `json:"score"`
+
+	// The retrieved chunk text that grounded the answer, truncated to a bounded
+	// length for display.
+	Snippet string `json:"snippet"`
+
+	// Human-readable label for the source — typically the document's source path or,
+	// for web-sourced docs, the URL/title.
+	Title string `json:"title"`
+
+	// Canonical link to the source, when one exists. For GitHub-sourced documents
+	// this is the blob/issue URL stamped onto the document's `source` at ingest (see
+	// CONNECTORS.md). Absent for sources with no web location (e.g. uploaded files).
+	URL *string `json:"url,omitempty,omitzero"`
+}
+
 // Fields sent by the client to approve or reject a pending tool write.
 type ConfirmToolActionRequest struct {
 	// Action discriminator.
@@ -423,6 +453,14 @@ type EventualResponseData struct {
 
 // The final agent output.
 type EventualResponseDataData struct {
+	// The sources that grounded this answer, when any were retrieved. Collected by
+	// the runtime from the documents that actually grounded the turn — the
+	// auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool
+	// results — deduplicated by source id and capped. Optional and back-compatible:
+	// absent when the turn used no knowledge sources. Each item is a `Citation` (see
+	// `domain/citation.schema.json`).
+	Citations []EventualResponseDataDataCitationsElem `json:"citations,omitempty,omitzero"`
+
 	// Human-readable escalation reason when `needsEscalation` is true.
 	EscalationReason *string `json:"escalationReason,omitempty,omitzero"`
 
@@ -435,6 +473,32 @@ type EventualResponseDataData struct {
 	// The structured agent response payload. Shape depends on the agent template.
 	// Clients should validate against a template-specific schema before rendering.
 	Response interface{} `json:"response"`
+}
+
+// A source the agent used to ground its answer (a `Citation` — see
+// `domain/citation.schema.json`). For GitHub-sourced documents `url` is the
+// blob/issue URL; documents without a web source omit it.
+type EventualResponseDataDataCitationsElem struct {
+	// Stable identifier of the cited source document (the knowledge-base
+	// `document_id`). Used to deduplicate citations within a turn.
+	ID string `json:"id"`
+
+	// Relevance score of this source for the turn's query (the knowledge-base
+	// similarity score). Higher is more relevant.
+	Score float64 `json:"score"`
+
+	// The retrieved chunk text that grounded the answer, truncated to a bounded
+	// length for display.
+	Snippet string `json:"snippet"`
+
+	// Human-readable label for the source — typically the document's source path or,
+	// for web-sourced docs, the URL/title.
+	Title string `json:"title"`
+
+	// Canonical link to the source, when one exists. For GitHub-sourced documents
+	// this is the blob/issue URL stamped onto the document's `source` at ingest.
+	// Absent for sources with no web location.
+	URL *string `json:"url,omitempty,omitzero"`
 }
 
 // Structured output from the default general-purpose agent template. Agents built

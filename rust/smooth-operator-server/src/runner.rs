@@ -20,18 +20,26 @@
 //!    is the robust, backend-agnostic way to carry memory. The log is the source
 //!    of truth the adapter already persists.)
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde_json::json;
 use smooth_operator_core::{
-    Agent, AgentConfig, AgentEvent, LlmConfig, Message as EngineMessage, Role, ToolRegistry,
+    Agent, AgentConfig, AgentEvent, KnowledgeResult, LlmConfig, Message as EngineMessage, Role,
+    ToolRegistry,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::adapter::{MessageQuery, StorageAdapter};
-use smooth_operator::domain::{Direction, Message as DomainMessage, MessageContent};
-use smooth_operator::tools::KnowledgeSearchTool;
+use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
+use smooth_operator::tools::{KnowledgeResultSink, KnowledgeSearchTool};
+use smooth_operator::MAX_CITATIONS;
+
+/// How many auto-injected knowledge results the engine prepends as
+/// `[Relevant knowledge]` context. Mirrors smooth-operator-core's `Agent`
+/// auto-injection (a top-3 query) so the citations we collect match the sources
+/// that grounded the first LLM call.
+const AUTO_CONTEXT_LIMIT: usize = 3;
 
 /// System prompt for the knowledge-chat agent. Mirrors core's prompt: ground
 /// answers in the knowledge base and search it before answering anything
@@ -57,6 +65,10 @@ pub struct TurnResult {
     pub message_id: String,
     /// True if any `knowledge_search` tool call ran this turn (diagnostics).
     pub invoked_knowledge_search: bool,
+    /// The sources that grounded this turn (the auto-injected context + every
+    /// `knowledge_search` result), deduped by id and capped. Carried onto the
+    /// `eventual_response`'s `citations`. Empty when nothing was retrieved.
+    pub citations: Vec<Citation>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -77,6 +89,19 @@ pub async fn run_streaming_turn(
     user_message: &str,
     sink: &UnboundedSender<serde_json::Value>,
 ) -> Result<TurnResult> {
+    // 0. Mirror the engine's auto-injected `[Relevant knowledge]` query so the
+    //    citations include the sources the FIRST LLM call was grounded with.
+    //    Same query smooth-operator-core's `Agent` runs (`query(msg, 3)`),
+    //    against the same knowledge handle. Best-effort: a KB error yields no
+    //    auto-context citations.
+    let auto_sources: Vec<KnowledgeResult> = storage
+        .knowledge()
+        .query(user_message, AUTO_CONTEXT_LIMIT)
+        .unwrap_or_default();
+    // Sink the knowledge_search tool records its structured results into, for
+    // citations built from the sources the agent's searches surfaced.
+    let tool_sources: KnowledgeResultSink = Arc::new(Mutex::new(Vec::new()));
+
     // 1. Load prior turns for memory BEFORE persisting the new inbound message,
     //    so prior_messages is exactly the history-up-to-now.
     let prior = load_prior_messages(storage.as_ref(), conversation_id).await?;
@@ -98,7 +123,9 @@ pub async fn run_streaming_turn(
         .with_prior_messages(prior);
 
     let mut tools = ToolRegistry::new();
-    tools.register(KnowledgeSearchTool::new(storage.knowledge()));
+    tools.register(
+        KnowledgeSearchTool::new(storage.knowledge()).with_result_sink(Arc::clone(&tool_sources)),
+    );
 
     let agent = Agent::new(config, tools).with_checkpoint_store(storage.checkpoints());
 
@@ -192,11 +219,39 @@ pub async fn run_streaming_turn(
         .id
     };
 
+    // Build citations from the sources that grounded this turn: auto-injected
+    // context first (it grounded the first LLM call), then the agent's
+    // knowledge_search results. Dedup by document id, cap at MAX_CITATIONS.
+    let tool_sources = match Arc::try_unwrap(tool_sources) {
+        Ok(mutex) => mutex
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        Err(arc) => arc.lock().expect("citation sink poisoned").clone(),
+    };
+    let citations = collect_citations(&auto_sources, &tool_sources);
+
     Ok(TurnResult {
         reply,
         message_id,
         invoked_knowledge_search,
+        citations,
     })
+}
+
+/// Build the turn's [`Citation`]s from the knowledge sources that grounded it:
+/// the engine's auto-injected `[Relevant knowledge]` context (`auto`, mirrored
+/// by the runner) followed by everything the agent's `knowledge_search` calls
+/// surfaced (`tool`). Concatenated auto-first, deduplicated by document id
+/// (first occurrence wins), mapped to [`Citation`], and capped at
+/// [`MAX_CITATIONS`]. Empty when nothing was retrieved.
+fn collect_citations(auto: &[KnowledgeResult], tool: &[KnowledgeResult]) -> Vec<Citation> {
+    let mut seen = std::collections::HashSet::new();
+    auto.iter()
+        .chain(tool.iter())
+        .filter(|r| seen.insert(r.document_id.clone()))
+        .take(MAX_CITATIONS)
+        .map(Citation::from_knowledge_result)
+        .collect()
 }
 
 /// Load the conversation's persisted messages (oldest-first, capped) and convert

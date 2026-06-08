@@ -31,17 +31,20 @@ pub mod tools;
 pub use access_control::{AccessContext, AclKnowledgeStore, DocAcl};
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
 pub use domain::{
-    Checkpoint, ContentItem, Conversation, Direction, Message, MessageContent, Participant,
-    ParticipantRef, ParticipantType, Platform, Session, SessionStatus,
+    Checkpoint, Citation, ContentItem, Conversation, Direction, Message, MessageContent,
+    Participant, ParticipantRef, ParticipantType, Platform, Session, SessionStatus,
+    CITATION_SNIPPET_MAX_CHARS,
 };
 pub use embedding::{
     cosine_similarity, DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
 };
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
-pub use runtime::{AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState};
+pub use runtime::{
+    AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState, MAX_CITATIONS,
+};
 pub use telemetry::init_telemetry;
 pub use tools::{
-    builtin_tools, ConversationHistoryTool, FetchUrlTool, KnowledgeSearchTool,
+    builtin_tools, ConversationHistoryTool, FetchUrlTool, KnowledgeResultSink, KnowledgeSearchTool,
     NoopWebSearchProvider, SearchResult, ToolContext, WebSearchProvider, WebSearchTool,
 };
 

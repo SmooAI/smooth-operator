@@ -371,6 +371,7 @@ async fn handle_send_message(
                 &turn.message_id,
                 response,
                 false,
+                &turn.citations,
             ));
         }
         Err(e) => {

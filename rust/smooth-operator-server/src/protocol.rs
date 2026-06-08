@@ -80,6 +80,10 @@ pub fn stream_chunk(request_id: &str, node: &str, state: Value) -> Value {
 
 /// `eventual_response` — the terminal event of a streaming turn. The payload is
 /// double-nested (`data.data`) per `eventual-response.schema.json`.
+///
+/// `citations` are the sources that grounded the answer. They're attached to
+/// the inner `data.data.citations` array only when non-empty — absent otherwise,
+/// keeping the event back-compatible with clients that predate citations.
 #[must_use]
 pub fn eventual_response(
     request_id: &str,
@@ -87,7 +91,17 @@ pub fn eventual_response(
     message_id: &str,
     response: Value,
     needs_escalation: bool,
+    citations: &[smooth_operator::domain::Citation],
 ) -> Value {
+    let mut inner = json!({
+        "messageId": message_id,
+        "response": response,
+        "needsEscalation": needs_escalation,
+    });
+    // Optional + back-compat: only emit `citations` when the turn had sources.
+    if !citations.is_empty() {
+        inner["citations"] = serde_json::to_value(citations).unwrap_or(Value::Null);
+    }
     json!({
         "type": "eventual_response",
         "requestId": request_id,
@@ -95,11 +109,7 @@ pub fn eventual_response(
         "data": {
             "requestId": request_id,
             "status": status,
-            "data": {
-                "messageId": message_id,
-                "response": response,
-                "needsEscalation": needs_escalation,
-            },
+            "data": inner,
         },
         "timestamp": now_ms(),
     })
@@ -164,12 +174,89 @@ mod tests {
 
     #[test]
     fn eventual_response_double_nests_payload() {
-        let ev = eventual_response("r1", 200, "m1", json!({"responseParts": ["hi"]}), false);
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+        );
         assert_eq!(ev["type"], "eventual_response");
         assert_eq!(ev["status"], 200);
         assert_eq!(ev["data"]["data"]["messageId"], "m1");
         assert_eq!(ev["data"]["data"]["needsEscalation"], false);
         assert_eq!(ev["data"]["data"]["response"]["responseParts"][0], "hi");
+    }
+
+    #[test]
+    fn eventual_response_omits_citations_when_empty() {
+        // Back-compat: no `citations` key at all when the turn had no sources.
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+        );
+        assert!(
+            ev["data"]["data"].get("citations").is_none(),
+            "citations must be absent when empty for back-compat"
+        );
+    }
+
+    #[test]
+    fn eventual_response_attaches_citations_when_present() {
+        let citations = vec![
+            smooth_operator::domain::Citation {
+                id: "doc-1".into(),
+                title: "acme/handbook@main#wildlife/quokka.md".into(),
+                url: Some("https://github.com/acme/handbook/blob/main/wildlife/quokka.md".into()),
+                snippet: "Quokkas are the friendliest marsupial.".into(),
+                score: 0.91,
+            },
+            smooth_operator::domain::Citation {
+                id: "doc-2".into(),
+                title: "policies/shipping.md".into(),
+                url: None,
+                snippet: "Standard shipping takes 5 to 7 business days.".into(),
+                score: 0.42,
+            },
+        ];
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &citations,
+        );
+        let cites = &ev["data"]["data"]["citations"];
+        assert!(cites.is_array(), "citations should be an array");
+        assert_eq!(cites.as_array().unwrap().len(), 2);
+        // GitHub-sourced citation carries id + url + snippet on the wire shape.
+        assert_eq!(cites[0]["id"], "doc-1");
+        assert_eq!(
+            cites[0]["url"],
+            "https://github.com/acme/handbook/blob/main/wildlife/quokka.md"
+        );
+        assert_eq!(
+            cites[0]["snippet"],
+            "Quokkas are the friendliest marsupial."
+        );
+        // score is an f32 widened to f64 on the wire, so compare with tolerance.
+        let score = cites[0]["score"].as_f64().expect("score is a number");
+        assert!(
+            (score - 0.91).abs() < 1e-4,
+            "score should round-trip ~0.91, got {score}"
+        );
+        // url is omitted (not null) for a source with no web location.
+        assert!(
+            cites[1].get("url").is_none(),
+            "a urless citation should omit `url`, not emit null"
+        );
+        assert_eq!(cites[1]["id"], "doc-2");
     }
 
     #[test]

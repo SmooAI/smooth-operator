@@ -52,12 +52,43 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `immediate_response` | synchronous ack (e.g. session created) |
 | `stream_chunk` | a per-node state snapshot from the agent workflow (carries `node` + filtered `state`) |
 | `stream_token` | a single streamed model token |
-| `eventual_response` | the final turn result |
+| `eventual_response` | the final turn result (carries optional `citations` — see below) |
 | `keepalive` | heartbeat |
 | `write_confirmation_required` | a tool wants to perform a write; client must `confirm_tool_action` |
 | `otp_verification_required` / `otp_sent` / `otp_verified` / `otp_invalid` | auth-gated tool flow |
 | `error` | `{ code, message }` |
 | `pong` | reply to `ping` |
+
+## Citations on `eventual_response`
+
+A grounded answer carries the sources it used. The terminal `eventual_response`'s inner payload (`data.data`) gains an **optional** `citations` array alongside `response` / `needsEscalation`:
+
+```jsonc
+{
+  "type": "eventual_response",
+  "data": {
+    "data": {
+      "messageId": "…",
+      "response": { "responseParts": ["Returns are accepted within 30 days…"] },
+      "needsEscalation": false,
+      "citations": [
+        {
+          "id": "doc-returns-policy",                                  // knowledge-base document id (dedup key)
+          "title": "acme/handbook@main#policies/returns.md",           // source label
+          "url": "https://github.com/acme/handbook/blob/main/policies/returns.md", // GitHub blob/issue URL (when web-sourced)
+          "snippet": "SmooAI returns are accepted within 30 days…",     // the retrieved chunk, truncated
+          "score": 0.91                                                // relevance (similarity) score
+        }
+      ]
+    }
+  }
+}
+```
+
+A `Citation` is `{ id, title, url?, snippet, score }` (schema: [`spec/domain/citation.schema.json`](../spec/domain/citation.schema.json); the inline array shape is on [`spec/events/eventual-response.schema.json`](../spec/events/eventual-response.schema.json)).
+
+- **What grounds a citation**: the runtime collects the knowledge-base documents that actually grounded the turn — the engine's auto-injected `[Relevant knowledge]` context (mirrored by the runtime with the same top-k query) plus every `knowledge_search` tool result. It deduplicates by `id`, caps the count (8), and maps each `KnowledgeResult` → `Citation`: `id` ← `document_id`, `title` ← `source`, `url` ← `source` when it is an `http(s)` URL (the GitHub blob/issue URL stamped on at ingest — see [CONNECTORS.md](CONNECTORS.md)) else omitted, `snippet` ← the chunk truncated, `score` ← `score`.
+- **Back-compat**: `citations` is absent when the turn retrieved nothing, so clients that predate it are unaffected. Generated clients expose it as an optional field (`Citation` type) after regeneration from `spec/`.
 
 ## Mapping to smooth-operator's `AgentEvent` stream
 

@@ -15,14 +15,16 @@ use smooth_operator_core::{
     ToolRegistry, Workflow, WorkflowBuilder,
 };
 
+use smooth_operator_core::KnowledgeResult;
+
 use crate::access_control::{AccessContext, AclKnowledgeStore};
 use crate::adapter::{MessageQuery, StorageAdapter};
-use crate::domain::{Direction, Message as DomainMessage, MessageContent};
+use crate::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use crate::telemetry::{
     GEN_AI_CONVERSATION_ID, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_NAME,
     GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
 };
-use crate::tools::KnowledgeSearchTool;
+use crate::tools::{KnowledgeResultSink, KnowledgeSearchTool};
 use tracing::Instrument;
 
 /// State threaded through the reference workflow: the user's message in, the
@@ -154,6 +156,19 @@ const KNOWLEDGE_CHAT_SYSTEM_PROMPT: &str =
 /// real backend (Postgres/DynamoDB) could be large.
 const MAX_PRIOR_MESSAGES: usize = 50;
 
+/// Max citations attached to a turn's [`TurnOutcome`]. Bounds the size of the
+/// `eventual_response` payload; the grounding sources past this cap are dropped
+/// (most-relevant kept first).
+pub const MAX_CITATIONS: usize = 8;
+
+/// How many auto-injected knowledge results the engine prepends as
+/// `[Relevant knowledge]` context. The runtime mirrors this exact query
+/// (`knowledge.query(user_message, AUTO_CONTEXT_LIMIT)`) so the citations it
+/// collects match the sources the engine actually grounded the first LLM call
+/// with. Kept in lockstep with smooth-operator-core's `Agent` auto-injection
+/// (currently a top-3 query).
+const AUTO_CONTEXT_LIMIT: usize = 3;
+
 /// The outcome of running one knowledge-grounded turn through the agent.
 ///
 /// Carries the final assistant text plus every [`AgentEvent`] the engine
@@ -168,6 +183,12 @@ pub struct TurnOutcome {
     /// [`AgentEvent::ToolCallStart`] / [`AgentEvent::ToolCallComplete`] to
     /// prove a knowledge search happened.
     pub events: Vec<AgentEvent>,
+    /// The sources that grounded this turn, deduplicated by id and capped at
+    /// [`MAX_CITATIONS`]. Collected from the documents the turn actually
+    /// retrieved — the engine's auto-injected `[Relevant knowledge]` context
+    /// (mirrored by the runtime) plus every `knowledge_search` tool result.
+    /// Empty when nothing was retrieved.
+    pub citations: Vec<Citation>,
 }
 
 /// Extract `(input_tokens, output_tokens)` from the engine's terminal
@@ -188,6 +209,26 @@ fn usage_from_events(events: &[AgentEvent]) -> Option<(u64, u64)> {
         }
         _ => None,
     })
+}
+
+/// Build the turn's [`Citation`]s from the knowledge sources that grounded it.
+///
+/// `auto` is the engine's auto-injected `[Relevant knowledge]` context (mirrored
+/// by the runtime), `tool` is everything the agent's `knowledge_search` calls
+/// surfaced. They're concatenated auto-first, deduplicated by document id
+/// (first occurrence wins — auto-context keeps its score when the same doc is
+/// also tool-searched), each mapped to a [`Citation`]
+/// ([`Citation::from_knowledge_result`]), and capped at [`MAX_CITATIONS`].
+///
+/// Returns an empty vec when nothing was retrieved.
+fn collect_citations(auto: &[KnowledgeResult], tool: &[KnowledgeResult]) -> Vec<Citation> {
+    let mut seen = std::collections::HashSet::new();
+    auto.iter()
+        .chain(tool.iter())
+        .filter(|r| seen.insert(r.document_id.clone()))
+        .take(MAX_CITATIONS)
+        .map(Citation::from_knowledge_result)
+        .collect()
 }
 
 impl TurnOutcome {
@@ -334,7 +375,12 @@ impl KnowledgeChatRuntime {
     /// turn 1: `Agent::new` randomizes the agent id every turn, so the
     /// checkpoint-resume path can't be keyed stably — replaying the persisted
     /// log is the robust, backend-agnostic way to carry memory.
-    fn build_agent(&self, events: Arc<Mutex<Vec<AgentEvent>>>, prior: Vec<EngineMessage>) -> Agent {
+    fn build_agent(
+        &self,
+        events: Arc<Mutex<Vec<AgentEvent>>>,
+        prior: Vec<EngineMessage>,
+        citation_sink: KnowledgeResultSink,
+    ) -> Agent {
         // The knowledge handle both retrieval paths read through. When access
         // control is enabled this is an ACL-filtering reader bound to the
         // requester's `AccessContext` (Onyx-gap G3); otherwise it's the raw
@@ -357,9 +403,10 @@ impl KnowledgeChatRuntime {
 
         // (2) Agent-driven search: register the knowledge_search tool over the
         //     SAME knowledge handle, so a tool call hits the same store and the
-        //     same ACL filter.
+        //     same ACL filter. The result sink lets the runtime collect the
+        //     sources the agent's searches surfaced, for citations.
         let mut tools = ToolRegistry::new();
-        tools.register(KnowledgeSearchTool::new(knowledge));
+        tools.register(KnowledgeSearchTool::new(knowledge).with_result_sink(citation_sink));
 
         let agent = Agent::new(config, tools)
             .with_checkpoint_store(self.storage.checkpoints())
@@ -453,13 +500,27 @@ impl KnowledgeChatRuntime {
         user_message: &str,
     ) -> Result<TurnOutcome> {
         let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+        // Sink the knowledge_search tool records its structured results into, so
+        // we can build citations from the sources the agent's searches surfaced.
+        let tool_sources: KnowledgeResultSink = Arc::new(Mutex::new(Vec::new()));
+
+        // Mirror the engine's auto-injected `[Relevant knowledge]` query so the
+        // citations include the sources the FIRST LLM call was grounded with.
+        // `smooth-operator-core`'s `Agent` queries `knowledge.query(msg, 3)` and
+        // prepends the matches as context (see `agent.rs`); we run the same
+        // query against the same knowledge handle here. Best-effort: a KB error
+        // just yields no auto-context citations (the turn still proceeds).
+        let auto_sources: Vec<KnowledgeResult> = self
+            .read_knowledge()
+            .query(user_message, AUTO_CONTEXT_LIMIT)
+            .unwrap_or_default();
 
         // Load the conversation's prior turns for cross-turn memory BEFORE
         // persisting the new inbound message, so `prior` is exactly the
         // history-up-to-now (the new message is replayed by `Agent::run` as the
         // current user turn, not as a duplicated prior message).
         let prior = self.load_prior_messages(conversation_id).await?;
-        let agent = self.build_agent(Arc::clone(&events), prior);
+        let agent = self.build_agent(Arc::clone(&events), prior, Arc::clone(&tool_sources));
 
         // Persist the inbound user message.
         self.persist_message(conversation_id, Direction::Inbound, user_message)
@@ -492,7 +553,24 @@ impl KnowledgeChatRuntime {
             Err(arc) => arc.lock().expect("event sink poisoned").clone(),
         };
 
-        Ok(TurnOutcome { reply, events })
+        // Build citations from the sources that grounded this turn: the
+        // auto-injected `[Relevant knowledge]` context first (it grounded the
+        // first LLM call), then whatever the agent's `knowledge_search` calls
+        // surfaced. Dedup by document id (auto-context wins ties, so its score
+        // is kept) and cap.
+        let tool_sources = match Arc::try_unwrap(tool_sources) {
+            Ok(mutex) => mutex
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Err(arc) => arc.lock().expect("citation sink poisoned").clone(),
+        };
+        let citations = collect_citations(&auto_sources, &tool_sources);
+
+        Ok(TurnOutcome {
+            reply,
+            events,
+            citations,
+        })
     }
 
     /// Append a single message to the conversation's log via the adapter.

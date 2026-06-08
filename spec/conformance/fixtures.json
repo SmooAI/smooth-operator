@@ -100,5 +100,44 @@
       },
       "timestamp": 1749340803500
     }
+  },
+
+  "eventual_response_with_citations_event": {
+    "$schema_ref": "events/eventual-response.schema.json",
+    "description": "Terminal response for a knowledge-grounded turn that carries the sources it used. One citation is a GitHub-sourced doc (with a blob url), the other a local doc with no web source (url omitted).",
+    "instance": {
+      "type": "eventual_response",
+      "requestId": "req-a1b2c3d4-0003",
+      "status": 200,
+      "data": {
+        "requestId": "req-a1b2c3d4-0003",
+        "status": 200,
+        "data": {
+          "messageId": "77777777-7777-7777-7777-777777777777",
+          "response": {
+            "responseParts": [
+              "Returns are accepted within 30 days of delivery for a full refund."
+            ]
+          },
+          "needsEscalation": false,
+          "citations": [
+            {
+              "id": "doc-returns-policy",
+              "title": "acme/handbook@main#policies/returns.md",
+              "url": "https://github.com/acme/handbook/blob/main/policies/returns.md",
+              "snippet": "SmooAI returns are accepted within 30 days of delivery for a full refund.",
+              "score": 0.91
+            },
+            {
+              "id": "doc-shipping-policy",
+              "title": "policies/shipping.md",
+              "snippet": "Standard shipping takes 5 to 7 business days within the continental US.",
+              "score": 0.42
+            }
+          ]
+        }
+      },
+      "timestamp": 1749340806700
+    }
   }
 }

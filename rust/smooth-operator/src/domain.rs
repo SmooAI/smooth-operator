@@ -232,6 +232,104 @@ pub struct Session {
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
+/// A source the agent used to ground its answer.
+///
+/// Mirrors `spec/domain/citation.schema.json` and the optional `citations`
+/// array on the terminal `eventual_response` event. Each citation points back at
+/// one retrieved knowledge-base document — the chunk the model read plus enough
+/// metadata to render an attribution link.
+///
+/// Citations are built from the
+/// [`KnowledgeResult`](smooth_operator_core::KnowledgeResult)s that actually
+/// grounded a turn (see [`Citation::from_knowledge_result`] /
+/// [`From<KnowledgeResult>`]): `id` ← `document_id`, `title` ← `source`,
+/// `url` ← `source` when it is an `http(s)` URL (the GitHub blob/issue URL the
+/// connector stamps onto the document's `source` at ingest — see
+/// `docs/CONNECTORS.md`) else `None`, `snippet` ← the chunk truncated for
+/// display, `score` ← `score`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Citation {
+    /// Stable identifier of the cited source document (the knowledge-base
+    /// `document_id`). Used to deduplicate citations within a turn.
+    pub id: String,
+    /// Human-readable label for the source — the document's source path or, for
+    /// web-sourced docs, the URL/title.
+    pub title: String,
+    /// Canonical link to the source, when one exists. For GitHub-sourced
+    /// documents this is the blob/issue URL stamped onto the document's `source`
+    /// at ingest. `None` for sources with no web location (e.g. uploaded files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The retrieved chunk text that grounded the answer, truncated for display.
+    pub snippet: String,
+    /// Relevance score of this source for the turn's query (the knowledge-base
+    /// similarity score). Higher is more relevant.
+    pub score: f32,
+}
+
+/// Max characters of a chunk to carry as a citation `snippet`. Bounds the size
+/// of the `eventual_response` payload; the full chunk lives in the KB.
+pub const CITATION_SNIPPET_MAX_CHARS: usize = 280;
+
+impl Citation {
+    /// Build a [`Citation`] from a knowledge-base
+    /// [`KnowledgeResult`](smooth_operator_core::KnowledgeResult).
+    ///
+    /// - `id` ← `document_id`
+    /// - `title` ← `source`
+    /// - `url` ← `source` when it parses as an `http`/`https` URL (the GitHub
+    ///   blob/issue URL the connector stamps onto `Document.source` at ingest —
+    ///   `docs/CONNECTORS.md`), otherwise `None` (e.g. a local `policies/x.md`
+    ///   path has no web location).
+    /// - `snippet` ← `chunk`, truncated to [`CITATION_SNIPPET_MAX_CHARS`] on a
+    ///   char boundary (an ellipsis appended when truncated).
+    /// - `score` ← `score`
+    #[must_use]
+    pub fn from_knowledge_result(result: &smooth_operator_core::KnowledgeResult) -> Self {
+        Self {
+            id: result.document_id.clone(),
+            title: result.source.clone(),
+            url: web_url(&result.source),
+            snippet: truncate_snippet(&result.chunk, CITATION_SNIPPET_MAX_CHARS),
+            score: result.score,
+        }
+    }
+}
+
+impl From<&smooth_operator_core::KnowledgeResult> for Citation {
+    fn from(result: &smooth_operator_core::KnowledgeResult) -> Self {
+        Self::from_knowledge_result(result)
+    }
+}
+
+impl From<smooth_operator_core::KnowledgeResult> for Citation {
+    fn from(result: smooth_operator_core::KnowledgeResult) -> Self {
+        Self::from_knowledge_result(&result)
+    }
+}
+
+/// Return `Some(source)` when `source` is an `http`/`https` URL (the citation's
+/// `url`), else `None`. GitHub-sourced documents carry the blob/issue URL in
+/// `Document.source`; local docs carry a path, which has no web location.
+fn web_url(source: &str) -> Option<String> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        Some(source.to_string())
+    } else {
+        None
+    }
+}
+
+/// Truncate `text` to at most `max` chars on a char boundary, appending `…`
+/// when truncation occurred. Empty/short text is returned unchanged.
+fn truncate_snippet(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

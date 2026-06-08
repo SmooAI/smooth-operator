@@ -602,6 +602,33 @@ class Error(BaseModel):
     """
 
 
+class Citation(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    id: str
+    """
+    Stable identifier of the cited source document (the knowledge-base `document_id`). Used to deduplicate citations within a turn.
+    """
+    title: str
+    """
+    Human-readable label for the source — typically the document's source path or, for web-sourced docs, the URL/title.
+    """
+    url: str | None = None
+    """
+    Canonical link to the source, when one exists. For GitHub-sourced documents this is the blob/issue URL stamped onto the document's `source` at ingest. Absent for sources with no web location.
+    """
+    snippet: str
+    """
+    The retrieved chunk text that grounded the answer, truncated to a bounded length for display.
+    """
+    score: float
+    """
+    Relevance score of this source for the turn's query (the knowledge-base similarity score). Higher is more relevant.
+    """
+
+
 class Data2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -622,6 +649,10 @@ class Data2(BaseModel):
     escalation_reason: Annotated[str | None, Field(alias='escalationReason')] = None
     """
     Human-readable escalation reason when `needsEscalation` is true.
+    """
+    citations: list[Citation] | None = None
+    """
+    The sources that grounded this answer, when any were retrieved. Collected by the runtime from the documents that actually grounded the turn — the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results — deduplicated by source id and capped. Optional and back-compatible: absent when the turn used no knowledge sources. Each item is a `Citation` (see `domain/citation.schema.json`).
     """
 
 
@@ -1210,6 +1241,33 @@ class Checkpoint(BaseModel):
     created_at: Annotated[AwareDatetime, Field(alias='createdAt')]
     """
     ISO 8601 timestamp when the checkpoint was created.
+    """
+
+
+class Citation1(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    id: str
+    """
+    Stable identifier of the cited source document (the knowledge-base `document_id`). Used to deduplicate citations within a turn.
+    """
+    title: str
+    """
+    Human-readable label for the source — typically the document's source path or, for web-sourced docs, the URL/title.
+    """
+    url: str | None = None
+    """
+    Canonical link to the source, when one exists. For GitHub-sourced documents this is the blob/issue URL stamped onto the document's `source` at ingest (see CONNECTORS.md). Absent for sources with no web location (e.g. uploaded files).
+    """
+    snippet: str
+    """
+    The retrieved chunk text that grounded the answer, truncated to a bounded length for display.
+    """
+    score: float
+    """
+    Relevance score of this source for the turn's query (the knowledge-base similarity score). Higher is more relevant.
     """
 
 

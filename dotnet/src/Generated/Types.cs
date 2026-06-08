@@ -22,6 +22,7 @@
 //   VerifyOtpRequest                   ← actions/verify-otp.schema.json
 //   VerifyOtpResponse                  ← actions/verify-otp.schema.json
 //   Checkpoint                         ← domain/checkpoint.schema.json
+//   Citation                           ← domain/citation.schema.json
 //   Conversation                       ← domain/conversation.schema.json
 //   Message                            ← domain/message.schema.json
 //   MessageContent                     ← domain/message.schema.json
@@ -640,6 +641,45 @@ namespace SmooAI.SmoothOperator.Generated
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("createdAt")]
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// A source the agent used to ground its answer. Each citation points back at one retrieved knowledge-base document — the chunk the model read, plus enough metadata to render an attribution link. Citations are collected by the runtime from the documents that actually grounded a turn (the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results) and attached to the terminal `eventual_response`. For GitHub-sourced documents `url` is the blob/issue URL; documents without a web source omit it.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Citation
+    {
+
+        /// <summary>
+        /// Stable identifier of the cited source document (the knowledge-base `document_id`). Used to deduplicate citations within a turn.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        public string Id { get; set; } = default!;
+
+        /// <summary>
+        /// Human-readable label for the source — typically the document's source path or, for web-sourced docs, the URL/title.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("title")]
+        public string Title { get; set; } = default!;
+
+        /// <summary>
+        /// Canonical link to the source, when one exists. For GitHub-sourced documents this is the blob/issue URL stamped onto the document's `source` at ingest (see CONNECTORS.md). Absent for sources with no web location (e.g. uploaded files).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("url")]
+        public string? Url { get; set; } = default!;
+
+        /// <summary>
+        /// The retrieved chunk text that grounded the answer, truncated to a bounded length for display.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("snippet")]
+        public string Snippet { get; set; } = default!;
+
+        /// <summary>
+        /// Relevance score of this source for the turn's query (the knowledge-base similarity score). Higher is more relevant.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("score")]
+        public double Score { get; set; } = default!;
 
     }
 
@@ -2232,6 +2272,12 @@ namespace SmooAI.SmoothOperator.Generated
         [System.Text.Json.Serialization.JsonPropertyName("escalationReason")]
         public string? EscalationReason { get; set; } = default!;
 
+        /// <summary>
+        /// The sources that grounded this answer, when any were retrieved. Collected by the runtime from the documents that actually grounded the turn — the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results — deduplicated by source id and capped. Optional and back-compatible: absent when the turn used no knowledge sources. Each item is a `Citation` (see `domain/citation.schema.json`).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("citations")]
+        public System.Collections.Generic.ICollection<Citations>? Citations { get; set; } = default!;
+
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
@@ -2366,6 +2412,45 @@ namespace SmooAI.SmoothOperator.Generated
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("actionDescription")]
         public string ActionDescription { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// A source the agent used to ground its answer (a `Citation` — see `domain/citation.schema.json`). For GitHub-sourced documents `url` is the blob/issue URL; documents without a web source omit it.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Citations
+    {
+
+        /// <summary>
+        /// Stable identifier of the cited source document (the knowledge-base `document_id`). Used to deduplicate citations within a turn.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        public string Id { get; set; } = default!;
+
+        /// <summary>
+        /// Human-readable label for the source — typically the document's source path or, for web-sourced docs, the URL/title.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("title")]
+        public string Title { get; set; } = default!;
+
+        /// <summary>
+        /// Canonical link to the source, when one exists. For GitHub-sourced documents this is the blob/issue URL stamped onto the document's `source` at ingest. Absent for sources with no web location.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("url")]
+        public string? Url { get; set; } = default!;
+
+        /// <summary>
+        /// The retrieved chunk text that grounded the answer, truncated to a bounded length for display.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("snippet")]
+        public string Snippet { get; set; } = default!;
+
+        /// <summary>
+        /// Relevance score of this source for the turn's query (the knowledge-base similarity score). Higher is more relevant.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("score")]
+        public double Score { get; set; } = default!;
 
     }
 

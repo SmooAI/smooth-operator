@@ -31,6 +31,15 @@ The pipeline chunker splits each file/issue; the connector emits one
 `RawDocument` per file (code) or per issue, and the chunker propagates the
 metadata onto every chunk.
 
+> **GitHub URLs flow into citations.** The blob/issue URL stamped onto each
+> document's `source` is what the runtime turns into a citation `url` on the
+> terminal `eventual_response` (see [PROTOCOL.md](PROTOCOL.md#citations-on-eventual_response)).
+> When the agent grounds an answer in a GitHub-sourced chunk, the returned
+> `Citation` carries that blob/issue URL as its `url`, so a UI can link the
+> answer straight back to the file or issue on GitHub. Documents whose `source`
+> is not an `http(s)` URL (e.g. uploaded files with a plain path) simply omit
+> `url`.
+
 ### Code filtering
 
 Code files are filtered so the index stays high-signal:

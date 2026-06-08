@@ -36,7 +36,7 @@ pub use github_search::{
     GithubAuth, GithubSearchBackend, GithubSearchKind, GithubSearchResult, GithubSearchTool,
     OctocrabGithubSearch,
 };
-pub use knowledge_search::KnowledgeSearchTool;
+pub use knowledge_search::{KnowledgeResultSink, KnowledgeSearchTool};
 pub use web_search::{NoopWebSearchProvider, SearchResult, WebSearchProvider, WebSearchTool};
 
 use std::sync::Arc;
