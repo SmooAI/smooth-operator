@@ -16,7 +16,9 @@ use std::sync::{Arc, RwLock};
 
 use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
+use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
+use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
 
@@ -36,6 +38,12 @@ pub struct AppState {
     pub auth: Arc<dyn AuthVerifier>,
     /// Indexing-run status store, surfaced by `GET /admin/indexing/runs`.
     pub indexing: Arc<dyn IndexingStore>,
+    /// Connector-configuration store, CRUD'd by the admin write API
+    /// (`/admin/connectors`). Org-scoped; holds an `auth_ref` (secret name), not
+    /// the secret itself.
+    pub connector_configs: Arc<dyn ConnectorConfigStore>,
+    /// Per-org agent settings store, read/written by `/admin/settings`.
+    pub settings: Arc<dyn SettingsStore>,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Document-set registry: set name → document count. The in-memory knowledge
@@ -63,6 +71,8 @@ impl AppState {
             config: Arc::new(config),
             auth: Arc::new(NoAuthVerifier::default()),
             indexing: Arc::new(InMemoryIndexingStore::new()),
+            connector_configs: Arc::new(InMemoryConnectorConfigStore::new()),
+            settings: Arc::new(InMemorySettingsStore::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(Vec::new())),
@@ -80,6 +90,20 @@ impl AppState {
     #[must_use]
     pub fn with_indexing(mut self, indexing: Arc<dyn IndexingStore>) -> Self {
         self.indexing = indexing;
+        self
+    }
+
+    /// Install the connector-configuration store (builder).
+    #[must_use]
+    pub fn with_connector_configs(mut self, store: Arc<dyn ConnectorConfigStore>) -> Self {
+        self.connector_configs = store;
+        self
+    }
+
+    /// Install the agent-settings store (builder).
+    #[must_use]
+    pub fn with_settings(mut self, store: Arc<dyn SettingsStore>) -> Self {
+        self.settings = store;
         self
     }
 

@@ -11,7 +11,9 @@ This page covers the **auth model** (Role / Principal / AuthVerifier, the three
 gates, and how **org-scoping** and **"Basic sees own"** work.
 
 - Auth/RBAC core: [`rust/smooth-operator/src/auth.rs`](../rust/smooth-operator/src/auth.rs)
-- Admin routes + extractor: [`rust/smooth-operator-server/src/admin.rs`](../rust/smooth-operator-server/src/admin.rs)
+- Admin routes + extractor (read **and** write): [`rust/smooth-operator-server/src/admin.rs`](../rust/smooth-operator-server/src/admin.rs)
+- Connector-config store + `auth_ref`: [`rust/smooth-operator/src/connector_config.rs`](../rust/smooth-operator/src/connector_config.rs)
+- Agent-settings store: [`rust/smooth-operator/src/settings.rs`](../rust/smooth-operator/src/settings.rs)
 - State wiring: [`rust/smooth-operator-server/src/state.rs`](../rust/smooth-operator-server/src/state.rs)
 - Related: [ACCESS-CONTROL.md](ACCESS-CONTROL.md) (document-level ACL — RBAC sits on top), [INDEXING.md](INDEXING.md), [DOCUMENT-SETS.md](DOCUMENT-SETS.md)
 
@@ -122,6 +124,77 @@ role; 404 cross-org / unknown).
 | `GET /admin/conversations/{id}/messages` | Basic | Messages for one conversation (role-scoped — a Basic caller must own it). |
 | `GET /admin/indexing/runs` | Curator | Indexing-run status across the org's connectors (from the `IndexingStore`). |
 | `GET /admin/document-sets` | Curator | Distinct document-set names + doc counts. |
+| `GET /admin/connectors` | Curator | List this org's connector configs. |
+| `POST /admin/connectors` | **Admin** | Create a connector config (returns `201` + the created connector). |
+| `GET /admin/connectors/{id}` | Curator | One connector config (org-scoped; cross-org/unknown ⇒ `404`). |
+| `PUT /admin/connectors/{id}` | **Admin** | Update a connector config (id + `createdAt` preserved). |
+| `DELETE /admin/connectors/{id}` | **Admin** | Delete a connector config (`204`; cross-org/unknown ⇒ `404`). |
+| `POST /admin/connectors/{id}/index` | Curator | Build the connector from its config and run one indexing pass; returns the `IndexingRun` (also visible in `/admin/indexing/runs`). |
+| `GET /admin/settings` | Curator | The org's agent settings (model, system prompt, default tools) — defaults if unset. |
+| `PUT /admin/settings` | **Admin** | Replace the org's agent settings. |
+
+The **write** routes (Phase 12, increment 3) follow the same `RequireRole<MIN>`
+gating: **read** surfaces (`GET /admin/connectors`, `/{id}`, `/admin/settings`)
+are **Curator**; **mutations** (`POST`/`PUT`/`DELETE` connectors, `PUT` settings)
+are **Admin-only**; the **index trigger** is **Curator** (curation is a Curator
+responsibility). Everything is scoped to `principal.org_id` — a cross-org id is a
+`404`, never `403`. Unknown connector `kind`s and malformed `config` payloads are
+rejected with a `400` `VALIDATION_ERROR` before anything is stored.
+
+### Connector config + the `auth_ref` secret model
+
+A **connector config** is the persisted, org-scoped description of one source the
+indexing loop pulls from:
+
+```jsonc
+{
+  "id": "uuid",
+  "name": "Docs repo",          // human label; the indexing-run is keyed by this
+  "kind": "github",             // github | web | file (unknown ⇒ 400)
+  "config": {                   // kind-specific, free-form payload
+    "owner": "smooai", "repo": "docs",
+    "ref": "main", "visibility": "private",
+    "auth_ref": "GITHUB_TOKEN"  // a SECRET NAME — never the token itself
+  },
+  "enabled": true,
+  "createdAt": "…", "updatedAt": "…"
+}
+```
+
+**`auth_ref` is the secret model.** The config never stores a credential — only the
+**name** of an environment variable / secret (e.g. `"GITHUB_TOKEN"`). The actual
+token is resolved from env (or `@smooai/config` when deployed) **at index time**,
+used to build the live connector, and discarded. It is never persisted in the
+store and **never returned in any API response** — a `GET` (single or list) echoes
+the `auth_ref` *name* but no token value.
+
+Required `config` fields per kind (enforced with a `400` on create/update):
+
+| `kind` | required | optional |
+| --- | --- | --- |
+| `github` | `owner`, `repo` | `ref`, `visibility` (`public`/`private`), `auth_ref` |
+| `web` | `url` | — |
+| `file` | `path` | — |
+
+### The index-trigger flow (`POST /admin/connectors/{id}/index`)
+
+1. Load the org-scoped connector config (`404` if absent / cross-org).
+2. **Build the live connector** from its `config` (`build_connector`): `web` →
+   `WebConnector`, `file` → `FileConnector`, `github` → `GithubConnector`. For
+   `github`, the token is resolved from `auth_ref` → env **at this moment**:
+   - `auth_ref` set + env present ⇒ `GithubAuth::Token`.
+   - `auth_ref` set but env **missing/empty** ⇒ a clean **`400` `VALIDATION_ERROR`**
+     (no panic, no GitHub call).
+   - no `auth_ref`: a **public** repo indexes unauthenticated; a **private** repo
+     is a `400` (a private repo needs a credential).
+   The built connector's `name()` is overridden to the configured connector name so
+   the run is keyed by the human label.
+3. Run `IndexingService::run_once(connector, indexing_store, chunker, embedder,
+   knowledge)` — the same incremental loop documented in [INDEXING.md](INDEXING.md)
+   (`latest_cursor` → `pull(since)` → chunk → embed → store). The chunker/embedder
+   are the network-free defaults (`Chunker::default()`, `DeterministicEmbedder`).
+4. The resulting `IndexingRun` is recorded in the **shared `IndexingStore`** (so it
+   also shows in `GET /admin/indexing/runs`) and returned under a `run` key.
 
 ### Auth extractor — `require_role`
 
@@ -175,6 +248,15 @@ alongside the storage adapter and config:
 - `auth: Arc<dyn AuthVerifier>` — the env-selected verifier.
 - `indexing: Arc<dyn IndexingStore>` — an `InMemoryIndexingStore` for now;
   the persistent Postgres/DynamoDB store is the follow-up (see [INDEXING.md](INDEXING.md)).
+- `connector_configs: Arc<dyn ConnectorConfigStore>` — an
+  `InMemoryConnectorConfigStore` (Phase 12 increment 3). CRUD'd by the
+  `/admin/connectors` write API, org-scoped, holds an `auth_ref` (secret **name**)
+  not a credential. The persistent follow-up is a Postgres/DynamoDB
+  `connector_configs` table keyed on `(org_id, id)`.
+- `settings: Arc<dyn SettingsStore>` — an `InMemorySettingsStore` (per-org agent
+  settings: model / system prompt / default tools), read/written by
+  `/admin/settings`. Persistent follow-up is an `agent_settings` table keyed on
+  `org_id`.
 - a **document-set registry** (set name → doc count) — the in-memory knowledge
   backend drops document metadata on ingest, so `/admin/document-sets` reads set
   names + counts from this side registry, populated as docs are seeded/ingested.
@@ -187,7 +269,9 @@ merged into the same axum app.
 ## Next: the management console (increment 2)
 
 The Next.js management console (Phase 12 increment 2) consumes this API:
-connector config, document sets, chat history, indexing status, and settings.
-It authenticates with the same JWT (BYO SST OpenAuth or Smoo identity) and calls
-these endpoints with the user's bearer token, so the console inherits the same
-RBAC gates and org-scoping enforced here.
+connector config (the increment-3 write endpoints above), document sets, chat
+history, indexing status, and settings. It authenticates with the same JWT (BYO
+SST OpenAuth or Smoo identity) and calls these endpoints with the user's bearer
+token, so the console inherits the same RBAC gates and org-scoping enforced here.
+The console pages themselves are a separate increment; the backend write surface
+they drive is complete.

@@ -22,11 +22,13 @@
 pub mod access_control;
 pub mod adapter;
 pub mod auth;
+pub mod connector_config;
 pub mod curation;
 pub mod domain;
 pub mod embedding;
 pub mod rerank;
 pub mod runtime;
+pub mod settings;
 pub mod telemetry;
 pub mod tools;
 
@@ -35,6 +37,9 @@ pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, 
 pub use auth::{
     AuthConfig, AuthError, AuthVerifier, JwtVerifier, NoAuthVerifier, Principal, Role,
     SmooIdentityVerifier,
+};
+pub use connector_config::{
+    ConnectorConfig, ConnectorConfigStore, ConnectorKind, InMemoryConnectorConfigStore,
 };
 pub use curation::{
     with_boost, with_document_set, CuratedKnowledgeStore, DocMeta, RetrievalFilter, DEFAULT_BOOST,
@@ -50,6 +55,9 @@ pub use embedding::{
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
 pub use runtime::{
     AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState, MAX_CITATIONS,
+};
+pub use settings::{
+    AgentSettings, InMemorySettingsStore, SettingsStore, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
 };
 pub use telemetry::init_telemetry;
 pub use tools::{
