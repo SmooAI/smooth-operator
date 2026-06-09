@@ -18,6 +18,29 @@
 //! | `SMOOTH_AGENT_SEED_KB` | *(unset)* | When `1`, seed a couple of distinctive demo docs on startup. |
 //! | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
 //! | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |
+//! | `SMOOTH_AGENT_STORAGE` | `memory` | Storage backend: `memory` \| `postgres` \| `dynamodb`. |
+//!
+//! ### Auth (load-bearing — the admin API's `require_role` reads these)
+//!
+//! Parsed by [`smooth_operator::auth::AuthConfig::from_env`], not [`ServerConfig`],
+//! but documented here because they gate `/admin` and the binary refuses to start
+//! when they're misconfigured. See [`smooth_operator::auth`] for the full contract.
+//!
+//! | var | default | meaning |
+//! | --- | --- | --- |
+//! | `AUTH_MODE` | *(unset → admin disabled, 401)* | `jwt` (BYO) \| `smoo` (hosted) \| `none` (dev only). Unset boots `/ws` but `/admin` returns 401 until configured. |
+//! | `AUTH_JWT_HS256_SECRET` | — | HS256 shared secret (for `jwt`/`smoo`). |
+//! | `AUTH_JWT_RS256_PUBLIC_KEY` | — | RS256 PEM public key (takes precedence over HS256). |
+//! | `AUTH_JWT_ISSUER` | — | Required `iss` claim (required for `smoo`; optional for `jwt`). |
+//! | `AUTH_JWT_AUDIENCE` | — | Required `aud` claim (optional). |
+//!
+//! ### Embedding (the retrieval/index path)
+//!
+//! The `/index` path (and the `dev-support` example) select the embedder from the
+//! gateway config above: with `SMOOAI_GATEWAY_KEY` set, the real **`GatewayEmbedder`**
+//! (`text-embedding-3-small`, 1536-d) is used for semantic retrieval; without it,
+//! the network-free **`DeterministicEmbedder`** (FNV-1a hash, 1024-d) is used and a
+//! warning is logged. See [`crate::embedder`].
 
 use smooth_operator_core::llm::{ApiFormat, RetryPolicy};
 use smooth_operator_core::LlmConfig;

@@ -14,10 +14,11 @@ use anyhow::{Context, Result};
 use smooth_operator::StorageAdapter;
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
 use smooth_operator_ingestion::{
-    ingest, Chunker, Connector, DeterministicEmbedder, GithubConnector, IngestOptions, IngestReport,
+    ingest, Chunker, Connector, GithubConnector, IngestOptions, IngestReport,
 };
+use smooth_operator_server::embedder::{build_embedder, EmbedderConfig, DEFAULT_EMBEDDING_MODEL};
 
-use crate::config::DevSupportConfig;
+use crate::config::{DevSupportConfig, DEFAULT_GATEWAY_URL};
 
 /// Build the GitHub [`Connector`] for `config` (resolving `$GITHUB_TOKEN` when
 /// `auth = "token"`).
@@ -63,15 +64,37 @@ pub async fn ingest_into(
     storage: Arc<dyn StorageAdapter>,
     org_id: &str,
 ) -> Result<IngestReport> {
+    let embedder = build_embedder(&embedder_config_from_env());
     ingest(
         connector,
         &Chunker::default(),
-        &DeterministicEmbedder::new(),
+        embedder.as_ref(),
         storage.knowledge(),
         IngestOptions::for_org(org_id),
     )
     .await
     .context("running the ingestion pipeline")
+}
+
+/// Build the [`EmbedderConfig`] from the same gateway env the chat path reads.
+///
+/// With `SMOOAI_GATEWAY_KEY` set, ingest embeds with the real semantic
+/// `GatewayEmbedder` (1536-d, `text-embedding-3-small`); without it, the shared
+/// selector falls back to the network-free deterministic embedder and logs a
+/// warning — so the offline demo still works with zero credentials.
+fn embedder_config_from_env() -> EmbedderConfig {
+    EmbedderConfig {
+        gateway_url: std::env::var("SMOOAI_GATEWAY_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string()),
+        gateway_key: std::env::var("SMOOAI_GATEWAY_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        model: DEFAULT_EMBEDDING_MODEL.to_string(),
+    }
 }
 
 #[cfg(test)]

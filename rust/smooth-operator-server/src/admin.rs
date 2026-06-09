@@ -47,10 +47,11 @@ use smooth_operator::domain::ParticipantType;
 use smooth_operator::settings::AgentSettings;
 
 use smooth_operator_ingestion::{
-    Chunker, Connector, DeterministicEmbedder, FileConnector, GithubAuth, GithubConnector,
-    GithubConnectorConfig, GithubVisibility, IndexingService, WebConnector,
+    Chunker, Connector, FileConnector, GithubAuth, GithubConnector, GithubConnectorConfig,
+    GithubVisibility, IndexingService, WebConnector,
 };
 
+use crate::embedder::{build_embedder, EmbedderConfig};
 use crate::protocol;
 use crate::state::AppState;
 
@@ -597,7 +598,12 @@ async fn index_connector(
 
     let service = IndexingService::new(principal.org_id.clone());
     let chunker = Chunker::default();
-    let embedder = DeterministicEmbedder::new();
+    // Select the embedder from config: the real semantic GatewayEmbedder (1536-d)
+    // when the gateway is keyed, else the network-free DeterministicEmbedder
+    // (1024-d) with a loud warning. The knowledge store the docs land in was
+    // created with this same embedder's dim by the storage-backend wiring
+    // (`build_state_from_env_async`), so document and query vectors agree.
+    let embedder = build_embedder(&EmbedderConfig::from_server_config(&state.config));
     let knowledge = state.storage.knowledge();
 
     let run = service
@@ -605,7 +611,7 @@ async fn index_connector(
             connector.as_ref(),
             state.indexing.as_ref(),
             &chunker,
-            &embedder,
+            embedder.as_ref(),
             knowledge,
         )
         .await

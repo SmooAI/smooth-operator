@@ -182,3 +182,49 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_org
 "#
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GatewayEmbedder, OPENAI_SMALL_EMBEDDING_DIM};
+    use smooth_operator::embedding::{DeterministicEmbedder, Embedder, DEFAULT_EMBEDDING_DIM};
+
+    /// The store's `vector(N)` column width MUST come from the active embedder's
+    /// `dim()` — never a hardcoded constant. This is the silent-retrieval-breaker
+    /// the adversarial review flagged: a 1536-d GatewayEmbedder writing into a
+    /// 1024-d column (or vice versa) produces garbage retrieval with no error.
+    ///
+    /// Drive both embedders' real `dim()` through the schema builder (the same
+    /// path `connect_with_embedder` takes at line `knowledge_vectors_schema(embedder.dim())`)
+    /// and assert the column matches. No live DB needed — this is the wiring contract.
+    #[test]
+    fn store_column_width_matches_active_embedder_dim() {
+        // Deterministic (offline / tests): 1024-d → vector(1024).
+        let det = DeterministicEmbedder::new();
+        assert_eq!(det.dim(), DEFAULT_EMBEDDING_DIM);
+        let det_ddl = knowledge_vectors_schema(det.dim());
+        assert!(
+            det_ddl.contains("vector(1024)"),
+            "deterministic embedder ({}-d) must yield a vector(1024) column, got:\n{det_ddl}",
+            det.dim()
+        );
+        assert!(!det_ddl.contains("vector(1536)"));
+
+        // Gateway (production): 1536-d → vector(1536). Built without a network
+        // call — `dim()` is local config.
+        let gw = GatewayEmbedder::new(
+            "https://example.test/v1",
+            "sk-test",
+            "text-embedding-3-small",
+            OPENAI_SMALL_EMBEDDING_DIM,
+        );
+        assert_eq!(gw.dim(), OPENAI_SMALL_EMBEDDING_DIM);
+        let gw_ddl = knowledge_vectors_schema(gw.dim());
+        assert!(
+            gw_ddl.contains("vector(1536)"),
+            "gateway embedder ({}-d) must yield a vector(1536) column, got:\n{gw_ddl}",
+            gw.dim()
+        );
+        assert!(!gw_ddl.contains("vector(1024)"));
+    }
+}

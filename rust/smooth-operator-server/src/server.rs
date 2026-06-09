@@ -111,49 +111,65 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
     let verifier = smooth_operator::auth::AuthConfig::from_env()
         .map_err(|e| anyhow::anyhow!("auth configuration error: {e}"))?;
 
-    let state =
-        match config.storage {
-            // The in-memory path is unchanged (synchronous, no external services).
-            StorageBackend::Memory => build_state(config),
+    let state = match config.storage {
+        // The in-memory path is unchanged (synchronous, no external services).
+        StorageBackend::Memory => build_state(config),
 
-            StorageBackend::Postgres => {
-                use smooth_operator_adapter_postgres::PostgresAdapter;
-                let adapter =
-                    Arc::new(PostgresAdapter::from_env().await.map_err(|e| {
-                        anyhow::anyhow!("connecting Postgres storage backend: {e}")
-                    })?);
-                // Admin stores against the SAME database — durable.
-                let connectors = Arc::new(adapter.connector_config_store());
-                let settings = Arc::new(adapter.settings_store());
-                let indexing = Arc::new(adapter.indexing_store());
-                let storage: Arc<dyn StorageAdapter> = adapter;
-                AppState::new(storage, config)
-                    .with_connector_configs(connectors)
-                    .with_settings(settings)
-                    .with_indexing(indexing)
-            }
-
-            StorageBackend::Dynamodb => {
-                use smooth_operator_adapter_dynamodb::DynamoDbAdapter;
-                let adapter =
-                    Arc::new(DynamoDbAdapter::from_env(None).await.map_err(|e| {
-                        anyhow::anyhow!("connecting DynamoDB storage backend: {e}")
-                    })?);
-                adapter
-                    .create_table()
+        StorageBackend::Postgres => {
+            use smooth_operator_adapter_postgres::PostgresAdapter;
+            // The pgvector column width MUST match the embedder the `/index`
+            // path uses (1536 keyed / 1024 offline). Build the embedder from
+            // config and create the adapter with it so document vectors (at
+            // ingest) and query vectors agree — no silent 1024/1536 mismatch.
+            let embedder = crate::embedder::build_embedder(
+                &crate::embedder::EmbedderConfig::from_server_config(&config),
+            );
+            let conn_str = std::env::var("SMOOTH_AGENT_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Postgres backend selected but neither SMOOTH_AGENT_DATABASE_URL \
+                             nor DATABASE_URL is set"
+                    )
+                })?;
+            let adapter = Arc::new(
+                PostgresAdapter::connect_with_embedder(&conn_str, embedder)
                     .await
-                    .map_err(|e| anyhow::anyhow!("creating DynamoDB table: {e}"))?;
-                // Admin stores against the SAME table — durable.
-                let connectors = Arc::new(adapter.connector_config_store());
-                let settings = Arc::new(adapter.settings_store());
-                let indexing = Arc::new(adapter.indexing_store());
-                let storage: Arc<dyn StorageAdapter> = adapter;
-                AppState::new(storage, config)
-                    .with_connector_configs(connectors)
-                    .with_settings(settings)
-                    .with_indexing(indexing)
-            }
-        };
+                    .map_err(|e| anyhow::anyhow!("connecting Postgres storage backend: {e}"))?,
+            );
+            // Admin stores against the SAME database — durable.
+            let connectors = Arc::new(adapter.connector_config_store());
+            let settings = Arc::new(adapter.settings_store());
+            let indexing = Arc::new(adapter.indexing_store());
+            let storage: Arc<dyn StorageAdapter> = adapter;
+            AppState::new(storage, config)
+                .with_connector_configs(connectors)
+                .with_settings(settings)
+                .with_indexing(indexing)
+        }
+
+        StorageBackend::Dynamodb => {
+            use smooth_operator_adapter_dynamodb::DynamoDbAdapter;
+            let adapter = Arc::new(
+                DynamoDbAdapter::from_env(None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("connecting DynamoDB storage backend: {e}"))?,
+            );
+            adapter
+                .create_table()
+                .await
+                .map_err(|e| anyhow::anyhow!("creating DynamoDB table: {e}"))?;
+            // Admin stores against the SAME table — durable.
+            let connectors = Arc::new(adapter.connector_config_store());
+            let settings = Arc::new(adapter.settings_store());
+            let indexing = Arc::new(adapter.indexing_store());
+            let storage: Arc<dyn StorageAdapter> = adapter;
+            AppState::new(storage, config)
+                .with_connector_configs(connectors)
+                .with_settings(settings)
+                .with_indexing(indexing)
+        }
+    };
 
     Ok(state.with_auth(Arc::from(verifier)))
 }
@@ -225,12 +241,12 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         %model,
         %gateway,
         llm_enabled = has_llm,
-        "smooth-agent-server listening"
+        "smooth-operator-server listening"
     );
     // Also print to stdout so the run-confirmation check is unambiguous without
     // a tracing subscriber filter.
     println!(
-        "smooth-agent-server listening on ws://{local}/ws (model={model}, llm_enabled={has_llm})"
+        "smooth-operator-server listening on ws://{local}/ws (model={model}, llm_enabled={has_llm})"
     );
 
     axum::serve(listener, app)

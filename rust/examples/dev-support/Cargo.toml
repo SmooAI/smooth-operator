@@ -21,6 +21,10 @@ smooai-smooth-operator-core = { workspace = true }
 smooai-smooth-operator-adapter-memory = { path = "../../adapters/in-memory" }
 # Ingestion pipeline + the GitHub connector + the deterministic embedder.
 smooai-smooth-operator-ingestion = { path = "../../ingestion" }
+# The shared embedder selector (real GatewayEmbedder when keyed, deterministic
+# fallback otherwise) lives in the server lib so the `/index` handler and this
+# example pick the embedder — and its dimension — in exactly one place.
+smooai-smooth-operator-server = { path = "../../smooth-operator-server" }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }
