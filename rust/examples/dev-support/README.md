@@ -147,30 +147,70 @@ tools = ["knowledge_search", "github_search"]
 ## The full-page chat-widget UI (`serve`)
 
 `ingest` + `chat` is the fastest way to see grounded answers in a terminal. For
-the **full chat-widget UI**, run the smooth-operator WebSocket server and point
-the embeddable widget ([`@smooai/chat-widget`](https://github.com/SmooAI/chat-widget)) at it:
+the **full chat-widget UI**, `serve` does the whole thing in one command: it
+**ingests the configured repo on boot** and then **runs the real
+`smooai-smooth-operator-server`** over that knowledge — so the embeddable widget
+([`@smooai/chat-widget`](https://github.com/SmooAI/chat-widget)) can connect and
+chat, grounded in your repo:
 
 ```sh
-cargo run -p smooai-smooth-operator-example-dev-support -- serve   # prints the recipe
+# Edit dev-support.toml (owner/repo), then:
+export SMOOAI_GATEWAY_KEY=…                 # the llm.smoo.ai gateway key (for chat)
+cargo run -p smooai-smooth-operator-example-dev-support -- serve
 ```
 
-`serve` prints the server's env contract (`SMOOAI_GATEWAY_KEY`,
-`SMOOTH_AGENT_MODEL`, `SMOOTH_AGENT_BIND`, `SMOOTH_AGENT_PORT`) and how to wire
-the widget. (We don't rebuild the server here — `serve` documents how to drive
-the real `smooai-smooth-operator-server`.)
+`serve` ingests the repo (same connector + pipeline as `ingest`/`chat`), builds
+the server's `AppState` over that knowledge, and binds the WebSocket endpoint —
+calling the server crate's own serve loop as a library (it does **not**
+reimplement the WS protocol). On boot it prints a ready banner like:
+
+```text
+✓ dev-support is serving rust-lang/mdBook
+  ingested:  214 docs, 1187 chunks (embedding dim 1536)
+  storage:   in-memory (this demo; the index is gone on exit)
+
+  WebSocket: ws://127.0.0.1:8787/ws
+
+Point the chat-widget (@smooai/chat-widget) at it — full-page mode:
+
+  <smoo-chat-widget mode="fullpage" endpoint="ws://127.0.0.1:8787/ws"></smoo-chat-widget>
+
+AUTH_MODE=none is the local-dev default (org-public): anonymous widget
+connections see the repo's org-public knowledge. Set AUTH_MODE=jwt + a key to gate it.
+```
+
+Configuration comes from the same env contract the server uses
+(`SMOOAI_GATEWAY_KEY`, `SMOOTH_AGENT_MODEL`, `SMOOTH_AGENT_BIND`,
+`SMOOTH_AGENT_PORT`, `SMOOTH_AGENT_STORAGE`). The embedder is selected
+automatically: the real semantic `GatewayEmbedder` (1536-d) when
+`SMOOAI_GATEWAY_KEY` is set, else the network-free deterministic embedder
+(1024-d) — so `serve` even boots offline (with `send_message` returning a clean
+`LLM_UNAVAILABLE` error until you add the key). The optional rerank stage is
+off by default and opt-in via `SMOOTH_AGENT_RERANK` (`gateway`/`lexical`).
+
+> **Local-dev auth.** `AUTH_MODE=none` (or unset) serves the repo's **org-public**
+> knowledge to anonymous widget connections — the local demo default. Set
+> `AUTH_MODE=jwt` + a key (or `AUTH_MODE=smoo`) to gate retrieval per principal;
+> the server already enforces the per-connection document ACL.
 
 ## Persistence
 
 The demo uses an **in-memory** knowledge store (gone on exit) so there's zero
-setup. For persistence across restarts, point the pipeline at the **Postgres
-(pgvector)** adapter — the connector and pipeline code are identical, only the
-`StorageAdapter` changes.
+setup. For persistence across restarts, set `SMOOTH_AGENT_STORAGE=postgres` and a
+connection string (`SMOOTH_AGENT_DATABASE_URL` / `DATABASE_URL`): `serve` ingests
+into the **Postgres (pgvector)** adapter instead — the connector and pipeline
+code are identical, only the `StorageAdapter` changes, and the index survives a
+restart. (When keyed, `serve` opens the Postgres adapter with the same 1536-d
+`GatewayEmbedder` it ingests with, so document and query vectors agree.)
 
 ## Tests
 
 ```sh
-# Offline smoke test — no network, no real GitHub, no API key.
-# Ingests a fixture "repo" and runs a grounded turn with a scripted MockLlmClient.
+# Offline smoke tests — no network, no real GitHub, no API key.
+# - smoke:       ingests a fixture "repo" and runs a grounded chat turn (MockLlmClient).
+# - serve_smoke: builds the serve AppState from an ingested fixture, boots the REAL
+#                server on an ephemeral port, drives a WS turn, and asserts a grounded
+#                reply over the served knowledge.
 cargo test -p smooai-smooth-operator-example-dev-support
 
 # Gated live test — one real turn against the llm.smoo.ai gateway.

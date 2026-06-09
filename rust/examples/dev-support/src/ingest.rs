@@ -65,10 +65,28 @@ pub async fn ingest_into(
     org_id: &str,
 ) -> Result<IngestReport> {
     let embedder = build_embedder(&embedder_config_from_env());
+    ingest_into_with_embedder(connector, storage, org_id, embedder.as_ref()).await
+}
+
+/// As [`ingest_into`] but with a caller-supplied embedder, so the embedder
+/// selection is made once by the caller (e.g. `serve` builds it from
+/// [`ServerConfig`](smooth_operator_server::config::ServerConfig) and reuses the
+/// SAME instance for the Postgres adapter's vector column) — and an offline test
+/// can pass the deterministic embedder explicitly, never touching the
+/// environment.
+///
+/// # Errors
+/// Propagates connector pull, embedding, and store errors.
+pub async fn ingest_into_with_embedder(
+    connector: &dyn Connector,
+    storage: Arc<dyn StorageAdapter>,
+    org_id: &str,
+    embedder: &dyn smooth_operator::embedding::Embedder,
+) -> Result<IngestReport> {
     ingest(
         connector,
         &Chunker::default(),
-        embedder.as_ref(),
+        embedder,
         storage.knowledge(),
         IngestOptions::for_org(org_id),
     )
@@ -76,13 +94,14 @@ pub async fn ingest_into(
     .context("running the ingestion pipeline")
 }
 
-/// Build the [`EmbedderConfig`] from the same gateway env the chat path reads.
-///
-/// With `SMOOAI_GATEWAY_KEY` set, ingest embeds with the real semantic
-/// `GatewayEmbedder` (1536-d, `text-embedding-3-small`); without it, the shared
-/// selector falls back to the network-free deterministic embedder and logs a
-/// warning — so the offline demo still works with zero credentials.
-fn embedder_config_from_env() -> EmbedderConfig {
+/// Build the [`EmbedderConfig`] from the same gateway env the chat/serve paths
+/// read, so every path selects the **identical** embedder (real semantic
+/// `GatewayEmbedder` when `SMOOAI_GATEWAY_KEY` is set, else the network-free
+/// deterministic fallback). Centralizing it here means `ingest`, `chat`, and
+/// `serve` can never silently disagree on the embedder (and its vector
+/// dimension).
+#[must_use]
+pub fn embedder_config_from_env() -> EmbedderConfig {
     EmbedderConfig {
         gateway_url: std::env::var("SMOOAI_GATEWAY_URL")
             .ok()

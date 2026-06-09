@@ -19,6 +19,9 @@ path = "src/lib.rs"
 smooth-operator = { workspace = true }
 smooai-smooth-operator-core = { workspace = true }
 smooai-smooth-operator-adapter-memory = { path = "../../adapters/in-memory" }
+# Optional Postgres (pgvector) persistence for `serve` — when SMOOTH_AGENT_STORAGE
+# selects it, the ingested repo survives a restart. In-memory is the default.
+smooai-smooth-operator-adapter-postgres = { path = "../../adapters/postgres" }
 # Ingestion pipeline + the GitHub connector + the deterministic embedder.
 smooai-smooth-operator-ingestion = { path = "../../ingestion" }
 # The shared embedder selector (real GatewayEmbedder when keyed, deterministic
@@ -42,3 +45,9 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 # Drive the smoke test with the engine's scripted MockLlmClient (no network).
 smooai-smooth-operator-core = { workspace = true }
+# Drive the serve smoke test's WebSocket turn over a real client (no network
+# beyond loopback) — same client the server crate's protocol tests use.
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+uuid = { workspace = true }
+chrono = { workspace = true }

@@ -232,6 +232,66 @@ pub async fn bind(config: ServerConfig) -> Result<(TcpListener, Router)> {
     Ok((listener, app))
 }
 
+/// Serve a **pre-built** [`AppState`] to completion (blocks), binding on
+/// `state.config.bind:state.config.port`.
+///
+/// This is the library entry point for callers that assemble their own
+/// `AppState` — e.g. the `dev-support` example, which ingests a GitHub repo into
+/// a storage adapter, wires the env-configured [`AuthVerifier`], and then serves
+/// that exact state so the chat-widget queries the ingested knowledge. It does
+/// **not** rebuild the state or touch the ACL/auth/embedder/reranker selection —
+/// those are baked into the `state` the caller passes in. The WS loop, router,
+/// and listening log are identical to [`run`] (which builds its state from env);
+/// `run` is unchanged.
+///
+/// # Errors
+/// Returns an error if the TCP bind fails or serving fails.
+pub async fn serve_state(state: AppState) -> Result<()> {
+    let ip: std::net::IpAddr = state
+        .config
+        .bind
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::new(ip, state.config.port);
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding WebSocket server on {addr}"))?;
+    serve_state_on(state, listener).await
+}
+
+/// Serve a pre-built [`AppState`] on an already-bound [`TcpListener`] (blocks).
+///
+/// Splitting the bind from the serve lets a caller (or a test) bind an ephemeral
+/// port, read [`TcpListener::local_addr`] for the real port, then hand the
+/// listener here. Logs the same "listening" line [`run`] does.
+///
+/// # Errors
+/// Returns an error if serving fails.
+pub async fn serve_state_on(state: AppState, listener: TcpListener) -> Result<()> {
+    let has_llm = state.config.has_llm();
+    let model = state.config.model.clone();
+    let gateway = state.config.gateway_url.clone();
+    let local = listener.local_addr().context("local addr")?;
+    let app = router(state);
+
+    tracing::info!(
+        %local,
+        endpoint = "/ws",
+        %model,
+        %gateway,
+        llm_enabled = has_llm,
+        "smooth-operator-server listening"
+    );
+    println!(
+        "smooth-operator-server listening on ws://{local}/ws (model={model}, llm_enabled={has_llm})"
+    );
+
+    axum::serve(listener, app)
+        .await
+        .context("serving WebSocket connections")?;
+    Ok(())
+}
+
 /// Run the server to completion (blocks). Logs a single listening line.
 ///
 /// # Errors

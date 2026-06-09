@@ -6,6 +6,7 @@
 //! # edit dev-support.toml (owner/repo)
 //! dev-support ingest        # pull prose + code + issues into a knowledge store
 //! dev-support chat          # grounded Q&A REPL over the repo
+//! dev-support serve         # run the WS server over the repo for the chat-widget
 //! ```
 //!
 //! See `README.md` for the full quickstart, a sample transcript, and how to
@@ -21,6 +22,7 @@ use clap::{Parser, Subcommand};
 use dev_support::config::{DevSupportConfig, DEFAULT_GATEWAY_URL};
 use dev_support::ingest::{build_connector, ingest_into_memory};
 use dev_support::runtime::{gateway_llm_config, tool_github_auth, DevSupportRuntime};
+use dev_support::serve::run_serve;
 use smooth_operator::StorageAdapter;
 
 /// `max_tokens` per turn — kept modest because the gateway is paid-per-token.
@@ -50,8 +52,8 @@ enum Command {
     Ingest,
     /// Ingest the repo, then start an interactive grounded Q&A REPL.
     Chat,
-    /// Print instructions for serving the ingested knowledge to the chat-widget
-    /// via the smooth-operator WebSocket server.
+    /// Ingest the configured repo, then run the smooth-operator WebSocket server
+    /// over that knowledge so the chat-widget can connect (full-page UI).
     Serve,
 }
 
@@ -78,10 +80,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Ingest => run_ingest(&config).await,
         Command::Chat => run_chat(&config).await,
-        Command::Serve => {
-            print_serve_instructions(&config);
-            Ok(())
-        }
+        Command::Serve => run_serve(&config).await,
     }
 }
 
@@ -177,29 +176,4 @@ async fn run_chat(config: &DevSupportConfig) -> Result<()> {
     }
     eprintln!("bye 👋");
     Ok(())
-}
-
-/// `serve`: print how to run the smooth-operator-server so the chat-widget can
-/// connect for the full-page UI. We don't rebuild the server — this documents
-/// the env contract + the seed path.
-fn print_serve_instructions(config: &DevSupportConfig) {
-    let slug = config.repo_slug();
-    println!("# Serve the dev-support agent to the chat-widget (full-page UI)");
-    println!();
-    println!("The embeddable chat-widget connects to the smooth-operator WebSocket server");
-    println!("(`smooai-smooth-operator-server`). To serve {slug}'s knowledge:");
-    println!();
-    println!("  export SMOOAI_GATEWAY_KEY=…            # the llm.smoo.ai gateway key");
-    println!("  export SMOOTH_AGENT_MODEL={}", config.agent.model);
-    println!("  export SMOOTH_AGENT_BIND=127.0.0.1     # 0.0.0.0 in a container");
-    println!("  export SMOOTH_AGENT_PORT=8787");
-    println!("  cargo run -p smooai-smooth-operator-server");
-    println!();
-    println!("Then point the chat-widget at  ws://127.0.0.1:8787  (see packages/ui-chat-widget).");
-    println!();
-    println!("Note: the standalone server seeds a couple of demo docs (SMOOTH_AGENT_SEED_KB=1)");
-    println!("rather than ingesting a repo on boot. To serve THIS repo's full index, run the");
-    println!("server in-process with the storage adapter `dev-support ingest` populated, or wire");
-    println!("the connector into the server's startup. The `ingest` + `chat` path above is the");
-    println!("fastest way to see grounded answers; `serve` is for the full widget UI.");
 }

@@ -25,11 +25,15 @@
 //! - [`ingest`] — build the connector + run the ingestion pipeline.
 //! - [`runtime`] — [`DevSupportRuntime`](runtime::DevSupportRuntime): the two
 //!   tools + the gateway wired onto a real smooth-operator `Agent`.
+//! - [`serve`] — ingest the repo, then run the real `smooth-operator-server`
+//!   over the ingested knowledge so the chat-widget can connect (full-page UI).
 
 pub mod config;
 pub mod ingest;
 pub mod runtime;
+pub mod serve;
 
 pub use config::{AuthMode, DevSupportConfig, IncludeConfig, ToolName};
 pub use ingest::{build_connector, ingest_into, ingest_into_memory};
 pub use runtime::{gateway_llm_config, tool_github_auth, DevSupportRuntime, TurnOutcome};
+pub use serve::{build_serve_state, build_serve_state_with_storage, run_serve, ServeState};

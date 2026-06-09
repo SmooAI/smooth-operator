@@ -45,6 +45,7 @@ pub use config::ServerConfig;
 pub use embedder::{build_embedder, EmbedderConfig};
 pub use reranker::{build_reranker, RerankMode, RerankerConfig};
 pub use server::{
-    bind, build_state, build_state_from_env, build_state_from_env_async, router, run,
+    bind, build_state, build_state_from_env, build_state_from_env_async, router, run, serve_state,
+    serve_state_on,
 };
 pub use state::AppState;
