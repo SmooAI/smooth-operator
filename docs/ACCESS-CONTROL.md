@@ -143,6 +143,110 @@ query param (reference server) or the `send_message` `token` field (Lambda); see
 [`/ws` authentication](#ws-authentication--accesscontext) above. No token ⇒
 anonymous ⇒ org-public only (fail closed).
 
+### Mint the token for the direct-widget case (JWT)
+
+When the **widget connects directly** to smooth-operator (it can reach `/ws`),
+your backend mints a **short-lived signed JWT** and hands it to the widget as the
+`?token=`. ~12 lines of Node/TS, HS256 over a secret shared with the server
+(`AUTH_JWT_HS256_SECRET`):
+
+```ts
+import jwt from 'jsonwebtoken';
+
+// On YOUR backend, after you've authenticated the user. Never ship the secret to
+// the browser — mint the token server-side and hand only the token to the widget.
+export function mintSmoothOperatorToken(user: {
+    id: string;
+    org: string;
+    role: 'admin' | 'curator' | 'basic';
+    groups: string[];
+}): string {
+    return jwt.sign(
+        { sub: user.id, org: user.org, role: user.role, groups: user.groups },
+        process.env.AUTH_JWT_HS256_SECRET!, // shared with the server's AUTH_JWT_HS256_SECRET
+        { algorithm: 'HS256', expiresIn: '5m' }, // short-lived; `exp` is required + enforced
+    );
+}
+// → hand the returned string to the widget as `wss://…/ws?token=<jwt>`.
+```
+
+The server **verifies** this signature + `exp` on every connect. This is the
+**direct/signed** path. The **proxied/no-token** path is `AUTH_MODE=trusted`
+below — pick one based on whether clients can reach smooth-operator directly.
+
+### Tokenless: `AUTH_MODE=trusted` (proxied integration)
+
+Use this when you're embedding smooth-operator into an **existing app whose
+backend already authenticated the user** and **proxies** the WebSocket to
+smooth-operator over a **trusted/internal network**. Your backend already knows
+who the user is — there's no second token to mint or verify. It simply
+**forwards the identity** and smooth-operator **trusts it**.
+
+**When to use it**
+
+- ✅ Your backend authenticates the user, then proxies `/ws` (or the Lambda
+  `send_message` frames) to smooth-operator on a private network the client
+  cannot reach.
+- ❌ **Do not** use it if clients can reach smooth-operator's `/ws` directly —
+  use `AUTH_MODE=jwt` (signed, verified) for that. See the security boundary
+  below.
+
+**Server config (env)**
+
+| Var | Value |
+| --- | ----- |
+| `AUTH_MODE` | `trusted` |
+
+That's the whole config — there is **no key**, because there is **nothing to
+verify**. The upstream owns identity *and* token lifetime, so there is no
+signature check and **no `exp` requirement**. At startup the server logs a loud
+warning that identity is trusted without verification.
+
+**The forwarded identity** rides in the **same slot a JWT would** (the `?token=`
+query param on the reference server, the `send_message` `token` field on the
+Lambda) — so all the existing transport plumbing is reused unchanged. The value
+is **`base64url(JSON)`** of the same claim shape (so it survives the
+query-param / JSON-string transport cleanly without escaping):
+
+```jsonc
+// base64url( JSON.stringify(  ← what your proxy puts in the ?token= slot
+{
+  "sub":    "u_123",                       // → user_id (matches DocAcl.users)
+  "org":    "topstep",                     // → org_id (org isolation); `org_id` also accepted
+  "role":   "basic",                       // admin | curator | basic
+  "groups": ["github:topstep/svc-pricing"] // → entitlements that gate document access
+  // NOTE: no `exp` needed — the upstream owns lifetime.
+}
+// ) )
+```
+
+Minting it in the proxy (Node/TS):
+
+```ts
+function forwardSmoothOperatorIdentity(user: {
+    id: string; org: string; role: string; groups: string[];
+}): string {
+    const claims = { sub: user.id, org: user.org, role: user.role, groups: user.groups };
+    return Buffer.from(JSON.stringify(claims)).toString('base64url');
+}
+// → proxy the upstream connection to smooth-operator with `…/ws?token=<blob>`.
+```
+
+**Security boundary — trust without verification.** `AUTH_MODE=trusted` is
+**only safe when clients cannot reach smooth-operator directly** — it must be
+fronted by your authenticated backend/proxy on a trusted network. A client that
+*can* reach `/ws` directly could **forge any identity** (any org, any groups).
+This is the single most important constraint of the mode; the server emits a
+startup `tracing::warn!` to that effect whenever `AUTH_MODE=trusted` is selected.
+
+**Fail closed.** An **absent / empty / malformed** forwarded identity resolves to
+`AccessContext::anonymous()` (org-public only) — **exactly** the no-token path.
+Trusted mode **never** silently becomes a no-auth admin: a blob that fails to
+decode, isn't claims JSON, or omits `role`/`org` is an error that degrades to
+anonymous, never to an all-access principal. `jwt` / `smoo` / `none` and the
+secure-by-default unset boot (admin-disabled) are all unchanged — `trusted` is
+only ever reached by an explicit `AUTH_MODE=trusted`.
+
 ## Durable persistence (Postgres + DynamoDB)
 
 The in-memory ACL side table dies with its process. The durable backends persist

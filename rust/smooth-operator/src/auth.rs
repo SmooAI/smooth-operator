@@ -488,6 +488,96 @@ impl AuthVerifier for NoAuthVerifier {
     }
 }
 
+/// **Tokenless trusted-upstream** verifier — `AUTH_MODE=trusted`.
+///
+/// For the **proxied-integration** deployment shape: an existing application's
+/// backend has *already* authenticated the user and proxies smooth-operator over
+/// a trusted/internal network. That upstream forwards the user's identity
+/// (`sub` / `org` / `role` / `groups`); smooth-operator **trusts** it **without
+/// any signature verification** — the upstream owns identity *and* token
+/// lifetime, so there is no signature to check and no `exp` to enforce.
+///
+/// ## Wire format — identity in the same slot a token would ride
+///
+/// The forwarded identity rides in the **exact same slot** a JWT would: the
+/// `/ws` `?token=` query param (reference server) or the `send_message` `token`
+/// field (Lambda). So *all* the existing transport plumbing is reused — the only
+/// difference from [`JwtVerifier`] is **trust, don't verify**.
+///
+/// The value is **`base64url(JSON)`** of the [`Claims`] shape, e.g.
+/// `base64url({"sub":"u1","org":"acme","role":"basic","groups":["github:acme/secret"]})`.
+/// base64url is used (not raw JSON) so the blob survives the query-string and
+/// JSON-string transports cleanly without escaping. No padding is required
+/// (`URL_SAFE_NO_PAD` is accepted; padded `URL_SAFE` is also tolerated).
+///
+/// ## Security boundary — this is **trust without verification**
+///
+/// `AUTH_MODE=trusted` is **only safe when smooth-operator is not directly
+/// reachable by clients** — it must be fronted by your authenticated
+/// backend/proxy on a trusted network. A client that *can* reach `/ws` directly
+/// could forge any identity (any org, any groups). [`AuthConfig::from_env`]
+/// emits a loud startup `tracing::warn!` to that effect whenever this mode is
+/// selected.
+///
+/// ## Fail closed — never silently no-auth-admin
+///
+/// Absent / empty / malformed trusted identity yields an [`AuthError`], which the
+/// connect path ([`crate::access_control::AccessContext::anonymous`]) maps to an
+/// **anonymous** connection (org-public only) — exactly like the no-token path.
+/// Trusted mode **never** degrades to an admin / all-access principal on bad
+/// input.
+pub struct TrustedIdentityVerifier;
+
+impl TrustedIdentityVerifier {
+    /// Construct the trusted-identity verifier (stateless).
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Decode `base64url(JSON)` identity → [`Claims`] → [`Principal`], **without**
+    /// any signature or `exp` check.
+    fn decode_trusted(forwarded: &str) -> Result<Principal, AuthError> {
+        use base64::Engine as _;
+
+        let forwarded = forwarded.trim();
+        if forwarded.is_empty() {
+            return Err(AuthError::Unauthenticated);
+        }
+        // Accept unpadded URL-safe (the canonical encoding) and fall back to the
+        // padded variant so a caller that pads isn't spuriously rejected.
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(forwarded)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(forwarded))
+            .map_err(|e| {
+                AuthError::InvalidToken(format!("trusted identity is not valid base64url: {e}"))
+            })?;
+        let claims: Claims = serde_json::from_slice(&bytes).map_err(|e| {
+            AuthError::InvalidToken(format!("trusted identity is not valid claims JSON: {e}"))
+        })?;
+        // Reuse the exact same Claims→Principal mapping as the JWT path: missing
+        // `role` / `org` are still hard errors (which fail closed to anonymous),
+        // so a blob that omits them can never become an admin.
+        claims.into_principal()
+    }
+}
+
+impl Default for TrustedIdentityVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AuthVerifier for TrustedIdentityVerifier {
+    fn verify(&self, forwarded_identity: &str) -> Result<Principal, AuthError> {
+        Self::decode_trusted(forwarded_identity)
+    }
+
+    fn mode(&self) -> &'static str {
+        "trusted"
+    }
+}
+
 /// Builds the configured [`AuthVerifier`] from the environment — secure by
 /// default.
 ///
@@ -495,7 +585,7 @@ impl AuthVerifier for NoAuthVerifier {
 ///
 /// | var | default | meaning |
 /// | --- | --- | --- |
-/// | `AUTH_MODE` | `jwt` | `jwt` (BYO) \| `smoo` (hosted) \| `none` (dev only). |
+/// | `AUTH_MODE` | `jwt` | `jwt` (BYO) \| `smoo` (hosted) \| `trusted` (proxied, tokenless — see below) \| `none` (dev only). |
 /// | `AUTH_JWT_HS256_SECRET` | — | HS256 shared secret. |
 /// | `AUTH_JWT_RS256_PUBLIC_KEY` | — | RS256 PEM public key (takes precedence over HS256). |
 /// | `AUTH_JWT_ISSUER` | — | Required `iss` (optional). |
@@ -553,6 +643,18 @@ impl AuthConfig {
                 let org = env_nonempty("AUTH_DEV_ORG_ID").unwrap_or_else(|| "dev-org".to_string());
                 Ok(Box::new(NoAuthVerifier::new(org)))
             }
+            "trusted" => {
+                // Reached ONLY by an explicit `AUTH_MODE=trusted`. Identity is
+                // taken from the upstream caller WITHOUT verification, so warn
+                // loudly at startup that this is only safe behind a trusted proxy.
+                tracing::warn!(
+                    "AUTH_MODE=trusted — identity is trusted from the upstream caller WITHOUT \
+                     verification; ONLY safe when smooth-operator is not directly reachable by \
+                     clients (front it with your authenticated backend/proxy). Bad/absent \
+                     identity fails closed to anonymous (org-public only), never admin."
+                );
+                Ok(Box::new(TrustedIdentityVerifier::new()))
+            }
             "jwt" => match Self::build_jwt(issuer, audience) {
                 Ok(v) => Ok(Box::new(v)),
                 // Default mode (AUTH_MODE unset) with no key: boot with the admin
@@ -592,7 +694,7 @@ impl AuthConfig {
                 }
             }
             other => Err(AuthError::Misconfigured(format!(
-                "unknown AUTH_MODE '{other}' (expected jwt | smoo | none)"
+                "unknown AUTH_MODE '{other}' (expected jwt | smoo | trusted | none)"
             ))),
         }
     }
@@ -983,6 +1085,146 @@ mod tests {
             AuthConfig::from_env(),
             Err(AuthError::Misconfigured(_))
         ));
+        clear_auth_env();
+    }
+
+    // ---- TrustedIdentityVerifier (AUTH_MODE=trusted) ---------------------
+    //
+    // Tokenless proxied-integration mode: the upstream forwards identity as a
+    // base64url(JSON) blob in the same slot a token would ride. NO signature,
+    // NO exp; reuses the Claims→Principal mapping. MUST fail closed (error →
+    // anonymous at the connect path), NEVER admin, on bad input.
+
+    /// Encode a claims object as the `base64url(JSON)` blob the trusted upstream
+    /// would forward (unpadded URL-safe — the canonical form).
+    fn forward(claims: serde_json::Value) -> String {
+        use base64::Engine as _;
+        let json = serde_json::to_vec(&claims).expect("serialize claims");
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    }
+
+    #[test]
+    fn trusted_verifier_parses_forwarded_identity_into_principal_with_groups() {
+        let verifier = TrustedIdentityVerifier::new();
+        // No `exp` here on purpose — the upstream owns lifetime; trusted mode
+        // must NOT require it.
+        let blob = forward(json!({
+            "sub": "user-42",
+            "org": "acme",
+            "role": "curator",
+            "name": "Grace Hopper",
+            "groups": ["github:acme/secret", "eng"],
+        }));
+        let p = verifier.verify(&blob).expect("trusted verify");
+        assert_eq!(p.user_id, "user-42");
+        assert_eq!(p.org_id, "acme");
+        assert_eq!(p.role, Role::Curator);
+        assert_eq!(p.display_name.as_deref(), Some("Grace Hopper"));
+        assert_eq!(p.groups, vec!["github:acme/secret", "eng"]);
+        assert_eq!(verifier.mode(), "trusted");
+
+        // The groups carry into the AccessContext so the SAME ACL enforcement a
+        // JWT drives applies to a forwarded identity.
+        let ctx = p.access_context();
+        let acl = crate::access_control::DocAcl::for_groups(["github:acme/secret"]);
+        assert!(
+            ctx.can_access(&acl),
+            "forwarded group must drive ACL access"
+        );
+    }
+
+    #[test]
+    fn trusted_verifier_accepts_org_id_alias_and_padded_base64() {
+        use base64::Engine as _;
+        let verifier = TrustedIdentityVerifier::new();
+        // `org_id` alias + PADDED url-safe base64 must both be accepted.
+        let json = serde_json::to_vec(&json!({
+            "sub": "u", "org_id": "org-alias", "role": "admin",
+        }))
+        .unwrap();
+        let blob = base64::engine::general_purpose::URL_SAFE.encode(json);
+        let p = verifier.verify(&blob).expect("padded + alias");
+        assert_eq!(p.org_id, "org-alias");
+        assert_eq!(p.role, Role::Admin);
+    }
+
+    #[test]
+    fn trusted_verifier_empty_is_unauthenticated_not_admin() {
+        let verifier = TrustedIdentityVerifier::new();
+        // Absent/empty forwarded identity ⇒ Unauthenticated error (which the
+        // connect path maps to anonymous), NOT a fabricated admin principal.
+        assert_eq!(
+            verifier.verify("   ").expect_err("empty must error"),
+            AuthError::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn trusted_verifier_malformed_base64_errors_never_admin() {
+        let verifier = TrustedIdentityVerifier::new();
+        let err = verifier
+            .verify("!!!not base64!!!")
+            .expect_err("malformed base64 must error");
+        assert!(matches!(err, AuthError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn trusted_verifier_malformed_json_errors_never_admin() {
+        use base64::Engine as _;
+        let verifier = TrustedIdentityVerifier::new();
+        // Valid base64url but the bytes aren't claims JSON.
+        let blob = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not json at all");
+        let err = verifier.verify(&blob).expect_err("non-json must error");
+        assert!(matches!(err, AuthError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn trusted_verifier_missing_role_errors_never_admin() {
+        // A forwarded identity with NO role must NOT silently become admin — it
+        // is a MissingRole error (→ anonymous at the connect path).
+        let verifier = TrustedIdentityVerifier::new();
+        let blob = forward(json!({ "sub": "u", "org": "o" }));
+        let err = verifier.verify(&blob).expect_err("no role must error");
+        assert!(matches!(err, AuthError::MissingRole(_)));
+    }
+
+    #[test]
+    fn trusted_verifier_missing_org_errors_never_admin() {
+        let verifier = TrustedIdentityVerifier::new();
+        let blob = forward(json!({ "sub": "u", "role": "admin" }));
+        let err = verifier.verify(&blob).expect_err("no org must error");
+        assert!(matches!(err, AuthError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn from_env_trusted_only_when_explicit() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        // trusted is reached ONLY by explicit AUTH_MODE=trusted — no key needed
+        // (there is nothing to verify), and it never requires AUTH_JWT_* config.
+        std::env::set_var("AUTH_MODE", "trusted");
+        let v = AuthConfig::from_env().expect("trusted builds");
+        assert_eq!(v.mode(), "trusted");
+        // A forwarded identity is honored...
+        let blob = forward(json!({ "sub": "u", "org": "o", "role": "basic" }));
+        assert_eq!(
+            v.verify(&blob).expect("trusted principal").role,
+            Role::Basic
+        );
+        // ...and bad input is an error (→ anonymous at the connect path), never admin.
+        assert!(v.verify("garbage").is_err());
+        clear_auth_env();
+    }
+
+    #[test]
+    fn from_env_unset_does_not_select_trusted() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        // Secure-by-default unset case is UNCHANGED: no AUTH_MODE ⇒ admin-disabled,
+        // NOT trusted. trusted is only ever reached by an explicit opt-in.
+        let v = AuthConfig::from_env().expect("default boots");
+        assert_eq!(v.mode(), "disabled");
+        assert_ne!(v.mode(), "trusted");
         clear_auth_env();
     }
 

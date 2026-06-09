@@ -46,3 +46,5 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Sign HS256 test tokens to exercise the real JwtVerifier through the routes.
 jsonwebtoken = { workspace = true }
+# Encode the base64url(JSON) forwarded-identity blob in the trusted-mode ACL test.
+base64 = { workspace = true }

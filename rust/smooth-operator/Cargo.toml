@@ -18,6 +18,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+# `AUTH_MODE=trusted`: decode the base64url(JSON) forwarded-identity blob.
+base64 = { workspace = true }
 # `fetch_url` built-in tool: HTTP GET + URL parsing for the SSRF guard.
 reqwest = { workspace = true }
 url = { workspace = true }
