@@ -43,10 +43,10 @@ Point the console at a local `smooth-operator-server` running with
 `AUTH_MODE=none` (a fixed Admin principal — no token needed) and a seeded KB:
 
 ```bash
-# 1. Boot the backend (from the repo's rust/ dir; build the binary if missing:
-#    cargo build -p smooai-smooth-operator-server --bin smooth-operator-server)
+# 1. Boot the backend (from the repo's rust/ dir).
 AUTH_MODE=none SMOOTH_AGENT_PORT=8840 SMOOTH_AGENT_SEED_KB=1 \
-  ~/.cargo/shared-target/debug/smooth-operator-server
+  cargo run -p smooai-smooth-operator-server
+# (or run a prebuilt binary: rust/target/debug/smooth-operator-server)
 
 # 2. Boot the console in dev-auth mode pointed at it
 cd console

@@ -33,12 +33,61 @@ export SMOOAI_GATEWAY_KEY=sk-…           # your llm.smoo.ai key
 export SMOOTH_AGENT_SEED_KB=1            # seeds a distinctive "17-day return window" doc
 
 cargo run -p smooai-smooth-operator-server
-# → smooth-operator-server listening on 127.0.0.1:8787 (model claude-haiku-4-5)
+# → smooth-operator-server listening on ws://127.0.0.1:8787/ws (model claude-haiku-4-5)
 ```
 
-That's it — an agent backend on `ws://127.0.0.1:8787`, with knowledge retrieval, tool-calling, and streaming. No database to provision (the reference server uses the in-memory adapter); swap in Postgres or DynamoDB when you deploy.
+That's it — an agent backend on `ws://127.0.0.1:8787/ws`, with knowledge retrieval, tool-calling, and streaming. No database to provision (the reference server uses the in-memory adapter); swap in Postgres or DynamoDB when you deploy.
 
 > No key? The server still boots and answers protocol actions — only `send_message` (which needs the LLM) errors cleanly until `SMOOAI_GATEWAY_KEY` is set.
+
+---
+
+## Run locally in 5 minutes
+
+The 30-second quickstart above glosses one thing a fresh clone has to know: **the
+Rust service builds against the engine crate via a sibling path dependency.**
+`rust/Cargo.toml` points at `../../smooth-operator-core/rust/smooth-operator-core`,
+so you must check out [`smooth-operator-core`](https://github.com/SmooAI/smooth-operator-core)
+**next to** this repo:
+
+```text
+~/dev/
+├── smooth-operator/          # this repo
+└── smooth-operator-core/     # the engine — clone it as a sibling, NOT a child
+```
+
+```bash
+# 1. Clone both repos side by side.
+git clone https://github.com/SmooAI/smooth-operator-core
+git clone https://github.com/SmooAI/smooth-operator
+cd smooth-operator/rust
+
+# 2. Local-only auth + a gateway key.
+export AUTH_MODE=none                     # dev only — boots /ws with the admin API open
+export SMOOAI_GATEWAY_KEY=sk-…            # your llm.smoo.ai key (talks to the real gateway)
+export SMOOTH_AGENT_SEED_KB=1             # seed a demo "17-day return window" doc
+
+# 3. Run the reference server.
+cargo run -p smooai-smooth-operator-server
+# → smooth-operator-server listening on ws://127.0.0.1:8787/ws (model claude-haiku-4-5)
+```
+
+Connect any client to **`ws://127.0.0.1:8787/ws`** (note the `/ws` path — the server
+routes the WebSocket there) and drive a turn with the [TypeScript](typescript/README.md),
+[Go](go/README.md), [.NET](dotnet/README.md), [Python](python/README.md), or
+[Rust](rust/README.md) client.
+
+**Want the full ingest → chat path?** The [`rust/examples/dev-support`](rust/examples/dev-support)
+example is the showcase: point it at a GitHub repo, run `dev-support ingest`, then
+`dev-support chat` to ask grounded questions about that codebase. It needs a
+`GITHUB_TOKEN` (read scope) in addition to the gateway key — see its
+[README](rust/examples/dev-support/README.md).
+
+> **Where do the keys come from?** `SMOOAI_GATEWAY_KEY` is a `llm.smoo.ai` gateway
+> key (hosted users get one from [lom.smoo.ai](https://lom.smoo.ai); self-hosters
+> point `SMOOAI_GATEWAY_URL` at any OpenAI-compatible endpoint and use that
+> provider's key). `AUTH_MODE=none` is **dev-only** — it leaves `/admin` open; set
+> `AUTH_MODE=jwt` (or `smoo`) with the `AUTH_JWT_*` vars before exposing the server.
 
 ---
 
@@ -49,7 +98,7 @@ Connect, start a session, send a turn, and watch tokens stream in — then `awai
 ```ts
 import { SmoothAgentClient } from '@smooai/smooth-operator';
 
-const client = new SmoothAgentClient({ url: 'ws://127.0.0.1:8787' });
+const client = new SmoothAgentClient({ url: 'ws://127.0.0.1:8787/ws' });
 await client.connect();
 
 const session = await client.createConversationSession({ agentId, userName: 'Alice' });
@@ -243,7 +292,7 @@ flowchart TB
 cd deploy/sst && pnpm install && npx sst deploy --stage prod
 
 # Kubernetes (Helm + ArgoCD) — service + WS ingress, external pgvector Postgres
-helm install smooth-operator deploy/k8s/chart --set image.tag=$(git rev-parse --short HEAD)
+helm install smooth-operator deploy/k8s --set image.tag=$(git rev-parse --short HEAD)
 ```
 
 Both paths are CI-verified (SST: synth + 47 workspace tests + `tsc`; k8s: `helm lint`/`template` + `kubectl` dry-run). Full matrix and the shared [`SmooAI/deploy`](https://github.com/SmooAI/deploy) package in [`docs/DEPLOY.md`](docs/DEPLOY.md).

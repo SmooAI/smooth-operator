@@ -148,7 +148,7 @@ tools = ["knowledge_search", "github_search"]
 
 `ingest` + `chat` is the fastest way to see grounded answers in a terminal. For
 the **full chat-widget UI**, run the smooth-operator WebSocket server and point
-the embeddable widget (`packages/ui-chat-widget`) at it:
+the embeddable widget ([`@smooai/chat-widget`](https://github.com/SmooAI/chat-widget)) at it:
 
 ```sh
 cargo run -p smooai-smooth-operator-example-dev-support -- serve   # prints the recipe

@@ -30,7 +30,7 @@ using SmooAI.SmoothOperator;
 
 await using var client = new SmoothAgentClient(new SmoothAgentClientOptions
 {
-    Url = "ws://127.0.0.1:8787",
+    Url = "ws://127.0.0.1:8787/ws",
 });
 await client.ConnectAsync();
 
@@ -87,7 +87,7 @@ using Microsoft.Extensions.AI;
 using SmooAI.SmoothOperator;
 
 // DI registration — IServiceCollection extension.
-services.AddSmoothAgent(options => options.Url = "ws://127.0.0.1:8787");
+services.AddSmoothAgent(options => options.Url = "ws://127.0.0.1:8787/ws");
 
 // Resolve and use it as a standard MEAI IChatClient.
 IChatClient chat = serviceProvider.GetRequiredService<IChatClient>();

@@ -20,15 +20,17 @@ The **native TypeScript client** for the [smooth-operator](../docs/PROTOCOL.md) 
 ## 30-second quickstart
 
 ```bash
-pnpm add @smooai/smooth-operator
+pnpm add @smooai/smooth-operator   # npm publish pending — use a workspace / file: dep today
 ```
 
-Requires Node ≥ 22, ESM only.
+Requires Node ≥ 22, ESM only. Until the package is published, depend on it from a
+sibling checkout (`"@smooai/smooth-operator": "workspace:*"` in a pnpm workspace, or
+`"file:../smooth-operator/typescript"`).
 
 ```ts
 import { SmoothAgentClient } from '@smooai/smooth-operator';
 
-const client = new SmoothAgentClient({ url: 'ws://127.0.0.1:8787' });
+const client = new SmoothAgentClient({ url: 'ws://127.0.0.1:8787/ws' });
 await client.connect();
 
 const session = await client.createConversationSession({ agentId, userName: 'Alice' });

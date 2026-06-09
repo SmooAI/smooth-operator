@@ -4,7 +4,7 @@ smooth-operator never names a database in application or agent code. Everything 
 
 | | **Postgres** (k8s / self-host) | **DynamoDB** (AWS serverless) |
 | --- | --- | --- |
-| Conversations / participants / messages / sessions | relational tables | ElectroDB single-table |
+| Conversations / participants / messages / sessions | relational tables | `aws-sdk-dynamodb` single-table |
 | Connection / session WS state | table or Redis | DynamoDB (TTL) or Redis |
 | Agent checkpoints | `PostgresCheckpointStore` (ships in smooth-operator) | DynamoDB checkpoint store (added here) |
 | Knowledge embeddings (dense) | `pgvector` (HNSW) | **Amazon S3 Vectors** |
@@ -38,9 +38,9 @@ Mirrors the smooai monorepo's schema (the north star) so dogfooding is a swap, n
 - **Checkpoints**: `PostgresCheckpointStore` from smooth-operator (already merged — r2d2 pool, `checkpoints` table keyed `(agent_id/thread, created_at desc)`).
 - **Knowledge**: a `knowledge_vectors` table with `embedding vector(1024)` (Voyage `voyage-3-large`) + `content_tsv tsvector`, HNSW cosine index. Retrieval = dense (HNSW) ∪ sparse (BM25) → Reciprocal Rank Fusion → optional rerank (the `Reranker` seam — see "Embedding seam (shared) and the rerank stage" above).
 
-## DynamoDB adapter (AWS) — ElectroDB single-table
+## DynamoDB adapter (AWS) — single-table
 
-One table, multiple entities, modeled with [ElectroDB](https://electrodb.dev). Sketch of the access patterns and keys:
+One table, multiple entities, modeled by hand on raw [`aws-sdk-dynamodb`](https://docs.rs/aws-sdk-dynamodb) (the single-table design below is the DynamoDB-Book-style entity layout; a future refactor onto [`modyne`](https://github.com/neoeinstein/modyne) — the "ElectroDB for Rust" — is on the roadmap). Sketch of the access patterns and keys:
 
 | Entity | PK | SK | Notes |
 | ------ | -- | -- | ----- |
@@ -64,7 +64,7 @@ The **checkpoint store** is the interesting one: smooth-operator-core's `Checkpo
 
 DynamoDB has **no vector type and no ANN/kNN index**. The only native option is to store embeddings as number lists and **brute-force scan** every item per query, computing cosine in Lambda — O(n) reads, O(n) RCUs, and latency that degrades linearly. Fine for a few hundred vectors; unusable at knowledge-base scale. A 1024-dim float32 embedding is ~4 KB, so the 400 KB item limit isn't the blocker — the missing index is.
 
-**Decision (AWS path): Amazon S3 Vectors.** GA 2025-12-02, the first object-storage service with native vector store + similarity query. Fully serverless (no cluster to provision), scales to billions of vectors per index, ~100 ms–sub-second queries, up to ~90% cheaper than running a dedicated vector DB. It pairs cleanly with DynamoDB+ElectroDB: **DynamoDB owns the OLTP domain (conversations, checkpoints, doc metadata); S3 Vectors owns dense retrieval.** The knowledge slice writes the chunk + metadata to DynamoDB and the embedding to an S3 Vectors index keyed by the same id.
+**Decision (AWS path): Amazon S3 Vectors.** GA 2025-12-02, the first object-storage service with native vector store + similarity query. Fully serverless (no cluster to provision), scales to billions of vectors per index, ~100 ms–sub-second queries, up to ~90% cheaper than running a dedicated vector DB. It pairs cleanly with the DynamoDB single-table: **DynamoDB owns the OLTP domain (conversations, checkpoints, doc metadata); S3 Vectors owns dense retrieval.** The knowledge slice writes the chunk + metadata to DynamoDB and the embedding to an S3 Vectors index keyed by the same id.
 
 Alternatives considered:
 - **OpenSearch Serverless k-NN** — powerful hybrid (vector + BM25 in one engine, closest to Onyx's Vespa), but higher floor cost and operational surface; offered as an opt-in backend for users who want managed hybrid in one place.

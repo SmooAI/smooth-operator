@@ -37,7 +37,7 @@ func main() {
 	ctx := context.Background()
 
 	c, _ := protocol.New(protocol.Options{
-		Transport: protocol.NewWebSocketTransport("ws://127.0.0.1:8787", nil),
+		Transport: protocol.NewWebSocketTransport("ws://127.0.0.1:8787/ws", nil),
 	})
 	_ = c.Connect(ctx)
 	defer c.Close()

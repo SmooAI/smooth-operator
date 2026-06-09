@@ -33,6 +33,8 @@ The flagship crate is **`smooai-smooth-operator`** (lib `smooth_operator`). The 
 ## 30-second quickstart — embed the runtime
 
 ```bash
+# crates.io publish pending — use a git or path dependency today, e.g.:
+#   smooai-smooth-operator = { git = "https://github.com/SmooAI/smooth-operator" }
 cargo add smooai-smooth-operator smooai-smooth-operator-adapter-memory tokio --features tokio/full
 ```
 
@@ -95,7 +97,7 @@ sequenceDiagram
 export SMOOAI_GATEWAY_KEY=sk-…       # your llm.smoo.ai key
 export SMOOTH_AGENT_SEED_KB=1        # seed demo knowledge
 cargo run -p smooai-smooth-operator-server
-# → smooth-operator-server listening on 127.0.0.1:8787
+# → smooth-operator-server listening on ws://127.0.0.1:8787/ws
 ```
 
 ### Environment contract
@@ -175,7 +177,7 @@ cargo lambda build --release -p smooai-smooth-operator-lambda
 cd ../deploy/sst && pnpm install && npx sst deploy --stage prod
 
 # Kubernetes — the server binds 0.0.0.0 via SMOOTH_AGENT_BIND in the chart
-helm install smooth-operator ../deploy/k8s/chart --set image.tag=$(git rev-parse --short HEAD)
+helm install smooth-operator ../deploy/k8s --set image.tag=$(git rev-parse --short HEAD)
 ```
 
 Full matrix in [`docs/DEPLOY.md`](../docs/DEPLOY.md).

@@ -20,15 +20,20 @@ The **native async Python client** for the [smooth-operator](../docs/PROTOCOL.md
 ## 30-second quickstart
 
 ```bash
-uv add smooth-operator          # or: pip install smooth-operator
+uv add smooth-operator          # PyPI publish pending — install from the local path today
 ```
+
+Until this package is published to PyPI, install it from a sibling checkout
+(`uv add ../smooth-operator/python`, or `pip install -e path/to/smooth-operator/python`).
+The unqualified PyPI name is **not** this package yet — don't `pip install smooth-operator`
+from the public index until the SmooAI release lands.
 
 ```python
 import asyncio
 from smooth_operator import SmoothAgentClient
 
 async def main():
-    client = SmoothAgentClient(url="ws://127.0.0.1:8787")
+    client = SmoothAgentClient(url="ws://127.0.0.1:8787/ws")
     await client.connect()
 
     session = await client.create_conversation_session(agent_id=agent_id, user_name="Alice")

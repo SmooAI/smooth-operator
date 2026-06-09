@@ -1,7 +1,7 @@
 # smooth-operator — Kubernetes deploy (Helm + ArgoCD)
 
 > 📦 **The canonical chart now lives in [`SmooAI/deploy`](https://github.com/SmooAI/deploy)
-> (`helm/smooth-agent`).** That shared chart was extracted from this directory so
+> (`helm/smooth-operator`).** That shared chart was extracted from this directory so
 > both `smooth-operator` and the `smooai` monorepo can consume one chart.
 > This `deploy/k8s/` copy is retained as a **self-contained, deployable mirror**
 > (so this repo stays standalone-cloneable), but new chart changes should land in
@@ -14,15 +14,15 @@
 > name: smooth-operator
 > version: 0.1.0
 > dependencies:
->   - name: smooth-agent
+>   - name: smooth-operator
 >     version: 0.1.x
->     repository: file://../../../deploy/helm/smooth-agent   # sibling SmooAI/deploy checkout
+>     repository: file://../../../deploy/helm/smooth-operator   # sibling SmooAI/deploy checkout
 >     # or, once published: repository: oci://ghcr.io/smooai/charts
 > ```
 >
 > ```yaml
 > # deploy/k8s/values.yaml (overlay form — overrides nested under the subchart name)
-> smooth-agent:
+> smooth-operator:
 >   image: { repository: ghcr.io/smooai/smooth-operator, tag: "0.1.0" }
 >   gateway:  { keySecretRef: { name: smooth-operator-gateway, key: SMOOAI_GATEWAY_KEY } }
 >   database: { urlSecretRef: { name: smooth-operator-db, key: DATABASE_URL } }

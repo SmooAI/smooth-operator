@@ -181,6 +181,22 @@ provider-backed embedder (e.g. the adapter's `GatewayEmbedder`) just implements
 the same trait, staying in its own crate so the paid HTTP client never reaches
 core or ingestion.
 
+### Which embedder runs in production (selection + dimension)
+
+The index/retrieval path does **not** hardcode an embedder — it selects one from
+config via `build_embedder` (in `smooth_operator_server::embedder`, reused by both
+the server `/index` handler and the `dev-support` example). When the gateway is
+keyed (`SMOOAI_GATEWAY_KEY` set, with `SMOOAI_GATEWAY_URL` / model), it returns the
+real, **semantic `GatewayEmbedder`** (`text-embedding-3-small`, **1536-d**) — this
+is the production path. When the key is absent it falls back to the network-free
+`DeterministicEmbedder` (FNV-1a hash, **1024-d**, *not* semantic) and logs a loud
+`tracing::warn!` so a hash-stub index can't be mistaken for a real one — this keeps
+offline dev and the test baseline running with zero credentials. Because document
+vectors (at ingest) and query vectors (at retrieval) must share a projection *and*
+a width, the knowledge store's `vector(N)` column is always created from the
+**active embedder's `dim()`** (1536 vs 1024) — never a hardcoded constant — so the
+keyed and unkeyed paths can never silently mix dimensions.
+
 ## Authoring a custom connector
 
 1. Define a struct holding whatever it needs (a base URL, an API client, creds).

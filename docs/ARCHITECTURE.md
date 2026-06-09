@@ -29,8 +29,8 @@ smooth-operator is the **service layer** on top of [`smooth-operator`](https://g
                               │                         │
                 ┌─────────────┴───────┐   ┌─────────────┴──────────────┐
                 │  AWS serverless     │   │  Kubernetes / self-host    │
-                │  DynamoDB (ElectroDB)│   │  Postgres                  │
-                │  + S3 Vectors        │   │  + pgvector                │
+                │  DynamoDB (aws-sdk) │   │  Postgres                  │
+                │  + S3 Vectors       │   │  + pgvector                │
                 └─────────────────────┘   └────────────────────────────┘
 ```
 
@@ -100,7 +100,7 @@ Backends:
 | --- | --- | --- |
 | Transport | API Gateway WebSocket | Ingress + WS |
 | Compute | Lambda | Deployment/pods |
-| OLTP | DynamoDB (ElectroDB single-table) | Postgres |
+| OLTP | DynamoDB (`aws-sdk-dynamodb` single-table) | Postgres |
 | Vectors | S3 Vectors | pgvector |
 | Checkpoints | DynamoDB | Postgres |
 | Blobs | S3 | S3-compatible |
