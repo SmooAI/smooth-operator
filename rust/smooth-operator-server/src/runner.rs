@@ -226,7 +226,7 @@ pub async fn run_streaming_turn(
         Ok(mutex) => mutex
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
-        Err(arc) => arc.lock().expect("citation sink poisoned").clone(),
+        Err(arc) => arc.lock().unwrap_or_else(|p| p.into_inner()).clone(),
     };
     let citations = collect_citations(&auto_sources, &tool_sources);
 

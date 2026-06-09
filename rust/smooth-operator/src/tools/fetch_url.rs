@@ -43,7 +43,7 @@ impl FetchUrlTool {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: safe_http_client(),
         }
     }
 
@@ -183,6 +183,33 @@ pub fn assert_url_is_public(raw_url: &str) -> anyhow::Result<Url> {
     Ok(url)
 }
 
+/// Build the HTTP client used by [`FetchUrlTool::new`]. It installs a redirect
+/// policy that re-runs [`assert_url_is_public`] on **every** hop: a public URL
+/// that 30x-redirects to an internal/metadata address (e.g. `169.254.169.254`)
+/// is rejected mid-chain rather than blindly followed. reqwest follows up to 10
+/// redirects by default, which would bypass the initial-URL-only guard — a real
+/// SSRF hole (a redirect to the cloud metadata endpoint = IAM credential theft).
+///
+/// Public so the `web` connector shares this exact client (one guard, no drift).
+pub fn safe_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error(Box::<dyn std::error::Error + Send + Sync>::from(
+                    "fetch_url: too many redirects",
+                ));
+            }
+            match assert_url_is_public(attempt.url().as_str()) {
+                Ok(_) => attempt.follow(),
+                Err(e) => attempt.error(Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                    "fetch_url: redirect blocked by SSRF guard: {e}"
+                ))),
+            }
+        }))
+        .build()
+        .expect("fetch_url HTTP client build is infallible")
+}
+
 /// Reject loopback / private / link-local / unspecified / broadcast IPv4.
 /// Link-local (`169.254.0.0/16`) covers the cloud metadata IP
 /// `169.254.169.254`.
@@ -229,7 +256,14 @@ fn assert_ipv6_public(ip: Ipv6Addr) -> anyhow::Result<()> {
 
 /// Heuristic: does this body look like HTML even without a content-type?
 fn looks_like_html(body: &str) -> bool {
-    let head = &body[..body.len().min(512)].to_ascii_lowercase();
+    // Floor the 512-byte window to a char boundary — a naive `&body[..512]`
+    // byte-slice panics when byte 512 lands inside a multibyte UTF-8 char, and
+    // `body` is an attacker/redirect-controlled HTTP response body (a DoS).
+    let mut end = body.len().min(512);
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = body[..end].to_ascii_lowercase();
     head.contains("<html") || head.contains("<!doctype html") || head.contains("<body")
 }
 
@@ -450,6 +484,19 @@ mod tests {
         let capped = cap_len(&long, MAX_TEXT_LEN);
         assert!(capped.ends_with("… [truncated]"));
         assert!(capped.chars().count() <= MAX_TEXT_LEN + "… [truncated]".chars().count());
+    }
+
+    #[test]
+    fn looks_like_html_no_panic_on_multibyte_boundary() {
+        // 200 × the 3-byte '€' = 600 bytes; byte 512 (= 3·170 + 2) is NOT a char
+        // boundary, so a naive `&body[..512]` byte-slice would panic on this
+        // attacker-controlled body.
+        let mut body = "€".repeat(200);
+        body.push_str("<html>");
+        let _ = looks_like_html(&body); // must not panic
+        // A real HTML marker within the first 512 bytes is still detected.
+        assert!(looks_like_html("<!doctype html><html><body>hi"));
+        assert!(!looks_like_html("just some plain text, no markup here"));
     }
 
     #[test]

@@ -18,7 +18,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 
-use smooth_operator::tools::fetch_url::{assert_url_is_public, html_to_text};
+use smooth_operator::tools::fetch_url::{assert_url_is_public, html_to_text, safe_http_client};
 
 use crate::connector::{Connector, RawDocument, Timestamp};
 
@@ -34,7 +34,9 @@ impl WebConnector {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
-            client: reqwest::Client::new(),
+            // Shared SSRF-safe client: re-validates every redirect hop (a bare
+            // reqwest::Client follows 30x to internal/metadata IPs).
+            client: safe_http_client(),
         }
     }
 
@@ -65,7 +67,14 @@ impl WebConnector {
 
 /// Heuristic: does this body look like HTML even without a content-type?
 fn looks_like_html(body: &str) -> bool {
-    let head = body[..body.len().min(512)].to_ascii_lowercase();
+    // Floor the 512-byte window to a char boundary — a naive `&body[..512]`
+    // byte-slice panics when byte 512 lands mid-multibyte-char (DoS on a
+    // server-controlled body).
+    let mut end = body.len().min(512);
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = body[..end].to_ascii_lowercase();
     head.contains("<html") || head.contains("<!doctype html") || head.contains("<body")
 }
 
@@ -173,6 +182,16 @@ mod tests {
         let html = "<html><body><p>bare html</p></body></html>";
         let doc = WebConnector::body_to_doc("https://example.com/x", "", html);
         assert_eq!(doc.content, "bare html");
+    }
+
+    #[test]
+    fn body_to_doc_no_panic_on_multibyte_boundary() {
+        // 200 × the 3-byte '€' (600 bytes) — byte 512 is not a char boundary, so a
+        // naive &body[..512] would panic on this server-controlled body.
+        let mut body = "€".repeat(200);
+        body.push_str("<html><body>x</body></html>");
+        let doc = WebConnector::body_to_doc("https://example.com/x", "", &body); // must not panic
+        assert_eq!(doc.id, "https://example.com/x");
     }
 
     #[test]

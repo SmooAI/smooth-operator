@@ -131,7 +131,7 @@ impl InMemoryIndexingStore {
 
 impl IndexingStore for InMemoryIndexingStore {
     fn record_run(&self, run: &IndexingRun) {
-        let mut runs = self.runs.lock().expect("indexing store lock");
+        let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
         // Upsert by id so a `Running` row can be promoted to a terminal state.
         if let Some(existing) = runs.iter_mut().find(|r| r.id == run.id) {
             *existing = run.clone();
@@ -141,7 +141,7 @@ impl IndexingStore for InMemoryIndexingStore {
     }
 
     fn latest_cursor(&self, connector_name: &str) -> Option<Timestamp> {
-        let runs = self.runs.lock().expect("indexing store lock");
+        let runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
         // Highest cursor among successful runs for this connector — robust to
         // out-of-order recording, and a failed run never advances it.
         runs.iter()
@@ -153,7 +153,7 @@ impl IndexingStore for InMemoryIndexingStore {
     }
 
     fn list_runs(&self, connector_name: &str) -> Vec<IndexingRun> {
-        let runs = self.runs.lock().expect("indexing store lock");
+        let runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
         runs.iter()
             .filter(|r| r.connector_name == connector_name)
             .cloned()
