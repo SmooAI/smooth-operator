@@ -5,7 +5,7 @@
  * `ConversationController` exactly, so the two presentation layers stay
  * interchangeable over the same protocol client.
  */
-import type { Citation } from '@smooai/smooth-operator';
+import type { Citation } from '../types.js';
 
 export type { Citation };
 

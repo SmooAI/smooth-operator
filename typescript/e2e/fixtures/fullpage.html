@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>@smooai/chat-widget — full-page mode live e2e</title>
+        <style>
+            html,
+            body {
+                margin: 0;
+                height: 100%;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: #040d30;
+                color: #e2e8f0;
+            }
+            /* The full-page widget fills its host element; here we let it fill the
+               whole viewport. */
+            #chat {
+                position: fixed;
+                inset: 0;
+                display: flex;
+            }
+            smooth-agent-chat {
+                flex: 1;
+            }
+        </style>
+    </head>
+    <body>
+        <!-- Loads the IIFE bundle produced by `pnpm build`. The element below
+             auto-registers in full-page mode: no launcher bubble, the chat fills
+             the viewport with a Smooth-branded header, a scrollable message list,
+             and an input bar. `endpoint` points at the locally-spawned
+             smooth-operator-server on :8831 (see e2e/fullpage.live.spec.ts), and
+             `agent-id` is a fixed UUID (the protocol keys the session on a UUID). -->
+        <script src="/dist/widget/chat-widget.iife.js"></script>
+        <div id="chat">
+            <smooth-agent-chat
+                mode="fullpage"
+                endpoint="ws://127.0.0.1:8831/ws"
+                agent-id="22222222-2222-4222-8222-222222222222"
+                agent-name="Dev Support"
+                greeting="Ask me anything about SmooAI — I'll cite my sources."
+            ></smooth-agent-chat>
+        </div>
+    </body>
+</html>

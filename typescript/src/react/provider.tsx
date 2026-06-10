@@ -7,7 +7,7 @@
  * connection, or when you want to construct the client yourself (custom
  * transport, auth-token refresh, etc.) and hand it down.
  */
-import { SmoothAgentClient } from '@smooai/smooth-operator';
+import { SmoothAgentClient } from '../client.js';
 import { createContext, createElement, useContext, useMemo, type ReactNode } from 'react';
 
 export interface SmoothOperatorContextValue {

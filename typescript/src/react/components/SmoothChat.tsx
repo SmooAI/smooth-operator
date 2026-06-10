@@ -11,7 +11,7 @@
  * `useConversation` + the exported parts. This is just the batteries-included path.
  *
  * Remember to import the stylesheet once in your app:
- *   import '@smooai/smooth-operator-react/styles.css';
+ *   import '@smooai/smooth-operator/react/styles.css';
  */
 import { themeToStyle, type ChatTheme } from '../theme.js';
 import { useConversation, type UseConversationOptions } from '../use-conversation.js';

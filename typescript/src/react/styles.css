@@ -2,7 +2,7 @@
  * smooth-operator-react default stylesheet.
  *
  * Import once in your app:
- *   import '@smooai/smooth-operator-react/styles.css';
+ *   import '@smooai/smooth-operator/react/styles.css';
  *
  * EVERYTHING is driven by `--smooth-*` CSS custom properties declared on the
  * `.smooth-chat` root (NOT `:root`, so nothing leaks into your page). Retheme by

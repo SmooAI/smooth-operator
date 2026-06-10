@@ -20,12 +20,26 @@ The **native TypeScript client** for the [smooth-operator](../docs/PROTOCOL.md) 
 ## 30-second quickstart
 
 ```bash
-pnpm add @smooai/smooth-operator   # npm publish pending — use a workspace / file: dep today
+pnpm add @smooai/smooth-operator
 ```
 
-Requires Node ≥ 22, ESM only. Until the package is published, depend on it from a
-sibling checkout (`"@smooai/smooth-operator": "workspace:*"` in a pnpm workspace, or
-`"file:../smooth-operator/typescript"`).
+Requires Node ≥ 22, ESM only.
+
+### One package, three subpath exports
+
+`@smooai/smooth-operator` is the whole TypeScript SDK — install once, import the
+layer you need. `react` / `react-dom` are **optional** peer deps (only the
+`./react` subpath needs them), so a client-only or widget-only consumer never
+pulls React into their bundle.
+
+| Import | What |
+| --- | --- |
+| `@smooai/smooth-operator` | the protocol client (`SmoothAgentClient`, streaming turns, HITL) |
+| `@smooai/smooth-operator/react` | React bindings — `useConversation` hook + `<SmoothChat>` (see [the guide](../docs/Guides/React%20Components%20and%20Custom%20UIs.md)) |
+| `@smooai/smooth-operator/react/styles.css` | default stylesheet for the React components |
+| `@smooai/smooth-operator/widget` | the embeddable web-component chat widget (`mountChatWidget`, `<smooth-agent-chat>`) |
+| `@smooai/smooth-operator/widget/standalone` | the prebuilt IIFE bundle for a no-build `<script>` embed |
+| `@smooai/smooth-operator/validate` | the Node-only `ProtocolValidator` (pulls `ajv` + `node:fs`; keep it off the browser path) |
 
 ```ts
 import { SmoothAgentClient } from '@smooai/smooth-operator';

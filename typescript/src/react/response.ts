@@ -6,7 +6,7 @@
  * absence, non-array shapes, and missing fields rather than letting a slightly
  * different server break rendering.
  */
-import type { Citation } from '@smooai/smooth-operator';
+import type { Citation } from '../types.js';
 
 /** Pull the final assistant text out of an `eventual_response` data payload. */
 export function extractFinalText(response: unknown): string | null {

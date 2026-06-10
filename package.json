@@ -2,7 +2,7 @@
     "name": "@smooai/smooth-operator-js",
     "version": "0.0.0",
     "private": true,
-    "description": "Workspace root for the smooth-operator JavaScript/TypeScript packages (protocol client + React bindings). Each package publishes to npm independently; in-repo deps link via the pnpm `workspace:` protocol and resolve to real semver on publish.",
+    "description": "Workspace root for the smooth-operator JavaScript/TypeScript packages. `typescript/` is the published npm SDK (client + React bindings + web-component widget, as subpath exports); `console/` is the private admin app.",
     "type": "module",
     "license": "MIT",
     "engines": {
@@ -12,7 +12,7 @@
         "build": "pnpm -r build",
         "test": "pnpm -r test",
         "typecheck": "pnpm -r typecheck",
-        "publish:dry": "pnpm -r --filter ./typescript --filter ./react publish --dry-run --no-git-checks"
+        "publish:dry": "pnpm --filter @smooai/smooth-operator publish --dry-run --no-git-checks"
     },
     "packageManager": "pnpm@9.15.0"
 }

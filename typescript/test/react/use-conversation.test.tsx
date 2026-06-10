@@ -4,11 +4,11 @@
  * unit tests. We assert the real streaming path: tokens accumulate, the terminal
  * response finalizes, and citations attach.
  */
-import { SmoothAgentClient, type Transport } from '@smooai/smooth-operator';
+import { SmoothAgentClient, type Transport } from '../../src/index.js';
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { SmoothChat } from '../src/components/SmoothChat.js';
-import { useConversation } from '../src/use-conversation.js';
+import { SmoothChat } from '../../src/react/components/SmoothChat.js';
+import { useConversation } from '../../src/react/use-conversation.js';
 
 /**
  * A scripted in-memory transport. It records sent frames and, via `autoRespond`,

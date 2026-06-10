@@ -2,30 +2,37 @@
 
 smooth-operator's frontend story is **layered and modular** — you can adopt as
 much or as little UI as you want, because every layer sits on the same
-schema-driven WebSocket protocol. Pick the layer that matches how much control
+schema-driven WebSocket protocol. And it's all **one package**,
+`@smooai/smooth-operator`, with subpath exports — install once, import the layer
 you need:
 
 ```mermaid
 flowchart TD
   P["WebSocket protocol<br/>(spec/ — language-neutral)"]
   C["@smooai/smooth-operator<br/>headless TS client"]
-  W["@smooai/chat-widget<br/>web component (any framework / no build)"]
-  H["@smooai/smooth-operator-react · useConversation<br/>headless hook (your own UI)"]
-  S["@smooai/smooth-operator-react · &lt;SmoothChat&gt;<br/>styled component (CSS-variable themed)"]
+  W["@smooai/smooth-operator/widget<br/>web component (any framework / no build)"]
+  H["@smooai/smooth-operator/react · useConversation<br/>headless hook (your own UI)"]
+  S["@smooai/smooth-operator/react · &lt;SmoothChat&gt;<br/>styled component (CSS-variable themed)"]
   P --> C --> W
   C --> H --> S
 ```
 
-| You want…                                              | Use                                        |
-| ------------------------------------------------------ | ------------------------------------------ |
-| Chat on a page, any framework, maybe no build step     | the chat widget (`@smooai/chat-widget`, web component)         |
-| A React app, your own components, full design control  | `useConversation` (headless hook)           |
-| A React app, batteries-included chat to theme          | `<SmoothChat>` (CSS-variable themed)        |
+| You want…                                              | Import                                       |
+| ------------------------------------------------------ | -------------------------------------------- |
+| Chat on a page, any framework, maybe no build step     | `@smooai/smooth-operator/widget` (web component) |
+| A React app, your own components, full design control  | `@smooai/smooth-operator/react` → `useConversation` |
+| A React app, batteries-included chat to theme          | `@smooai/smooth-operator/react` → `<SmoothChat>`    |
 | Another language, or a totally custom surface          | the [[Using the Polyglot Clients\|clients]] directly |
 
-The package is `@smooai/smooth-operator-react` (source in `react/`). `react` /
-`react-dom` are peer deps; the protocol client is a normal dependency it
-re-exports for convenience.
+One install gives you all of it:
+
+```bash
+pnpm add @smooai/smooth-operator react react-dom
+```
+
+`react` / `react-dom` are **optional** peer deps — only needed if you import the
+`./react` subpath. A client-only or widget-only consumer never pulls React into
+their bundle (subpath exports + `sideEffects` keep it tree-shaken out).
 
 ## Headless first — `useConversation`
 
@@ -34,7 +41,7 @@ finalize with citations) and returns **only state + actions** — no markup, no
 styling. This is the modular core: build any UI on top.
 
 ```tsx
-import { useConversation } from '@smooai/smooth-operator-react';
+import { useConversation } from '@smooai/smooth-operator/react';
 
 function Chat({ url, agentId }: { url: string; agentId: string }) {
     const { status, messages, send } = useConversation({ url, agentId });
@@ -51,11 +58,31 @@ Pair it with the exported parts (`MessageList`, `MessageBubble`, `Composer`,
 ## Batteries-included — `<SmoothChat>`
 
 ```tsx
-import { SmoothChat } from '@smooai/smooth-operator-react';
-import '@smooai/smooth-operator-react/styles.css'; // once, anywhere
+import { SmoothChat } from '@smooai/smooth-operator/react';
+import '@smooai/smooth-operator/react/styles.css'; // once, anywhere
 
 <SmoothChat url="wss://your-host/ws" agentId={agentId} agentName="Support" greeting="How can I help?" />;
 ```
+
+## No-React option — the web-component widget
+
+If you're not on React (or want a no-build `<script>` embed), the same UI ships
+as a framework-agnostic custom element on the `./widget` subpath:
+
+```ts
+import { mountChatWidget } from '@smooai/smooth-operator/widget';
+mountChatWidget({ endpoint: 'wss://your-host/ws', agentId });
+```
+
+Or drop the standalone IIFE on any page — no bundler, no framework:
+
+```html
+<script src="https://unpkg.com/@smooai/smooth-operator/dist/widget/chat-widget.iife.js"></script>
+<smooth-agent-chat endpoint="wss://your-host/ws" agent-id="…"></smooth-agent-chat>
+```
+
+The widget is themed with the same palette keys (`ChatWidgetTheme`) as the React
+components, so a brand ports between them unchanged.
 
 ## Theming with CSS variables (not a build coupling)
 
@@ -74,7 +101,7 @@ leaks into your page). Override them three ways, later wins:
 3. **Restyle `.smooth-chat__*`** classes outright.
 
 The variable ↔ `theme`-key table is in the package
-[README](../../react/README.md). Keys match the widget's `ChatWidgetTheme`, so a
+[README](../../typescript/README.md). Keys match the widget's `ChatWidgetTheme`, so a
 brand palette ports between the web-component widget and the React components
 unchanged.
 
@@ -86,6 +113,6 @@ See [[Integrating into an Existing App]] and [[Access Control]].
 
 ## Related
 
-- [[Using the Polyglot Clients]] — driving the protocol from TS/Go/.NET/Python; includes the `@smooai/chat-widget` web component.
+- [[Using the Polyglot Clients]] — driving the protocol from TS/Go/.NET/Python.
 - [[Integrating into an Existing App]] — auth modes for embedding.
 - [[Protocol Reference]] — the message/frame contract underneath all of this.

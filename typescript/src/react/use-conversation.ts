@@ -10,7 +10,7 @@
  * flow, same defensive payload reading, but message state lives in React so your
  * components re-render on every streamed token.
  */
-import { ProtocolError, SmoothAgentClient } from '@smooai/smooth-operator';
+import { ProtocolError, SmoothAgentClient } from '../client.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { extractCitations, extractFinalText } from './response.js';
 import type { ChatMessage, ConnectionStatus } from './types.js';
