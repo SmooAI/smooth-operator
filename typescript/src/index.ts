@@ -22,9 +22,10 @@ export {
     type WebSocketLike,
     type WebSocketFactory,
 } from './transport.js';
-export {
-    ProtocolValidator,
-    DEFAULT_SPEC_DIR,
-    formatErrors,
-    type ValidationResult,
-} from './validate.js';
+
+// NOTE: the Node-only `ProtocolValidator` (it pulls in `ajv` + `node:fs`) is
+// intentionally NOT part of this default barrel — that keeps the main entry
+// browser-clean so the widget / React bindings / any browser app can import the
+// client without dragging `ajv` into their bundle. Import it from the dedicated
+// subpath instead:
+//   import { ProtocolValidator } from '@smooai/smooth-operator/validate';

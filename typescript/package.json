@@ -14,6 +14,10 @@
         ".": {
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js"
+        },
+        "./validate": {
+            "types": "./dist/validate.d.ts",
+            "import": "./dist/validate.js"
         }
     },
     "files": [
@@ -28,11 +32,13 @@
         "test:watch": "vitest",
         "test:e2e": "vitest run --config vitest.e2e.config.ts"
     },
+    "dependencies": {
+        "ajv": "^8.17.1",
+        "ajv-formats": "^3.0.1"
+    },
     "devDependencies": {
         "@apidevtools/json-schema-ref-parser": "^11.7.3",
         "@types/node": "^25.9.2",
-        "ajv": "^8.17.1",
-        "ajv-formats": "^3.0.1",
         "json-schema-to-typescript": "^15.0.4",
         "tsx": "^4.19.2",
         "typescript": "^5.7.3",

@@ -56,6 +56,7 @@ Start here to understand *what it is* and *why it's shaped this way*.
 - [[Build a Dev-Support Agent]] — the `examples/dev-support` recipe (ingest a repo → chat).
 - [[Writing a Connector]] — author a new knowledge source.
 - [[Using the Polyglot Clients]] — TS / Go / .NET / Python / Rust.
+- [[React Components and Custom UIs]] — headless `useConversation` hook + CSS-variable-themed `<SmoothChat>`.
 
 ### 📚 Reference — the lookup material
 
