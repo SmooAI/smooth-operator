@@ -48,6 +48,12 @@ jobs:
         runs-on: ubuntu-latest
         timeout-minutes: 20
 
+        # `id-token: write` is required for npm provenance attestation
+        # (NPM_CONFIG_PROVENANCE) — without it npm fails with EUSAGE before upload.
+        permissions:
+            contents: read
+            id-token: write
+
         steps:
             - uses: actions/checkout@v4
 
