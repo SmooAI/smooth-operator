@@ -1,0 +1,33 @@
+# Deprecate a published npm package/version range (reversible: re-run with an
+# empty message to un-deprecate). Manual-only. Uses the org SMOOAI_NPM_TOKEN.
+#
+# Example:
+#   spec:    @smooai/smooth-operator-react@"<=0.1.0"
+#   message: Merged into @smooai/smooth-operator — use the ./react subpath.
+name: Deprecate npm
+
+on:
+    workflow_dispatch:
+        inputs:
+            spec:
+                description: 'Package spec, e.g. @smooai/smooth-operator-react@"<=0.1.0"'
+                required: true
+            message:
+                description: 'Deprecation message (empty string un-deprecates)'
+                required: true
+
+jobs:
+    deprecate:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: Install Node 22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  registry-url: 'https://registry.npmjs.org'
+
+            - name: npm deprecate
+              run: npm deprecate "${{ inputs.spec }}" "${{ inputs.message }}"
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.SMOOAI_NPM_TOKEN }}
