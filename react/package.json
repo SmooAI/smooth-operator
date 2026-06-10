@@ -17,6 +17,24 @@
         },
         "./styles.css": "./src/styles.css"
     },
+    "publishConfig": {
+        "access": "public"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/SmooAI/smooth-operator.git",
+        "directory": "react"
+    },
+    "homepage": "https://github.com/SmooAI/smooth-operator/tree/main/react",
+    "keywords": [
+        "smooth-operator",
+        "react",
+        "chat",
+        "ai",
+        "websocket",
+        "agent",
+        "rag"
+    ],
     "files": [
         "dist",
         "src"
@@ -36,7 +54,7 @@
         "react-dom": ">=18"
     },
     "dependencies": {
-        "@smooai/smooth-operator": "file:../typescript"
+        "@smooai/smooth-operator": "workspace:^"
     },
     "devDependencies": {
         "@testing-library/dom": "^10.4.0",

@@ -1,0 +1,13 @@
+# JavaScript/TypeScript packages in this repo.
+#
+# `typescript` (the protocol client) and `react` (the React bindings) publish to
+# npm; their in-repo dependency links via the `workspace:` protocol, which pnpm
+# rewrites to a real semver range (`^x.y.z`) at publish time — so the published
+# packages depend on each other by version, never by path.
+#
+# `console` (the admin app) is private (never published) and is intentionally a
+# member too, so one `pnpm install` at the repo root links everything.
+packages:
+    - typescript
+    - react
+    - console

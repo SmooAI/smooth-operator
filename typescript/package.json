@@ -20,6 +20,24 @@
             "import": "./dist/validate.js"
         }
     },
+    "publishConfig": {
+        "access": "public"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/SmooAI/smooth-operator.git",
+        "directory": "typescript"
+    },
+    "homepage": "https://github.com/SmooAI/smooth-operator/tree/main/typescript",
+    "keywords": [
+        "smooth-operator",
+        "websocket",
+        "protocol",
+        "client",
+        "ai",
+        "agent",
+        "streaming"
+    ],
     "files": [
         "dist",
         "src"

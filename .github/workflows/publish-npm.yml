@@ -1,0 +1,82 @@
+# Publish the smooth-operator JavaScript packages to npm.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS WORKFLOW IS THE ONLY PLACE THESE PACKAGES ARE PUBLISHED.
+#
+# Packages (published in dependency order):
+#   • @smooai/smooth-operator         (typescript/ — the protocol client)
+#   • @smooai/smooth-operator-react   (react/      — the React bindings)
+#
+#   • Publishing to npm is effectively IRREVERSIBLE — `npm unpublish` is only
+#     allowed within 72h and the version number can never be reused.
+#   • BUMP THE VERSION in the package's package.json BEFORE publishing. npm
+#     rejects re-uploading a version that already exists.
+#   • The `react` package depends on the client via the pnpm `workspace:`
+#     protocol, which is rewritten to a real `^x.y.z` range at pack time — so the
+#     published package depends on the client BY VERSION, never by path.
+#
+# How to publish:
+#   1. Manual (primary path): Actions → "Publish npm" → Run workflow.
+#      Defaults to a DRY RUN (packs + validates but uploads nothing). To actually
+#      publish, set the `dry_run` input to `false` — a deliberate, explicit opt-in.
+#   2. Tag: push a tag matching `npm-v*` (e.g. `npm-v0.1.0`). The tag path always
+#      publishes for real.
+#
+# Auth: uses the org-level secret SMOOAI_NPM_TOKEN.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Publish npm
+
+on:
+    workflow_dispatch:
+        inputs:
+            dry_run:
+                description: 'Dry run (pack + validate but do NOT upload). Set to false to actually publish.'
+                type: boolean
+                default: true
+    push:
+        tags:
+            - 'npm-v*'
+
+# Never let two publishes race against each other.
+concurrency:
+    group: publish-npm
+    cancel-in-progress: false
+
+jobs:
+    publish:
+        name: Publish smooth-operator JS packages to npm
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Install Node 22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  registry-url: 'https://registry.npmjs.org'
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build packages
+              run: pnpm -r --filter ./typescript --filter ./react build
+
+            - name: Test packages
+              run: pnpm -r --filter ./typescript --filter ./react test
+
+            # On manual runs `dry_run` defaults to true, so a bare "Run workflow"
+            # click uploads NOTHING. Tag pushes have no input, so `inputs.dry_run`
+            # is false and this publishes for real. `pnpm -r publish` walks the two
+            # packages in dependency order (client first, then react).
+            - name: Publish (or dry-run)
+              run: |
+                  pnpm -r --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-react" \
+                    publish --no-git-checks --access public ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.SMOOAI_NPM_TOKEN }}
+                  NPM_CONFIG_PROVENANCE: 'true'
