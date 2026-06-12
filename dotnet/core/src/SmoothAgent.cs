@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text;
 using Microsoft.Extensions.AI;
 
 namespace SmooAI.SmoothOperator.Core;
@@ -47,7 +48,7 @@ public sealed class SmoothAgent
     /// </summary>
     public async Task<AgentRunResponse> RunAsync(string message, SmoothAgentThread? thread, CancellationToken cancellationToken = default)
     {
-        var working = SeedConversation(message, thread);
+        var working = await SeedConversationAsync(message, thread, cancellationToken).ConfigureAwait(false);
         var newThisTurn = new List<ChatMessage> { working[^1] }; // the live user message
         var chatOptions = BuildChatOptions();
         var usage = new UsageDetails();
@@ -92,7 +93,7 @@ public sealed class SmoothAgent
         SmoothAgentThread? thread,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var working = SeedConversation(message, thread);
+        var working = await SeedConversationAsync(message, thread, cancellationToken).ConfigureAwait(false);
         var newThisTurn = new List<ChatMessage> { working[^1] };
         var chatOptions = BuildChatOptions();
         var iterations = 0;
@@ -127,7 +128,7 @@ public sealed class SmoothAgent
         thread?.AddRange(newThisTurn);
     }
 
-    private List<ChatMessage> SeedConversation(string userMessage, SmoothAgentThread? thread)
+    private async Task<List<ChatMessage>> SeedConversationAsync(string userMessage, SmoothAgentThread? thread, CancellationToken cancellationToken)
     {
         var messages = new List<ChatMessage>();
         if (!string.IsNullOrEmpty(_options.Instructions))
@@ -138,8 +139,60 @@ public sealed class SmoothAgent
         {
             messages.AddRange(thread.Messages);
         }
+
+        // Retrieve knowledge + memory for this turn and inject it as grounding context,
+        // placed right before the live user message. Ephemeral — regenerated each turn,
+        // never persisted into the thread.
+        var context = await BuildRetrievedContextAsync(userMessage, cancellationToken).ConfigureAwait(false);
+        if (context is not null)
+        {
+            messages.Add(context);
+        }
+
         messages.Add(new ChatMessage(ChatRole.User, userMessage));
         return messages;
+    }
+
+    private async Task<ChatMessage?> BuildRetrievedContextAsync(string query, CancellationToken cancellationToken)
+    {
+        if (_options.Knowledge is null && _options.Memory is null)
+        {
+            return null;
+        }
+
+        var builder = new StringBuilder();
+
+        if (_options.Knowledge is not null)
+        {
+            var hits = await _options.Knowledge.QueryAsync(query, _options.KnowledgeTopK, cancellationToken).ConfigureAwait(false);
+            if (hits.Count > 0)
+            {
+                builder.AppendLine("Relevant knowledge (ground your answer in this; cite the source):");
+                foreach (var hit in hits)
+                {
+                    builder.AppendLine($"- [{hit.Source}] {hit.Chunk}");
+                }
+            }
+        }
+
+        if (_options.Memory is not null)
+        {
+            var memories = await _options.Memory.RecallAsync(query, _options.MemoryTopK, cancellationToken).ConfigureAwait(false);
+            if (memories.Count > 0)
+            {
+                if (builder.Length > 0)
+                {
+                    builder.AppendLine();
+                }
+                builder.AppendLine("Relevant memory:");
+                foreach (var memory in memories)
+                {
+                    builder.AppendLine($"- {memory.Content}");
+                }
+            }
+        }
+
+        return builder.Length > 0 ? new ChatMessage(ChatRole.System, builder.ToString()) : null;
     }
 
     private ChatOptions? BuildChatOptions() =>

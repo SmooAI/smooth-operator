@@ -23,14 +23,25 @@ fixtures + eval scenarios**, not by identical type shapes — see
   usage accumulation, max-iteration guard, streaming. `MockChatClient` test double.
 - **Phase 1 — conversation + compaction** (shipped): `SmoothAgentThread` for multi-turn
   history, `MaxContextTokens` budget + `SlidingWindow` compaction.
+- **Phase 2 — memory + knowledge** (shipped): pluggable `IKnowledgeBase` / `IAgentMemory`,
+  retrieved and injected as pre-turn grounding context (RAG).
 
-9 parity tests green. See the phased roadmap in the Polyglot Cores doc.
+14 parity tests green. See the phased roadmap in the Polyglot Cores doc.
 
 ```csharp
 // Multi-turn: pass a thread to each run and it remembers.
 var thread = agent.GetNewThread();
 await agent.RunAsync("My name is Brent.", thread);
 var r = await agent.RunAsync("What's my name?", thread);   // "Your name is Brent."
+```
+
+```csharp
+// RAG: give it a knowledge base and it grounds answers in retrieved context.
+var kb = new InMemoryKnowledgeBase();
+await kb.IngestAsync(new KnowledgeDocument("returns", "The return window is 17 days.", "policy.md"));
+
+var agent = new SmoothAgent(model, new AgentOptions { Knowledge = kb });
+var r = await agent.RunAsync("How long is the return window?");   // grounded in policy.md
 ```
 
 ## Quickstart

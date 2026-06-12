@@ -40,4 +40,24 @@ public sealed class AgentOptions
 
     /// <summary>How to shrink the conversation when it exceeds <see cref="MaxContextTokens"/>.</summary>
     public CompactionStrategy Compaction { get; set; } = CompactionStrategy.SlidingWindow;
+
+    /// <summary>
+    /// Optional knowledge store. When set, the agent retrieves the top
+    /// <see cref="KnowledgeTopK"/> hits for the user's message and injects them as grounding
+    /// context before answering (RAG). Mirrors the Rust engine's <c>knowledge</c>.
+    /// </summary>
+    public IKnowledgeBase? Knowledge { get; set; }
+
+    /// <summary>How many knowledge hits to inject per turn.</summary>
+    public int KnowledgeTopK { get; set; } = 4;
+
+    /// <summary>
+    /// Optional long-/short-term memory. When set, the agent recalls the top
+    /// <see cref="MemoryTopK"/> relevant memories for the user's message and injects them as
+    /// context. Mirrors the Rust engine's <c>memory</c>.
+    /// </summary>
+    public IAgentMemory? Memory { get; set; }
+
+    /// <summary>How many recalled memories to inject per turn.</summary>
+    public int MemoryTopK { get; set; } = 4;
 }

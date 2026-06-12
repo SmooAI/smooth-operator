@@ -84,8 +84,11 @@ ships green parity tests before the next starts.
   history across turns; `MaxContextTokens` budget with a `SlidingWindow` compaction
   strategy (preserves system + latest user). Parity tests: multi-turn continuity;
   compaction trims old messages under budget.
-- **Phase 2 — memory + knowledge**: pluggable `IAgentMemory` / `IKnowledgeBase`,
-  pre-turn context injection.
+- **Phase 2 — memory + knowledge** *(shipped)*: pluggable `IKnowledgeBase` /
+  `IAgentMemory` (with deterministic in-memory lexical impls); the agent retrieves
+  the top-K hits for the user's message and injects them as grounding context before
+  answering (RAG). Parity tests: ranked retrieval, knowledge + memory injection,
+  no-hit injects nothing.
 - **Phase 3 — checkpointing + resume**: `ICheckpointStore` (in-memory → file → SQLite),
   resume-or-new.
 - **Phase 4 — HITL**: `IHumanGate` confirmation hook, pause on write tools, resume.
