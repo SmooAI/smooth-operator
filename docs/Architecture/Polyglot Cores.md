@@ -89,8 +89,11 @@ ships green parity tests before the next starts.
   the top-K hits for the user's message and injects them as grounding context before
   answering (RAG). Parity tests: ranked retrieval, knowledge + memory injection,
   no-hit injects nothing.
-- **Phase 3 — checkpointing + resume**: `ICheckpointStore` (in-memory → file → SQLite),
-  resume-or-new.
+- **Phase 3 — checkpointing + resume** *(shipped)*: `ICheckpointStore` +
+  `CheckpointStrategy` (Never/AfterEachIteration/AfterToolCall); the agent snapshots the
+  durable conversation during a run, and `ResumeThreadAsync` rebuilds a thread from its
+  latest checkpoint (resume-or-new). `InMemoryCheckpointStore` ships; file/SQLite/Postgres
+  next. Parity tests: store ops, checkpoint-after-tool-call, resume-across-restart.
 - **Phase 4 — HITL**: `IHumanGate` confirmation hook, pause on write tools, resume.
 - **Phase 5 — cast / subagents**: `OperatorRole` clearance, dispatch-subagent tool,
   isolated sidekick transcripts.

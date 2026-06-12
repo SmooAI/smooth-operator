@@ -63,6 +63,7 @@ public sealed class SmoothAgent
             Accumulate(usage, response.Usage);
             working.AddRange(response.Messages);
             newThisTurn.AddRange(response.Messages);
+            await MaybeCheckpointAsync(thread, newThisTurn, iterations, CheckpointStrategy.AfterEachIteration, cancellationToken).ConfigureAwait(false);
 
             var calls = ExtractToolCalls(response.Messages);
             if (calls.Count == 0 || iterations >= _options.MaxIterations)
@@ -73,6 +74,7 @@ public sealed class SmoothAgent
             var toolMessage = await ExecuteToolsAsync(calls, cancellationToken).ConfigureAwait(false);
             working.Add(toolMessage);
             newThisTurn.Add(toolMessage);
+            await MaybeCheckpointAsync(thread, newThisTurn, iterations, CheckpointStrategy.AfterToolCall, cancellationToken).ConfigureAwait(false);
         }
 
         thread?.AddRange(newThisTurn);
@@ -113,6 +115,7 @@ public sealed class SmoothAgent
             var response = updates.ToChatResponse();
             working.AddRange(response.Messages);
             newThisTurn.AddRange(response.Messages);
+            await MaybeCheckpointAsync(thread, newThisTurn, iterations, CheckpointStrategy.AfterEachIteration, cancellationToken).ConfigureAwait(false);
 
             var calls = ExtractToolCalls(response.Messages);
             if (calls.Count == 0 || iterations >= _options.MaxIterations)
@@ -123,9 +126,47 @@ public sealed class SmoothAgent
             var toolMessage = await ExecuteToolsAsync(calls, cancellationToken).ConfigureAwait(false);
             working.Add(toolMessage);
             newThisTurn.Add(toolMessage);
+            await MaybeCheckpointAsync(thread, newThisTurn, iterations, CheckpointStrategy.AfterToolCall, cancellationToken).ConfigureAwait(false);
         }
 
         thread?.AddRange(newThisTurn);
+    }
+
+    /// <summary>
+    /// Reconstruct a thread from its latest checkpoint (or a fresh one with that id if there's
+    /// no checkpoint / no store). The C# analog of the Rust engine's <c>resume_or_new</c>.
+    /// </summary>
+    public async Task<SmoothAgentThread> ResumeThreadAsync(string threadId, CancellationToken cancellationToken = default)
+    {
+        var thread = new SmoothAgentThread(threadId);
+        if (_options.CheckpointStore is not null)
+        {
+            var checkpoint = await _options.CheckpointStore.LoadLatestAsync(threadId, cancellationToken).ConfigureAwait(false);
+            if (checkpoint is not null)
+            {
+                thread.AddRange(checkpoint.Messages);
+            }
+        }
+        return thread;
+    }
+
+    private async Task MaybeCheckpointAsync(
+        SmoothAgentThread? thread,
+        IReadOnlyList<ChatMessage> newThisTurn,
+        int iteration,
+        CheckpointStrategy trigger,
+        CancellationToken cancellationToken)
+    {
+        if (thread is null || _options.CheckpointStore is null || _options.Checkpoint != trigger)
+        {
+            return;
+        }
+
+        // Snapshot the durable conversation up to this point (prior thread history + this turn
+        // so far). A copy, so later compaction of the working list can't corrupt it.
+        var snapshot = thread.Messages.Concat(newThisTurn).ToList();
+        var checkpoint = new Checkpoint(Guid.NewGuid().ToString("n"), thread.Id, snapshot, iteration, DateTimeOffset.UtcNow);
+        await _options.CheckpointStore.SaveAsync(checkpoint, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<List<ChatMessage>> SeedConversationAsync(string userMessage, SmoothAgentThread? thread, CancellationToken cancellationToken)

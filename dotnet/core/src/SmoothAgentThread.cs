@@ -14,6 +14,15 @@ public sealed class SmoothAgentThread
 {
     private readonly List<ChatMessage> _messages = new();
 
+    /// <summary>Create a thread. Pass an existing id to resume one (e.g. from a checkpoint).</summary>
+    public SmoothAgentThread(string? id = null)
+    {
+        Id = string.IsNullOrEmpty(id) ? Guid.NewGuid().ToString("n") : id;
+    }
+
+    /// <summary>Stable id for this conversation — the key checkpoints are stored under.</summary>
+    public string Id { get; }
+
     /// <summary>The accumulated history, oldest first (no system prompt).</summary>
     public IReadOnlyList<ChatMessage> Messages => _messages;
 

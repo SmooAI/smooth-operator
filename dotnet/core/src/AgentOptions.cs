@@ -60,4 +60,14 @@ public sealed class AgentOptions
 
     /// <summary>How many recalled memories to inject per turn.</summary>
     public int MemoryTopK { get; set; } = 4;
+
+    /// <summary>
+    /// Optional checkpoint store. When set (and a thread is in use), the agent snapshots the
+    /// conversation during a run per <see cref="Checkpoint"/> so it can be resumed after a
+    /// crash. Mirrors the Rust engine's <c>checkpoint_store</c>.
+    /// </summary>
+    public ICheckpointStore? CheckpointStore { get; set; }
+
+    /// <summary>When to write checkpoints during a run.</summary>
+    public CheckpointStrategy Checkpoint { get; set; } = CheckpointStrategy.AfterToolCall;
 }

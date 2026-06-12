@@ -25,8 +25,10 @@ fixtures + eval scenarios**, not by identical type shapes — see
   history, `MaxContextTokens` budget + `SlidingWindow` compaction.
 - **Phase 2 — memory + knowledge** (shipped): pluggable `IKnowledgeBase` / `IAgentMemory`,
   retrieved and injected as pre-turn grounding context (RAG).
+- **Phase 3 — checkpointing + resume** (shipped): `ICheckpointStore` + `CheckpointStrategy`;
+  snapshot a run and `ResumeThreadAsync` to rebuild a thread after a crash.
 
-14 parity tests green. See the phased roadmap in the Polyglot Cores doc.
+18 parity tests green. See the phased roadmap in the Polyglot Cores doc.
 
 ```csharp
 // Multi-turn: pass a thread to each run and it remembers.
