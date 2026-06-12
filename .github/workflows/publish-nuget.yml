@@ -16,7 +16,8 @@
 #      DRY RUN (packs + validates, pushes nothing). Set dry_run=false to publish.
 #   2. Tag: push a tag matching `nuget-v*` (e.g. `nuget-v0.1.0`) — always real.
 #
-# Auth: the org-level secret NUGET_API_KEY.
+# Auth: the org-level secret SMOOAI_NUGET_API_KEY (visibility=all, matching
+# SMOOAI_NPM_TOKEN / SMOOAI_CARGO_REGISTRY_TOKEN / SMOOAI_PYPI_TOKEN).
 # ─────────────────────────────────────────────────────────────────────────────
 name: Publish NuGet
 
@@ -66,7 +67,7 @@ jobs:
 
             - name: Push to NuGet (or dry-run)
               env:
-                  NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+                  NUGET_API_KEY: ${{ secrets.SMOOAI_NUGET_API_KEY }}
                   DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'true' || 'false' }}
               run: |
                   ls -la dist
