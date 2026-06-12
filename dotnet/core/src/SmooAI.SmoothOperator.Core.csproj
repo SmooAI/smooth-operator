@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SmooAI.SmoothOperator.Core</RootNamespace>
+    <AssemblyName>SmooAI.SmoothOperator.Core</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Description>Native C# implementation of the smooth-operator agent engine — the in-process, MEAI/IChatClient-based sibling of the Rust smooai-smooth-operator-core. Learns from Microsoft Agent Framework idioms.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The engine is built ON Microsoft.Extensions.AI: IChatClient is the model
+         abstraction, ChatMessage/AIFunction/FunctionCallContent the conversation +
+         tool types. Any MEAI provider plugs in; a normal C# method becomes a tool. -->
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="9.7.1" />
+  </ItemGroup>
+
+</Project>

@@ -2,6 +2,10 @@
   <Folder Name="/src/">
     <Project Path="src/SmooAI.SmoothOperator.csproj" />
   </Folder>
+  <Folder Name="/core/">
+    <Project Path="core/src/SmooAI.SmoothOperator.Core.csproj" />
+    <Project Path="core/tests/SmooAI.SmoothOperator.Core.Tests.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SmooAI.SmoothOperator.Tests.csproj" />
   </Folder>

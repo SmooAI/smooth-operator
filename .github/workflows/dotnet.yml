@@ -1,0 +1,39 @@
+# Build + test the .NET solution (the protocol client AND the C# agent-engine core).
+# Parity for the C# core is enforced here — its Phase-N tests must stay green. Live
+# E2E / gateway tests are SkippableFact and skip cleanly without SMOOTH_AGENT_E2E +
+# SMOOAI_GATEWAY_KEY, so this job needs no secrets.
+name: .NET
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - 'dotnet/**'
+            - 'spec/**'
+            - '.github/workflows/dotnet.yml'
+    pull_request:
+        paths:
+            - 'dotnet/**'
+            - 'spec/**'
+            - '.github/workflows/dotnet.yml'
+
+jobs:
+    build-test:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: '8.0.x'
+
+            - name: Restore
+              run: dotnet restore dotnet/SmooAI.SmoothOperator.slnx
+
+            - name: Build
+              run: dotnet build dotnet/SmooAI.SmoothOperator.slnx --configuration Release --no-restore
+
+            - name: Test
+              run: dotnet test dotnet/SmooAI.SmoothOperator.slnx --configuration Release --no-build --verbosity normal

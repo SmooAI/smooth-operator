@@ -40,6 +40,7 @@ Start here to understand *what it is* and *why it's shaped this way*.
 ### 🏛 Architecture — the deep design docs
 
 - [[Architecture Overview]] — system design, the agent pipeline, how it consumes the engine.
+- [[Polyglot Cores]] — native per-language engine implementations (C# first, learning from Microsoft Agent Framework); the shared parity contract.
 - [[Storage Adapters]] — the `StorageAdapter` seam; Postgres and DynamoDB/S3 Vectors designs.
 - [[Ingestion Pipeline]] — connectors, chunking, the embedder seam, idempotency.
 - [[Indexing]] — background / incremental indexing on a schedule.
