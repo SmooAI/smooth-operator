@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
 ## An agent turn
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6','signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram
   participant R as KnowledgeChatRuntime
   participant A as Agent
@@ -141,6 +142,7 @@ Both implement the same trait and pass the **same testcontainers conformance sui
 > **Nothing here is vibe-coded — it's verified against a real LLM gateway.**
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart TD
   J["🎯 LLM-as-judge evals (smooai-smooth-operator-evals)"]
   E["🌐 Live E2E (e2e_llm_smoo_ai.rs — real llm.smoo.ai turns)"]

@@ -1,25 +1,20 @@
-<p align="center"><img src="./assets/smooth-logo.svg" alt="Smooth" width="360" /></p>
-
-<h1 align="center">smooth-operator</h1>
-
 <p align="center">
-  <strong>An open-source, serverless-native, polyglot AI agent service — knowledge chat, tools, and multi-participant conversations over one schema-driven WebSocket protocol.</strong>
+  <a href="https://smoo.ai"><img src=".github/banner.png" alt="smooth-operator — Polyglot AI agent service. One protocol." width="100%" /></a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=flat-square" alt="Smoo AI">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=flat-square" alt="license"></a>
+  <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
+  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/tests-126_passing-00A6A6?style=flat-square" alt="126 tests passing">
   <img src="https://img.shields.io/badge/serverless_·_polyglot_·_TDD-FF6B6C?style=flat-square" alt="serverless · polyglot · TDD">
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-020618?style=flat-square" alt="lom.smoo.ai"></a>
 </p>
 
 <p align="center">
-  <a href="#what-is-this">What it is</a> ·
-  <a href="#30-second-quickstart">Quickstart</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#deploy">Deploy</a> ·
-  <a href="#-part-of-smoo-ai">Platform</a>
+  <a href="#what-is-this"><b>What it is</b></a> &nbsp;·&nbsp; <a href="#30-second-quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp; <a href="#architecture"><b>Architecture</b></a> &nbsp;·&nbsp; <a href="#deploy"><b>Deploy</b></a> &nbsp;·&nbsp; <a href="#-part-of-smoo-ai"><b>Platform</b></a>
 </p>
 
 ---
@@ -163,34 +158,36 @@ What it **keeps**: hybrid (vector + keyword) retrieval with reranking, a clean C
 One protocol in front; a swappable engine and storage behind it. A client never names a language, a backend, or whether the engine is embedded or remote — it only ever sees the protocol.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart LR
-  subgraph Clients["Clients — 5 native, 1 protocol"]
-    TS["TypeScript"]
-    GO["Go"]
-    NET[".NET"]
-    PY["Python"]
-    RS["Rust"]
+  CLIENTS["5 native clients<br/>TS · Go · .NET · Python · Rust"]
+  CLIENTS -->|"WebSocket protocol"| SVC
+
+  subgraph SVC["smooth-operator · service"]
+    PROTO["Protocol layer"] --> RT["KnowledgeChatRuntime"]
   end
 
-  Clients -->|"schema-driven<br/>WebSocket protocol"| SVC
+  RT -->|"Agent::run"| ENGINE["smooth-operator-core<br/>Rust engine"]
+  ENGINE -->|"LlmProvider"| GW[("llm.smoo.ai<br/>or BYO gateway")]
+  RT -->|"StorageAdapter"| KB[("Knowledge + conversations<br/>pgvector / DynamoDB + S3 Vectors")]
 
-  subgraph SVC["smooth-operator (service)"]
-    PROTO["Protocol layer<br/>(actions ↔ events)"]
-    RT["KnowledgeChatRuntime<br/>(a smooth-operator Workflow)"]
-    PROTO --> RT
-  end
-
-  RT -->|"Agent::run loop"| ENGINE["smooth-operator-core<br/>(Rust engine:<br/>Agent · Tool · Memory · HITL · cost)"]
-  ENGINE -->|"LlmProvider"| GW["llm.smoo.ai<br/>(or BYO gateway)"]
-
-  RT -->|"StorageAdapter trait"| KB["Knowledge + conversations<br/>(hybrid retrieval)"]
-  KB --> PG[("Postgres + pgvector<br/>(k8s)")]
-  KB --> DDB[("DynamoDB + S3 Vectors<br/>(AWS)")]
+  classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+  classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+  class ENGINE warm
+  class GW,KB teal
 ```
 
 ### An agent turn, end to end
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6',
+  'signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c',
+  'fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram
   participant C as Client
   participant S as Service
@@ -215,6 +212,9 @@ sequenceDiagram
 ### Protocol lifecycle (incl. HITL)
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 stateDiagram-v2
   [*] --> Connected: connect
   Connected --> SessionOpen: create_session
@@ -237,12 +237,19 @@ Full action/event tables, the `AgentEvent` mapping, and connection-state keys ar
 > **Nothing here is vibe-coded — it's verified against a real LLM gateway.** Substring tests prove a reply *contains* the right number; an LLM-as-judge proves the agent *reasoned* its way there and didn't hallucinate. We run both.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 flowchart TD
-  J["🎯 LLM-as-judge quality evals<br/>(real llm.smoo.ai, rubric-scored 1–5)"]
-  E["🌐 Live cross-language E2E<br/>(all 5 clients drive real agent turns over WebSocket)"]
-  C["🧪 Testcontainers conformance<br/>(pgvector + DynamoDB-Local, same suite both backends)"]
-  U["⚡ Unit tests<br/>(pure logic: chunker, SSRF guard, parsers, can_access matrix)"]
-  J --> E --> C --> U
+  U["Unit tests<br/>chunker · SSRF guard · can_access"] --> C
+  C["Testcontainers conformance<br/>pgvector + DynamoDB-Local"] --> E
+  E["Live cross-language E2E<br/>all 5 clients, real WebSocket turns"] --> J
+  J["LLM-as-judge quality evals<br/>real gateway, rubric-scored 1–5"]
+
+  classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+  classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+  class U teal
+  class J warm
 ```
 
 ### The numbers
@@ -282,21 +289,27 @@ cargo test -p smooai-smooth-operator-evals --test llm_judge -- --nocapture --tes
 Two first-class paths from one codebase. The `StorageAdapter` seam is what makes the same agent code run on either — application code never names a backend.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart TB
-  CODE["smooth-operator<br/>(one codebase)"]
+  CODE["smooth-operator<br/>one codebase"]
   CODE --> SST
   CODE --> K8S
 
-  subgraph SST["AWS serverless — default"]
-    AGW["API Gateway<br/>WebSocket"] --> LAM["Rust Lambda"]
-    LAM --> DDB[("DynamoDB")]
-    LAM --> S3V[("S3 Vectors")]
+  subgraph SST["AWS serverless · default"]
+    LAM["API GW WS → Rust Lambda"] --> AWSDB[("DynamoDB + S3 Vectors")]
   end
 
-  subgraph K8S["Kubernetes — self-host"]
-    ING["WS Ingress"] --> POD["Deployment / pods"]
-    POD --> PG[("Postgres + pgvector")]
+  subgraph K8S["Kubernetes · self-host"]
+    POD["WS Ingress → pods"] --> PG[("Postgres + pgvector")]
   end
+
+  classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+  classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+  class CODE warm
+  class AWSDB,PG teal
 ```
 
 ```bash
@@ -372,14 +385,12 @@ Don't want to operate it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** runs s
 
 ## 🧩 Part of Smoo AI {#part-of-smoo-ai}
 
-smooth-operator is part of the [Smoo AI](https://smoo.ai) platform — an AI-powered business platform with AI built into every product. It's the service layer of the agent stack, alongside:
+smooth-operator is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product: CRM, customer support, campaigns, field service, observability, and developer tools.
 
-- [smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) — the Rust agent engine this service wraps
-- [@smooai/deploy](https://github.com/SmooAI/deploy) — the shared SST + Helm deploy primitives both paths use
-- [smooth](https://github.com/SmooAI/smooth) — the Smoo AI CLI (`th`) and orchestration platform
-- [**lom.smoo.ai**](https://lom.smoo.ai) — smooth-operator run for you as a managed, multi-tenant service
-
-See [github.com/SmooAI](https://github.com/SmooAI) for more open source.
+- 🚀 **smooth-operator on the platform** — [smoo.ai/th](https://smoo.ai/th)
+- 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
+- 🧩 **Sibling packages** — [smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) (the Rust engine this wraps), [@smooai/deploy](https://github.com/SmooAI/deploy), [smooth](https://github.com/SmooAI/smooth) (the `th` CLI)
+- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
 
 ## 🤝 Contributing
 

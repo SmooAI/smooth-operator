@@ -104,6 +104,7 @@ Start here to understand *what it is* and *why it's shaped this way*.
 ## At a glance
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart LR
   subgraph Clients["5 native clients · 1 protocol"]
     TS["TypeScript"]; GO["Go"]; NET[".NET"]; PY["Python"]; RS["Rust"]

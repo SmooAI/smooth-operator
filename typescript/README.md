@@ -78,6 +78,7 @@ const final = await turn; // EventualResponse — the authoritative terminal sta
 ```
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6','signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram
   participant App
   participant C as SmoothAgentClient
@@ -117,6 +118,7 @@ v.validateEvent(incomingEvent); // { valid, errors } — ajv-compiled from the s
 This is one of five native clients generated from the same protocol. Need C# / Microsoft.Extensions.AI? The **`IChatClient` facade** lives in the [.NET client](../dotnet/README.md) (it's a .NET-ecosystem feature). This TypeScript package is the native streaming client.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart LR
   SPEC["spec/ (JSON Schema)"] --> TS["TypeScript<br/>@smooai/smooth-operator"]
   SPEC --> GO["Go"]
@@ -132,6 +134,7 @@ flowchart LR
 > **Nothing here is vibe-coded — it's verified against a real LLM gateway.**
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart TD
   J["🎯 LLM-as-judge quality evals (Rust harness)"]
   E["🌐 Live cross-language E2E — this client boots the real server + drives a real claude-haiku-4-5 turn"]

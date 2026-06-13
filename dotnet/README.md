@@ -111,6 +111,7 @@ Why this matters:
 ## Polyglot — one spec, five clients
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart LR
   SPEC["spec/ (JSON Schema)"] --> NET[".NET<br/>SmooAI.SmoothOperator<br/>(+ MEAI IChatClient facade)"]
   SPEC --> TS["TypeScript"]
@@ -126,6 +127,7 @@ flowchart LR
 > **Nothing here is vibe-coded — it's verified against a real LLM gateway.**
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart TD
   J["🎯 LLM-as-judge quality evals (Rust harness)"]
   E["🌐 Live cross-language E2E — this client boots the real server + drives a real claude-haiku-4-5 turn"]
