@@ -70,57 +70,42 @@ builder.Services.AddSingleton(new TokenAccessResolver(new AuthOptions
     Hs256Secret = Get("SMOOTH_JWT_HS256_SECRET"),
 }));
 
+// ── Repo ingestion service: parses SMOOTH_GITHUB_REPOS into RepoSpecs, ingests each into the
+//    ACL-aware store stamped with its github:owner/repo group. Registered so it serves both the
+//    startup ingest AND the POST /admin/reindex endpoint (re-index without a restart). ──
+var repos = Get("SMOOTH_GITHUB_REPOS")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    .Select(RepoSpec.Parse)
+    .ToArray();
+var githubToken = Get("SMOOTH_GITHUB_TOKEN");
+builder.Services.AddSingleton(sp =>
+{
+    var http = new HttpClient();
+    http.DefaultRequestHeaders.UserAgent.ParseAdd("smooth-operator-server");
+    if (!string.IsNullOrEmpty(githubToken))
+    {
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", githubToken);
+    }
+    return new RepoIngestionService(repos, knowledge, spec => new GitHubConnector(spec.Owner, spec.Repo, http, spec.GitRef));
+});
+
 builder.Services.AddSmoothOperatorServer();
 
 var app = builder.Build();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", model, auth = authMode.ToString().ToLowerInvariant() }));
 app.MapSmoothOperatorWebSocket("/ws");
+app.MapSmoothOperatorAdmin();
 
-// ── Background ingestion of configured GitHub repos (doesn't block readiness) ──
-var repos = Get("SMOOTH_GITHUB_REPOS").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+// ── Startup ingestion of configured repos (background — doesn't block readiness). The same
+//    service backs POST /admin/reindex, so docs can be re-indexed later without a restart. ──
 if (repos.Length > 0)
 {
-    _ = IngestReposAsync(repos, Get("SMOOTH_GITHUB_TOKEN"), knowledge, app.Logger);
+    var ingestion = app.Services.GetRequiredService<RepoIngestionService>();
+    _ = ingestion.ReindexAllAsync();
 }
 
 app.Run();
-
-static async Task IngestReposAsync(string[] repos, string token, IAclKnowledge knowledge, ILogger logger)
-{
-    using var http = new HttpClient();
-    http.DefaultRequestHeaders.UserAgent.ParseAdd("smooth-operator-server");
-    if (!string.IsNullOrEmpty(token))
-    {
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-    }
-
-    foreach (var spec in repos)
-    {
-        var (owner, repo, gitRef) = ParseRepo(spec);
-        // Each repo's docs are entitled to the group `github:owner/repo` — a user's JWT/Okta groups
-        // must include it (or the doc be public) to retrieve them.
-        var aclGroup = $"github:{owner}/{repo}";
-        var pipeline = new IngestPipeline(knowledge.WithAcl(DocumentAcl.ForGroups(aclGroup)));
-        try
-        {
-            var result = await pipeline.IngestAsync(new GitHubConnector(owner, repo, http, gitRef));
-            logger.LogInformation("Ingested {Repo}: {Docs} docs, {Chunks} chunks (acl {Acl})", spec, result.Documents, result.Chunks, aclGroup);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to ingest {Repo}", spec);
-        }
-    }
-}
-
-static (string Owner, string Repo, string Ref) ParseRepo(string spec)
-{
-    var atSplit = spec.Split('@', 2);
-    var gitRef = atSplit.Length > 1 ? atSplit[1] : "main";
-    var slashSplit = atSplit[0].Split('/', 2);
-    return (slashSplit[0], slashSplit.Length > 1 ? slashSplit[1] : string.Empty, gitRef);
-}
 
 static HttpClient EmbeddingHttpClient(string gatewayUrl, string key)
 {

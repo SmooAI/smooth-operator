@@ -52,3 +52,10 @@ public docs only (fail-closed).
 - `GET /health` — liveness + the resolved model/auth mode.
 - `WS /ws` — the conversation protocol (`create_conversation_session`, `send_message`, …). The
   `@smooai/chat-widget` and the polyglot clients connect here.
+- `GET /admin/health` — ungated admin liveness.
+- `GET /admin/me` — the resolved identity (whoami). Auth-gated (`Authorization: Bearer …`).
+- `GET /admin/connectors` — the configured repos. Auth-gated.
+- `POST /admin/reindex` — re-ingest every configured repo **without a restart**. Auth-gated.
+
+Admin endpoints (except `/admin/health`) are **fail-closed**: a request that doesn't resolve to a
+non-anonymous identity gets `401`. In `none` auth mode the admin API is effectively closed.

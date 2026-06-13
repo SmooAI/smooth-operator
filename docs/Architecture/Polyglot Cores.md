@@ -198,7 +198,18 @@ client's `ProtocolValidator`).
   gateway-no-key→lexical fallback, never an unauth call). Wired `TurnRunner` (fetch a wider candidate
   pool, rerank down to top-K) → `FrameDispatcher` → AspNetCore DI → host config, proven by a
   real-WebSocket integration test (a reversing reranker visibly reorders the citation path). *Still
-  open here:* tool/HITL `stream_chunk`s, the `/admin/*` API.
+  open here:* tool/HITL `stream_chunk`s.
+- **Server Phase 5 — `/admin/*` API** *(shipped)*: the auth-gated admin HTTP API (C# analog of the
+  Rust `/admin` router). `MapSmoothOperatorAdmin()` mounts `/admin/health` (ungated liveness),
+  `/admin/me` (whoami), `/admin/connectors` (the configured repos), and `POST /admin/reindex`
+  (re-ingest every configured repo **without a restart**). Everything except health is **fail-closed**
+  via `TokenAccessResolver` reading `Authorization: Bearer …` (or `?token=`) — 401 on an anonymous/unresolved
+  identity, mirroring the Rust `require_role`. Ingestion was factored into a registered
+  `RepoIngestionService` (injectable connector factory → testable with `MockConnector`; per-repo
+  errors captured, not thrown) that backs both startup ingest and `/admin/reindex`. Tested over real
+  HTTP (TestServer): health ungated, `/admin/me` 401→200, `/admin/reindex` 401→200 actually driving
+  ingestion. *Still open:* persistent connector CRUD + document-sets/indexing-runs stores (the full
+  Rust admin surface), and a live-gateway integration test.
 - **Server Phase 6 — deployable host** *(shipped)*: `SmooAI.SmoothOperator.Server.Host` — a
   runnable ASP.NET app that wires the model (OpenAI-compatible gateway), storage (Postgres or
   in-memory), auth (jwt/trusted/none), and **startup GitHub ingestion** (each repo's docs stamped
@@ -209,8 +220,8 @@ client's `ProtocolValidator`).
   when a database is configured, with the ACL leak contract asserted against **both** the
   in-memory and Postgres ACL stores. A **`GatewayEmbedder`** (OpenAI-compatible `/embeddings`)
   gives the durable store real semantic vectors when a gateway key is present (deterministic
-  fallback otherwise); unit-tested against a fake HTTP handler. *Still open:* the `/admin/*` API,
-  and a live-gateway integration test.
+  fallback otherwise); unit-tested against a fake HTTP handler. *Still open:* a live-gateway
+  integration test.
 
 ## Adding the Nth language core
 

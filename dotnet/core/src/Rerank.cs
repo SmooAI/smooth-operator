@@ -1,7 +1,7 @@
 namespace SmooAI.SmoothOperator.Core;
 
 /// <summary>
-/// Reorder retrieval candidates by query relevance, returning at most <paramref name="topK"/>,
+/// Reorder retrieval candidates by query relevance, returning at most <c>topK</c>,
 /// best first. The C# analog of the Rust engine's <c>Reranker</c> trait — the opt-in
 /// post-retrieval reorder stage. Implementations must be total: an empty candidate set yields an
 /// empty result, and <c>topK == 0</c> yields an empty result.
@@ -33,7 +33,7 @@ public sealed class NoopReranker : IReranker
 /// Deterministic, network-free lexical reranker. Scores each candidate by how much of the query's
 /// vocabulary its chunk contains — a small BM25-ish lexical signal (term-frequency saturated and
 /// length-normalized), computed entirely offline. No embeddings, no network, no cost, fully
-/// reproducible — the rerank analog of the <see cref="DeterministicEmbedder"/>'s role on the dense
+/// reproducible — the rerank analog of the <c>DeterministicEmbedder</c>'s role on the dense
 /// path. Ties (and zero-overlap candidates) keep their upstream order (stable sort), so a no-signal
 /// query degrades to the upstream ranking rather than shuffling. Mirrors the Rust
 /// <c>LexicalReranker</c> (score = Σ tf_saturated(q) / (1 + ln(1 + chunk_len))).
