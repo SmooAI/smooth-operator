@@ -1,3 +1,7 @@
+<p align="center">
+  <a href="https://smoo.ai"><img src="https://smoo.ai/images/logo/logo.svg" alt="Smoo AI" width="200" /></a>
+</p>
+
 # smooth-operator — Documentation Home
 
 > **This `docs/` folder is an [Obsidian](https://obsidian.md) vault.** Open the
@@ -5,6 +9,8 @@
 > names); every page also
 > renders on GitHub. This page is the **Map of Content (MOC)** — the front door
 > to the whole system. New here? Read [[Overview]], then [[Getting Started]].
+
+smooth-operator is part of the [Smoo AI](https://smoo.ai) platform — AI built into every product.
 
 **smooth-operator** is an open-source, serverless-native, **polyglot AI agent
 service**: knowledge chat, tool-calling, and multi-participant conversations over
@@ -113,3 +119,9 @@ See [[Overview]] for the narrative, [[Architecture Overview]] for the full desig
 - [`console/`](../console/README.md) — the Next.js management console.
 - [`rust/examples/dev-support/`](../rust/examples/dev-support/README.md) — the showcase agent.
 - [`spec/`](../spec) — the language-neutral wire protocol (JSON Schema).
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>

@@ -1,13 +1,30 @@
 <p align="center"><img src="./assets/smooth-logo.svg" alt="Smooth" width="360" /></p>
 
-<p align="center"><strong>An open-source, serverless-native, polyglot AI agent service</strong> — knowledge chat, tools, and multi-participant conversations over one schema-driven WebSocket protocol.</p>
+<h1 align="center">smooth-operator</h1>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/tests-126%20passing-success" alt="126 tests passing" />
-  <img src="https://img.shields.io/badge/serverless%20%C2%B7%20polyglot%20%C2%B7%20TDD-6f42c1" alt="serverless · polyglot · TDD" />
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-0aa" alt="lom.smoo.ai" /></a>
+  <strong>An open-source, serverless-native, polyglot AI agent service — knowledge chat, tools, and multi-participant conversations over one schema-driven WebSocket protocol.</strong>
 </p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=flat-square" alt="Smoo AI">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=flat-square" alt="license"></a>
+  <img src="https://img.shields.io/badge/tests-126_passing-00A6A6?style=flat-square" alt="126 tests passing">
+  <img src="https://img.shields.io/badge/serverless_·_polyglot_·_TDD-FF6B6C?style=flat-square" alt="serverless · polyglot · TDD">
+  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-020618?style=flat-square" alt="lom.smoo.ai"></a>
+</p>
+
+<p align="center">
+  <a href="#what-is-this">What it is</a> ·
+  <a href="#30-second-quickstart">Quickstart</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#deploy">Deploy</a> ·
+  <a href="#-part-of-smoo-ai">Platform</a>
+</p>
+
+---
+
+> **smooth-operator** gives you hybrid retrieval (dense + sparse + rerank), durable agent checkpoints, human-in-the-loop approvals, and multi-participant conversations — deployed with one command to AWS serverless *or* Kubernetes. Built in the open, test-first.
 
 ---
 
@@ -353,6 +370,27 @@ Don't want to operate it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** runs s
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | Dual SST / k8s deploy + the shared `SmooAI/deploy` package |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased build plan + current status |
 
-## License
+## 🧩 Part of Smoo AI {#part-of-smoo-ai}
 
-MIT © 2026 Smoo AI
+smooth-operator is part of the [Smoo AI](https://smoo.ai) platform — an AI-powered business platform with AI built into every product. It's the service layer of the agent stack, alongside:
+
+- [smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) — the Rust agent engine this service wraps
+- [@smooai/deploy](https://github.com/SmooAI/deploy) — the shared SST + Helm deploy primitives both paths use
+- [smooth](https://github.com/SmooAI/smooth) — the Smoo AI CLI (`th`) and orchestration platform
+- [**lom.smoo.ai**](https://lom.smoo.ai) — smooth-operator run for you as a managed, multi-tenant service
+
+See [github.com/SmooAI](https://github.com/SmooAI) for more open source.
+
+## 🤝 Contributing
+
+Built in the open, test-first. Issues and PRs welcome — see the [docs vault](docs/Home.md) for architecture, protocol, and the eval harness, and [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's queued.
+
+## 📄 License
+
+MIT © 2026 Smoo AI. See [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>
