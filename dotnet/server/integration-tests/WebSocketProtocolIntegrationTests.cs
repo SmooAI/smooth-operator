@@ -45,6 +45,68 @@ public class WebSocketProtocolIntegrationTests
         return app;
     }
 
+    private static WebApplication BuildAppWithReranker(IChatClient chat, AclKnowledgeStore knowledge, IReranker? reranker)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(chat);
+        builder.Services.AddSingleton<IAccessKnowledge>(knowledge);
+        if (reranker is not null)
+        {
+            builder.Services.AddSingleton(reranker);
+        }
+        builder.Services.AddSmoothOperatorServer();
+
+        var app = builder.Build();
+        app.MapSmoothOperatorWebSocket("/ws");
+        return app;
+    }
+
+    [Fact]
+    public async Task Reranker_ReordersCitations_OverWebSocket()
+    {
+        // Three public docs all matching the query, so three citations come back. A reranker that
+        // reverses the candidate order proves the dispatcher→runner→reranker wiring actually applies
+        // the reranker on the live chat path: the reranked citation order is the reverse of the
+        // un-reranked order (same set, different order).
+        static AclKnowledgeStore Corpus()
+        {
+            var kb = new AclKnowledgeStore();
+            kb.IngestAsync(new KnowledgeDocument("a", "Refund policy details for orders.", "a.md"), DocumentAcl.PublicAcl).GetAwaiter().GetResult();
+            kb.IngestAsync(new KnowledgeDocument("b", "Shipping policy and delivery windows.", "b.md"), DocumentAcl.PublicAcl).GetAwaiter().GetResult();
+            kb.IngestAsync(new KnowledgeDocument("c", "Privacy policy and data handling.", "c.md"), DocumentAcl.PublicAcl).GetAwaiter().GetResult();
+            return kb;
+        }
+
+        List<string> baseline;
+        await using (var app = BuildAppWithReranker(new MockChatClient().PushText("ok"), Corpus(), reranker: null))
+        {
+            await app.StartAsync();
+            baseline = await CitationSourcesAsync(app.GetTestServer(), token: null, "policy");
+            await app.StopAsync();
+        }
+
+        List<string> reranked;
+        await using (var app = BuildAppWithReranker(new MockChatClient().PushText("ok"), Corpus(), new ReversingReranker()))
+        {
+            await app.StartAsync();
+            reranked = await CitationSourcesAsync(app.GetTestServer(), token: null, "policy");
+            await app.StopAsync();
+        }
+
+        Assert.Equal(3, baseline.Count);
+        Assert.Equal(baseline.AsEnumerable().Reverse(), reranked);          // the reranker visibly reordered the citation path
+        Assert.Equal(baseline.OrderBy(s => s), reranked.OrderBy(s => s));   // and it's the same set of sources
+    }
+
+    /// <summary>A test reranker that reverses the candidate order — a visible, deterministic reorder
+    /// that proves the reranker is invoked in the pipeline (vs the no-op default).</summary>
+    private sealed class ReversingReranker : IReranker
+    {
+        public Task<IReadOnlyList<KnowledgeResult>> RerankAsync(string query, IReadOnlyList<KnowledgeResult> candidates, int topK, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<KnowledgeResult>>(candidates.Reverse().Take(topK).ToArray());
+    }
+
     [Fact]
     public async Task Acl_PrivateDoc_OnlyReachesEntitledUser_OverWebSocket()
     {

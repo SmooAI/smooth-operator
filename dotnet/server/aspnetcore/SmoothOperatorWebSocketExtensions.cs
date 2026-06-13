@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server.AspNetCore;
 
@@ -56,7 +57,8 @@ public static class SmoothOperatorWebSocketExtensions
             services.GetRequiredService<ISessionStore>(),
             services.GetRequiredService<IChatClient>(),
             services.GetService<IAccessKnowledge>(),
-            access);
+            access,
+            reranker: services.GetService<IReranker>()); // null unless the host registered one (rerank is opt-in)
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)

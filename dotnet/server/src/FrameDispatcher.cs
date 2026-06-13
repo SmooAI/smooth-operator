@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
+using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server;
 
@@ -18,6 +19,7 @@ public sealed class FrameDispatcher
     private readonly ISessionStore _store;
     private readonly IChatClient _chatClient;
     private readonly IAccessKnowledge? _knowledge;
+    private readonly IReranker? _reranker;
     private readonly AccessContext _access;
     private readonly string? _systemPrompt;
 
@@ -26,13 +28,15 @@ public sealed class FrameDispatcher
         IChatClient chatClient,
         IAccessKnowledge? knowledge = null,
         AccessContext? access = null,
-        string? systemPrompt = null)
+        string? systemPrompt = null,
+        IReranker? reranker = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _knowledge = knowledge;
         _access = access ?? AccessContext.Anonymous;
         _systemPrompt = systemPrompt;
+        _reranker = reranker;
     }
 
     public async Task DispatchAsync(string rawFrame, Action<JsonObject> sink, CancellationToken cancellationToken = default)
@@ -137,7 +141,7 @@ public sealed class FrameDispatcher
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker);
         var result = await runner.RunAsync(session.ConversationId, requestId, message, sink, cancellationToken).ConfigureAwait(false);
 
         // 3. Terminal eventual_response.

@@ -48,6 +48,20 @@ IAclKnowledge knowledge = string.IsNullOrEmpty(databaseUrl)
     : await PostgresAclKnowledgeStore.CreateAsync(ToNpgsqlConnectionString(databaseUrl), embedder);
 builder.Services.AddSingleton<IAccessKnowledge>(knowledge);
 
+// ── Reranker: opt-in post-retrieval reorder (SMOOTH_AGENT_RERANK=gateway|lexical|off). Off by
+//    default, so retrieval order is unchanged unless explicitly enabled. The gateway cross-encoder
+//    is used only when a key is present; otherwise it falls back to the offline lexical reranker. ──
+var rerankMode = RerankSelection.ParseMode(Get("SMOOTH_AGENT_RERANK"));
+var reranker = RerankSelection.Build(
+    rerankMode,
+    hasGatewayKey: !string.IsNullOrEmpty(gatewayKey),
+    Get("SMOOTH_RERANK_MODEL", RerankSelection.DefaultRerankModel),
+    () => EmbeddingHttpClient(gatewayUrl, gatewayKey)); // same gateway base + auth as embeddings
+if (reranker is not null)
+{
+    builder.Services.AddSingleton(reranker);
+}
+
 // ── Auth: jwt (verified) / trusted (proxied) / none ──
 var authMode = Enum.TryParse<AuthMode>(Get("SMOOTH_AUTH_MODE", "none"), ignoreCase: true, out var mode) ? mode : AuthMode.None;
 builder.Services.AddSingleton(new TokenAccessResolver(new AuthOptions

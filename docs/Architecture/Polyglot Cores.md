@@ -189,7 +189,16 @@ client's `ProtocolValidator`).
   `acl_chat_leak` suite (anonymous → public-only, entitled → private, unentitled → no leak) +
   forged/expired JWT fail-closed. *Next:* thread `AccessContext` from the `?token=` slot through
   the dispatcher → runner so the live chat path enforces it end-to-end (+ a Postgres `acl` column).
-- **Server Phase 5 — tool/HITL `stream_chunk`s, the reranker, the `/admin/*` API**.
+- **Server Phase 5 — reranker** *(shipped)*: the opt-in post-retrieval reorder stage
+  (`SMOOTH_AGENT_RERANK=gateway|lexical|off`, **default off** so retrieval order is unchanged unless
+  enabled). The engine ships `IReranker` + `NoopReranker` (identity) + `LexicalReranker` (BM25-ish,
+  network-free) + `Rerankers.ApplyOptionalAsync`, parity-tested against the Rust `rerank` module. The
+  server adds a `GatewayReranker` (Cohere/Voyage `/rerank` cross-encoder, unit-tested vs a fake HTTP
+  handler) + `RerankSelection` mirroring the Rust `build_reranker` (off→none, gateway+key→gateway,
+  gateway-no-key→lexical fallback, never an unauth call). Wired `TurnRunner` (fetch a wider candidate
+  pool, rerank down to top-K) → `FrameDispatcher` → AspNetCore DI → host config, proven by a
+  real-WebSocket integration test (a reversing reranker visibly reorders the citation path). *Still
+  open here:* tool/HITL `stream_chunk`s, the `/admin/*` API.
 - **Server Phase 6 — deployable host** *(shipped)*: `SmooAI.SmoothOperator.Server.Host` — a
   runnable ASP.NET app that wires the model (OpenAI-compatible gateway), storage (Postgres or
   in-memory), auth (jwt/trusted/none), and **startup GitHub ingestion** (each repo's docs stamped
@@ -200,8 +209,8 @@ client's `ProtocolValidator`).
   when a database is configured, with the ACL leak contract asserted against **both** the
   in-memory and Postgres ACL stores. A **`GatewayEmbedder`** (OpenAI-compatible `/embeddings`)
   gives the durable store real semantic vectors when a gateway key is present (deterministic
-  fallback otherwise); unit-tested against a fake HTTP handler. *Still open:* the reranker, the
-  `/admin/*` API, and a live-gateway integration test.
+  fallback otherwise); unit-tested against a fake HTTP handler. *Still open:* the `/admin/*` API,
+  and a live-gateway integration test.
 
 ## Adding the Nth language core
 

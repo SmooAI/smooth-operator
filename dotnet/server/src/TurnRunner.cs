@@ -17,19 +17,22 @@ public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<Js
 public sealed class TurnRunner
 {
     private const int AutoContextLimit = 3;
+    private const int RerankCandidatePool = 15; // fetched before the reranker trims to AutoContextLimit
     private const int MaxPriorMessages = 50;
     private const int CitationSnippetMaxChars = 280;
 
     private readonly IChatClient _chatClient;
     private readonly ISessionStore _store;
     private readonly IKnowledgeBase? _knowledge;
+    private readonly IReranker? _reranker;
     private readonly string _systemPrompt;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _knowledge = knowledge;
+        _reranker = reranker;
         _systemPrompt = systemPrompt ??
             "You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don't know.";
     }
@@ -37,10 +40,15 @@ public sealed class TurnRunner
     public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, CancellationToken cancellationToken = default)
     {
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources.
+        //    With a reranker configured, fetch a wider candidate pool and let it reorder down to
+        //    the top few before they become citations; without one, fetch exactly the top few
+        //    (behavior unchanged — the rerank stage is opt-in).
         var citations = new List<JsonObject>();
         if (_knowledge is not null)
         {
-            var hits = await _knowledge.QueryAsync(userMessage, AutoContextLimit, cancellationToken).ConfigureAwait(false);
+            var fetchLimit = _reranker is not null ? RerankCandidatePool : AutoContextLimit;
+            var candidates = await _knowledge.QueryAsync(userMessage, fetchLimit, cancellationToken).ConfigureAwait(false);
+            var hits = await Rerankers.ApplyOptionalAsync(_reranker, userMessage, candidates, AutoContextLimit, cancellationToken).ConfigureAwait(false);
             foreach (var hit in hits)
             {
                 var url = hit.Source.StartsWith("http://", StringComparison.Ordinal) || hit.Source.StartsWith("https://", StringComparison.Ordinal) ? hit.Source : null;

@@ -30,6 +30,9 @@ docker run -p 8080:8080 -e SMOOTH_GATEWAY_KEY=… -e SMOOTH_AUTH_MODE=jwt -e SMO
 | `SMOOTH_GATEWAY_URL` | `https://llm.smoo.ai/v1` | Any OpenAI-compatible endpoint (smooth gateway, Azure OpenAI, Ollama). |
 | `SMOOTH_GATEWAY_KEY` | — | The model API key. **Required** for chat. |
 | `SMOOTH_MODEL` | `claude-haiku-4-5` | Model id at the gateway. |
+| `SMOOTH_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for the durable knowledge store (semantic retrieval when a gateway key is set, else a deterministic fallback). |
+| `SMOOTH_AGENT_RERANK` | `off` | Post-retrieval reorder stage: `gateway` (cross-encoder if keyed, else lexical), `lexical` (offline), or `off`. |
+| `SMOOTH_RERANK_MODEL` | `rerank-english-v3.0` | Rerank model id when `SMOOTH_AGENT_RERANK=gateway`. |
 | `SMOOTH_DATABASE_URL` | *(in-memory)* | `postgres://…` or an Npgsql connection string. Durable sessions when set. |
 | `SMOOTH_AUTH_MODE` | `none` | `jwt` (verify), `trusted` (proxied identity), or `none`. |
 | `SMOOTH_JWT_HS256_SECRET` | — | Shared secret when `SMOOTH_AUTH_MODE=jwt`. |
