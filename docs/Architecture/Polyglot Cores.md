@@ -122,6 +122,31 @@ ships green parity tests before the next starts.
 > 31 unit/parity tests + 1 gated live-eval suite. Next sibling (Python/TS) follows the same
 > contract.
 
+## Beyond the engine — the service layer (the full system in C#)
+
+The **engine** is one of three layers. A .NET shop that wants the *whole* smooth-operator
+system native in C# — not just the in-process agent — needs the layer above the engine, which
+is **not yet built in C#**:
+
+| Layer | What | Rust | C# |
+| --- | --- | --- | --- |
+| Engine | the generic agent framework (loop, tools, memory, checkpoint, cast, cost) | `smooai-smooth-operator-core` | `SmooAI.SmoothOperator.Core` ✅ |
+| **Service** | the knowledge-chat **system** on the engine: WS protocol serving, durable storage, ingestion + connectors, ACL, citations, reranker, auth, admin API | `smooth-operator-server` (+ adapters, ingestion) | **— not built —** |
+| Client | a protocol client that talks to a running service | — | `SmooAI.SmoothOperator` ✅ (+ `IChatClient` facade) |
+
+A C# **`SmooAI.SmoothOperator.Server`** (the analog of `smooth-operator-server`) would consume
+`…Core` and add: an ASP.NET WebSocket host serving the schema-driven protocol; durable adapters
+(Postgres+pgvector / DynamoDB) for conversations + knowledge + checkpoints (the engine ships
+in-memory); the ingestion pipeline + connectors (GitHub, …); ACL-filtered retrieval
+(`Principal` / `AccessContext` / groups); JWT / trusted auth; citations + reranker; the
+`/admin/*` API; and a deployable host (container, SST / k8s).
+
+It's a **much larger surface** than the engine, and it's optional — a .NET shop can run the
+Rust server + the .NET client, or embed `…Core` directly with its own hosting. The C# service
+is the "run the entire system in .NET" option: full native parity, the logical completion of
+the polyglot vision. **Status: recorded, not scoped** — a phased plan + ADR (like the engine's)
+comes first when it's greenlit.
+
 ## Adding the Nth language core
 
 1. Pick the ecosystem's idiomatic agent/LLM abstraction (the language's MEAI-equivalent).
