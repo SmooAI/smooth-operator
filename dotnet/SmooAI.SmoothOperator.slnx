@@ -6,6 +6,10 @@
     <Project Path="core/src/SmooAI.SmoothOperator.Core.csproj" />
     <Project Path="core/tests/SmooAI.SmoothOperator.Core.Tests.csproj" />
   </Folder>
+  <Folder Name="/server/">
+    <Project Path="server/src/SmooAI.SmoothOperator.Server.csproj" />
+    <Project Path="server/tests/SmooAI.SmoothOperator.Server.Tests.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SmooAI.SmoothOperator.Tests.csproj" />
   </Folder>

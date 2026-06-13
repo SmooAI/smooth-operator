@@ -144,8 +144,30 @@ in-memory); the ingestion pipeline + connectors (GitHub, …); ACL-filtered retr
 It's a **much larger surface** than the engine, and it's optional — a .NET shop can run the
 Rust server + the .NET client, or embed `…Core` directly with its own hosting. The C# service
 is the "run the entire system in .NET" option: full native parity, the logical completion of
-the polyglot vision. **Status: recorded, not scoped** — a phased plan + ADR (like the engine's)
-comes first when it's greenlit.
+the polyglot vision.
+
+### Server roadmap (C#)
+
+`SmooAI.SmoothOperator.Server` lives at `dotnet/server`, consumes `…Core`, and is checked
+against the **same `spec/` schemas + conformance fixtures** as the Rust server (via the protocol
+client's `ProtocolValidator`).
+
+- **Server Phase 0 — protocol runner** *(shipped)*: `ISessionStore` (in-memory) + a `TurnRunner`
+  that drives the engine per `send_message` turn (load history → ground in knowledge → stream the
+  engine → persist → citations) + a `FrameDispatcher` routing `ping` / `create_conversation_session`
+  / `get_session` / `send_message` by `action`. Produces the exact event sequence
+  (`immediate_response` 202 → `stream_token`s → `eventual_response` 200, triple-nested data +
+  citations), each frame **schema-validated**. 5 conformance tests.
+- **Server Phase 1 — WebSocket host**: an ASP.NET Core `/ws` endpoint wiring the dispatcher (the
+  endpoint the widget / clients connect to), the `?token=` auth slot, keepalive.
+- **Server Phase 2 — durable storage**: a Postgres+pgvector `ISessionStore` + knowledge/checkpoint
+  adapters (the engine + server ship in-memory today).
+- **Server Phase 3 — ingestion + connectors**: the GitHub connector + ingest pipeline (chunk →
+  embed → store), `/admin/connectors/{id}/index`.
+- **Server Phase 4 — ACL + auth**: `Principal` / `AccessContext` from the JWT/trusted token,
+  ACL-filtered retrieval (`knowledge_for_access`).
+- **Server Phase 5 — tool/HITL `stream_chunk`s, the reranker, the `/admin/*` API**.
+- **Server Phase 6 — deployable host + conformance/eval in CI** (container, SST / k8s).
 
 ## Adding the Nth language core
 

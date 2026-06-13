@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SmooAI.SmoothOperator.Server</RootNamespace>
+    <AssemblyName>SmooAI.SmoothOperator.Server</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <Description>The smooth-operator service in C# — wraps SmooAI.SmoothOperator.Core to serve the schema-driven conversation protocol (sessions, streaming turns, citations). The native .NET analog of the Rust smooth-operator-server. Phase 0: the in-process protocol runner + dispatch; the WebSocket host + durable adapters arrive in later phases.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The service is built ON the engine: it drives SmoothAgent per turn and adds the
+         protocol/session/storage surface around it. -->
+    <ProjectReference Include="..\..\core\src\SmooAI.SmoothOperator.Core.csproj" />
+  </ItemGroup>
+
+</Project>
