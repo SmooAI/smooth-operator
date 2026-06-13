@@ -1,6 +1,9 @@
 //! Shared test helpers: boot the server in-process on an ephemeral port and
 //! return a connected WebSocket client.
 
+// Shared across several test binaries; not every binary uses every helper.
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};

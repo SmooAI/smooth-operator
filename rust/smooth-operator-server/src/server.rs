@@ -378,15 +378,29 @@ async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let access = resolve_ws_access(&state, &query);
-    ws.on_upgrade(move |socket| connection_loop(socket, state, access))
+    // Capture the browser's `Origin` at the handshake (browsers always send it,
+    // and can't be made to forge another site's). It's enforced per-agent at
+    // session creation against the agent's embed allowlist (widget_auth).
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    ws.on_upgrade(move |socket| connection_loop(socket, state, access, origin))
 }
 
 /// Drive one WebSocket connection: split into reader + writer, joined by an
 /// outbound event sink. `access` is the connection's resolved document-level
-/// entitlement, threaded into every `send_message` turn.
-async fn connection_loop(socket: WebSocket, state: AppState, access: AccessContext) {
+/// entitlement, threaded into every `send_message` turn. `origin` is the
+/// handshake `Origin` header, enforced against an agent's embed allowlist.
+async fn connection_loop(
+    socket: WebSocket,
+    state: AppState,
+    access: AccessContext,
+    origin: Option<String>,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (sink_tx, mut sink_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
 
@@ -407,7 +421,8 @@ async fn connection_loop(socket: WebSocket, state: AppState, access: AccessConte
     while let Some(frame) = ws_rx.next().await {
         match frame {
             Ok(Message::Text(text)) => {
-                handler::handle_frame(&state, &access, text.as_str(), &sink_tx).await;
+                handler::handle_frame(&state, &access, origin.as_deref(), text.as_str(), &sink_tx)
+                    .await;
             }
             Ok(Message::Binary(_)) => {
                 let _ = sink_tx.send(crate::protocol::error(
@@ -459,6 +474,7 @@ mod tests {
             max_iterations: 4,
             max_tokens: 128,
             storage: crate::config::StorageBackend::Memory,
+            widget_auth_strict: false,
         };
         let state = build_state(cfg);
         assert!(!state.config.has_llm());

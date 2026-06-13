@@ -59,6 +59,10 @@ jsonwebtoken = { version = "10", default-features = false, features = [
 ] }
 # Decoding base64 blob bodies from the GitHub contents API.
 base64 = "0.22"
+# HMAC-SHA256 for embeddable-widget authContext verification (widget_auth).
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 # Mock GitHub API server for the offline connector contract test.
 wiremock = "0.6"
 # rustls is in the graph twice (octocrab's hyper-rustls + reqwest), and the

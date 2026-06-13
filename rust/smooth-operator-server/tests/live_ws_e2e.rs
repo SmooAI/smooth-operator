@@ -67,6 +67,7 @@ fn live_config(key: String) -> ServerConfig {
         max_iterations: 6,
         max_tokens: 512,
         storage: smooth_operator_server::config::StorageBackend::Memory,
+        widget_auth_strict: false,
     }
 }
 
