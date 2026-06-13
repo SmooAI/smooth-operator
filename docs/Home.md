@@ -31,6 +31,19 @@ the five clients, and the deploy paths. See [[Engine and Service]] for the split
 
 ## The map
 
+### Section Index
+
+| Section | What's in it |
+| --- | --- |
+| 🧭 [[Overview\|Concepts]] | The mental model — what it is and why it's shaped this way. |
+| 🏛 [[Architecture Overview\|Architecture]] | The deep design docs — storage, ingestion, indexing, deploy, polyglot cores. |
+| 🛠 [[Guides-Overview\|Guides]] | Task-oriented how-tos — getting started, self-hosting, integration, connectors. |
+| 📚 [[Reference-Overview\|Reference]] | Lookup material — protocol, admin API, connectors, tools, config, .NET MEAI. |
+| ⚙️ [[Operations-Overview\|Operations]] | Running it — access control, auth/RBAC, evals, observability. |
+| 🗺 [[Planning-Overview\|Planning]] | Roadmap + the TDD feature-gap analysis. |
+
+The full per-page map follows.
+
 ### 🧭 Concepts — the mental model
 
 Start here to understand *what it is* and *why it's shaped this way*.
