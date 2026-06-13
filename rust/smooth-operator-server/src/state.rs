@@ -19,6 +19,7 @@ use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
+use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
 
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
 
@@ -44,6 +45,11 @@ pub struct AppState {
     pub connector_configs: Arc<dyn ConnectorConfigStore>,
     /// Per-org agent settings store, read/written by `/admin/settings`.
     pub settings: Arc<dyn SettingsStore>,
+    /// Embeddable-widget auth hook: resolves an agent's origin-allowlist +
+    /// public-key policy for `<smooth-agent-chat>` connections. Defaults to
+    /// [`PermissiveWidgetAuth`] (no enforcement) until a host installs a real
+    /// provider via [`with_widget_auth`](Self::with_widget_auth).
+    pub widget_auth: Arc<dyn WidgetAuthProvider>,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Document-set registry, **org-scoped**: `org_id` → (set name → document
@@ -84,6 +90,7 @@ impl AppState {
             indexing: Arc::new(InMemoryIndexingStore::new()),
             connector_configs: Arc::new(InMemoryConnectorConfigStore::new()),
             settings: Arc::new(InMemorySettingsStore::new()),
+            widget_auth: Arc::new(PermissiveWidgetAuth),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
@@ -115,6 +122,14 @@ impl AppState {
     #[must_use]
     pub fn with_settings(mut self, store: Arc<dyn SettingsStore>) -> Self {
         self.settings = store;
+        self
+    }
+
+    /// Install the embeddable-widget auth provider (builder). A host backs this
+    /// with its agent store so embed origins + public keys are enforced.
+    #[must_use]
+    pub fn with_widget_auth(mut self, provider: Arc<dyn WidgetAuthProvider>) -> Self {
+        self.widget_auth = provider;
         self
     }
 

@@ -29,6 +29,7 @@ const AGENT_NAME: &str = "smooth-agent";
 pub async fn handle_frame(
     state: &AppState,
     access: &AccessContext,
+    origin: Option<&str>,
     raw: &str,
     sink: &UnboundedSender<Value>,
 ) {
@@ -52,7 +53,7 @@ pub async fn handle_frame(
             let _ = sink.send(protocol::pong(request_id));
         }
         Some("create_conversation_session") => {
-            handle_create_session(state, &parsed, request_id, sink);
+            handle_create_session(state, origin, &parsed, request_id, sink).await;
         }
         Some("get_session") => {
             handle_get_session(state, &parsed, request_id, sink);
@@ -77,11 +78,80 @@ pub async fn handle_frame(
     }
 }
 
+/// Enforce an agent's embeddable-widget policy (origin allowlist + `authContext`)
+/// before a session is created. Returns `true` to proceed, or `false` after
+/// emitting a protocol `error` (the caller must then stop). Agents with no policy
+/// proceed — unless `WIDGET_AUTH_STRICT` is set, in which case an unknown agent is
+/// rejected (fail closed).
+async fn enforce_widget_auth(
+    state: &AppState,
+    origin: Option<&str>,
+    agent_id: &str,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) -> bool {
+    let Some(policy) = state.widget_auth.agent_widget_auth(agent_id).await else {
+        if state.config.widget_auth_strict {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "AGENT_NOT_AUTHORIZED",
+                "this agent is not registered for embedding",
+            ));
+            return false;
+        }
+        return true;
+    };
+
+    // Origin allowlist — fail closed: a missing or disallowed `Origin` is rejected.
+    if !smooth_operator::widget_auth::origin_allowed(
+        &policy.allowed_origins,
+        origin.unwrap_or_default(),
+    ) {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "ORIGIN_NOT_ALLOWED",
+            "this origin is not allowed to embed this agent",
+        ));
+        return false;
+    }
+
+    // Pre-auth `authContext` (optional): when present it must verify.
+    if let Some(ac) = parsed.get("authContext") {
+        if !verify_auth_context_value(policy.public_key.as_deref(), ac) {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "AUTH_CONTEXT_INVALID",
+                "authContext signature failed verification",
+            ));
+            return false;
+        }
+    }
+    true
+}
+
+/// Verify a JSON `authContext` (`{userId, signature, timestamp}`) against the
+/// agent's `public_key`. False on any missing field/key or signature/replay
+/// failure. Replay window: 60s.
+fn verify_auth_context_value(public_key: Option<&str>, ac: &Value) -> bool {
+    let (Some(pk), Some(user_id), Some(signature), Some(timestamp)) = (
+        public_key,
+        ac.get("userId").and_then(Value::as_str),
+        ac.get("signature").and_then(Value::as_str),
+        ac.get("timestamp").and_then(Value::as_i64),
+    ) else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    smooth_operator::widget_auth::verify_auth_context(pk, user_id, signature, timestamp, now, 60)
+}
+
 /// `create_conversation_session` — create a conversation + user & agent
 /// participants + a session, then reply with an `immediate_response` carrying
 /// the session descriptor (per `create-conversation-session.schema.json`).
-fn handle_create_session(
+async fn handle_create_session(
     state: &AppState,
+    origin: Option<&str>,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -91,6 +161,13 @@ fn handle_create_session(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // Embeddable-widget auth: enforce the agent's origin allowlist + authContext
+    // before creating any session. No-op for agents without a policy (unless
+    // WIDGET_AUTH_STRICT). On denial, an error is emitted and we stop here.
+    if !enforce_widget_auth(state, origin, &agent_id, parsed, request_id, sink).await {
+        return;
+    }
 
     let user_name = parsed
         .get("userName")

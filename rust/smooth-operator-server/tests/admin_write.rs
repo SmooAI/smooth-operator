@@ -41,6 +41,7 @@ fn test_config() -> ServerConfig {
         max_iterations: 4,
         max_tokens: 128,
         storage: smooth_operator_server::config::StorageBackend::Memory,
+        widget_auth_strict: false,
     }
 }
 

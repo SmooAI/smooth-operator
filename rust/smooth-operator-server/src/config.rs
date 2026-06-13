@@ -19,6 +19,7 @@
 //! | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
 //! | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |
 //! | `SMOOTH_AGENT_STORAGE` | `memory` | Storage backend: `memory` \| `postgres` \| `dynamodb`. |
+//! | `WIDGET_AUTH_STRICT` | *(unset → `false`)* | Fail-closed embeddable-widget auth: when `1`/`true`, a session for an agent the [`WidgetAuthProvider`](smooth_operator::widget_auth::WidgetAuthProvider) has no policy for is rejected. Origin + `authContext` are always enforced for policied agents. |
 //!
 //! ### Auth (load-bearing — the admin API's `require_role` reads these)
 //!
@@ -110,6 +111,14 @@ pub struct ServerConfig {
     /// Storage backend (drives both the storage adapter and the matching durable
     /// admin stores). Defaults to [`StorageBackend::Memory`].
     pub storage: StorageBackend,
+    /// Fail-closed embeddable-widget auth: when `true`, a session for an agent
+    /// the [`WidgetAuthProvider`](smooth_operator::widget_auth::WidgetAuthProvider)
+    /// has **no** policy for is **rejected** (unknown/unregistered agents can't be
+    /// embedded). When `false` (default), an absent policy is allowed — so the
+    /// permissive default provider leaves `/ws` open. Set `WIDGET_AUTH_STRICT=1`
+    /// in front of a real provider. Origin + `authContext` are always enforced
+    /// for agents that *do* have a policy, regardless of this flag.
+    pub widget_auth_strict: bool,
 }
 
 impl ServerConfig {
@@ -163,6 +172,14 @@ impl ServerConfig {
             .map(|s| StorageBackend::parse(&s))
             .unwrap_or(StorageBackend::Memory);
 
+        let widget_auth_strict = std::env::var("WIDGET_AUTH_STRICT")
+            .ok()
+            .map(|s| {
+                let s = s.trim().to_ascii_lowercase();
+                s == "1" || s == "true" || s == "yes"
+            })
+            .unwrap_or(false);
+
         Self {
             bind,
             port,
@@ -173,6 +190,7 @@ impl ServerConfig {
             max_iterations,
             max_tokens,
             storage,
+            widget_auth_strict,
         }
     }
 
@@ -219,6 +237,7 @@ mod tests {
             max_iterations: DEFAULT_MAX_ITERATIONS,
             max_tokens: DEFAULT_MAX_TOKENS,
             storage: StorageBackend::Memory,
+            widget_auth_strict: false,
         };
         assert_eq!(cfg.port, 8787);
         assert_eq!(cfg.storage, StorageBackend::Memory);
@@ -240,6 +259,7 @@ mod tests {
             max_iterations: 4,
             max_tokens: 128,
             storage: StorageBackend::Memory,
+            widget_auth_strict: false,
         };
         assert!(cfg.has_llm());
         let llm = cfg.llm_config().expect("llm config");

@@ -20,6 +20,10 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 # `AUTH_MODE=trusted`: decode the base64url(JSON) forwarded-identity blob.
 base64 = { workspace = true }
+# Embeddable-widget authContext HMAC-SHA256 verification (widget_auth).
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 # `fetch_url` built-in tool: HTTP GET + URL parsing for the SSRF guard.
 reqwest = { workspace = true }
 url = { workspace = true }

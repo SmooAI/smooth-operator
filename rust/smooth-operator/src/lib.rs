@@ -31,6 +31,7 @@ pub mod runtime;
 pub mod settings;
 pub mod telemetry;
 pub mod tools;
+pub mod widget_auth;
 
 pub use access_control::{AccessContext, AclKnowledgeStore, DocAcl};
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
