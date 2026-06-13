@@ -17,17 +17,21 @@ public abstract class CheckpointStoreContractTests
     private static Checkpoint Cp(string threadId, string id, int iteration, params string[] texts) =>
         new(id, threadId, texts.Select(t => new ChatMessage(ChatRole.User, t)).ToArray(), iteration, DateTimeOffset.UtcNow);
 
+    // Checkpoint id is a GLOBAL primary key (real callers mint unique ids per checkpoint), so derive
+    // ids from each test's unique thread to keep the shared Postgres store collision-free across tests.
+    private static string Id(string thread, int n) => $"{thread}:{n}";
+
     [SkippableFact]
     public async Task Save_Then_LoadLatest_RoundTrips()
     {
         var store = await CreateStoreAsync();
         var thread = Guid.NewGuid().ToString();
-        await store.SaveAsync(Cp(thread, "c1", iteration: 3, "hello", "world"));
+        await store.SaveAsync(Cp(thread, Id(thread, 1), iteration: 3, "hello", "world"));
 
         var latest = await store.LoadLatestAsync(thread);
 
         Assert.NotNull(latest);
-        Assert.Equal("c1", latest!.Id);
+        Assert.Equal(Id(thread, 1), latest!.Id);
         Assert.Equal(thread, latest.ThreadId);
         Assert.Equal(3, latest.Iteration);
         Assert.Equal(2, latest.Messages.Count);
@@ -40,10 +44,10 @@ public abstract class CheckpointStoreContractTests
     {
         var store = await CreateStoreAsync();
         var thread = Guid.NewGuid().ToString();
-        await store.SaveAsync(Cp(thread, "c1", 1, "first"));
-        await store.SaveAsync(Cp(thread, "c2", 2, "second"));
+        await store.SaveAsync(Cp(thread, Id(thread, 1), 1, "first"));
+        await store.SaveAsync(Cp(thread, Id(thread, 2), 2, "second"));
 
-        Assert.Equal("c2", (await store.LoadLatestAsync(thread))!.Id);
+        Assert.Equal(Id(thread, 2), (await store.LoadLatestAsync(thread))!.Id);
     }
 
     [SkippableFact]
@@ -51,13 +55,13 @@ public abstract class CheckpointStoreContractTests
     {
         var store = await CreateStoreAsync();
         var thread = Guid.NewGuid().ToString();
-        await store.SaveAsync(Cp(thread, "c1", 1, "a"));
-        await store.SaveAsync(Cp(thread, "c2", 2, "b"));
-        await store.SaveAsync(Cp(thread, "c3", 3, "c"));
+        await store.SaveAsync(Cp(thread, Id(thread, 1), 1, "a"));
+        await store.SaveAsync(Cp(thread, Id(thread, 2), 2, "b"));
+        await store.SaveAsync(Cp(thread, Id(thread, 3), 3, "c"));
 
         var all = await store.ListAsync(thread);
 
-        Assert.Equal(new[] { "c1", "c2", "c3" }, all.Select(c => c.Id));
+        Assert.Equal(new[] { Id(thread, 1), Id(thread, 2), Id(thread, 3) }, all.Select(c => c.Id));
     }
 
     [SkippableFact]
@@ -67,13 +71,13 @@ public abstract class CheckpointStoreContractTests
         var thread = Guid.NewGuid().ToString();
         for (var i = 1; i <= 5; i++)
         {
-            await store.SaveAsync(Cp(thread, $"c{i}", i, "x"));
+            await store.SaveAsync(Cp(thread, Id(thread, i), i, "x"));
         }
 
         var removed = await store.PruneAsync(thread, keep: 2);
 
         Assert.Equal(3, removed);
-        Assert.Equal(new[] { "c4", "c5" }, (await store.ListAsync(thread)).Select(c => c.Id));
+        Assert.Equal(new[] { Id(thread, 4), Id(thread, 5) }, (await store.ListAsync(thread)).Select(c => c.Id));
     }
 
     [SkippableFact]
@@ -89,10 +93,10 @@ public abstract class CheckpointStoreContractTests
         var store = await CreateStoreAsync();
         var a = Guid.NewGuid().ToString();
         var b = Guid.NewGuid().ToString();
-        await store.SaveAsync(Cp(a, "a1", 1, "a-state"));
-        await store.SaveAsync(Cp(b, "b1", 1, "b-state"));
+        await store.SaveAsync(Cp(a, Id(a, 1), 1, "a-state"));
+        await store.SaveAsync(Cp(b, Id(b, 1), 1, "b-state"));
 
-        Assert.Equal("a1", (await store.LoadLatestAsync(a))!.Id);
+        Assert.Equal(Id(a, 1), (await store.LoadLatestAsync(a))!.Id);
         Assert.Single(await store.ListAsync(a));
     }
 }
