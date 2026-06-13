@@ -33,10 +33,15 @@ public static class Chunker
             var end = Math.Min(start + options.MaxChars, text.Length);
             if (end < text.Length)
             {
-                // Prefer to break at the last whitespace within this window.
+                // Prefer to break at the last whitespace within this window — but ONLY if that break
+                // still leaves room to advance past the overlap. Otherwise (e.g. a long run of
+                // non-whitespace like minified code or a base64 blob, where the only space is near
+                // the window start) breaking there would set the next start = end - overlap BACKWARD,
+                // and the loop would never progress. In that case keep the hard cut at start+MaxChars,
+                // which always advances since MaxChars > OverlapChars.
                 var window = end - start;
                 var whitespace = text.LastIndexOf(' ', end - 1, window);
-                if (whitespace > start)
+                if (whitespace > start + options.OverlapChars)
                 {
                     end = whitespace;
                 }
@@ -52,7 +57,11 @@ public static class Chunker
             {
                 break;
             }
-            start = Math.Max(0, end - options.OverlapChars);
+
+            // Advance with overlap, but never regress or stall — guarantee forward progress so the
+            // loop always terminates regardless of where the break landed.
+            var nextStart = end - options.OverlapChars;
+            start = nextStart > start ? nextStart : end;
         }
 
         return chunks;

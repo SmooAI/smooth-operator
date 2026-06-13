@@ -21,6 +21,22 @@ public class IngestionTests
     }
 
     [Fact]
+    public void Chunker_LongNonWhitespaceRun_TerminatesAndCovers()
+    {
+        // Regression: a long run of non-whitespace (minified code / base64 / long URL) where the
+        // only space sits within OverlapChars of a window start used to send `start` backward
+        // (end - overlap <= start) → infinite loop. The chunker must terminate and cover the content.
+        var content = "ab " + new string('x', 5000); // one early space, then a 5000-char no-space run
+        var options = new ChunkingOptions(MaxChars: 100, OverlapChars: 20);
+
+        var chunks = Chunker.Chunk(content, options); // must not hang
+
+        Assert.True(chunks.Count > 1);
+        Assert.All(chunks, c => Assert.True(c.Length <= options.MaxChars));
+        Assert.Contains(chunks, c => c.Contains("xxxxx")); // the no-space run is captured
+    }
+
+    [Fact]
     public void Chunker_LongContent_SplitsWithBoundedSizeAndOverlap()
     {
         var word = string.Concat(Enumerable.Repeat("lorem ", 600)); // ~3600 chars
