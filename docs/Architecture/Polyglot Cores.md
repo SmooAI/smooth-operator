@@ -198,9 +198,10 @@ client's `ProtocolValidator`).
   ping with a mocked model (CI-safe). The host uses the durable **`PostgresAclKnowledgeStore`**
   (pgvector + `acl_public`/`acl_groups`, the ACL filtered **in SQL** — `acl_groups && @groups`)
   when a database is configured, with the ACL leak contract asserted against **both** the
-  in-memory and Postgres ACL stores. *Still open:* the reranker, the `/admin/*` API, a real
-  gateway embedder (the durable store uses the deterministic embedder today), and a
-  live-gateway integration test.
+  in-memory and Postgres ACL stores. A **`GatewayEmbedder`** (OpenAI-compatible `/embeddings`)
+  gives the durable store real semantic vectors when a gateway key is present (deterministic
+  fallback otherwise); unit-tested against a fake HTTP handler. *Still open:* the reranker, the
+  `/admin/*` API, and a live-gateway integration test.
 
 ## Adding the Nth language core
 

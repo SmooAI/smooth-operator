@@ -38,10 +38,14 @@ if (!string.IsNullOrEmpty(databaseUrl))
 }
 
 // ── Knowledge: ACL-aware store (durable Postgres+pgvector when a DB is configured, else in-memory),
-//    ingested at startup; ACL is enforced on the chat path ──
+//    ingested at startup; ACL is enforced on the chat path. The durable store uses semantic
+//    gateway embeddings when a key is present, else the deterministic fallback. ──
+IEmbedder embedder = string.IsNullOrEmpty(gatewayKey)
+    ? new DeterministicEmbedder()
+    : new GatewayEmbedder(EmbeddingHttpClient(gatewayUrl, gatewayKey), Get("SMOOTH_EMBEDDING_MODEL", "text-embedding-3-small"), dimensions: 1536);
 IAclKnowledge knowledge = string.IsNullOrEmpty(databaseUrl)
     ? new AclKnowledgeStore()
-    : await PostgresAclKnowledgeStore.CreateAsync(ToNpgsqlConnectionString(databaseUrl), new DeterministicEmbedder());
+    : await PostgresAclKnowledgeStore.CreateAsync(ToNpgsqlConnectionString(databaseUrl), embedder);
 builder.Services.AddSingleton<IAccessKnowledge>(knowledge);
 
 // ── Auth: jwt (verified) / trusted (proxied) / none ──
@@ -102,6 +106,14 @@ static (string Owner, string Repo, string Ref) ParseRepo(string spec)
     var gitRef = atSplit.Length > 1 ? atSplit[1] : "main";
     var slashSplit = atSplit[0].Split('/', 2);
     return (slashSplit[0], slashSplit.Length > 1 ? slashSplit[1] : string.Empty, gitRef);
+}
+
+static HttpClient EmbeddingHttpClient(string gatewayUrl, string key)
+{
+    var baseUrl = gatewayUrl.EndsWith('/') ? gatewayUrl : gatewayUrl + "/";
+    var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+    http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
+    return http;
 }
 
 static string ToNpgsqlConnectionString(string url)
