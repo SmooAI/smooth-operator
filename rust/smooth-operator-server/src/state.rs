@@ -16,6 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
+use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
@@ -50,6 +51,11 @@ pub struct AppState {
     /// [`PermissiveWidgetAuth`] (no enforcement) until a host installs a real
     /// provider via [`with_widget_auth`](Self::with_widget_auth).
     pub widget_auth: Arc<dyn WidgetAuthProvider>,
+    /// Connection backplane: per-pod sink registry + cross-pod event delivery.
+    /// Defaults to [`InMemoryBackplane`] (single-process); a host installs a
+    /// Redis/NATS impl via [`with_backplane`](Self::with_backplane) to scale out
+    /// and to let non-AI publishers push realtime events to connected clients.
+    pub backplane: Arc<dyn Backplane>,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Document-set registry, **org-scoped**: `org_id` → (set name → document
@@ -91,6 +97,7 @@ impl AppState {
             connector_configs: Arc::new(InMemoryConnectorConfigStore::new()),
             settings: Arc::new(InMemorySettingsStore::new()),
             widget_auth: Arc::new(PermissiveWidgetAuth),
+            backplane: Arc::new(InMemoryBackplane::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
@@ -130,6 +137,15 @@ impl AppState {
     #[must_use]
     pub fn with_widget_auth(mut self, provider: Arc<dyn WidgetAuthProvider>) -> Self {
         self.widget_auth = provider;
+        self
+    }
+
+    /// Install the connection backplane (builder). A host installs a Redis/NATS
+    /// impl to scale the WS service horizontally and to let other services push
+    /// realtime events to connected clients via [`Backplane::publish`].
+    #[must_use]
+    pub fn with_backplane(mut self, backplane: Arc<dyn Backplane>) -> Self {
+        self.backplane = backplane;
         self
     }
 

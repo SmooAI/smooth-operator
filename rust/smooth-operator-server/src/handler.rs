@@ -29,6 +29,7 @@ const AGENT_NAME: &str = "smooth-agent";
 pub async fn handle_frame(
     state: &AppState,
     access: &AccessContext,
+    conn_id: &str,
     origin: Option<&str>,
     raw: &str,
     sink: &UnboundedSender<Value>,
@@ -53,7 +54,7 @@ pub async fn handle_frame(
             let _ = sink.send(protocol::pong(request_id));
         }
         Some("create_conversation_session") => {
-            handle_create_session(state, origin, &parsed, request_id, sink).await;
+            handle_create_session(state, conn_id, origin, &parsed, request_id, sink).await;
         }
         Some("get_session") => {
             handle_get_session(state, &parsed, request_id, sink);
@@ -151,6 +152,7 @@ fn verify_auth_context_value(public_key: Option<&str>, ac: &Value) -> bool {
 /// the session descriptor (per `create-conversation-session.schema.json`).
 async fn handle_create_session(
     state: &AppState,
+    conn_id: &str,
     origin: Option<&str>,
     parsed: &Value,
     request_id: Option<&str>,
@@ -193,6 +195,25 @@ async fn handle_create_session(
     let session_id = uuid::Uuid::new_v4().to_string();
     let user_participant_id = uuid::Uuid::new_v4().to_string();
     let agent_participant_id = uuid::Uuid::new_v4().to_string();
+
+    // Associate this connection with its session (and agent) on the backplane so
+    // events published to the session/agent — by an agent turn or any other
+    // service — reach this client's socket, on this pod or (with a Redis/NATS
+    // backplane) any pod.
+    state
+        .backplane
+        .associate(
+            conn_id,
+            smooth_operator::backplane::Target::Session(session_id.clone()),
+        )
+        .await;
+    state
+        .backplane
+        .associate(
+            conn_id,
+            smooth_operator::backplane::Target::Agent(agent_id.clone()),
+        )
+        .await;
 
     let conversation = Conversation {
         id: conversation_id.clone(),

@@ -404,6 +404,21 @@ async fn connection_loop(
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (sink_tx, mut sink_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
 
+    // Register this connection's outbound sink with the backplane so events
+    // published from anywhere (this pod or, with a Redis/NATS impl, another) can
+    // reach it. `conn_id` is associated with its session at create-session time.
+    let conn_id = uuid::Uuid::new_v4().to_string();
+    let sink_for_backplane = sink_tx.clone();
+    state
+        .backplane
+        .attach(
+            &conn_id,
+            std::sync::Arc::new(move |event| {
+                let _ = sink_for_backplane.send(event);
+            }),
+        )
+        .await;
+
     // Writer: drain the sink and write each event as a JSON text frame.
     let writer = tokio::spawn(async move {
         while let Some(event) = sink_rx.recv().await {
@@ -421,8 +436,15 @@ async fn connection_loop(
     while let Some(frame) = ws_rx.next().await {
         match frame {
             Ok(Message::Text(text)) => {
-                handler::handle_frame(&state, &access, origin.as_deref(), text.as_str(), &sink_tx)
-                    .await;
+                handler::handle_frame(
+                    &state,
+                    &access,
+                    &conn_id,
+                    origin.as_deref(),
+                    text.as_str(),
+                    &sink_tx,
+                )
+                .await;
             }
             Ok(Message::Binary(_)) => {
                 let _ = sink_tx.send(crate::protocol::error(
@@ -438,7 +460,9 @@ async fn connection_loop(
         }
     }
 
-    // Reader finished → drop the sink so the writer task exits.
+    // Reader finished → detach from the backplane, then drop the sink so the
+    // writer task exits.
+    state.backplane.detach(&conn_id).await;
     drop(sink_tx);
     let _ = writer.await;
 }

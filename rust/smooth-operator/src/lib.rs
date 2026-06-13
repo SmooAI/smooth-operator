@@ -22,6 +22,7 @@
 pub mod access_control;
 pub mod adapter;
 pub mod auth;
+pub mod backplane;
 pub mod connector_config;
 pub mod curation;
 pub mod domain;
