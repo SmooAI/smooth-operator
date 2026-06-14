@@ -19,6 +19,8 @@
 //! | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
 //! | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |
 //! | `SMOOTH_AGENT_STORAGE` | `memory` | Storage backend: `memory` \| `postgres` \| `dynamodb`. |
+//! | `SMOOTH_AGENT_BACKPLANE` | `memory` | Connection backplane: `memory` (single-process) \| `redis`/`valkey` \| `nats`. A distributed backend is required for >1 replica and to let non-AI publishers push events via `Backplane::publish`. |
+//! | `SMOOTH_AGENT_BACKPLANE_URL` | *(unset)* | Bus URL for `redis`/`nats` (e.g. `redis://valkey:6379`, `nats://nats:4222`); falls back to `SMOOTH_AGENT_REDIS_URL` / `SMOOTH_AGENT_NATS_URL`. |
 //! | `WIDGET_AUTH_STRICT` | *(unset → `false`)* | Fail-closed embeddable-widget auth: when `1`/`true`, a session for an agent the [`WidgetAuthProvider`](smooth_operator::widget_auth::WidgetAuthProvider) has no policy for is rejected. Origin + `authContext` are always enforced for policied agents. |
 //!
 //! ### Auth (load-bearing — the admin API's `require_role` reads these)
