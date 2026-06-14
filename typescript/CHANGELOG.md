@@ -1,5 +1,14 @@
 # @smooai/smooth-operator
 
+## 0.8.0
+
+### Minor Changes
+
+- a8bfb62: HTTP-backed widget auth (SMOODEV-1890): `HttpWidgetAuth`, a generic `WidgetAuthProvider` that resolves each agent's embed policy (`allowed_origins` + `public_key`) by GETting `{base_url}/{agentId}` from a host policy service, with TTL caching. Response handling fails safe: 2xx caches the policy, 404 caches a no-policy result (denied under `WIDGET_AUTH_STRICT`), and 5xx/network/malformed responses return `None` without caching so the next connect retries. The server now installs it from env — set `WIDGET_AUTH_URL` (plus optional `WIDGET_AUTH_BEARER` / `WIDGET_AUTH_TTL_SECS`) to enforce embeddable-widget auth against a host's policy service with no custom binary; unset leaves the permissive default. This is the reusable mechanism a host backs with its own agent store (SmooAI points it at an api-prime route).
+- bc901d7: Persistent + semantic agent memory (SMOODEV-1470, parity gap Phase 3): `PgMemory`, a pgvector-backed implementation of the core `Memory` trait in the `adapters/postgres` crate. Before this the only `Memory` backend was the core `InMemoryMemory` (a `Vec` behind a `Mutex`, keyword recall, lost on restart). `PgMemory` gives the general agent cross-thread user memory that survives restarts and recalls by semantic similarity — the Rust equivalent of the TS `store`/`store_vectors` namespaced by `['memories', orgId, userId]`.
+
+  Each `PgMemory` instance is bound to one `(organization_id, user_id)` namespace at construction (built via `PostgresAdapter::memory(org, user)`; `user_id = None` for org-wide memory), mirroring how `PgKnowledgeBase` binds an org — the core `Memory::recall(query, limit)` signature carries no scoping, so scoping is threaded through the constructor. `store` embeds the entry content and upserts a row in a new `memories` table (`embedding vector(N)` matching the active `Embedder` dim, HNSW cosine index, namespaced by `(organization_id, user_id)`); `recall` embeds the query and returns the namespace's top-K by pgvector cosine distance with `relevance` set to the cosine similarity; `forget` deletes within the namespace. Embedding goes through the shared `Embedder` seam (DeterministicEmbedder offline, GatewayEmbedder live), so memory and knowledge vectors share column width and hashing. Covered by a testcontainers integration test (semantic recall, org/user namespace isolation, namespace-scoped forget, empty recall) that skips cleanly when Docker is unavailable. No change to the core `Memory` trait was required.
+
 ## 0.7.0
 
 ### Minor Changes
