@@ -56,3 +56,5 @@ smooai-smooth-operator-adapter-memory = { path = "../adapters/in-memory" }
 # The live-gateway e2e test (`tests/e2e_llm_smoo_ai.rs`) consumes the engine's
 # `LlmClient::chat_stream` response, which is a `futures::Stream`.
 futures-util = "0.3"
+# Mock HTTP policy service for the HttpWidgetAuth tests (no network).
+wiremock = { workspace = true }

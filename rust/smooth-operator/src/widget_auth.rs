@@ -21,6 +21,8 @@
 //! fail-closed behavior on unknown agents).
 
 use std::collections::HashMap;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
@@ -94,6 +96,177 @@ impl StaticWidgetAuth {
 impl WidgetAuthProvider for StaticWidgetAuth {
     async fn agent_widget_auth(&self, agent_id: &str) -> Option<AgentWidgetAuth> {
         self.rows.get(agent_id).cloned()
+    }
+}
+
+/// A cache entry: the resolved policy (or `None` for a known no-policy agent) and
+/// when it was fetched, for TTL expiry.
+struct CacheEntry {
+    value: Option<AgentWidgetAuth>,
+    fetched: Instant,
+}
+
+/// HTTP-backed provider: resolves `agentId` → [`AgentWidgetAuth`] by GETting
+/// `{base_url}/{agentId}` from a host's policy service, with TTL caching.
+///
+/// This is the **generic mechanism** a host installs instead of writing a custom
+/// [`WidgetAuthProvider`]: stand up an endpoint that returns the
+/// [`AgentWidgetAuth`] JSON (`{ "allowed_origins": [...], "public_key": "..." }`)
+/// for an agent, point `HttpWidgetAuth` at it, and embed-auth is enforced against
+/// live data. (SmooAI backs this with an api-prime route over its agent DB.)
+///
+/// Response handling — chosen so a flaky policy service never *silently* opens a
+/// hole:
+/// - **2xx** → parse + cache the policy.
+/// - **404** → cache `None` (the agent legitimately has no policy; in
+///   `WIDGET_AUTH_STRICT` the server then denies it).
+/// - **5xx / network / malformed body** → return `None` **without caching**, so
+///   the next connect retries. Combined with strict mode this fails closed; in
+///   permissive mode enforcement is off anyway.
+///
+/// Cached results (incl. 404s) are reused for `ttl` (default 60s) so a busy embed
+/// doesn't hammer the policy service on every WebSocket connect.
+pub struct HttpWidgetAuth {
+    client: reqwest::Client,
+    /// Policy endpoint base (no trailing slash); the agent id is appended as a
+    /// single percent-encoded path segment.
+    base_url: String,
+    /// Optional bearer token sent to the policy service (e.g. an M2M token).
+    bearer: Option<String>,
+    ttl: Duration,
+    cache: RwLock<HashMap<String, CacheEntry>>,
+}
+
+impl HttpWidgetAuth {
+    /// Build a provider that resolves policies from `base_url` (e.g.
+    /// `https://api.smoo.ai/internal/widget-auth`). Uses a client with a 5s
+    /// timeout so a hung policy service can't stall widget connects.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        Self::with_client(base_url, client)
+    }
+
+    /// Build with a caller-supplied [`reqwest::Client`] (to share a pool / set
+    /// custom timeouts or TLS).
+    #[must_use]
+    pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
+        Self {
+            client,
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            bearer: None,
+            ttl: Duration::from_secs(60),
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Send `Authorization: Bearer <token>` to the policy service (builder).
+    #[must_use]
+    pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
+        self.bearer = Some(token.into());
+        self
+    }
+
+    /// Override the cache TTL (builder). Default 60s.
+    #[must_use]
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    /// A live (non-expired) cached result for `agent_id`, if any. Outer `None` =
+    /// not cached / expired; inner `Option` = the cached policy-or-no-policy.
+    fn cached(&self, agent_id: &str) -> Option<Option<AgentWidgetAuth>> {
+        let cache = self.cache.read().ok()?;
+        let entry = cache.get(agent_id)?;
+        if entry.fetched.elapsed() < self.ttl {
+            Some(entry.value.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Cache a definitive result (a 2xx policy or a 404 no-policy).
+    fn store(&self, agent_id: &str, value: Option<AgentWidgetAuth>) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(
+                agent_id.to_string(),
+                CacheEntry {
+                    value,
+                    fetched: Instant::now(),
+                },
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl WidgetAuthProvider for HttpWidgetAuth {
+    async fn agent_widget_auth(&self, agent_id: &str) -> Option<AgentWidgetAuth> {
+        if let Some(cached) = self.cached(agent_id) {
+            return cached;
+        }
+
+        // Build the URL by pushing the agent id as one percent-encoded segment,
+        // so an id can't manipulate the path.
+        let mut url = match reqwest::Url::parse(&self.base_url) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, base_url = %self.base_url, "widget-auth: invalid base_url");
+                return None;
+            }
+        };
+        match url.path_segments_mut() {
+            Ok(mut segs) => {
+                segs.push(agent_id);
+            }
+            Err(()) => {
+                tracing::warn!(base_url = %self.base_url, "widget-auth: base_url cannot be a base");
+                return None;
+            }
+        }
+
+        let mut req = self.client.get(url);
+        if let Some(bearer) = &self.bearer {
+            req = req.bearer_auth(bearer);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                // Transient — do NOT cache, so the next connect retries.
+                tracing::warn!(error = %e, agent_id, "widget-auth: policy fetch failed");
+                return None;
+            }
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            match resp.json::<AgentWidgetAuth>().await {
+                Ok(policy) => {
+                    let value = Some(policy);
+                    self.store(agent_id, value.clone());
+                    value
+                }
+                Err(e) => {
+                    // Malformed body (deploy skew?) — don't cache; retry next time.
+                    tracing::warn!(error = %e, agent_id, "widget-auth: malformed policy body");
+                    None
+                }
+            }
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            // Legitimate "this agent has no policy" — cache it.
+            self.store(agent_id, None);
+            None
+        } else {
+            // 5xx etc. — don't cache; fail open here, which strict mode turns
+            // into a deny.
+            tracing::warn!(%status, agent_id, "widget-auth: policy service error");
+            None
+        }
     }
 }
 
@@ -254,5 +427,72 @@ mod tests {
             .agent_widget_auth("anything")
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn http_provider_fetches_then_serves_from_cache() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/agent-9"))
+            .and(header("authorization", "Bearer m2m-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed_origins": ["https://app.smoo.ai"],
+                "public_key": "secret"
+            })))
+            .expect(1) // second call must be served from cache, not the server
+            .mount(&server)
+            .await;
+
+        let provider = HttpWidgetAuth::new(server.uri()).with_bearer("m2m-token");
+
+        let first = provider.agent_widget_auth("agent-9").await.expect("policy");
+        assert_eq!(
+            first.allowed_origins,
+            vec!["https://app.smoo.ai".to_string()]
+        );
+        assert_eq!(first.public_key.as_deref(), Some("secret"));
+
+        // Cache hit — no second upstream request (verified by `.expect(1)` on drop).
+        let second = provider.agent_widget_auth("agent-9").await.expect("cached");
+        assert_eq!(second.public_key.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn http_provider_404_is_none_and_cached() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ghost"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1) // a known no-policy result is cached too
+            .mount(&server)
+            .await;
+
+        let provider = HttpWidgetAuth::new(server.uri());
+        assert!(provider.agent_widget_auth("ghost").await.is_none());
+        assert!(provider.agent_widget_auth("ghost").await.is_none()); // cached
+    }
+
+    #[tokio::test]
+    async fn http_provider_server_error_is_none_and_not_cached() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flaky"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(2) // NOT cached on error → the next call retries upstream
+            .mount(&server)
+            .await;
+
+        let provider = HttpWidgetAuth::new(server.uri());
+        assert!(provider.agent_widget_auth("flaky").await.is_none());
+        assert!(provider.agent_widget_auth("flaky").await.is_none()); // retried, not cached
     }
 }

@@ -22,6 +22,9 @@
 //! | `SMOOTH_AGENT_BACKPLANE` | `memory` | Connection backplane: `memory` (single-process) \| `redis`/`valkey` \| `nats`. A distributed backend is required for >1 replica and to let non-AI publishers push events via `Backplane::publish`. |
 //! | `SMOOTH_AGENT_BACKPLANE_URL` | *(unset)* | Bus URL for `redis`/`nats` (e.g. `redis://valkey:6379`, `nats://nats:4222`); falls back to `SMOOTH_AGENT_REDIS_URL` / `SMOOTH_AGENT_NATS_URL`. |
 //! | `WIDGET_AUTH_STRICT` | *(unset → `false`)* | Fail-closed embeddable-widget auth: when `1`/`true`, a session for an agent the [`WidgetAuthProvider`](smooth_operator::widget_auth::WidgetAuthProvider) has no policy for is rejected. Origin + `authContext` are always enforced for policied agents. |
+//! | `WIDGET_AUTH_URL` | *(unset → permissive)* | When set, install an [`HttpWidgetAuth`](smooth_operator::widget_auth::HttpWidgetAuth) provider resolving each agent's embed policy from `{url}/{agentId}` — enforce widget auth against a host policy service with no custom binary. |
+//! | `WIDGET_AUTH_BEARER` | *(unset)* | Optional bearer token sent to `WIDGET_AUTH_URL` (e.g. an M2M token). |
+//! | `WIDGET_AUTH_TTL_SECS` | `60` | Policy cache TTL for `WIDGET_AUTH_URL` (incl. cached 404 no-policy results). |
 //!
 //! ### Auth (load-bearing — the admin API's `require_role` reads these)
 //!
