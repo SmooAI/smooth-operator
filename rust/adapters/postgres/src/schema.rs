@@ -193,6 +193,48 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_org
     )
 }
 
+/// Build the `memories` DDL for a given embedding dimension.
+///
+/// Cross-thread, semantic agent memory (parity gap Phase 3 / SMOODEV-1470).
+/// Mirrors the TS side's Postgres `store`/`store_vectors` namespaced by
+/// `['memories', orgId, userId]`: every row carries `(organization_id, user_id)`
+/// so a [`PgMemory`](crate::PgMemory) instance bound to one namespace can never
+/// recall another's rows. `user_id` is **nullable** for org-wide memory.
+///
+/// An `embedding vector(N)` (matching the active [`Embedder`] dim, default
+/// N=1024 / Voyage-shaped) backs semantic recall via the pgvector cosine `<=>`
+/// operator under an HNSW index, exactly like `knowledge_vectors`. The
+/// `memory_type` mirrors the core [`MemoryType`](smooth_operator_core::MemoryType)
+/// enum (serialized as its serde tag), `metadata` is the entry's JSON blob, and
+/// `relevance` is persisted as written (recall overwrites it with the computed
+/// cosine score on read).
+#[must_use]
+pub fn memories_schema(dim: usize) -> String {
+    format!(
+        r#"
+CREATE TABLE IF NOT EXISTS memories (
+    id              TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    -- NULL ⇒ org-wide memory (not bound to a single user).
+    user_id         TEXT,
+    content         TEXT NOT NULL,
+    memory_type     TEXT NOT NULL,
+    relevance       REAL NOT NULL DEFAULT 0,
+    metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    embedding       vector({dim}) NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_accessed   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Dense ANN: HNSW over cosine distance (the `<=>` operator), as knowledge_vectors.
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw
+    ON memories USING hnsw (embedding vector_cosine_ops);
+-- Namespace scan: recall always filters on (org_id, user_id) before ANN ranking.
+CREATE INDEX IF NOT EXISTS idx_memories_namespace
+    ON memories (organization_id, user_id);
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +272,40 @@ mod tests {
         );
         assert_eq!(gw.dim(), OPENAI_SMALL_EMBEDDING_DIM);
         let gw_ddl = knowledge_vectors_schema(gw.dim());
+        assert!(
+            gw_ddl.contains("vector(1536)"),
+            "gateway embedder ({}-d) must yield a vector(1536) column, got:\n{gw_ddl}",
+            gw.dim()
+        );
+        assert!(!gw_ddl.contains("vector(1024)"));
+    }
+
+    /// The `memories` column width tracks the active embedder's `dim()` for the
+    /// same reason `knowledge_vectors` does — a dimension mismatch silently
+    /// breaks cosine recall. Drive both embedders' real `dim()` through the
+    /// schema builder (the path `PgMemory` takes at `memories_schema(dim)`).
+    #[test]
+    fn memories_column_width_matches_active_embedder_dim() {
+        let det = DeterministicEmbedder::new();
+        assert_eq!(det.dim(), DEFAULT_EMBEDDING_DIM);
+        let det_ddl = memories_schema(det.dim());
+        assert!(
+            det_ddl.contains("vector(1024)"),
+            "deterministic embedder ({}-d) must yield a vector(1024) column, got:\n{det_ddl}",
+            det.dim()
+        );
+        assert!(!det_ddl.contains("vector(1536)"));
+        // user_id must be nullable (org-wide memory) and the namespace must be indexed.
+        assert!(det_ddl.contains("user_id         TEXT,"));
+        assert!(det_ddl.contains("idx_memories_namespace"));
+
+        let gw = GatewayEmbedder::new(
+            "https://example.test/v1",
+            "sk-test",
+            "text-embedding-3-small",
+            OPENAI_SMALL_EMBEDDING_DIM,
+        );
+        let gw_ddl = memories_schema(gw.dim());
         assert!(
             gw_ddl.contains("vector(1536)"),
             "gateway embedder ({}-d) must yield a vector(1536) column, got:\n{gw_ddl}",

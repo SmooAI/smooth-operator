@@ -17,6 +17,12 @@
 //!   sparse `tsvector` BM25 → Reciprocal Rank Fusion). Text→vector goes through
 //!   the [`Embedder`] seam — [`DeterministicEmbedder`] by default (reproducible,
 //!   no network), [`GatewayEmbedder`] when a live gateway is configured.
+//! - **Memory**: a pgvector-backed [`PgMemory`] (parity gap Phase 3 /
+//!   SMOODEV-1470) — persistent, semantic, cross-thread agent memory namespaced
+//!   by `(organization_id, user_id)` like the TS `['memories', orgId, userId]`
+//!   store. Implements the core [`Memory`](smooth_operator_core::Memory) trait;
+//!   recall is pgvector cosine top-K under an HNSW index, scoped to the
+//!   namespace. Shares the adapter's [`Embedder`].
 //!
 //! ## Sharing one database between the async pool and the sync checkpoint store
 //!
@@ -32,6 +38,7 @@
 mod admin;
 mod embedder;
 mod knowledge;
+mod memory;
 mod reranker;
 mod schema;
 
@@ -61,6 +68,7 @@ use smooth_operator_core::{CheckpointStore, KnowledgeBase};
 pub use admin::{PgConnectorConfigStore, PgIndexingStore, PgSettingsStore};
 pub use embedder::{GatewayEmbedder, OPENAI_SMALL_EMBEDDING_DIM};
 pub use knowledge::PgKnowledgeBase;
+pub use memory::PgMemory;
 pub use reranker::{
     GatewayReranker, HttpRerankBackend, RerankBackend, RerankScore, DEFAULT_RERANK_MODEL,
 };
@@ -78,6 +86,9 @@ pub struct PostgresAdapter {
     /// keeps the adapter safe to drop from async code.
     checkpoints: Option<Arc<PostgresCheckpointStore>>,
     knowledge: Arc<PgKnowledgeBase>,
+    /// Retained so the [`memory`](PostgresAdapter::memory) accessor can build
+    /// namespace-bound [`PgMemory`] handles that embed identically to knowledge.
+    embedder: Arc<dyn Embedder>,
     embedding_dim: usize,
     /// Captured runtime handle for the sync admin-store bridges (connector
     /// configs / settings / indexing runs over the same async pool).
@@ -177,6 +188,10 @@ impl PostgresAdapter {
                 .batch_execute(&schema::knowledge_vectors_schema(embedding_dim))
                 .await
                 .context("applying knowledge_vectors schema")?;
+            client
+                .batch_execute(&schema::memories_schema(embedding_dim))
+                .await
+                .context("applying memories schema")?;
         }
 
         // --- sync checkpoint store against the SAME database ---
@@ -194,7 +209,7 @@ impl PostgresAdapter {
         let handle = tokio::runtime::Handle::current();
         let knowledge = Arc::new(PgKnowledgeBase::new(
             pool.clone(),
-            embedder,
+            embedder.clone(),
             handle.clone(),
             None,
         ));
@@ -203,6 +218,7 @@ impl PostgresAdapter {
             pool,
             checkpoints: Some(checkpoints),
             knowledge,
+            embedder,
             embedding_dim,
             handle,
         })
@@ -246,6 +262,26 @@ impl PostgresAdapter {
     #[must_use]
     pub fn indexing_store(&self) -> PgIndexingStore {
         PgIndexingStore::new(self.pool.clone(), self.handle.clone())
+    }
+
+    /// A Postgres-backed [`Memory`](smooth_operator_core::Memory) over this
+    /// adapter's pool (the `memories` table), bound to one `(organization_id,
+    /// user_id)` namespace — persistent, semantic, cross-thread agent memory
+    /// (parity gap Phase 3 / SMOODEV-1470). Pass `user_id = None` for org-wide
+    /// memory. Embeds with the adapter's configured [`Embedder`] so memory and
+    /// knowledge vectors share the same column width and hashing.
+    ///
+    /// Cheap to build (clones pool + embedder handles); make one per
+    /// `(org, user)` you serve.
+    #[must_use]
+    pub fn memory(&self, organization_id: impl Into<String>, user_id: Option<String>) -> PgMemory {
+        PgMemory::new(
+            self.pool.clone(),
+            self.embedder.clone(),
+            self.handle.clone(),
+            organization_id,
+            user_id,
+        )
     }
 }
 
