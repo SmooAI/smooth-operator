@@ -86,7 +86,38 @@ pub fn build_state(config: ServerConfig) -> AppState {
 pub fn build_state_from_env(config: ServerConfig) -> Result<AppState> {
     let verifier = smooth_operator::auth::AuthConfig::from_env()
         .map_err(|e| anyhow::anyhow!("auth configuration error: {e}"))?;
-    Ok(build_state(config).with_auth(Arc::from(verifier)))
+    let state = install_widget_auth_from_env(build_state(config));
+    Ok(state.with_auth(Arc::from(verifier)))
+}
+
+/// Install an [`HttpWidgetAuth`](smooth_operator::widget_auth::HttpWidgetAuth)
+/// provider from `WIDGET_AUTH_URL` (optionally `WIDGET_AUTH_BEARER` +
+/// `WIDGET_AUTH_TTL_SECS`); otherwise leave the permissive default. This lets a
+/// host enforce embeddable-widget auth against its own policy service by setting
+/// env vars — no custom binary needed. (A host wanting bespoke logic still
+/// installs its own provider via [`AppState::with_widget_auth`].)
+fn install_widget_auth_from_env(state: AppState) -> AppState {
+    let Ok(url) = std::env::var("WIDGET_AUTH_URL") else {
+        return state;
+    };
+    let url = url.trim();
+    if url.is_empty() {
+        return state;
+    }
+    let mut provider = smooth_operator::widget_auth::HttpWidgetAuth::new(url);
+    if let Ok(bearer) = std::env::var("WIDGET_AUTH_BEARER") {
+        let bearer = bearer.trim();
+        if !bearer.is_empty() {
+            provider = provider.with_bearer(bearer);
+        }
+    }
+    if let Some(secs) = std::env::var("WIDGET_AUTH_TTL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        provider = provider.with_ttl(std::time::Duration::from_secs(secs));
+    }
+    state.with_widget_auth(Arc::new(provider))
 }
 
 /// Build an [`AppState`] selecting the **storage backend** (and the matching
@@ -180,6 +211,7 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
     };
 
     let state = install_backplane_from_env(state).await?;
+    let state = install_widget_auth_from_env(state);
 
     Ok(state.with_auth(Arc::from(verifier)))
 }
