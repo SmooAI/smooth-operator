@@ -5,6 +5,8 @@ members = [
     "adapters/in-memory",
     "adapters/postgres",
     "adapters/dynamodb",
+    "adapters/backplane-redis",
+    "adapters/backplane-nats",
     "smooth-operator-server",
     "smooth-operator-lambda",
     "ingestion",

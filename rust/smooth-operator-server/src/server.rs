@@ -179,7 +179,64 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
         }
     };
 
+    let state = install_backplane_from_env(state).await?;
+
     Ok(state.with_auth(Arc::from(verifier)))
+}
+
+/// Select the connection [`Backplane`](smooth_operator::backplane::Backplane)
+/// from `SMOOTH_AGENT_BACKPLANE`, installing it via
+/// [`AppState::with_backplane`](crate::state::AppState::with_backplane).
+///
+/// | value | backend | url env |
+/// |---|---|---|
+/// | unset / `memory` / `inmemory` | single-process (default) | — |
+/// | `redis` / `valkey` | [`RedisBackplane`] cross-pod fan-out | `SMOOTH_AGENT_BACKPLANE_URL` \| `SMOOTH_AGENT_REDIS_URL` |
+/// | `nats` | [`NatsBackplane`] cross-pod fan-out | `SMOOTH_AGENT_BACKPLANE_URL` \| `SMOOTH_AGENT_NATS_URL` |
+///
+/// A distributed backend is required for >1 replica (otherwise an event produced
+/// on one pod can't reach a socket on another) and to let non-AI publishers push
+/// realtime events via `Backplane::publish`.
+///
+/// # Errors
+/// Returns an error for an unknown backend value, a missing url, or a failed
+/// connection — fail loud at boot rather than silently run single-process.
+async fn install_backplane_from_env(state: AppState) -> Result<AppState> {
+    let kind = std::env::var("SMOOTH_AGENT_BACKPLANE")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+
+    let url = |specific: &str| -> Result<String> {
+        std::env::var("SMOOTH_AGENT_BACKPLANE_URL")
+            .or_else(|_| std::env::var(specific))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "{kind} backplane selected but neither SMOOTH_AGENT_BACKPLANE_URL nor {specific} is set"
+                )
+            })
+    };
+
+    match kind.as_str() {
+        "" | "memory" | "inmemory" => Ok(state), // default InMemoryBackplane already installed
+        "redis" | "valkey" => {
+            use smooth_operator_adapter_backplane_redis::RedisBackplane;
+            let backplane = RedisBackplane::connect(&url("SMOOTH_AGENT_REDIS_URL")?)
+                .await
+                .map_err(|e| anyhow::anyhow!("connecting Redis backplane: {e}"))?;
+            Ok(state.with_backplane(Arc::new(backplane)))
+        }
+        "nats" => {
+            use smooth_operator_adapter_backplane_nats::NatsBackplane;
+            let backplane = NatsBackplane::connect(&url("SMOOTH_AGENT_NATS_URL")?)
+                .await
+                .map_err(|e| anyhow::anyhow!("connecting NATS backplane: {e}"))?;
+            Ok(state.with_backplane(Arc::new(backplane)))
+        }
+        other => Err(anyhow::anyhow!(
+            "unknown SMOOTH_AGENT_BACKPLANE '{other}' (expected: memory | redis | valkey | nats)"
+        )),
+    }
 }
 
 /// Seed a couple of distinctive demo docs so knowledge-grounded E2E is

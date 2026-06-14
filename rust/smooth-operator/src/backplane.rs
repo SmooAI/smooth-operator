@@ -30,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A connection's local delivery sink: given an event, write it to that
@@ -40,7 +41,11 @@ pub type LocalSink = Arc<dyn Fn(Value) + Send + Sync>;
 
 /// A delivery target: a single connection, or every connection associated with a
 /// session / user / org / agent.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Serialize`/`Deserialize` so a distributed [`Backplane`] (Redis/NATS) can put
+/// the target on the wire alongside the event, and each pod re-resolve it against
+/// *its* local registry.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Target {
     /// One specific connection.
     Connection(String),
@@ -52,6 +57,24 @@ pub enum Target {
     Org(String),
     /// Every connection talking to an agent.
     Agent(String),
+}
+
+/// The wire format a distributed [`Backplane`] broadcasts on its bus: who
+/// published it (so a pod can skip its own echo), the [`Target`] to re-resolve
+/// locally, and the event payload.
+///
+/// Shared so the Redis and NATS adapters — and any host's own transport adapter —
+/// speak the same envelope; a pod on the other end deserializes this and calls
+/// `publish` on its **local** [`InMemoryBackplane`] to fan out to its sockets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackplaneEnvelope {
+    /// Opaque id of the publishing node. A receiver compares it to its own id and
+    /// skips the message if equal — the origin already delivered locally.
+    pub origin: String,
+    /// The delivery target, re-resolved against the receiving pod's registry.
+    pub target: Target,
+    /// The event payload, delivered verbatim to matching local sinks.
+    pub event: Value,
 }
 
 /// The connection backplane: a per-pod sink registry + cross-pod event delivery.
