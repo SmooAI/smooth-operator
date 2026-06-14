@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use smooth_operator::auth::{AuthError, Principal, Role};
+use smooth_operator::backplane::Target;
 use smooth_operator::connector_config::{ConnectorConfig, ConnectorKind};
 use smooth_operator::domain::ParticipantType;
 use smooth_operator::settings::AgentSettings;
@@ -82,6 +83,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/admin/connectors/{id}/index", post(index_connector))
         .route("/admin/settings", get(get_settings).put(put_settings))
+        // Realtime publish (Phase: backplane) — push an event to a backplane
+        // target over the WebSocket fleet. The plug point for non-AI publishers
+        // (job status, ingestion progress, notifications). Admin-gated.
+        .route("/admin/publish", post(publish_event))
 }
 
 // ---------------------------------------------------------------------------
@@ -850,4 +855,73 @@ async fn conversation_owned_by(state: &AppState, conversation_id: &str, user_id:
         }),
         Err(_) => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Realtime publish — `POST /admin/publish`
+// ---------------------------------------------------------------------------
+
+/// A delivery target in the publish request, in a friendlier `{type, id}` shape
+/// than [`Target`]'s default enum serialization.
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "id", rename_all = "snake_case")]
+enum PublishTarget {
+    Connection(String),
+    Session(String),
+    User(String),
+    Org(String),
+    Agent(String),
+}
+
+impl From<PublishTarget> for Target {
+    fn from(t: PublishTarget) -> Self {
+        match t {
+            PublishTarget::Connection(id) => Target::Connection(id),
+            PublishTarget::Session(id) => Target::Session(id),
+            PublishTarget::User(id) => Target::User(id),
+            PublishTarget::Org(id) => Target::Org(id),
+            PublishTarget::Agent(id) => Target::Agent(id),
+        }
+    }
+}
+
+/// `POST /admin/publish` body: the [`PublishTarget`] and the event payload to
+/// deliver verbatim to every connection for that target.
+#[derive(Deserialize)]
+struct PublishRequest {
+    target: PublishTarget,
+    event: Value,
+}
+
+/// `POST /admin/publish` response.
+#[derive(Serialize)]
+struct PublishResponse {
+    /// Connections this **pod** delivered to. With a distributed backplane the
+    /// event also fans out to connections on other pods, which this count omits
+    /// (each pod delivers to its own sockets) — so `0` here does NOT mean
+    /// "delivered to nobody", only "nobody on the pod that served this request".
+    delivered: usize,
+}
+
+/// Push a realtime event to a backplane target over the WebSocket fleet — the
+/// plug point for **non-AI publishers** (job status, ingestion progress,
+/// notifications, billing): any service can deliver to a connected client
+/// without going through an agent turn.
+///
+/// Admin-gated. Targets are opaque ids matched against the backplane's
+/// connection registry; this layer does not org-validate session/user/agent ids
+/// (the backplane is an id-routing layer, not an authz layer). A host that needs
+/// hard tenant isolation namespaces those ids in its own wrapper before they
+/// reach the backplane. Callers are trusted internal services holding an Admin
+/// credential.
+async fn publish_event(
+    RequireRole::<2>(_principal): RequireRole<2>,
+    State(state): State<AppState>,
+    Json(body): Json<PublishRequest>,
+) -> Json<PublishResponse> {
+    let delivered = state
+        .backplane
+        .publish(body.target.into(), body.event)
+        .await;
+    Json(PublishResponse { delivered })
 }
