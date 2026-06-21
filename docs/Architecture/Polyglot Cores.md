@@ -1,7 +1,12 @@
 # Polyglot Cores
 
-> **Status:** active. The **C# core is complete** (all phases shipped, published to NuGet).
-> The Rust engine `smooai-smooth-operator-core` is the **reference implementation**.
+> **Status:** active. The Rust engine `smooai-smooth-operator-core` is the
+> **reference implementation**. The **C# core is complete** (all phases shipped,
+> published to NuGet). **Phase 0 now exists in every target language** — the
+> **Python** ([Python Core](Python%20Core.md)), **TypeScript**
+> ([TypeScript Core](TypeScript%20Core.md)), and **Go** ([Go Core](Go%20Core.md))
+> native cores each pass the shared LLM-judge eval suite against the live gateway
+> (5/5 under an adversarial sonnet judge), at behavioral parity with Rust and C#.
 
 ## The idea
 
