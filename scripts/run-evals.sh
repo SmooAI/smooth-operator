@@ -13,21 +13,43 @@
 # Env overrides:
 #   SMOOAI_GATEWAY_KEY_NAME   th config key holding the sk- virtual key
 #                             (default: liteLLMVirtualKeyAiServer)
-#   SMOOAI_CONFIG_ENV         config environment to read (default: production)
+#   SMOOAI_EVAL_GATEWAY_ENV   config environment the gateway key lives in
+#                             (default: production). Deliberately NOT the ambient
+#                             SMOOAI_CONFIG_ENV — that's your local working env
+#                             (often `development`, where the key is just a
+#                             placeholder), unrelated to where the prod key lives.
+#   SMOOAI_CONFIG_ORG_ID      org whose config holds the key. `th config` reads
+#                             the org from this env (set by direnv in the smooai
+#                             monorepo); without it, th resolves a different/default
+#                             org and returns the wrong value. Export it (or source
+#                             the monorepo's .envrc) before running outside that repo.
 #   SMOOTH_AGENT_JUDGE_MODEL  judge model (default: the harness CHEAP_MODEL);
 #                             set e.g. claude-sonnet-4-5 for an adversarial grade
 set -euo pipefail
 
 KEY_NAME="${SMOOAI_GATEWAY_KEY_NAME:-liteLLMVirtualKeyAiServer}"
-CONFIG_ENV="${SMOOAI_CONFIG_ENV:-production}"
+CONFIG_ENV="${SMOOAI_EVAL_GATEWAY_ENV:-production}"
 
 if ! command -v th >/dev/null 2>&1; then
     echo "error: 'th' CLI not found — install the smooth CLI to fetch config secrets" >&2
     exit 1
 fi
 
-# Fetch the gateway virtual key from @smooai/config. Never echoed.
-SMOOAI_GATEWAY_KEY="$(th config get "$KEY_NAME" --environment="$CONFIG_ENV" --json 2>/dev/null \
+# The key lives in a specific org (SmooAI's infra-secrets / master org). We pin it
+# explicitly and authenticate via the `th` user JWT, deliberately UNSETTING any
+# ambient @smooai/config M2M env vars (SMOOAI_CONFIG_API_KEY / CLIENT_*) for the
+# fetch — those are scoped to whatever org the surrounding direnv loaded and would
+# otherwise override --org-id and return the wrong value.
+if [ -z "${SMOOAI_CONFIG_ORG_ID:-}" ]; then
+    echo "error: SMOOAI_CONFIG_ORG_ID is not set." >&2
+    echo "       Set it to the org that holds '$KEY_NAME' (SmooAI's infra-secrets org)," >&2
+    echo "       e.g. export SMOOAI_CONFIG_ORG_ID=<org-uuid>, then re-run." >&2
+    exit 1
+fi
+
+# Fetch the gateway virtual key from @smooai/config via the user JWT. Never echoed.
+SMOOAI_GATEWAY_KEY="$(env -u SMOOAI_CONFIG_API_KEY -u SMOOAI_CONFIG_CLIENT_ID -u SMOOAI_CONFIG_CLIENT_SECRET -u SMOOAI_CONFIG_API_URL \
+    th config get "$KEY_NAME" --environment="$CONFIG_ENV" --org-id "$SMOOAI_CONFIG_ORG_ID" --json 2>/dev/null \
     | python3 -c 'import sys,json; print(json.load(sys.stdin).get("value",""))')"
 
 if [ -z "${SMOOAI_GATEWAY_KEY}" ]; then
