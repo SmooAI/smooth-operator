@@ -13,6 +13,7 @@
  */
 
 import type { CheckpointStore } from './checkpoint.js';
+import type { Memory } from './memory.js';
 import type { Reranker } from './rerank.js';
 import { compact } from './compaction.js';
 import { CostTracker } from './cost.js';
@@ -40,6 +41,10 @@ export interface AgentOptions {
     reranker?: Reranker;
     /** Candidate pool size to retrieve before reranking; when > knowledgeTopK, more docs are fetched, reranked, then trimmed. */
     knowledgeCandidateK?: number;
+    /** Optional long-term memory; relevant entries are recalled into context each turn. */
+    memory?: Memory;
+    /** How many memory entries to recall per turn (default 4). */
+    memoryTopK?: number;
     tools?: Tool[];
     /**
      * Approximate token budget for the context window. Before each model call,
@@ -114,6 +119,16 @@ export class SmoothAgent {
 
     private buildSystem(message: string): string {
         let system = this.options.instructions ?? '';
+
+        const mem = this.options.memory;
+        if (mem) {
+            const recalled = mem.recall(message, this.options.memoryTopK ?? 4);
+            if (recalled.length > 0) {
+                const block = recalled.map((e) => `- ${e.text}`).join('\n');
+                system = `${system}\n\nRelevant memory (things you remember about this user/context):\n${block}`.trim();
+            }
+        }
+
         const kb = this.options.knowledge;
         if (kb) {
             const topK = this.options.knowledgeTopK ?? DEFAULTS.knowledgeTopK;
