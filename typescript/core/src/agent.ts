@@ -13,6 +13,7 @@
  */
 
 import type { CheckpointStore } from './checkpoint.js';
+import type { Reranker } from './rerank.js';
 import { compact } from './compaction.js';
 import { CostTracker } from './cost.js';
 import type { CostBudget, ModelPricing, Usage } from './cost.js';
@@ -35,6 +36,10 @@ export interface AgentOptions {
     temperature?: number;
     knowledge?: InMemoryKnowledge;
     knowledgeTopK?: number;
+    /** Reranker applied to retrieved hits before injection (default: passthrough). */
+    reranker?: Reranker;
+    /** Candidate pool size to retrieve before reranking; when > knowledgeTopK, more docs are fetched, reranked, then trimmed. */
+    knowledgeCandidateK?: number;
     tools?: Tool[];
     /**
      * Approximate token budget for the context window. Before each model call,
@@ -111,7 +116,11 @@ export class SmoothAgent {
         let system = this.options.instructions ?? '';
         const kb = this.options.knowledge;
         if (kb) {
-            const hits = kb.query(message, this.options.knowledgeTopK ?? DEFAULTS.knowledgeTopK);
+            const topK = this.options.knowledgeTopK ?? DEFAULTS.knowledgeTopK;
+            const candidateK = Math.max(this.options.knowledgeCandidateK ?? 0, topK);
+            let hits = kb.query(message, candidateK);
+            if (this.options.reranker) hits = this.options.reranker.rerank(message, hits);
+            hits = hits.slice(0, topK);
             if (hits.length > 0) {
                 const block = hits.map((h) => `[${h.source}] ${h.content}`).join('\n\n');
                 system = `${system}\n\nKnowledge base (ground all facts ONLY in this; if it is not here, say you don't know):\n${block}`.trim();

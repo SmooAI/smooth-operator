@@ -14,3 +14,5 @@ export { CostTracker, DEFAULT_PRICING } from './cost.js';
 export type { CostBudget, ModelPricing, Usage } from './cost.js';
 export { InMemoryKnowledge } from './knowledge.js';
 export type { KnowledgeHit } from './knowledge.js';
+export { LexicalReranker, NoopReranker } from './rerank.js';
+export type { Reranker } from './rerank.js';
