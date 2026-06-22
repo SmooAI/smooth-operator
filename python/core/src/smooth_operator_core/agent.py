@@ -20,6 +20,7 @@ from .checkpoint import Checkpoint, CheckpointStore
 from .compaction import compact
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge
+from .rerank import NoopReranker, Reranker
 
 
 class Tool(Protocol):
@@ -56,6 +57,12 @@ class AgentOptions:
     temperature: float = 0.0
     knowledge: InMemoryKnowledge | None = None
     knowledge_top_k: int = 4
+    #: Reranker applied to retrieved hits before injection (defaults to passthrough).
+    reranker: Reranker = field(default_factory=NoopReranker)
+    #: Candidate pool size to retrieve before reranking. When greater than
+    #: ``knowledge_top_k``, more documents are fetched, reranked, and trimmed to
+    #: ``knowledge_top_k`` — so the reranker can promote a better candidate.
+    knowledge_candidate_k: int = 0
     tools: list[Tool] = field(default_factory=list)
     #: Approximate token budget for the context window. Before each model call,
     #: older non-system messages are dropped (sliding window) to stay under it.
@@ -115,7 +122,10 @@ class SmoothAgent:
         system = self._options.instructions or ""
         kb = self._options.knowledge
         if kb is not None:
-            hits = kb.query(message, self._options.knowledge_top_k)
+            top_k = self._options.knowledge_top_k
+            candidate_k = max(self._options.knowledge_candidate_k, top_k)
+            hits = kb.query(message, candidate_k)
+            hits = self._options.reranker.rerank(message, hits)[:top_k]
             if hits:
                 block = "\n\n".join(f"[{h.source}] {h.content}" for h in hits)
                 system = (

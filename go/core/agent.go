@@ -83,7 +83,12 @@ type AgentOptions struct {
 	Temperature   float64
 	Knowledge     *InMemoryKnowledge
 	KnowledgeTopK int
-	Tools         []Tool
+	// Reranker reorders retrieved hits before injection (nil = passthrough).
+	Reranker Reranker
+	// KnowledgeCandidateK is the pool size retrieved before reranking; when greater
+	// than KnowledgeTopK, more docs are fetched, reranked, then trimmed to TopK.
+	KnowledgeCandidateK int
+	Tools               []Tool
 	// MaxContextTokens is the approximate token budget for the context window.
 	// Before each model call, older non-system messages are dropped (sliding
 	// window) to stay under it. 0 uses the default (8000); negative disables.
@@ -143,7 +148,17 @@ func (a *SmoothAgent) buildSystem(message string) string {
 		if topK <= 0 {
 			topK = defaultKnowledgeTopK
 		}
-		hits := a.options.Knowledge.Query(message, topK)
+		candidateK := topK
+		if a.options.KnowledgeCandidateK > candidateK {
+			candidateK = a.options.KnowledgeCandidateK
+		}
+		hits := a.options.Knowledge.Query(message, candidateK)
+		if a.options.Reranker != nil {
+			hits = a.options.Reranker.Rerank(message, hits)
+		}
+		if len(hits) > topK {
+			hits = hits[:topK]
+		}
 		if len(hits) > 0 {
 			parts := make([]string, len(hits))
 			for i, h := range hits {
