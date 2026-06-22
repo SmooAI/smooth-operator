@@ -23,6 +23,13 @@ type KnowledgeHit struct {
 	Score   float64
 }
 
+// Knowledge is a retriever: returns the most relevant documents for a query. Both
+// the lexical InMemoryKnowledge and the embedding-backed VectorKnowledge satisfy
+// this, so the agent accepts either.
+type Knowledge interface {
+	Query(query string, topK int) []KnowledgeHit
+}
+
 type doc struct {
 	content string
 	source  string

@@ -18,7 +18,7 @@ import type { Reranker } from './rerank.js';
 import { compact } from './compaction.js';
 import { CostTracker } from './cost.js';
 import type { CostBudget, ModelPricing, Usage } from './cost.js';
-import type { InMemoryKnowledge } from './knowledge.js';
+import type { Knowledge } from './knowledge.js';
 
 /** A callable tool the agent may invoke. Mirrors the reference engines' tool seam. */
 export interface Tool {
@@ -35,7 +35,7 @@ export interface AgentOptions {
     maxIterations?: number;
     maxTokens?: number;
     temperature?: number;
-    knowledge?: InMemoryKnowledge;
+    knowledge?: Knowledge;
     knowledgeTopK?: number;
     /** Reranker applied to retrieved hits before injection (default: passthrough). */
     reranker?: Reranker;

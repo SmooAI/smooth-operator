@@ -14,6 +14,15 @@ export interface KnowledgeHit {
     score: number;
 }
 
+/**
+ * A retriever: returns the most relevant documents for a query. Both the lexical
+ * {@link InMemoryKnowledge} and the embedding-backed `VectorKnowledge` satisfy
+ * this, so the agent accepts either.
+ */
+export interface Knowledge {
+    query(query: string, topK?: number): KnowledgeHit[];
+}
+
 interface Doc {
     content: string;
     source: string;
