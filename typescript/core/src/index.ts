@@ -6,7 +6,7 @@
  * client, with in-memory knowledge grounding. See `docs/Architecture/TypeScript Core.md`.
  */
 
-export { SmoothAgent } from './agent.js';
+export { delegateTool, SmoothAgent } from './agent.js';
 export type { AgentOptions, AgentRunResponse, ChatClientLike, Tool } from './agent.js';
 export { InMemoryCheckpointStore } from './checkpoint.js';
 export type { Checkpoint, CheckpointStore } from './checkpoint.js';

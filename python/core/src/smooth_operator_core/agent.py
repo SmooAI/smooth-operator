@@ -267,3 +267,31 @@ class SmoothAgent:
             return await tool.execute(args)
         except Exception as exc:  # noqa: BLE001 — surface tool failures to the model, don't crash the turn
             return f"error: tool '{name}' failed: {exc}"
+
+
+def delegate_tool(name: str, description: str, child: SmoothAgent, task_property: str = "task") -> FunctionTool:
+    """Build a :class:`Tool` that delegates a subtask to a child :class:`SmoothAgent`.
+
+    A sub-agent is just a tool backed by another agent: the model calls this tool
+    with a ``task`` argument, the child agent runs that task, and the child's final
+    reply becomes the tool result — composing with the existing tool loop, no
+    special wiring. The child can have its own instructions, tools, knowledge, etc.
+    """
+
+    async def _run(args: dict[str, Any]) -> str:
+        task = str(args.get(task_property, ""))
+        result = await child.run(task)
+        return result.text
+
+    return FunctionTool(
+        name=name,
+        description=description,
+        parameters={
+            "type": "object",
+            "properties": {
+                task_property: {"type": "string", "description": "The subtask for the sub-agent to perform."}
+            },
+            "required": [task_property],
+        },
+        func=_run,
+    )
