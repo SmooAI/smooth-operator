@@ -83,6 +83,10 @@ type AgentOptions struct {
 	Knowledge     *InMemoryKnowledge
 	KnowledgeTopK int
 	Tools         []Tool
+	// MaxContextTokens is the approximate token budget for the context window.
+	// Before each model call, older non-system messages are dropped (sliding
+	// window) to stay under it. 0 uses the default (8000); negative disables.
+	MaxContextTokens int
 }
 
 // AgentRunResponse is the result of a turn.
@@ -93,10 +97,11 @@ type AgentRunResponse struct {
 }
 
 const (
-	defaultModel         = "claude-haiku-4-5"
-	defaultMaxIterations = 8
-	defaultMaxTokens     = 512
-	defaultKnowledgeTopK = 4
+	defaultModel            = "claude-haiku-4-5"
+	defaultMaxIterations    = 8
+	defaultMaxTokens        = 512
+	defaultKnowledgeTopK    = 4
+	defaultMaxContextTokens = 8000
 )
 
 // SmoothAgent is a native, in-process agent.
@@ -171,11 +176,17 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 		maxTokens = defaultMaxTokens
 	}
 	tools := a.toolSpecs()
+	maxContext := a.options.MaxContextTokens
+	if maxContext == 0 {
+		maxContext = defaultMaxContextTokens
+	}
 
 	toolCalls := 0
 	lastText := ""
 
 	for iteration := 1; iteration <= maxIter; iteration++ {
+		// Keep the context window within budget before each model call.
+		messages = compact(messages, maxContext)
 		resp, err := a.client.Chat(ctx, ChatRequest{
 			Model:       model,
 			Messages:    messages,

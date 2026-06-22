@@ -12,6 +12,7 @@
  * on exactly as they did when the C# core grew past Phase 0.
  */
 
+import { compact } from './compaction.js';
 import type { InMemoryKnowledge } from './knowledge.js';
 
 /** A callable tool the agent may invoke. Mirrors the reference engines' tool seam. */
@@ -32,6 +33,12 @@ export interface AgentOptions {
     knowledge?: InMemoryKnowledge;
     knowledgeTopK?: number;
     tools?: Tool[];
+    /**
+     * Approximate token budget for the context window. Before each model call,
+     * older non-system messages are dropped (sliding window) to stay under it.
+     * `0` disables compaction. Defaults to 8000.
+     */
+    maxContextTokens?: number;
 }
 
 export interface AgentRunResponse {
@@ -65,6 +72,7 @@ const DEFAULTS = {
     maxTokens: 512,
     temperature: 0,
     knowledgeTopK: 4,
+    maxContextTokens: 8000,
 };
 
 export class SmoothAgent {
@@ -113,7 +121,10 @@ export class SmoothAgent {
         let toolCalls = 0;
         let lastText = '';
 
+        const maxContextTokens = this.options.maxContextTokens ?? DEFAULTS.maxContextTokens;
         for (let iteration = 1; iteration <= maxIterations; iteration++) {
+            // Keep the context window within budget before each model call.
+            messages.splice(0, messages.length, ...compact(messages, maxContextTokens));
             const response = await this.client.chat.completions.create({
                 model: this.options.model ?? DEFAULTS.model,
                 messages,

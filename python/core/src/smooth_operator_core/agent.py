@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
+from .compaction import compact
 from .knowledge import InMemoryKnowledge
 
 
@@ -55,6 +56,10 @@ class AgentOptions:
     knowledge: InMemoryKnowledge | None = None
     knowledge_top_k: int = 4
     tools: list[Tool] = field(default_factory=list)
+    #: Approximate token budget for the context window. Before each model call,
+    #: older non-system messages are dropped (sliding window) to stay under it.
+    #: ``0`` disables compaction.
+    max_context_tokens: int = 8000
 
 
 @dataclass
@@ -118,6 +123,8 @@ class SmoothAgent:
         last_text = ""
 
         for iteration in range(1, self._options.max_iterations + 1):
+            # Keep the context window within budget before each model call.
+            messages = compact(messages, self._options.max_context_tokens)
             response = await self._client.chat.completions.create(
                 model=self._options.model,
                 messages=messages,
