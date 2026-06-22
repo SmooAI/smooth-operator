@@ -13,6 +13,8 @@
  */
 
 import { compact } from './compaction.js';
+import { CostTracker } from './cost.js';
+import type { CostBudget, ModelPricing, Usage } from './cost.js';
 import type { InMemoryKnowledge } from './knowledge.js';
 
 /** A callable tool the agent may invoke. Mirrors the reference engines' tool seam. */
@@ -39,12 +41,20 @@ export interface AgentOptions {
      * `0` disables compaction. Defaults to 8000.
      */
     maxContextTokens?: number;
+    /** Optional ceiling for the turn (token and/or USD). The turn stops early once a model call pushes usage/cost over the budget. */
+    budget?: CostBudget;
+    /** Per-model pricing override for cost accounting (defaults to DEFAULT_PRICING). */
+    pricing?: Record<string, ModelPricing>;
 }
 
 export interface AgentRunResponse {
     text: string;
     iterations: number;
     toolCalls: number;
+    usage: Usage;
+    costUsd: number;
+    /** True if the turn stopped because the cost/token budget was hit. */
+    budgetExceeded: boolean;
 }
 
 /**
@@ -61,6 +71,7 @@ export interface ChatClientLike {
                         tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> | null;
                     };
                 }>;
+                usage?: { prompt_tokens?: number | null; completion_tokens?: number | null } | null;
             }>;
         };
     };
@@ -74,6 +85,11 @@ const DEFAULTS = {
     knowledgeTopK: 4,
     maxContextTokens: 8000,
 };
+
+/** Pull token usage from an OpenAI-shaped response, defaulting to zero when absent. */
+function extractUsage(usage: { prompt_tokens?: number | null; completion_tokens?: number | null } | null | undefined): Usage {
+    return { promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0 };
+}
 
 export class SmoothAgent {
     private readonly toolsByName: Map<string, Tool>;
@@ -122,16 +138,19 @@ export class SmoothAgent {
         let lastText = '';
 
         const maxContextTokens = this.options.maxContextTokens ?? DEFAULTS.maxContextTokens;
+        const model = this.options.model ?? DEFAULTS.model;
+        const tracker = new CostTracker();
         for (let iteration = 1; iteration <= maxIterations; iteration++) {
             // Keep the context window within budget before each model call.
             messages.splice(0, messages.length, ...compact(messages, maxContextTokens));
             const response = await this.client.chat.completions.create({
-                model: this.options.model ?? DEFAULTS.model,
+                model,
                 messages,
                 ...(tools ? { tools } : {}),
                 temperature: this.options.temperature ?? DEFAULTS.temperature,
                 max_tokens: this.options.maxTokens ?? DEFAULTS.maxTokens,
             });
+            tracker.record(model, extractUsage(response.usage), this.options.pricing);
             const choice = response.choices[0].message;
             lastText = choice.content ?? '';
 
@@ -145,8 +164,13 @@ export class SmoothAgent {
             }
             messages.push(assistantMsg);
 
+            // Stop early if this turn has hit its token/cost budget.
+            if (tracker.exceeds(this.options.budget)) {
+                return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: true };
+            }
+
             if (!choice.tool_calls || choice.tool_calls.length === 0) {
-                return { text: lastText, iterations: iteration, toolCalls };
+                return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
             }
 
             for (const tc of choice.tool_calls) {
@@ -156,7 +180,7 @@ export class SmoothAgent {
             }
         }
 
-        return { text: lastText, iterations: maxIterations, toolCalls };
+        return { text: lastText, iterations: maxIterations, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
     }
 
     private async dispatchTool(name: string, rawArgs: string): Promise<string> {

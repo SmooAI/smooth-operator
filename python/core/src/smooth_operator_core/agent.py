@@ -6,10 +6,9 @@ chat client (the ``openai`` SDK pointed at a gateway): inject retrieved
 knowledge, call the model, run any requested tools, feed results back, and loop
 until the model answers without a tool call or the iteration budget is hit.
 
-Deliberately minimal (no compaction / budget / checkpointing yet) — those layer
-on exactly as they did when the C# core grew past Phase 0. The point of Phase 0
-is a real, in-process engine that passes the shared eval suite against the live
-gateway.
+Phase 1 adds context compaction and token/cost budgeting; further features
+(checkpointing, rerank, memory, sub-agents, vector knowledge) layer on as they did
+when the C# core grew past Phase 0.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 from .compaction import compact
+from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge
 
 
@@ -60,6 +60,11 @@ class AgentOptions:
     #: older non-system messages are dropped (sliding window) to stay under it.
     #: ``0`` disables compaction.
     max_context_tokens: int = 8000
+    #: Optional ceiling for the turn (token and/or USD). The turn stops early once
+    #: a model call pushes accumulated usage/cost over the budget.
+    budget: CostBudget | None = None
+    #: Per-model pricing override for cost accounting (defaults to DEFAULT_PRICING).
+    pricing: dict[str, ModelPricing] | None = None
 
 
 @dataclass
@@ -69,6 +74,22 @@ class AgentRunResponse:
     text: str
     iterations: int
     tool_calls: int
+    usage: Usage = field(default_factory=Usage)
+    cost_usd: float = 0.0
+    #: True if the turn stopped because the cost/token budget was hit.
+    budget_exceeded: bool = False
+
+
+def _extract_usage(response: Any) -> Usage:
+    """Pull token usage from an OpenAI-shaped response, defaulting to zero when
+    absent (e.g. a fake client in tests)."""
+    u = getattr(response, "usage", None)
+    if u is None:
+        return Usage()
+    return Usage(
+        prompt_tokens=int(getattr(u, "prompt_tokens", 0) or 0),
+        completion_tokens=int(getattr(u, "completion_tokens", 0) or 0),
+    )
 
 
 class SmoothAgent:
@@ -121,6 +142,7 @@ class SmoothAgent:
         tool_specs = self._tool_specs()
         tool_call_count = 0
         last_text = ""
+        tracker = CostTracker()
 
         for iteration in range(1, self._options.max_iterations + 1):
             # Keep the context window within budget before each model call.
@@ -132,6 +154,7 @@ class SmoothAgent:
                 temperature=self._options.temperature,
                 max_tokens=self._options.max_tokens,
             )
+            tracker.record(self._options.model, _extract_usage(response), self._options.pricing)
             choice = response.choices[0].message
             last_text = choice.content or ""
 
@@ -148,15 +171,38 @@ class SmoothAgent:
                 ]
             messages.append(assistant_msg)
 
+            # Stop early if this turn has hit its token/cost budget.
+            if tracker.exceeds(self._options.budget):
+                return AgentRunResponse(
+                    text=last_text,
+                    iterations=iteration,
+                    tool_calls=tool_call_count,
+                    usage=tracker.usage,
+                    cost_usd=tracker.cost_usd,
+                    budget_exceeded=True,
+                )
+
             if not choice.tool_calls:
-                return AgentRunResponse(text=last_text, iterations=iteration, tool_calls=tool_call_count)
+                return AgentRunResponse(
+                    text=last_text,
+                    iterations=iteration,
+                    tool_calls=tool_call_count,
+                    usage=tracker.usage,
+                    cost_usd=tracker.cost_usd,
+                )
 
             for tc in choice.tool_calls:
                 tool_call_count += 1
                 result = await self._dispatch_tool(tc.function.name, tc.function.arguments)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
-        return AgentRunResponse(text=last_text, iterations=self._options.max_iterations, tool_calls=tool_call_count)
+        return AgentRunResponse(
+            text=last_text,
+            iterations=self._options.max_iterations,
+            tool_calls=tool_call_count,
+            usage=tracker.usage,
+            cost_usd=tracker.cost_usd,
+        )
 
     async def _dispatch_tool(self, name: str, raw_arguments: str) -> str:
         import json

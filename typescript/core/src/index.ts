@@ -8,5 +8,7 @@
 
 export { SmoothAgent } from './agent.js';
 export type { AgentOptions, AgentRunResponse, ChatClientLike, Tool } from './agent.js';
+export { CostTracker, DEFAULT_PRICING } from './cost.js';
+export type { CostBudget, ModelPricing, Usage } from './cost.js';
 export { InMemoryKnowledge } from './knowledge.js';
 export type { KnowledgeHit } from './knowledge.js';
