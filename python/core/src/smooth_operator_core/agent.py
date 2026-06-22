@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from .checkpoint import Checkpoint, CheckpointStore
 from .compaction import compact
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
-from .knowledge import InMemoryKnowledge
+from .knowledge import Knowledge
 from .memory import Memory
 from .rerank import NoopReranker, Reranker
 
@@ -56,7 +56,7 @@ class AgentOptions:
     max_iterations: int = 8
     max_tokens: int = 512
     temperature: float = 0.0
-    knowledge: InMemoryKnowledge | None = None
+    knowledge: Knowledge | None = None
     knowledge_top_k: int = 4
     #: Reranker applied to retrieved hits before injection (defaults to passthrough).
     reranker: Reranker = field(default_factory=NoopReranker)

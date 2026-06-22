@@ -8,9 +8,10 @@ knowledge grounding. See ``docs/Architecture/Python Core.md``.
 from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, Tool, delegate_tool
 from .checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
-from .knowledge import InMemoryKnowledge, KnowledgeHit
+from .knowledge import InMemoryKnowledge, Knowledge, KnowledgeHit
 from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
+from .vector import Embedder, HashEmbedder, VectorKnowledge
 
 __all__ = [
     "AgentOptions",
@@ -19,11 +20,14 @@ __all__ = [
     "CheckpointStore",
     "CostBudget",
     "CostTracker",
+    "Embedder",
     "FunctionTool",
     "delegate_tool",
+    "HashEmbedder",
     "InMemoryCheckpointStore",
     "InMemoryKnowledge",
     "InMemoryMemory",
+    "Knowledge",
     "KnowledgeHit",
     "LexicalReranker",
     "Memory",
@@ -34,4 +38,5 @@ __all__ = [
     "SmoothAgent",
     "Tool",
     "Usage",
+    "VectorKnowledge",
 ]

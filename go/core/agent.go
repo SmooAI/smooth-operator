@@ -109,7 +109,7 @@ type AgentOptions struct {
 	MaxIterations int
 	MaxTokens     int
 	Temperature   float64
-	Knowledge     *InMemoryKnowledge
+	Knowledge     Knowledge
 	KnowledgeTopK int
 	// Reranker reorders retrieved hits before injection (nil = passthrough).
 	Reranker Reranker

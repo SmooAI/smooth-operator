@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Protocol
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -27,6 +28,14 @@ class KnowledgeHit:
     content: str
     source: str
     score: float
+
+
+class Knowledge(Protocol):
+    """A retriever: returns the most relevant documents for a query. Both the
+    lexical :class:`InMemoryKnowledge` and the embedding-backed VectorKnowledge
+    satisfy this, so the agent accepts either."""
+
+    def query(self, query: str, top_k: int = 4) -> list[KnowledgeHit]: ...
 
 
 @dataclass
