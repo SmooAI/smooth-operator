@@ -12,7 +12,8 @@
 #
 # Env overrides:
 #   SMOOAI_GATEWAY_KEY_NAME   th config key holding the sk- virtual key
-#                             (default: liteLLMVirtualKeyAiServer)
+#                             (default: smooaiLlmKey — the smooai org's own LLM
+#                             virtual key, mirror of org_llm_keys; secret tier)
 #   SMOOAI_EVAL_GATEWAY_ENV   config environment the gateway key lives in
 #                             (default: production). Deliberately NOT the ambient
 #                             SMOOAI_CONFIG_ENV — that's your local working env
@@ -27,7 +28,7 @@
 #                             set e.g. claude-sonnet-4-5 for an adversarial grade
 set -euo pipefail
 
-KEY_NAME="${SMOOAI_GATEWAY_KEY_NAME:-liteLLMVirtualKeyAiServer}"
+KEY_NAME="${SMOOAI_GATEWAY_KEY_NAME:-smooaiLlmKey}"
 CONFIG_ENV="${SMOOAI_EVAL_GATEWAY_ENV:-production}"
 
 if ! command -v th >/dev/null 2>&1; then
