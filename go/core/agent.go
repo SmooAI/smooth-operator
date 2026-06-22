@@ -88,7 +88,11 @@ type AgentOptions struct {
 	// KnowledgeCandidateK is the pool size retrieved before reranking; when greater
 	// than KnowledgeTopK, more docs are fetched, reranked, then trimmed to TopK.
 	KnowledgeCandidateK int
-	Tools               []Tool
+	// Memory, if set, recalls relevant facts into context each turn.
+	Memory Memory
+	// MemoryTopK is how many memory entries to recall per turn (0 = default 4).
+	MemoryTopK int
+	Tools      []Tool
 	// MaxContextTokens is the approximate token budget for the context window.
 	// Before each model call, older non-system messages are dropped (sliding
 	// window) to stay under it. 0 uses the default (8000); negative disables.
@@ -143,6 +147,22 @@ func NewSmoothAgent(client ChatClient, options AgentOptions) *SmoothAgent {
 
 func (a *SmoothAgent) buildSystem(message string) string {
 	system := a.options.Instructions
+
+	if a.options.Memory != nil {
+		topK := a.options.MemoryTopK
+		if topK <= 0 {
+			topK = defaultKnowledgeTopK
+		}
+		recalled := a.options.Memory.Recall(message, topK)
+		if len(recalled) > 0 {
+			lines := make([]string, len(recalled))
+			for i, e := range recalled {
+				lines[i] = "- " + e.Text
+			}
+			system = strings.TrimSpace(system + "\n\nRelevant memory (things you remember about this user/context):\n" + strings.Join(lines, "\n"))
+		}
+	}
+
 	if a.options.Knowledge != nil {
 		topK := a.options.KnowledgeTopK
 		if topK <= 0 {

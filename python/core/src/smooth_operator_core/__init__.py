@@ -9,6 +9,7 @@ from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, To
 from .checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge, KnowledgeHit
+from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
 
 __all__ = [
@@ -18,14 +19,17 @@ __all__ = [
     "CheckpointStore",
     "CostBudget",
     "CostTracker",
-    "LexicalReranker",
-    "NoopReranker",
-    "Reranker",
     "FunctionTool",
     "InMemoryCheckpointStore",
     "InMemoryKnowledge",
+    "InMemoryMemory",
     "KnowledgeHit",
+    "LexicalReranker",
+    "Memory",
+    "MemoryEntry",
     "ModelPricing",
+    "NoopReranker",
+    "Reranker",
     "SmoothAgent",
     "Tool",
     "Usage",

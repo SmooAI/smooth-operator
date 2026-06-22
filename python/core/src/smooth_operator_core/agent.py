@@ -20,6 +20,7 @@ from .checkpoint import Checkpoint, CheckpointStore
 from .compaction import compact
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge
+from .memory import Memory
 from .rerank import NoopReranker, Reranker
 
 
@@ -63,6 +64,10 @@ class AgentOptions:
     #: ``knowledge_top_k``, more documents are fetched, reranked, and trimmed to
     #: ``knowledge_top_k`` — so the reranker can promote a better candidate.
     knowledge_candidate_k: int = 0
+    #: Optional long-term memory; relevant entries are recalled into context each turn.
+    memory: Memory | None = None
+    #: How many memory entries to recall per turn.
+    memory_top_k: int = 4
     tools: list[Tool] = field(default_factory=list)
     #: Approximate token budget for the context window. Before each model call,
     #: older non-system messages are dropped (sliding window) to stay under it.
@@ -120,6 +125,16 @@ class SmoothAgent:
 
     def _build_system(self, message: str) -> str:
         system = self._options.instructions or ""
+
+        mem = self._options.memory
+        if mem is not None:
+            recalled = mem.recall(message, self._options.memory_top_k)
+            if recalled:
+                block = "\n".join(f"- {e.text}" for e in recalled)
+                system = (
+                    system + "\n\nRelevant memory (things you remember about this user/context):\n" + block
+                ).strip()
+
         kb = self._options.knowledge
         if kb is not None:
             top_k = self._options.knowledge_top_k
