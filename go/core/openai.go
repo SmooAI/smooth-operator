@@ -74,6 +74,10 @@ type wireResponse struct {
 			ToolCalls []wireToolCall `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 }
 
 // Chat implements ChatClient.
@@ -130,7 +134,10 @@ func (g *GatewayClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse
 		return ChatResponse{}, fmt.Errorf("gateway returned no choices")
 	}
 	msg := wresp.Choices[0].Message
-	out := ChatResponse{Content: msg.Content}
+	out := ChatResponse{
+		Content: msg.Content,
+		Usage:   Usage{PromptTokens: wresp.Usage.PromptTokens, CompletionTokens: wresp.Usage.CompletionTokens},
+	}
 	for _, tc := range msg.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 	}

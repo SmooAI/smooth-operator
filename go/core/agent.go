@@ -42,6 +42,7 @@ type ChatRequest struct {
 type ChatResponse struct {
 	Content   string
 	ToolCalls []ToolCall
+	Usage     Usage
 }
 
 // ChatClient is the minimal OpenAI-compatible surface the agent needs. The
@@ -87,6 +88,10 @@ type AgentOptions struct {
 	// Before each model call, older non-system messages are dropped (sliding
 	// window) to stay under it. 0 uses the default (8000); negative disables.
 	MaxContextTokens int
+	// Budget, if set, stops the turn early once accumulated usage/cost hits it.
+	Budget *CostBudget
+	// Pricing overrides the per-model cost table (defaults to DefaultPricing).
+	Pricing map[string]ModelPricing
 }
 
 // AgentRunResponse is the result of a turn.
@@ -94,6 +99,10 @@ type AgentRunResponse struct {
 	Text       string
 	Iterations int
 	ToolCalls  int
+	Usage      Usage
+	CostUSD    float64
+	// BudgetExceeded is true if the turn stopped because the cost/token budget was hit.
+	BudgetExceeded bool
 }
 
 const (
@@ -183,6 +192,7 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 
 	toolCalls := 0
 	lastText := ""
+	var tracker CostTracker
 
 	for iteration := 1; iteration <= maxIter; iteration++ {
 		// Keep the context window within budget before each model call.
@@ -197,12 +207,18 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 		if err != nil {
 			return AgentRunResponse{}, fmt.Errorf("model call: %w", err)
 		}
+		tracker.Record(model, resp.Usage, a.options.Pricing)
 		lastText = resp.Content
 
 		messages = append(messages, ChatMessage{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 
+		// Stop early if this turn has hit its token/cost budget.
+		if tracker.Exceeds(a.options.Budget) {
+			return AgentRunResponse{Text: lastText, Iterations: iteration, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD, BudgetExceeded: true}, nil
+		}
+
 		if len(resp.ToolCalls) == 0 {
-			return AgentRunResponse{Text: lastText, Iterations: iteration, ToolCalls: toolCalls}, nil
+			return AgentRunResponse{Text: lastText, Iterations: iteration, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}, nil
 		}
 
 		for _, tc := range resp.ToolCalls {
@@ -212,7 +228,7 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 		}
 	}
 
-	return AgentRunResponse{Text: lastText, Iterations: maxIter, ToolCalls: toolCalls}, nil
+	return AgentRunResponse{Text: lastText, Iterations: maxIter, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}, nil
 }
 
 func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall) string {
