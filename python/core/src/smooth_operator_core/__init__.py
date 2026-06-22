@@ -5,7 +5,7 @@ agentic tool-calling loop over any OpenAI-compatible chat client, with in-memory
 knowledge grounding. See ``docs/Architecture/Python Core.md``.
 """
 
-from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, Tool
+from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, Tool, delegate_tool
 from .checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge, KnowledgeHit
@@ -20,6 +20,7 @@ __all__ = [
     "CostBudget",
     "CostTracker",
     "FunctionTool",
+    "delegate_tool",
     "InMemoryCheckpointStore",
     "InMemoryKnowledge",
     "InMemoryMemory",

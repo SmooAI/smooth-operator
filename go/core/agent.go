@@ -74,6 +74,34 @@ func (t FuncTool) Execute(ctx context.Context, args map[string]any) (string, err
 	return t.Fn(ctx, args)
 }
 
+// DelegateTool builds a Tool that delegates a subtask to a child SmoothAgent.
+//
+// A sub-agent is just a tool backed by another agent: the model calls this tool
+// with a "task" argument, the child agent runs that task, and the child's final
+// reply becomes the tool result — composing with the existing tool loop, no
+// special wiring. The child can have its own instructions, tools, knowledge, etc.
+func DelegateTool(name, description string, child *SmoothAgent) Tool {
+	return FuncTool{
+		ToolName: name,
+		Desc:     description,
+		Params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task": map[string]any{"type": "string", "description": "The subtask for the sub-agent to perform."},
+			},
+			"required": []string{"task"},
+		},
+		Fn: func(ctx context.Context, args map[string]any) (string, error) {
+			task, _ := args["task"].(string)
+			result, err := child.Run(ctx, task, nil)
+			if err != nil {
+				return "", err
+			}
+			return result.Text, nil
+		},
+	}
+}
+
 // AgentOptions configures a SmoothAgent turn. Mirrors the sibling cores' options.
 type AgentOptions struct {
 	Instructions  string

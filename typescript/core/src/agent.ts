@@ -246,3 +246,28 @@ export class SmoothAgent {
         }
     }
 }
+
+/**
+ * Build a {@link Tool} that delegates a subtask to a child {@link SmoothAgent}.
+ *
+ * A sub-agent is just a tool backed by another agent: the model calls this tool
+ * with a `task` argument, the child agent runs that task, and the child's final
+ * reply becomes the tool result — composing with the existing tool loop, no special
+ * wiring. The child can have its own instructions, tools, knowledge, etc.
+ */
+export function delegateTool(name: string, description: string, child: SmoothAgent, taskProperty = 'task'): Tool {
+    return {
+        name,
+        description,
+        parameters: {
+            type: 'object',
+            properties: { [taskProperty]: { type: 'string', description: 'The subtask for the sub-agent to perform.' } },
+            required: [taskProperty],
+        },
+        async execute(args: Record<string, unknown>): Promise<string> {
+            const task = String(args[taskProperty] ?? '');
+            const result = await child.run(task);
+            return result.text;
+        },
+    };
+}
