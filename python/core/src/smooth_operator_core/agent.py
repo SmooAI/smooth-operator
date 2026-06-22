@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
+from .checkpoint import Checkpoint, CheckpointStore
 from .compaction import compact
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge
@@ -65,6 +66,12 @@ class AgentOptions:
     budget: CostBudget | None = None
     #: Per-model pricing override for cost accounting (defaults to DEFAULT_PRICING).
     pricing: dict[str, ModelPricing] | None = None
+    #: Optional store for persisting/resuming the conversation. When set together
+    #: with ``conversation_id``, prior messages are loaded at the start of a turn
+    #: and the updated conversation is saved at the end.
+    checkpoint_store: CheckpointStore | None = None
+    #: Conversation id for the checkpoint store (required to use checkpointing).
+    conversation_id: str | None = None
 
 
 @dataclass
@@ -135,8 +142,18 @@ class SmoothAgent:
         system = self._build_system(message)
         if system:
             messages.append({"role": "system", "content": system})
-        if history:
-            messages.extend(history)
+
+        # Source prior conversation from the checkpoint store (if configured),
+        # otherwise from the explicit ``history`` argument.
+        cp_store = self._options.checkpoint_store
+        cp_id = self._options.conversation_id
+        prior = history
+        if cp_store is not None and cp_id is not None:
+            loaded = cp_store.load(cp_id)
+            if loaded is not None:
+                prior = loaded.messages
+        if prior:
+            messages.extend(prior)
         messages.append({"role": "user", "content": message})
 
         tool_specs = self._tool_specs()
@@ -144,65 +161,72 @@ class SmoothAgent:
         last_text = ""
         tracker = CostTracker()
 
-        for iteration in range(1, self._options.max_iterations + 1):
-            # Keep the context window within budget before each model call.
-            messages = compact(messages, self._options.max_context_tokens)
-            response = await self._client.chat.completions.create(
-                model=self._options.model,
-                messages=messages,
-                tools=tool_specs,
-                temperature=self._options.temperature,
-                max_tokens=self._options.max_tokens,
+        try:
+            for iteration in range(1, self._options.max_iterations + 1):
+                # Keep the context window within budget before each model call.
+                messages = compact(messages, self._options.max_context_tokens)
+                response = await self._client.chat.completions.create(
+                    model=self._options.model,
+                    messages=messages,
+                    tools=tool_specs,
+                    temperature=self._options.temperature,
+                    max_tokens=self._options.max_tokens,
+                )
+                tracker.record(self._options.model, _extract_usage(response), self._options.pricing)
+                choice = response.choices[0].message
+                last_text = choice.content or ""
+
+                # Append the assistant turn (OpenAI wire shape) so tool results pair to it.
+                assistant_msg: dict[str, Any] = {"role": "assistant", "content": choice.content or ""}
+                if choice.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        }
+                        for tc in choice.tool_calls
+                    ]
+                messages.append(assistant_msg)
+
+                # Stop early if this turn has hit its token/cost budget.
+                if tracker.exceeds(self._options.budget):
+                    return AgentRunResponse(
+                        text=last_text,
+                        iterations=iteration,
+                        tool_calls=tool_call_count,
+                        usage=tracker.usage,
+                        cost_usd=tracker.cost_usd,
+                        budget_exceeded=True,
+                    )
+
+                if not choice.tool_calls:
+                    return AgentRunResponse(
+                        text=last_text,
+                        iterations=iteration,
+                        tool_calls=tool_call_count,
+                        usage=tracker.usage,
+                        cost_usd=tracker.cost_usd,
+                    )
+
+                for tc in choice.tool_calls:
+                    tool_call_count += 1
+                    result = await self._dispatch_tool(tc.function.name, tc.function.arguments)
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+            return AgentRunResponse(
+                text=last_text,
+                iterations=self._options.max_iterations,
+                tool_calls=tool_call_count,
+                usage=tracker.usage,
+                cost_usd=tracker.cost_usd,
             )
-            tracker.record(self._options.model, _extract_usage(response), self._options.pricing)
-            choice = response.choices[0].message
-            last_text = choice.content or ""
-
-            # Append the assistant turn (OpenAI wire shape) so tool results pair to it.
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": choice.content or ""}
-            if choice.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in choice.tool_calls
-                ]
-            messages.append(assistant_msg)
-
-            # Stop early if this turn has hit its token/cost budget.
-            if tracker.exceeds(self._options.budget):
-                return AgentRunResponse(
-                    text=last_text,
-                    iterations=iteration,
-                    tool_calls=tool_call_count,
-                    usage=tracker.usage,
-                    cost_usd=tracker.cost_usd,
-                    budget_exceeded=True,
+        finally:
+            # Persist the conversation (sans system prompt, which is rebuilt each turn).
+            if cp_store is not None and cp_id is not None:
+                cp_store.save(
+                    Checkpoint(conversation_id=cp_id, messages=[m for m in messages if m.get("role") != "system"])
                 )
-
-            if not choice.tool_calls:
-                return AgentRunResponse(
-                    text=last_text,
-                    iterations=iteration,
-                    tool_calls=tool_call_count,
-                    usage=tracker.usage,
-                    cost_usd=tracker.cost_usd,
-                )
-
-            for tc in choice.tool_calls:
-                tool_call_count += 1
-                result = await self._dispatch_tool(tc.function.name, tc.function.arguments)
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-
-        return AgentRunResponse(
-            text=last_text,
-            iterations=self._options.max_iterations,
-            tool_calls=tool_call_count,
-            usage=tracker.usage,
-            cost_usd=tracker.cost_usd,
-        )
 
     async def _dispatch_tool(self, name: str, raw_arguments: str) -> str:
         import json

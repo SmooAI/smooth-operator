@@ -12,6 +12,7 @@
  * on exactly as they did when the C# core grew past Phase 0.
  */
 
+import type { CheckpointStore } from './checkpoint.js';
 import { compact } from './compaction.js';
 import { CostTracker } from './cost.js';
 import type { CostBudget, ModelPricing, Usage } from './cost.js';
@@ -45,6 +46,10 @@ export interface AgentOptions {
     budget?: CostBudget;
     /** Per-model pricing override for cost accounting (defaults to DEFAULT_PRICING). */
     pricing?: Record<string, ModelPricing>;
+    /** Optional store for persisting/resuming the conversation. Used with `conversationId`. */
+    checkpointStore?: CheckpointStore;
+    /** Conversation id for the checkpoint store (required to use checkpointing). */
+    conversationId?: string;
 }
 
 export interface AgentRunResponse {
@@ -129,7 +134,17 @@ export class SmoothAgent {
         const messages: Array<Record<string, unknown>> = [];
         const system = this.buildSystem(message);
         if (system) messages.push({ role: 'system', content: system });
-        if (history) messages.push(...history);
+
+        // Source prior conversation from the checkpoint store (if configured),
+        // otherwise from the explicit `history` argument.
+        const cpStore = this.options.checkpointStore;
+        const cpId = this.options.conversationId;
+        let prior = history;
+        if (cpStore && cpId) {
+            const loaded = cpStore.load(cpId);
+            if (loaded) prior = loaded.messages;
+        }
+        if (prior) messages.push(...prior);
         messages.push({ role: 'user', content: message });
 
         const tools = this.toolSpecs();
@@ -140,47 +155,54 @@ export class SmoothAgent {
         const maxContextTokens = this.options.maxContextTokens ?? DEFAULTS.maxContextTokens;
         const model = this.options.model ?? DEFAULTS.model;
         const tracker = new CostTracker();
-        for (let iteration = 1; iteration <= maxIterations; iteration++) {
-            // Keep the context window within budget before each model call.
-            messages.splice(0, messages.length, ...compact(messages, maxContextTokens));
-            const response = await this.client.chat.completions.create({
-                model,
-                messages,
-                ...(tools ? { tools } : {}),
-                temperature: this.options.temperature ?? DEFAULTS.temperature,
-                max_tokens: this.options.maxTokens ?? DEFAULTS.maxTokens,
-            });
-            tracker.record(model, extractUsage(response.usage), this.options.pricing);
-            const choice = response.choices[0].message;
-            lastText = choice.content ?? '';
-
-            const assistantMsg: Record<string, unknown> = { role: 'assistant', content: choice.content ?? '' };
-            if (choice.tool_calls && choice.tool_calls.length > 0) {
-                assistantMsg.tool_calls = choice.tool_calls.map((tc) => ({
-                    id: tc.id,
-                    type: 'function',
-                    function: { name: tc.function.name, arguments: tc.function.arguments },
-                }));
+        try {
+            for (let iteration = 1; iteration <= maxIterations; iteration++) {
+                // Keep the context window within budget before each model call.
+                messages.splice(0, messages.length, ...compact(messages, maxContextTokens));
+                const response = await this.client.chat.completions.create({
+                    model,
+                    messages,
+                    ...(tools ? { tools } : {}),
+                    temperature: this.options.temperature ?? DEFAULTS.temperature,
+                    max_tokens: this.options.maxTokens ?? DEFAULTS.maxTokens,
+                });
+                tracker.record(model, extractUsage(response.usage), this.options.pricing);
+                const choice = response.choices[0].message;
+                lastText = choice.content ?? '';
+    
+                const assistantMsg: Record<string, unknown> = { role: 'assistant', content: choice.content ?? '' };
+                if (choice.tool_calls && choice.tool_calls.length > 0) {
+                    assistantMsg.tool_calls = choice.tool_calls.map((tc) => ({
+                        id: tc.id,
+                        type: 'function',
+                        function: { name: tc.function.name, arguments: tc.function.arguments },
+                    }));
+                }
+                messages.push(assistantMsg);
+    
+                // Stop early if this turn has hit its token/cost budget.
+                if (tracker.exceeds(this.options.budget)) {
+                    return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: true };
+                }
+    
+                if (!choice.tool_calls || choice.tool_calls.length === 0) {
+                    return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
+                }
+    
+                for (const tc of choice.tool_calls) {
+                    toolCalls++;
+                    const result = await this.dispatchTool(tc.function.name, tc.function.arguments);
+                    messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+                }
             }
-            messages.push(assistantMsg);
 
-            // Stop early if this turn has hit its token/cost budget.
-            if (tracker.exceeds(this.options.budget)) {
-                return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: true };
-            }
-
-            if (!choice.tool_calls || choice.tool_calls.length === 0) {
-                return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
-            }
-
-            for (const tc of choice.tool_calls) {
-                toolCalls++;
-                const result = await this.dispatchTool(tc.function.name, tc.function.arguments);
-                messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+            return { text: lastText, iterations: maxIterations, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
+        } finally {
+            // Persist the conversation (sans system prompt, which is rebuilt each turn).
+            if (cpStore && cpId) {
+                cpStore.save({ conversationId: cpId, messages: messages.filter((m) => m.role !== 'system') });
             }
         }
-
-        return { text: lastText, iterations: maxIterations, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
     }
 
     private async dispatchTool(name: string, rawArgs: string): Promise<string> {

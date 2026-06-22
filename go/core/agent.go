@@ -92,6 +92,10 @@ type AgentOptions struct {
 	Budget *CostBudget
 	// Pricing overrides the per-model cost table (defaults to DefaultPricing).
 	Pricing map[string]ModelPricing
+	// CheckpointStore, with ConversationID, persists/resumes the conversation.
+	CheckpointStore CheckpointStore
+	// ConversationID keys the checkpoint store (required to use checkpointing).
+	ConversationID string
 }
 
 // AgentRunResponse is the result of a turn.
@@ -169,8 +173,32 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 	if system := a.buildSystem(message); system != "" {
 		messages = append(messages, ChatMessage{Role: "system", Content: system})
 	}
-	messages = append(messages, history...)
+
+	// Source prior conversation from the checkpoint store (if configured),
+	// otherwise from the explicit history argument.
+	cpStore := a.options.CheckpointStore
+	cpID := a.options.ConversationID
+	prior := history
+	if cpStore != nil && cpID != "" {
+		if loaded, ok := cpStore.Load(cpID); ok {
+			prior = loaded.Messages
+		}
+	}
+	messages = append(messages, prior...)
 	messages = append(messages, ChatMessage{Role: "user", Content: message})
+
+	// Persist the conversation (sans system prompt, rebuilt each turn) on any exit.
+	if cpStore != nil && cpID != "" {
+		defer func() {
+			nonSystem := make([]ChatMessage, 0, len(messages))
+			for _, m := range messages {
+				if m.Role != "system" {
+					nonSystem = append(nonSystem, m)
+				}
+			}
+			cpStore.Save(Checkpoint{ConversationID: cpID, Messages: nonSystem})
+		}()
+	}
 
 	model := a.options.Model
 	if model == "" {
