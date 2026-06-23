@@ -48,7 +48,10 @@ Rust, C#, and Python.
 ## Deliberately deferred
 
 Compaction, budget/cost, checkpointing, reranking, memory, sub-agents, vector
-knowledge — additive, post-Phase-0, exactly as the other cores did.
+knowledge — additive, post-Phase-0, exactly as the other cores did. Human-in-the-loop
+approval (`humanGate` + `requiresApproval`, mirroring the C# Phase-4 HITL) has since
+landed: the agent consults the gate before a flagged tool runs and feeds a denial
+back to the model instead of executing.
 
 ## Running the evals
 

@@ -9,6 +9,13 @@ from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, To
 from .cast import Cast, Clearance, OperatorRole, RoleKind
 from .checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
+from .human_gate import (
+    DelegateHumanGate,
+    HumanApprovalRequest,
+    HumanApprovalResponse,
+    HumanDecision,
+    HumanGate,
+)
 from .knowledge import InMemoryKnowledge, Knowledge, KnowledgeHit
 from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
@@ -24,10 +31,15 @@ __all__ = [
     "Clearance",
     "CostBudget",
     "CostTracker",
+    "DelegateHumanGate",
     "Embedder",
     "FunctionTool",
     "delegate_tool",
     "HashEmbedder",
+    "HumanApprovalRequest",
+    "HumanApprovalResponse",
+    "HumanDecision",
+    "HumanGate",
     "InMemoryCheckpointStore",
     "InMemoryKnowledge",
     "InMemoryMemory",

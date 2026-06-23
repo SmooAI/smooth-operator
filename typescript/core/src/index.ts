@@ -14,6 +14,8 @@ export { InMemoryCheckpointStore } from './checkpoint.js';
 export type { Checkpoint, CheckpointStore } from './checkpoint.js';
 export { CostTracker, DEFAULT_PRICING } from './cost.js';
 export type { CostBudget, ModelPricing, Usage } from './cost.js';
+export { approve, deny, HumanDecision, isApproved } from './humanGate.js';
+export type { HumanApprovalRequest, HumanApprovalResponse, HumanGate } from './humanGate.js';
 export { InMemoryKnowledge } from './knowledge.js';
 export type { Knowledge, KnowledgeHit } from './knowledge.js';
 export { InMemoryMemory } from './memory.js';

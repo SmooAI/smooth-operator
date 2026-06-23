@@ -20,6 +20,7 @@ from .cast import Clearance
 from .checkpoint import Checkpoint, CheckpointStore
 from .compaction import compact
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
+from .human_gate import HumanApprovalRequest, HumanGate
 from .knowledge import Knowledge
 from .memory import Memory
 from .rerank import NoopReranker, Reranker
@@ -90,6 +91,16 @@ class AgentOptions:
     #: dispatched — a "tool not permitted" result is returned to the model instead.
     #: ``None`` allows every tool (the prior behaviour).
     clearance: Clearance | None = None
+    #: Optional human-in-the-loop gate. When set, the agent asks it for approval
+    #: before running any tool call for which ``requires_approval`` returns true.
+    #: A denied call is not executed; the model is told it was denied and can adapt.
+    human_gate: HumanGate | None = None
+    #: Which tool calls need human approval (e.g. writes / destructive actions),
+    #: given the tool name and parsed arguments. Default: none. Only consulted when
+    #: ``human_gate`` is set. Example::
+    #:
+    #:     lambda name, args: name in {"delete_record", "send_email"}
+    requires_approval: Callable[[str, dict[str, Any]], bool] | None = None
 
 
 @dataclass
@@ -303,6 +314,17 @@ class SmoothAgent:
             args = json.loads(raw_arguments) if raw_arguments else {}
         except json.JSONDecodeError:
             return f"error: tool '{name}' received invalid JSON arguments"
+
+        # Human-in-the-loop: pause for approval before running a flagged (write/sensitive)
+        # tool. A denial is fed back to the model as a result — the tool never runs.
+        gate = self._options.human_gate
+        needs_approval = self._options.requires_approval
+        if gate is not None and needs_approval is not None and needs_approval(name, args):
+            request = HumanApprovalRequest(tool_name=name, arguments=args, prompt=f"Approve calling tool '{name}'?")
+            decision = await gate.request_approval(request)
+            if not decision.is_approved:
+                return f"Denied by human: {decision.reason or 'no reason given'}"
+
         try:
             return await tool.execute(args)
         except Exception as exc:  # noqa: BLE001 — surface tool failures to the model, don't crash the turn

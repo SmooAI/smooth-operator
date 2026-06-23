@@ -56,7 +56,10 @@ the Rust and C# engines.
 
 Context compaction, cost/budget tracking, checkpointing, reranking, memory,
 sub-agents, and a vector knowledge store. None change the loop's shape — they are
-additive, and the eval suite ratchets the bar up as they land.
+additive, and the eval suite ratchets the bar up as they land. Human-in-the-loop
+approval (`HumanGate` + `requires_approval`, mirroring the C# Phase-4 HITL) has
+since landed: the agent consults the gate before a flagged tool runs and feeds a
+denial back to the model instead of executing.
 
 ## Running the evals
 
