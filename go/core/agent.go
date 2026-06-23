@@ -137,6 +137,16 @@ type AgentOptions struct {
 	// forbids is not executed — a "tool not permitted" result is returned to the
 	// model instead. Nil allows every tool (the prior behaviour).
 	Clearance *Clearance
+	// HumanGate, when set, is asked for approval before running any tool call for
+	// which RequiresApproval returns true. A denied call is not executed; the model
+	// is told it was denied and can adapt.
+	HumanGate HumanGate
+	// RequiresApproval reports which tool calls need human approval (e.g. writes /
+	// destructive actions), given the tool name and parsed arguments. nil = none.
+	// Only consulted when HumanGate is set. Example:
+	//
+	//	func(name string, _ map[string]any) bool { return name == "delete_record" }
+	RequiresApproval func(name string, args map[string]any) bool
 }
 
 // AgentRunResponse is the result of a turn.
@@ -372,6 +382,24 @@ func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall) string {
 			return fmt.Sprintf("error: tool '%s' received invalid JSON arguments", tc.Name)
 		}
 	}
+
+	// Human-in-the-loop: pause for approval before running a flagged (write/sensitive)
+	// tool. A denial is fed back to the model as a result — the tool never runs.
+	if a.options.HumanGate != nil && a.options.RequiresApproval != nil && a.options.RequiresApproval(tc.Name, args) {
+		req := HumanApprovalRequest{ToolName: tc.Name, Arguments: args, Prompt: fmt.Sprintf("Approve calling tool '%s'?", tc.Name)}
+		decision, err := a.options.HumanGate(ctx, req)
+		if err != nil {
+			return fmt.Sprintf("error: human gate for tool '%s' failed: %v", tc.Name, err)
+		}
+		if !decision.IsApproved() {
+			reason := decision.Reason
+			if reason == "" {
+				reason = "no reason given"
+			}
+			return fmt.Sprintf("Denied by human: %s", reason)
+		}
+	}
+
 	out, err := tool.Execute(ctx, args)
 	if err != nil {
 		// Surface tool failures to the model, don't crash the turn.

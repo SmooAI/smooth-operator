@@ -20,6 +20,8 @@ import type { Reranker } from './rerank.js';
 import { compact } from './compaction.js';
 import { CostTracker } from './cost.js';
 import type { CostBudget, ModelPricing, Usage } from './cost.js';
+import type { HumanGate } from './humanGate.js';
+import { isApproved } from './humanGate.js';
 import type { Knowledge } from './knowledge.js';
 
 /** A callable tool the agent may invoke. Mirrors the reference engines' tool seam. */
@@ -68,6 +70,18 @@ export interface AgentOptions {
      * Undefined allows every tool (the prior behaviour).
      */
     clearance?: Clearance;
+    /**
+     * Optional human-in-the-loop gate. When set, the agent asks it for approval before
+     * running any tool call for which {@link requiresApproval} returns true. A denied call
+     * is not executed; the model is told it was denied and can adapt.
+     */
+    humanGate?: HumanGate;
+    /**
+     * Which tool calls need human approval (e.g. writes / destructive actions), given the
+     * tool name and parsed arguments. Default: none. Only consulted when `humanGate` is set.
+     * Example: `requiresApproval: (name) => name === 'delete_record' || name === 'send_email'`.
+     */
+    requiresApproval?: (name: string, args: Record<string, unknown>) => boolean;
 }
 
 export interface AgentRunResponse {
@@ -275,6 +289,17 @@ export class SmoothAgent {
         } catch {
             return `error: tool '${name}' received invalid JSON arguments`;
         }
+
+        // Human-in-the-loop: pause for approval before running a flagged (write/sensitive)
+        // tool. A denial is fed back to the model as a result — the tool never runs.
+        const gate = this.options.humanGate;
+        if (gate && this.options.requiresApproval?.(name, args)) {
+            const decision = await gate({ toolName: name, arguments: args, prompt: `Approve calling tool '${name}'?` });
+            if (!isApproved(decision)) {
+                return `Denied by human: ${decision.reason ?? 'no reason given'}`;
+            }
+        }
+
         try {
             return await tool.execute(args);
         } catch (err) {
