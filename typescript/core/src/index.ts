@@ -25,3 +25,5 @@ export type { Reranker } from './rerank.js';
 export { SmoothAgentThread } from './thread.js';
 export { HashEmbedder, hashToken, VectorKnowledge } from './vector.js';
 export type { Embedder } from './vector.js';
+export { END, Workflow, WorkflowError } from './workflow.js';
+export type { NodeFn, Router } from './workflow.js';

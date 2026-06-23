@@ -21,6 +21,7 @@ from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
 from .thread import SmoothAgentThread
 from .vector import Embedder, HashEmbedder, VectorKnowledge
+from .workflow import END, Workflow, WorkflowError
 
 __all__ = [
     "AgentOptions",
@@ -58,4 +59,7 @@ __all__ = [
     "Tool",
     "Usage",
     "VectorKnowledge",
+    "Workflow",
+    "WorkflowError",
+    "END",
 ]
