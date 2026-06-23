@@ -17,6 +17,13 @@ from .human_gate import (
     HumanGate,
 )
 from .knowledge import InMemoryKnowledge, Knowledge, KnowledgeHit
+from .llm_provider import (
+    LlmProvider,
+    MockLlmProvider,
+    RecordedCall,
+    text_response,
+    tool_call_response,
+)
 from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
 from .thread import SmoothAgentThread
@@ -47,11 +54,14 @@ __all__ = [
     "Knowledge",
     "KnowledgeHit",
     "LexicalReranker",
+    "LlmProvider",
     "Memory",
     "MemoryEntry",
+    "MockLlmProvider",
     "ModelPricing",
     "NoopReranker",
     "OperatorRole",
+    "RecordedCall",
     "Reranker",
     "RoleKind",
     "SmoothAgent",
@@ -62,4 +72,6 @@ __all__ = [
     "Workflow",
     "WorkflowError",
     "END",
+    "text_response",
+    "tool_call_response",
 ]
