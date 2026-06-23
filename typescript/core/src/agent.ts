@@ -23,6 +23,7 @@ import type { CostBudget, ModelPricing, Usage } from './cost.js';
 import type { HumanGate } from './humanGate.js';
 import { isApproved } from './humanGate.js';
 import type { Knowledge } from './knowledge.js';
+import { ToolSearch } from './toolSearch.js';
 
 /** A callable tool the agent may invoke. Mirrors the reference engines' tool seam. */
 export interface Tool {
@@ -50,6 +51,15 @@ export interface AgentOptions {
     /** How many memory entries to recall per turn (default 4). */
     memoryTopK?: number;
     tools?: Tool[];
+    /**
+     * Deferred tools — registered but with their schemas HIDDEN from the model.
+     * When any are present, a built-in `tool_search` meta-tool is advertised in
+     * their place; the model calls it to fuzzy-match and promote the ones it needs,
+     * which then become visible + dispatchable on subsequent turns. Keeps the tool
+     * schema payload small when there are many rarely-used tools. An unpromoted
+     * deferred tool is NOT dispatchable.
+     */
+    deferredTools?: Tool[];
     /**
      * Approximate token budget for the context window. Before each model call,
      * older non-system messages are dropped (sliding window) to stay under it.
@@ -166,10 +176,18 @@ export class SmoothAgent {
         return system;
     }
 
-    private toolSpecs(): Array<Record<string, unknown>> | undefined {
-        const tools = this.options.tools ?? [];
-        if (tools.length === 0) return undefined;
-        return tools.map((t) => ({
+    private toolSpecs(search?: ToolSearch): Array<Record<string, unknown>> | undefined {
+        // Eager (always-visible) tools, plus — when deferred tools exist — the
+        // built-in `tool_search` meta-tool and any deferred tools promoted so far
+        // this run. Deferred-but-unpromoted tools are deliberately omitted so the
+        // model never sees their schemas until it searches for them.
+        const visible: Tool[] = [...(this.options.tools ?? [])];
+        if (search?.hasDeferred()) {
+            visible.push(search);
+            visible.push(...search.promotedTools());
+        }
+        if (visible.length === 0) return undefined;
+        return visible.map((t) => ({
             type: 'function',
             function: { name: t.name, description: t.description, parameters: t.parameters },
         }));
@@ -208,7 +226,8 @@ export class SmoothAgent {
         // reorder `messages` mid-turn.
         const turnMessages: Array<Record<string, unknown>> = [userMsg];
 
-        const tools = this.toolSpecs();
+        // Per-run promotion state for deferred tools (undefined when none registered).
+        const search = this.options.deferredTools && this.options.deferredTools.length > 0 ? new ToolSearch(this.options.deferredTools) : undefined;
         const maxIterations = this.options.maxIterations ?? DEFAULTS.maxIterations;
         let toolCalls = 0;
         let lastText = '';
@@ -220,6 +239,9 @@ export class SmoothAgent {
             for (let iteration = 1; iteration <= maxIterations; iteration++) {
                 // Keep the context window within budget before each model call.
                 messages.splice(0, messages.length, ...compact(messages, maxContextTokens));
+                // Recompute tool specs each iteration: a `tool_search` call in the
+                // previous iteration may have promoted deferred tools into view.
+                const tools = this.toolSpecs(search);
                 const response = await this.client.chat.completions.create({
                     model,
                     messages,
@@ -253,7 +275,7 @@ export class SmoothAgent {
     
                 for (const tc of choice.tool_calls) {
                     toolCalls++;
-                    const result = await this.dispatchTool(tc.function.name, tc.function.arguments);
+                    const result = await this.dispatchTool(tc.function.name, tc.function.arguments, search);
                     const toolMsg: Record<string, unknown> = { role: 'tool', tool_call_id: tc.id, content: result };
                     messages.push(toolMsg);
                     turnMessages.push(toolMsg);
@@ -272,7 +294,7 @@ export class SmoothAgent {
         }
     }
 
-    private async dispatchTool(name: string, rawArgs: string): Promise<string> {
+    private async dispatchTool(name: string, rawArgs: string, search?: ToolSearch): Promise<string> {
         // Enforce the role's tool clearance before dispatch: a forbidden tool is
         // never executed — the model is told it isn't permitted, mirroring how the
         // loop surfaces other tool errors.
@@ -281,7 +303,13 @@ export class SmoothAgent {
             return `error: tool '${name}' is not permitted for this role`;
         }
 
-        const tool = this.toolsByName.get(name);
+        // Resolve the tool: eager tools first, then the built-in `tool_search`
+        // meta-tool, then deferred tools that have been promoted. An unpromoted
+        // deferred tool resolves to nothing — it's invisible until searched for.
+        let tool = this.toolsByName.get(name);
+        if (!tool && search) {
+            tool = name === search.name ? search : search.toolByName(name);
+        }
         if (!tool) return `error: unknown tool '${name}'`;
         let args: Record<string, unknown>;
         try {

@@ -121,6 +121,13 @@ type AgentOptions struct {
 	// MemoryTopK is how many memory entries to recall per turn (0 = default 4).
 	MemoryTopK int
 	Tools      []Tool
+	// DeferredTools are registered but with their schemas HIDDEN from the model.
+	// When any are present, a built-in tool_search meta-tool is advertised in their
+	// place; the model calls it to fuzzy-match and promote the ones it needs, which
+	// then become visible + dispatchable on subsequent turns. Keeps the tool schema
+	// payload small when there are many rarely-used tools. An unpromoted deferred
+	// tool is NOT dispatchable.
+	DeferredTools []Tool
 	// MaxContextTokens is the approximate token budget for the context window.
 	// Before each model call, older non-system messages are dropped (sliding
 	// window) to stay under it. 0 uses the default (8000); negative disables.
@@ -233,12 +240,22 @@ func (a *SmoothAgent) buildSystem(message string) string {
 	return system
 }
 
-func (a *SmoothAgent) toolSpecs() []ToolSpec {
-	if len(a.options.Tools) == 0 {
+func (a *SmoothAgent) toolSpecs(search *ToolSearch) []ToolSpec {
+	// Eager (always-visible) tools, plus — when deferred tools exist — the built-in
+	// tool_search meta-tool and any deferred tools promoted so far this run.
+	// Deferred-but-unpromoted tools are deliberately omitted so the model never sees
+	// their schemas until it searches for them.
+	visible := make([]Tool, 0, len(a.options.Tools)+1)
+	visible = append(visible, a.options.Tools...)
+	if search != nil && search.HasDeferred() {
+		visible = append(visible, search)
+		visible = append(visible, search.PromotedTools()...)
+	}
+	if len(visible) == 0 {
 		return nil
 	}
-	specs := make([]ToolSpec, len(a.options.Tools))
-	for i, t := range a.options.Tools {
+	specs := make([]ToolSpec, len(visible))
+	for i, t := range visible {
 		specs[i] = ToolSpec{Name: t.Name(), Description: t.Description(), Parameters: t.Parameters()}
 	}
 	return specs
@@ -313,7 +330,11 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 	if maxTokens <= 0 {
 		maxTokens = defaultMaxTokens
 	}
-	tools := a.toolSpecs()
+	// Per-run promotion state for deferred tools (nil when none registered).
+	var search *ToolSearch
+	if len(a.options.DeferredTools) > 0 {
+		search = NewToolSearch(a.options.DeferredTools)
+	}
 	maxContext := a.options.MaxContextTokens
 	if maxContext == 0 {
 		maxContext = defaultMaxContextTokens
@@ -326,6 +347,9 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 	for iteration := 1; iteration <= maxIter; iteration++ {
 		// Keep the context window within budget before each model call.
 		messages = compact(messages, maxContext)
+		// Recompute tool specs each iteration: a tool_search call in the previous
+		// iteration may have promoted deferred tools into view.
+		tools := a.toolSpecs(search)
 		resp, err := a.client.Chat(ctx, ChatRequest{
 			Model:       model,
 			Messages:    messages,
@@ -354,7 +378,7 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 
 		for _, tc := range resp.ToolCalls {
 			toolCalls++
-			result := a.dispatchTool(ctx, tc)
+			result := a.dispatchTool(ctx, tc, search)
 			toolMsg := ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: result}
 			messages = append(messages, toolMsg)
 			turnMessages = append(turnMessages, toolMsg)
@@ -364,7 +388,7 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 	return AgentRunResponse{Text: lastText, Iterations: maxIter, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}, nil
 }
 
-func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall) string {
+func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall, search *ToolSearch) string {
 	// Enforce the role's tool clearance before dispatch: a forbidden tool is never
 	// executed — the model is told it isn't permitted, mirroring how the loop
 	// surfaces other tool errors.
@@ -372,7 +396,17 @@ func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall) string {
 		return fmt.Sprintf("error: tool '%s' is not permitted for this role", tc.Name)
 	}
 
+	// Resolve the tool: eager tools first, then the built-in tool_search meta-tool,
+	// then deferred tools that have been promoted. An unpromoted deferred tool
+	// resolves to nothing — it's invisible until searched for.
 	tool, ok := a.toolsByName[tc.Name]
+	if !ok && search != nil {
+		if tc.Name == search.Name() {
+			tool, ok = search, true
+		} else {
+			tool, ok = search.ToolByName(tc.Name)
+		}
+	}
 	if !ok {
 		return fmt.Sprintf("error: unknown tool '%s'", tc.Name)
 	}
