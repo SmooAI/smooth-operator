@@ -1,40 +1,23 @@
 """Non-network unit tests for the Python core: the agentic loop, tool calling, and
-knowledge injection, driven by a fake OpenAI-compatible client. Always green (no
-credentials needed) — the live-gateway behavior is covered by ``test_evals.py``.
+knowledge injection, driven by the reusable :class:`MockLlmProvider`. Always green
+(no credentials needed) — the live-gateway behavior is covered by ``test_evals.py``.
+
+These tests used to roll their own ad-hoc fake openai client; they now use the
+shared ``MockLlmProvider`` (see ``test_llm_provider.py``) as the demonstration that
+it replaces the hand-written fakes.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from smooth_operator_core import AgentOptions, FunctionTool, InMemoryKnowledge, SmoothAgent
-
-
-# ── a tiny fake of the openai client surface the agent uses ──────────────────
-def _msg(content=None, tool_calls=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
-
-
-def _tool_call(call_id: str, name: str, arguments: str):
-    return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
-
-
-class _FakeCompletions:
-    def __init__(self, scripted):
-        self._scripted = list(scripted)
-        self.calls: list[dict] = []
-
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
-        message = self._scripted.pop(0)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-
-class FakeClient:
-    def __init__(self, scripted):
-        self.chat = SimpleNamespace(completions=_FakeCompletions(scripted))
+from smooth_operator_core import (
+    AgentOptions,
+    FunctionTool,
+    InMemoryKnowledge,
+    MockLlmProvider,
+    SmoothAgent,
+)
 
 
 def test_knowledge_query_ranks_by_overlap():
@@ -48,8 +31,9 @@ def test_knowledge_query_ranks_by_overlap():
 
 @pytest.mark.asyncio
 async def test_text_reply_stops_after_one_call():
-    client = FakeClient([_msg(content="the answer is 42")])
-    agent = SmoothAgent(client, AgentOptions(instructions="be helpful"))
+    mock = MockLlmProvider()
+    mock.push_text("the answer is 42")
+    agent = SmoothAgent(mock, AgentOptions(instructions="be helpful"))
     result = await agent.run("what is the answer?")
     assert result.text == "the answer is 42"
     assert result.iterations == 1
@@ -67,18 +51,14 @@ async def test_tool_call_then_finish():
         parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
         func=echo,
     )
-    client = FakeClient(
-        [
-            _msg(content=None, tool_calls=[_tool_call("call-1", "echo", '{"text": "hello tools"}')]),
-            _msg(content="done"),
-        ]
-    )
-    agent = SmoothAgent(client, AgentOptions(tools=[tool]))
+    mock = MockLlmProvider()
+    mock.push_tool_call("call-1", "echo", '{"text": "hello tools"}').push_text("done")
+    agent = SmoothAgent(mock, AgentOptions(tools=[tool]))
     result = await agent.run("use echo")
     assert result.text == "done"
     assert result.tool_calls == 1
     # The tool result was fed back as a tool-role message before the final call.
-    second_call_messages = client.chat.completions.calls[1]["messages"]
+    second_call_messages = mock.calls[1].messages
     assert any(m.get("role") == "tool" and m.get("content") == "hello tools" for m in second_call_messages)
 
 
@@ -86,9 +66,10 @@ async def test_tool_call_then_finish():
 async def test_knowledge_is_injected_into_system_prompt():
     kb = InMemoryKnowledge()
     kb.ingest("The return window is exactly 17 days from delivery.", "returns.md")
-    client = FakeClient([_msg(content="17 days")])
-    agent = SmoothAgent(client, AgentOptions(instructions="support agent", knowledge=kb))
+    mock = MockLlmProvider()
+    mock.push_text("17 days")
+    agent = SmoothAgent(mock, AgentOptions(instructions="support agent", knowledge=kb))
     await agent.run("how many days to return?")
-    system = client.chat.completions.calls[0]["messages"][0]
+    system = mock.calls[0].messages[0]
     assert system["role"] == "system"
     assert "17 days" in system["content"]

@@ -1,38 +1,19 @@
 /**
  * Non-network unit tests for the TypeScript core: the agentic loop, tool calling,
- * and knowledge injection, driven by a fake OpenAI-compatible client. Always
- * green (no credentials) — live-gateway behavior is covered by `evals.test.ts`.
+ * and knowledge injection, driven by the reusable `MockLlmProvider`. Always green
+ * (no credentials) — live-gateway behavior is covered by `evals.test.ts`.
+ *
+ * These tests used to roll their own ad-hoc `FakeClient`; they now use the shared
+ * `MockLlmProvider` (see `llmProvider.test.ts`) as the demonstration that it
+ * replaces the hand-written fakes.
  */
 
 import { describe, expect, it } from 'vitest';
-import { AgentOptions, ChatClientLike, SmoothAgent, Tool } from '../src/agent.js';
+import { AgentOptions, SmoothAgent, Tool } from '../src/agent.js';
 import { InMemoryKnowledge } from '../src/knowledge.js';
+import { MockLlmProvider } from '../src/llmProvider.js';
 
-type ScriptedMessage = {
-    content: string | null;
-    tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> | null;
-};
-
-class FakeClient implements ChatClientLike {
-    readonly calls: Array<Record<string, unknown>> = [];
-    private readonly scripted: ScriptedMessage[];
-
-    constructor(scripted: ScriptedMessage[]) {
-        this.scripted = [...scripted];
-    }
-
-    chat = {
-        completions: {
-            create: async (body: Record<string, unknown>) => {
-                this.calls.push(body);
-                const message = this.scripted.shift()!;
-                return { choices: [{ message }] };
-            },
-        },
-    };
-}
-
-function makeAgent(client: ChatClientLike, options: AgentOptions = {}): SmoothAgent {
+function makeAgent(client: MockLlmProvider, options: AgentOptions = {}): SmoothAgent {
     return new SmoothAgent(client, options);
 }
 
@@ -49,7 +30,7 @@ describe('InMemoryKnowledge', () => {
 
 describe('SmoothAgent', () => {
     it('stops after one call on a text reply', async () => {
-        const client = new FakeClient([{ content: 'the answer is 42' }]);
+        const client = new MockLlmProvider().pushText('the answer is 42');
         const agent = makeAgent(client, { instructions: 'be helpful' });
         const result = await agent.run('what is the answer?');
         expect(result.text).toBe('the answer is 42');
@@ -64,26 +45,24 @@ describe('SmoothAgent', () => {
             parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
             execute: async (args) => String(args.text ?? ''),
         };
-        const client = new FakeClient([
-            { content: null, tool_calls: [{ id: 'call-1', function: { name: 'echo', arguments: '{"text": "hello tools"}' } }] },
-            { content: 'done' },
-        ]);
+        const client = new MockLlmProvider();
+        client.pushToolCall('call-1', 'echo', '{"text": "hello tools"}').pushText('done');
         const agent = makeAgent(client, { tools: [echo] });
         const result = await agent.run('use echo');
         expect(result.text).toBe('done');
         expect(result.toolCalls).toBe(1);
         // The tool result was fed back as a tool-role message before the final call.
-        const secondCallMessages = client.calls[1].messages as Array<Record<string, unknown>>;
+        const secondCallMessages = client.calls[1].messages;
         expect(secondCallMessages.some((m) => m.role === 'tool' && m.content === 'hello tools')).toBe(true);
     });
 
     it('injects knowledge into the system prompt', async () => {
         const kb = new InMemoryKnowledge();
         kb.ingest('The return window is exactly 17 days from delivery.', 'returns.md');
-        const client = new FakeClient([{ content: '17 days' }]);
+        const client = new MockLlmProvider().pushText('17 days');
         const agent = makeAgent(client, { instructions: 'support agent', knowledge: kb });
         await agent.run('how many days to return?');
-        const messages = client.calls[0].messages as Array<Record<string, unknown>>;
+        const messages = client.calls[0].messages;
         expect(messages[0].role).toBe('system');
         expect(messages[0].content).toContain('17 days');
     });

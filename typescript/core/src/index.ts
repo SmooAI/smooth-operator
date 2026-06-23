@@ -18,6 +18,8 @@ export { approve, deny, HumanDecision, isApproved } from './humanGate.js';
 export type { HumanApprovalRequest, HumanApprovalResponse, HumanGate } from './humanGate.js';
 export { InMemoryKnowledge } from './knowledge.js';
 export type { Knowledge, KnowledgeHit } from './knowledge.js';
+export { MockLlmProvider, textResponse, toolCallResponse } from './llmProvider.js';
+export type { LlmProvider, RecordedCall, ScriptedMessage } from './llmProvider.js';
 export { InMemoryMemory } from './memory.js';
 export type { Memory, MemoryEntry } from './memory.js';
 export { LexicalReranker, NoopReranker } from './rerank.js';
