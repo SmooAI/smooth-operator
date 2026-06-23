@@ -133,6 +133,10 @@ type AgentOptions struct {
 	CheckpointStore CheckpointStore
 	// ConversationID keys the checkpoint store (required to use checkpointing).
 	ConversationID string
+	// Clearance, if set, gates which tools may be dispatched. A tool the clearance
+	// forbids is not executed — a "tool not permitted" result is returned to the
+	// model instead. Nil allows every tool (the prior behaviour).
+	Clearance *Clearance
 }
 
 // AgentRunResponse is the result of a turn.
@@ -323,6 +327,13 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 }
 
 func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall) string {
+	// Enforce the role's tool clearance before dispatch: a forbidden tool is never
+	// executed — the model is told it isn't permitted, mirroring how the loop
+	// surfaces other tool errors.
+	if a.options.Clearance != nil && !a.options.Clearance.IsAllowed(tc.Name) {
+		return fmt.Sprintf("error: tool '%s' is not permitted for this role", tc.Name)
+	}
+
 	tool, ok := a.toolsByName[tc.Name]
 	if !ok {
 		return fmt.Sprintf("error: unknown tool '%s'", tc.Name)

@@ -8,6 +8,8 @@
 
 export { delegateTool, SmoothAgent } from './agent.js';
 export type { AgentOptions, AgentRunResponse, ChatClientLike, Tool } from './agent.js';
+export { Cast, Clearance, makeRole, RoleKind } from './cast.js';
+export type { OperatorRole } from './cast.js';
 export { InMemoryCheckpointStore } from './checkpoint.js';
 export type { Checkpoint, CheckpointStore } from './checkpoint.js';
 export { CostTracker, DEFAULT_PRICING } from './cost.js';

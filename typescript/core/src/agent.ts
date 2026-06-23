@@ -12,6 +12,7 @@
  * on exactly as they did when the C# core grew past Phase 0.
  */
 
+import type { Clearance } from './cast.js';
 import type { CheckpointStore } from './checkpoint.js';
 import type { Memory } from './memory.js';
 import type { Reranker } from './rerank.js';
@@ -60,6 +61,12 @@ export interface AgentOptions {
     checkpointStore?: CheckpointStore;
     /** Conversation id for the checkpoint store (required to use checkpointing). */
     conversationId?: string;
+    /**
+     * Optional tool-access policy. When set, a tool the clearance forbids is not
+     * dispatched — a "tool not permitted" result is returned to the model instead.
+     * Undefined allows every tool (the prior behaviour).
+     */
+    clearance?: Clearance;
 }
 
 export interface AgentRunResponse {
@@ -230,6 +237,14 @@ export class SmoothAgent {
     }
 
     private async dispatchTool(name: string, rawArgs: string): Promise<string> {
+        // Enforce the role's tool clearance before dispatch: a forbidden tool is
+        // never executed — the model is told it isn't permitted, mirroring how the
+        // loop surfaces other tool errors.
+        const clearance = this.options.clearance;
+        if (clearance && !clearance.isAllowed(name)) {
+            return `error: tool '${name}' is not permitted for this role`;
+        }
+
         const tool = this.toolsByName.get(name);
         if (!tool) return `error: unknown tool '${name}'`;
         let args: Record<string, unknown>;

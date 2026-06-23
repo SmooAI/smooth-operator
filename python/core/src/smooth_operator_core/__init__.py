@@ -6,6 +6,7 @@ knowledge grounding. See ``docs/Architecture/Python Core.md``.
 """
 
 from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, Tool, delegate_tool
+from .cast import Cast, Clearance, OperatorRole, RoleKind
 from .checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge, Knowledge, KnowledgeHit
@@ -16,8 +17,10 @@ from .vector import Embedder, HashEmbedder, VectorKnowledge
 __all__ = [
     "AgentOptions",
     "AgentRunResponse",
+    "Cast",
     "Checkpoint",
     "CheckpointStore",
+    "Clearance",
     "CostBudget",
     "CostTracker",
     "Embedder",
@@ -34,7 +37,9 @@ __all__ = [
     "MemoryEntry",
     "ModelPricing",
     "NoopReranker",
+    "OperatorRole",
     "Reranker",
+    "RoleKind",
     "SmoothAgent",
     "Tool",
     "Usage",
