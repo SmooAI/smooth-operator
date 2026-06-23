@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
+from .cast import Clearance
 from .checkpoint import Checkpoint, CheckpointStore
 from .compaction import compact
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
@@ -84,6 +85,10 @@ class AgentOptions:
     checkpoint_store: CheckpointStore | None = None
     #: Conversation id for the checkpoint store (required to use checkpointing).
     conversation_id: str | None = None
+    #: Optional tool-access policy. When set, a tool the clearance forbids is not
+    #: dispatched — a "tool not permitted" result is returned to the model instead.
+    #: ``None`` allows every tool (the prior behaviour).
+    clearance: Clearance | None = None
 
 
 @dataclass
@@ -255,6 +260,13 @@ class SmoothAgent:
 
     async def _dispatch_tool(self, name: str, raw_arguments: str) -> str:
         import json
+
+        # Enforce the role's tool clearance before dispatch: a forbidden tool is
+        # never executed — the model is told it isn't permitted, mirroring how the
+        # loop surfaces other tool errors.
+        clearance = self._options.clearance
+        if clearance is not None and not clearance.is_allowed(name):
+            return f"error: tool '{name}' is not permitted for this role"
 
         tool = self._tools_by_name.get(name)
         if tool is None:
