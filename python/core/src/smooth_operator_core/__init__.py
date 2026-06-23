@@ -27,6 +27,7 @@ from .llm_provider import (
 from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
 from .thread import SmoothAgentThread
+from .tool_search import ToolSearch
 from .vector import Embedder, HashEmbedder, VectorKnowledge
 from .workflow import END, Workflow, WorkflowError
 
@@ -67,6 +68,7 @@ __all__ = [
     "SmoothAgent",
     "SmoothAgentThread",
     "Tool",
+    "ToolSearch",
     "Usage",
     "VectorKnowledge",
     "Workflow",

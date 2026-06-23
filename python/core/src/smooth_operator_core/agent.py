@@ -25,6 +25,7 @@ from .knowledge import Knowledge
 from .memory import Memory
 from .rerank import NoopReranker, Reranker
 from .thread import SmoothAgentThread
+from .tool_search import ToolSearch
 
 
 class Tool(Protocol):
@@ -72,6 +73,13 @@ class AgentOptions:
     #: How many memory entries to recall per turn.
     memory_top_k: int = 4
     tools: list[Tool] = field(default_factory=list)
+    #: Deferred tools — registered but with their schemas HIDDEN from the model.
+    #: When any are present, a built-in ``tool_search`` meta-tool is advertised in
+    #: their place; the model calls it to fuzzy-match and promote the ones it needs,
+    #: which then become visible + dispatchable on subsequent turns. Keeps the tool
+    #: schema payload small when there are many rarely-used tools. An unpromoted
+    #: deferred tool is NOT dispatchable.
+    deferred_tools: list[Tool] = field(default_factory=list)
     #: Approximate token budget for the context window. Before each model call,
     #: older non-system messages are dropped (sliding window) to stay under it.
     #: ``0`` disables compaction.
@@ -167,15 +175,23 @@ class SmoothAgent:
                 ).strip()
         return system
 
-    def _tool_specs(self) -> list[dict[str, Any]] | None:
-        if not self._options.tools:
+    def _tool_specs(self, search: ToolSearch | None) -> list[dict[str, Any]] | None:
+        # Eager (always-visible) tools, plus — when deferred tools exist — the
+        # built-in ``tool_search`` meta-tool and any deferred tools promoted so far
+        # this run. Deferred-but-unpromoted tools are deliberately omitted so the
+        # model never sees their schemas until it searches for them.
+        visible: list[Tool] = list(self._options.tools)
+        if search is not None and search.has_deferred():
+            visible.append(search)  # ToolSearch satisfies the Tool protocol (name/description/parameters)
+            visible.extend(search.promoted_tools())
+        if not visible:
             return None
         return [
             {
                 "type": "function",
                 "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
             }
-            for t in self._options.tools
+            for t in visible
         ]
 
     async def run(
@@ -218,7 +234,8 @@ class SmoothAgent:
         # drop/reorder ``messages`` mid-turn.
         turn_messages: list[dict[str, Any]] = [user_msg]
 
-        tool_specs = self._tool_specs()
+        # Per-run promotion state for deferred tools (None when none are registered).
+        search = ToolSearch(self._options.deferred_tools) if self._options.deferred_tools else None
         tool_call_count = 0
         last_text = ""
         tracker = CostTracker()
@@ -227,6 +244,9 @@ class SmoothAgent:
             for iteration in range(1, self._options.max_iterations + 1):
                 # Keep the context window within budget before each model call.
                 messages = compact(messages, self._options.max_context_tokens)
+                # Recompute tool specs each iteration: a ``tool_search`` call in the
+                # previous iteration may have promoted deferred tools into view.
+                tool_specs = self._tool_specs(search)
                 response = await self._client.chat.completions.create(
                     model=self._options.model,
                     messages=messages,
@@ -274,7 +294,7 @@ class SmoothAgent:
 
                 for tc in choice.tool_calls:
                     tool_call_count += 1
-                    result = await self._dispatch_tool(tc.function.name, tc.function.arguments)
+                    result = await self._dispatch_tool(tc.function.name, tc.function.arguments, search)
                     tool_msg = {"role": "tool", "tool_call_id": tc.id, "content": result}
                     messages.append(tool_msg)
                     turn_messages.append(tool_msg)
@@ -297,7 +317,7 @@ class SmoothAgent:
             if thread is not None:
                 thread.extend(turn_messages)
 
-    async def _dispatch_tool(self, name: str, raw_arguments: str) -> str:
+    async def _dispatch_tool(self, name: str, raw_arguments: str, search: ToolSearch | None) -> str:
         import json
 
         # Enforce the role's tool clearance before dispatch: a forbidden tool is
@@ -307,7 +327,15 @@ class SmoothAgent:
         if clearance is not None and not clearance.is_allowed(name):
             return f"error: tool '{name}' is not permitted for this role"
 
-        tool = self._tools_by_name.get(name)
+        # Resolve the tool: eager tools first, then the built-in ``tool_search``
+        # meta-tool, then deferred tools that have been promoted. An unpromoted
+        # deferred tool resolves to nothing — it's invisible until searched for.
+        tool: Tool | None = self._tools_by_name.get(name)
+        if tool is None and search is not None:
+            if name == search.name:
+                tool = search
+            else:
+                tool = search.tool_by_name(name)
         if tool is None:
             return f"error: unknown tool '{name}'"
         try:

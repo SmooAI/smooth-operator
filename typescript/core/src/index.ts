@@ -25,6 +25,7 @@ export type { Memory, MemoryEntry } from './memory.js';
 export { LexicalReranker, NoopReranker } from './rerank.js';
 export type { Reranker } from './rerank.js';
 export { SmoothAgentThread } from './thread.js';
+export { MAX_MATCHES, TOOL_SEARCH_NAME, ToolSearch } from './toolSearch.js';
 export { HashEmbedder, hashToken, VectorKnowledge } from './vector.js';
 export type { Embedder } from './vector.js';
 export { END, Workflow, WorkflowError } from './workflow.js';
