@@ -236,13 +236,25 @@ func (a *SmoothAgent) toolSpecs() []ToolSpec {
 
 // Run executes a single turn. history is prior conversation messages (multi-turn).
 func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMessage) (AgentRunResponse, error) {
+	return a.run(ctx, message, history, nil)
+}
+
+// RunThread executes a single turn carried by a SmoothAgentThread: the turn is seeded
+// from the thread's messages, and this turn's new user + assistant (+ tool) messages
+// are appended back to the thread before returning. The thread takes precedence over
+// any history as the prior context. Run (single-shot/history) keeps working unchanged.
+func (a *SmoothAgent) RunThread(ctx context.Context, message string, thread *SmoothAgentThread) (AgentRunResponse, error) {
+	return a.run(ctx, message, nil, thread)
+}
+
+func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMessage, thread *SmoothAgentThread) (AgentRunResponse, error) {
 	messages := make([]ChatMessage, 0, len(history)+2)
 	if system := a.buildSystem(message); system != "" {
 		messages = append(messages, ChatMessage{Role: "system", Content: system})
 	}
 
-	// Source prior conversation from the checkpoint store (if configured),
-	// otherwise from the explicit history argument.
+	// Source prior conversation: the thread (if passed) wins, then the checkpoint
+	// store (if configured), then the explicit history argument.
 	cpStore := a.options.CheckpointStore
 	cpID := a.options.ConversationID
 	prior := history
@@ -251,12 +263,21 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 			prior = loaded.Messages
 		}
 	}
+	if thread != nil {
+		prior = thread.Messages()
+	}
 	messages = append(messages, prior...)
 	messages = append(messages, ChatMessage{Role: "user", Content: message})
 
-	// Persist the conversation (sans system prompt, rebuilt each turn) on any exit.
-	if cpStore != nil && cpID != "" {
-		defer func() {
+	// Track this turn's new messages (user + assistant + tool, never system) so they
+	// can be appended back to the thread on exit. Slicing the live messages by index
+	// would be unsafe — compaction may drop/reorder it mid-turn.
+	turnMessages := []ChatMessage{{Role: "user", Content: message}}
+
+	// Persist the conversation (sans system prompt, rebuilt each turn) on any exit,
+	// and append this turn's messages to the thread.
+	defer func() {
+		if cpStore != nil && cpID != "" {
 			nonSystem := make([]ChatMessage, 0, len(messages))
 			for _, m := range messages {
 				if m.Role != "system" {
@@ -264,8 +285,11 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 				}
 			}
 			cpStore.Save(Checkpoint{ConversationID: cpID, Messages: nonSystem})
-		}()
-	}
+		}
+		if thread != nil {
+			thread.Extend(turnMessages)
+		}
+	}()
 
 	model := a.options.Model
 	if model == "" {
@@ -305,7 +329,9 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 		tracker.Record(model, resp.Usage, a.options.Pricing)
 		lastText = resp.Content
 
-		messages = append(messages, ChatMessage{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
+		assistantMsg := ChatMessage{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls}
+		messages = append(messages, assistantMsg)
+		turnMessages = append(turnMessages, assistantMsg)
 
 		// Stop early if this turn has hit its token/cost budget.
 		if tracker.Exceeds(a.options.Budget) {
@@ -319,7 +345,9 @@ func (a *SmoothAgent) Run(ctx context.Context, message string, history []ChatMes
 		for _, tc := range resp.ToolCalls {
 			toolCalls++
 			result := a.dispatchTool(ctx, tc)
-			messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: result})
+			toolMsg := ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: result}
+			messages = append(messages, toolMsg)
+			turnMessages = append(turnMessages, toolMsg)
 		}
 	}
 

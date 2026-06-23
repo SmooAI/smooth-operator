@@ -14,6 +14,7 @@
 
 import type { Clearance } from './cast.js';
 import type { CheckpointStore } from './checkpoint.js';
+import type { SmoothAgentThread } from './thread.js';
 import type { Memory } from './memory.js';
 import type { Reranker } from './rerank.js';
 import { compact } from './compaction.js';
@@ -160,14 +161,22 @@ export class SmoothAgent {
         }));
     }
 
-    /** Run a single turn. `history` is prior OpenAI-format messages (multi-turn). */
-    async run(message: string, history?: Array<Record<string, unknown>>): Promise<AgentRunResponse> {
+    /**
+     * Run a single turn.
+     *
+     * `history` is prior OpenAI-format messages (multi-turn). `thread`, when given,
+     * is a {@link SmoothAgentThread} carrying the conversation across runs: the turn
+     * is seeded from the thread's messages, and this turn's new user + assistant
+     * (+ tool) messages are appended back to it before returning. The thread takes
+     * precedence over `history` as the prior context.
+     */
+    async run(message: string, history?: Array<Record<string, unknown>>, thread?: SmoothAgentThread): Promise<AgentRunResponse> {
         const messages: Array<Record<string, unknown>> = [];
         const system = this.buildSystem(message);
         if (system) messages.push({ role: 'system', content: system });
 
-        // Source prior conversation from the checkpoint store (if configured),
-        // otherwise from the explicit `history` argument.
+        // Source prior conversation: the thread (if passed) wins, then the checkpoint
+        // store (if configured), then the explicit `history` argument.
         const cpStore = this.options.checkpointStore;
         const cpId = this.options.conversationId;
         let prior = history;
@@ -175,8 +184,15 @@ export class SmoothAgent {
             const loaded = cpStore.load(cpId);
             if (loaded) prior = loaded.messages;
         }
+        if (thread) prior = [...thread.messages];
         if (prior) messages.push(...prior);
-        messages.push({ role: 'user', content: message });
+        const userMsg: Record<string, unknown> = { role: 'user', content: message };
+        messages.push(userMsg);
+
+        // Track this turn's new messages by identity so they can be appended back to
+        // the thread on exit. Index slicing would be unsafe — compaction may drop or
+        // reorder `messages` mid-turn.
+        const turnMessages: Array<Record<string, unknown>> = [userMsg];
 
         const tools = this.toolSpecs();
         const maxIterations = this.options.maxIterations ?? DEFAULTS.maxIterations;
@@ -210,7 +226,8 @@ export class SmoothAgent {
                     }));
                 }
                 messages.push(assistantMsg);
-    
+                turnMessages.push(assistantMsg);
+
                 // Stop early if this turn has hit its token/cost budget.
                 if (tracker.exceeds(this.options.budget)) {
                     return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: true };
@@ -223,7 +240,9 @@ export class SmoothAgent {
                 for (const tc of choice.tool_calls) {
                     toolCalls++;
                     const result = await this.dispatchTool(tc.function.name, tc.function.arguments);
-                    messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+                    const toolMsg: Record<string, unknown> = { role: 'tool', tool_call_id: tc.id, content: result };
+                    messages.push(toolMsg);
+                    turnMessages.push(toolMsg);
                 }
             }
 
@@ -233,6 +252,9 @@ export class SmoothAgent {
             if (cpStore && cpId) {
                 cpStore.save({ conversationId: cpId, messages: messages.filter((m) => m.role !== 'system') });
             }
+            // Append this turn's new messages (user + assistant + tool, never system)
+            // back to the thread so the next run sees the full conversation.
+            if (thread) thread.extend(turnMessages);
         }
     }
 
