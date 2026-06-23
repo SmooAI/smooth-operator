@@ -12,6 +12,7 @@ from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import InMemoryKnowledge, Knowledge, KnowledgeHit
 from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
+from .thread import SmoothAgentThread
 from .vector import Embedder, HashEmbedder, VectorKnowledge
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "Reranker",
     "RoleKind",
     "SmoothAgent",
+    "SmoothAgentThread",
     "Tool",
     "Usage",
     "VectorKnowledge",

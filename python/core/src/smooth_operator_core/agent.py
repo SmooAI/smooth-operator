@@ -23,6 +23,7 @@ from .cost import CostBudget, CostTracker, ModelPricing, Usage
 from .knowledge import Knowledge
 from .memory import Memory
 from .rerank import NoopReranker, Reranker
+from .thread import SmoothAgentThread
 
 
 class Tool(Protocol):
@@ -166,15 +167,27 @@ class SmoothAgent:
             for t in self._options.tools
         ]
 
-    async def run(self, message: str, history: list[dict[str, Any]] | None = None) -> AgentRunResponse:
-        """Run a single turn. ``history`` is prior OpenAI-format messages (multi-turn)."""
+    async def run(
+        self,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        thread: SmoothAgentThread | None = None,
+    ) -> AgentRunResponse:
+        """Run a single turn.
+
+        ``history`` is prior OpenAI-format messages (multi-turn). ``thread``, when
+        given, is a :class:`SmoothAgentThread` carrying the conversation across runs:
+        the turn is seeded from the thread's messages, and this turn's new user +
+        assistant (+ tool) messages are appended back to it before returning. The
+        thread takes precedence over ``history`` as the prior context.
+        """
         messages: list[dict[str, Any]] = []
         system = self._build_system(message)
         if system:
             messages.append({"role": "system", "content": system})
 
-        # Source prior conversation from the checkpoint store (if configured),
-        # otherwise from the explicit ``history`` argument.
+        # Source prior conversation: the thread (if passed) wins, then the checkpoint
+        # store (if configured), then the explicit ``history`` argument.
         cp_store = self._options.checkpoint_store
         cp_id = self._options.conversation_id
         prior = history
@@ -182,9 +195,17 @@ class SmoothAgent:
             loaded = cp_store.load(cp_id)
             if loaded is not None:
                 prior = loaded.messages
+        if thread is not None:
+            prior = list(thread.messages)
         if prior:
             messages.extend(prior)
-        messages.append({"role": "user", "content": message})
+        user_msg = {"role": "user", "content": message}
+        messages.append(user_msg)
+
+        # Track this turn's new messages by identity so they can be appended back to
+        # the thread on exit. Index-based slicing would be unsafe — compaction may
+        # drop/reorder ``messages`` mid-turn.
+        turn_messages: list[dict[str, Any]] = [user_msg]
 
         tool_specs = self._tool_specs()
         tool_call_count = 0
@@ -218,6 +239,7 @@ class SmoothAgent:
                         for tc in choice.tool_calls
                     ]
                 messages.append(assistant_msg)
+                turn_messages.append(assistant_msg)
 
                 # Stop early if this turn has hit its token/cost budget.
                 if tracker.exceeds(self._options.budget):
@@ -242,7 +264,9 @@ class SmoothAgent:
                 for tc in choice.tool_calls:
                     tool_call_count += 1
                     result = await self._dispatch_tool(tc.function.name, tc.function.arguments)
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    tool_msg = {"role": "tool", "tool_call_id": tc.id, "content": result}
+                    messages.append(tool_msg)
+                    turn_messages.append(tool_msg)
 
             return AgentRunResponse(
                 text=last_text,
@@ -257,6 +281,10 @@ class SmoothAgent:
                 cp_store.save(
                     Checkpoint(conversation_id=cp_id, messages=[m for m in messages if m.get("role") != "system"])
                 )
+            # Append this turn's new messages (user + assistant + tool, never system)
+            # back to the thread so the next run sees the full conversation.
+            if thread is not None:
+                thread.extend(turn_messages)
 
     async def _dispatch_tool(self, name: str, raw_arguments: str) -> str:
         import json
