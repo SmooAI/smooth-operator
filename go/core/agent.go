@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,74 @@ type ChatResponse struct {
 // GatewayClient implements it against a live endpoint; tests inject a fake.
 type ChatClient interface {
 	Chat(ctx context.Context, req ChatRequest) (ChatResponse, error)
+}
+
+// ChatChunk is one streamed chunk from a streaming chat completion — the standard
+// OpenAI streaming chunk shape (the slice the agent reads). Content deltas
+// concatenate into the assistant text; tool-call fragments are assembled by their
+// Index (ID + Function.Name appear when a call first opens, Function.Arguments
+// arrives in fragments). Usage is non-nil on (typically) the final chunk.
+type ChatChunk struct {
+	// ContentDelta is an incremental piece of assistant text ("" when this chunk
+	// carries no text).
+	ContentDelta string
+	// ToolCallDeltas are incremental tool-call fragments in this chunk.
+	ToolCallDeltas []ToolCallDelta
+	// Usage, when non-nil, reports cumulative token usage (gateways send it last).
+	Usage *Usage
+}
+
+// ToolCallDelta is one tool-call fragment within a streamed chunk.
+type ToolCallDelta struct {
+	Index        int    // which tool call this fragment belongs to
+	ID           string // set when the call first opens ("" in later fragments)
+	Name         string // set when the call first opens ("" in later fragments)
+	ArgsFragment string // a fragment of the JSON arguments to append
+}
+
+// StreamingChatClient is the OPTIONAL streaming surface. A ChatClient that also
+// implements it can drive RunStream; the GatewayClient and MockLlmProvider both do.
+// ChatStream opens a streaming model call and returns a receive-only channel of
+// chunks. The channel is closed when the stream ends; any error is delivered via
+// the returned error (for connect-time failures) or — for a mid-stream failure —
+// stored and reported as documented by the implementation. Production wires this to
+// the OpenAI `create(..., stream=True)` surface.
+type StreamingChatClient interface {
+	ChatClient
+	ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatChunk, error)
+}
+
+// StreamEventKind tags a StreamEvent.
+type StreamEventKind int
+
+const (
+	// StreamText is an incremental assistant content delta as it streams in.
+	StreamText StreamEventKind = iota
+	// StreamToolCall is a tool call the model requested, emitted once before dispatch.
+	StreamToolCall
+	// StreamToolResult is a tool's result, emitted after it finishes.
+	StreamToolResult
+	// StreamDone is the single terminal event, carrying the final AgentRunResponse.
+	StreamDone
+)
+
+// StreamEvent is one event from RunStream. The Kind field selects which payload
+// fields are populated, mirroring the C# RunStreamingAsync update sequence and the
+// Rust reference engine's event stream:
+//
+//   - StreamText:       Text holds the content delta.
+//   - StreamToolCall:   Name + Arguments hold the requested call.
+//   - StreamToolResult: Name + Result hold a finished tool's result.
+//   - StreamDone:       Response holds the final AgentRunResponse (the same value
+//     Run would return for the same script). Exactly one StreamDone is emitted, last,
+//     UNLESS the turn ends in an error (see RunStream's error contract).
+type StreamEvent struct {
+	Kind      StreamEventKind
+	Text      string           // StreamText
+	Name      string           // StreamToolCall / StreamToolResult
+	Arguments string           // StreamToolCall
+	Result    string           // StreamToolResult
+	Response  AgentRunResponse // StreamDone
 }
 
 // Tool is a callable the agent may invoke.
@@ -425,6 +494,232 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 	}
 
 	return AgentRunResponse{Text: lastText, Iterations: maxIter, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}, nil
+}
+
+// RunStream streams a single turn, delivering incremental StreamEvents on the
+// returned channel. It drives the SAME agentic loop as Run (system/knowledge/memory
+// build, seed messages, per-iteration compaction, cost tracking, budget early-stop,
+// deferred-tool specs, clearance + human-gate on dispatch, checkpoint/thread
+// persistence on exit) — but calls the model in STREAMING mode and emits events as
+// work happens:
+//
+//   - a StreamText event per non-empty content delta as it streams in;
+//   - a StreamToolCall event per requested tool call, after that iteration's model
+//     stream ends, BEFORE the call is dispatched;
+//   - a StreamToolResult event per tool, after it finishes (in original call order
+//     even when ParallelToolCalls runs them concurrently);
+//   - exactly one terminal StreamDone event carrying the same AgentRunResponse Run
+//     would return for the same script.
+//
+// Error contract (idiomatic Go): the client must implement StreamingChatClient — if
+// it does not, RunStream returns a nil channel and a non-nil error synchronously and
+// runs nothing. Once the turn is running, a model-call error aborts it: the channel
+// is closed WITHOUT a StreamDone and the error is stored, retrievable via the
+// returned *Stream's Err() after the channel drains. So a caller ranges the channel
+// to completion, then checks Err(); a clean turn ends with a StreamDone and Err()==nil.
+//
+// NOTE: retry-with-backoff (MaxRetries/RetryBackoff) is intentionally NOT applied to
+// the streaming model call — re-running it after a mid-stream failure would re-emit
+// already-yielded chunks. Retry stays scoped to non-streaming Run (see callModel);
+// this mirrors the C# RunStreamingAsync decision.
+func (a *SmoothAgent) RunStream(ctx context.Context, message string, thread *SmoothAgentThread) (*Stream, error) {
+	sc, ok := a.client.(StreamingChatClient)
+	if !ok {
+		return nil, fmt.Errorf("core: client does not implement StreamingChatClient (no ChatStream)")
+	}
+
+	events := make(chan StreamEvent)
+	stream := &Stream{events: events}
+	go func() {
+		defer close(events)
+		if err := a.runStream(ctx, sc, message, thread, events); err != nil {
+			stream.mu.Lock()
+			stream.err = err
+			stream.mu.Unlock()
+		}
+	}()
+	return stream, nil
+}
+
+// Stream is the handle RunStream returns: range Events() to consume the turn's
+// StreamEvents, then call Err() (after the channel drains) to see whether the turn
+// aborted with a model error.
+type Stream struct {
+	events <-chan StreamEvent
+	mu     sync.Mutex
+	err    error
+}
+
+// Events returns the channel of streamed events. It is closed when the turn ends.
+func (s *Stream) Events() <-chan StreamEvent { return s.events }
+
+// Err returns the error that aborted the turn, or nil if it completed cleanly.
+// Call it only after Events() has been fully drained (the channel closed).
+func (s *Stream) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
+func (a *SmoothAgent) runStream(ctx context.Context, sc StreamingChatClient, message string, thread *SmoothAgentThread, out chan<- StreamEvent) error {
+	messages := make([]ChatMessage, 0, 2)
+	if system := a.buildSystem(message); system != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: system})
+	}
+
+	cpStore := a.options.CheckpointStore
+	cpID := a.options.ConversationID
+	var prior []ChatMessage
+	if cpStore != nil && cpID != "" {
+		if loaded, ok := cpStore.Load(cpID); ok {
+			prior = loaded.Messages
+		}
+	}
+	if thread != nil {
+		prior = thread.Messages()
+	}
+	messages = append(messages, prior...)
+	messages = append(messages, ChatMessage{Role: "user", Content: message})
+
+	turnMessages := []ChatMessage{{Role: "user", Content: message}}
+	defer func() {
+		if cpStore != nil && cpID != "" {
+			nonSystem := make([]ChatMessage, 0, len(messages))
+			for _, m := range messages {
+				if m.Role != "system" {
+					nonSystem = append(nonSystem, m)
+				}
+			}
+			cpStore.Save(Checkpoint{ConversationID: cpID, Messages: nonSystem})
+		}
+		if thread != nil {
+			thread.Extend(turnMessages)
+		}
+	}()
+
+	model := a.options.Model
+	if model == "" {
+		model = defaultModel
+	}
+	maxIter := a.options.MaxIterations
+	if maxIter <= 0 {
+		maxIter = defaultMaxIterations
+	}
+	maxTokens := a.options.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
+	var search *ToolSearch
+	if len(a.options.DeferredTools) > 0 {
+		search = NewToolSearch(a.options.DeferredTools)
+	}
+	maxContext := a.options.MaxContextTokens
+	if maxContext == 0 {
+		maxContext = defaultMaxContextTokens
+	}
+
+	toolCalls := 0
+	lastText := ""
+	var tracker CostTracker
+
+	for iteration := 1; iteration <= maxIter; iteration++ {
+		messages = compact(messages, maxContext)
+		tools := a.toolSpecs(search)
+
+		// Stream the model call, emitting text deltas while accumulating the full
+		// assistant message (content + tool calls + usage).
+		chunks, err := sc.ChatStream(ctx, ChatRequest{
+			Model: model, Messages: messages, Tools: tools,
+			Temperature: a.options.Temperature, MaxTokens: maxTokens,
+		})
+		if err != nil {
+			return fmt.Errorf("model stream: %w", err)
+		}
+		var content strings.Builder
+		partials := map[int]*ToolCall{}
+		var order []int
+		var usage Usage
+		for chunk := range chunks {
+			if chunk.Usage != nil {
+				usage = *chunk.Usage
+			}
+			if chunk.ContentDelta != "" {
+				content.WriteString(chunk.ContentDelta)
+				out <- StreamEvent{Kind: StreamText, Text: chunk.ContentDelta}
+			}
+			for _, d := range chunk.ToolCallDeltas {
+				cur, seen := partials[d.Index]
+				if !seen {
+					cur = &ToolCall{}
+					partials[d.Index] = cur
+					order = append(order, d.Index)
+				}
+				if d.ID != "" {
+					cur.ID = d.ID
+				}
+				if d.Name != "" {
+					cur.Name = d.Name
+				}
+				cur.Arguments += d.ArgsFragment
+			}
+		}
+		sort.Ints(order)
+		assembled := make([]ToolCall, 0, len(order))
+		for _, idx := range order {
+			assembled = append(assembled, *partials[idx])
+		}
+
+		tracker.Record(model, usage, a.options.Pricing)
+		lastText = content.String()
+
+		assistantMsg := ChatMessage{Role: "assistant", Content: lastText, ToolCalls: assembled}
+		messages = append(messages, assistantMsg)
+		turnMessages = append(turnMessages, assistantMsg)
+
+		if tracker.Exceeds(a.options.Budget) {
+			out <- StreamEvent{Kind: StreamDone, Response: AgentRunResponse{Text: lastText, Iterations: iteration, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD, BudgetExceeded: true}}
+			return nil
+		}
+
+		if len(assembled) == 0 {
+			out <- StreamEvent{Kind: StreamDone, Response: AgentRunResponse{Text: lastText, Iterations: iteration, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}}
+			return nil
+		}
+
+		toolCalls += len(assembled)
+		// Emit a tool_call event per requested call (original order) BEFORE dispatch.
+		for _, tc := range assembled {
+			out <- StreamEvent{Kind: StreamToolCall, Name: tc.Name, Arguments: tc.Arguments}
+		}
+		// Reuse the SAME dispatch path as Run (clearance, human-gate, tool_search,
+		// JSON parsing, error-to-string, ParallelToolCalls). Results surface in
+		// original call order so the event stream stays deterministic.
+		results := make([]string, len(assembled))
+		if a.options.ParallelToolCalls && len(assembled) > 1 {
+			var wg sync.WaitGroup
+			for i, tc := range assembled {
+				wg.Add(1)
+				go func(i int, tc ToolCall) {
+					defer wg.Done()
+					results[i] = a.dispatchTool(ctx, tc, search)
+				}(i, tc)
+			}
+			wg.Wait()
+		} else {
+			for i, tc := range assembled {
+				results[i] = a.dispatchTool(ctx, tc, search)
+			}
+		}
+		for i, tc := range assembled {
+			toolMsg := ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: results[i]}
+			messages = append(messages, toolMsg)
+			turnMessages = append(turnMessages, toolMsg)
+			out <- StreamEvent{Kind: StreamToolResult, Name: tc.Name, Result: results[i]}
+		}
+	}
+
+	out <- StreamEvent{Kind: StreamDone, Response: AgentRunResponse{Text: lastText, Iterations: maxIter, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}}
+	return nil
 }
 
 // callModel invokes the model with bounded retry-with-exponential-backoff.

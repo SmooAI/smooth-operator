@@ -5,7 +5,19 @@ agentic tool-calling loop over any OpenAI-compatible chat client, with in-memory
 knowledge grounding. See ``docs/Architecture/Python Core.md``.
 """
 
-from .agent import AgentOptions, AgentRunResponse, FunctionTool, SmoothAgent, Tool, delegate_tool
+from .agent import (
+    AgentOptions,
+    AgentRunResponse,
+    DoneEvent,
+    FunctionTool,
+    SmoothAgent,
+    StreamEvent,
+    TextEvent,
+    Tool,
+    ToolCallEvent,
+    ToolResultEvent,
+    delegate_tool,
+)
 from .cast import Cast, Clearance, OperatorRole, RoleKind
 from .checkpoint import Checkpoint, CheckpointStore, InMemoryCheckpointStore
 from .cost import CostBudget, CostTracker, ModelPricing, Usage
@@ -23,6 +35,7 @@ from .llm_provider import (
     RecordedCall,
     text_response,
     tool_call_response,
+    usage,
 )
 from .memory import InMemoryMemory, Memory, MemoryEntry
 from .rerank import LexicalReranker, NoopReranker, Reranker
@@ -35,6 +48,12 @@ __all__ = [
     "AgentOptions",
     "AgentRunResponse",
     "Cast",
+    "DoneEvent",
+    "StreamEvent",
+    "TextEvent",
+    "ToolCallEvent",
+    "ToolResultEvent",
+    "usage",
     "Checkpoint",
     "CheckpointStore",
     "Clearance",
