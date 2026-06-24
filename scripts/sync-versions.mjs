@@ -84,11 +84,6 @@ const targets = [
         apply: (text) => text.replace(/^version = "[^"]*"$/m, `version = "${version}"`),
     },
     {
-        name: 'python/core/pyproject.toml',
-        url: new URL('../python/core/pyproject.toml', import.meta.url),
-        apply: (text) => text.replace(/^version = "[^"]*"$/m, `version = "${version}"`),
-    },
-    {
         name: 'go/version.go',
         url: new URL('../go/version.go', import.meta.url),
         apply: (text) => text.replace(/const Version = "[^"]*"/, `const Version = "${version}"`),
