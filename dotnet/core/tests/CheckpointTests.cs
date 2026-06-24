@@ -37,7 +37,7 @@ public class CheckpointTests
     {
         var store = new InMemoryCheckpointStore();
         var add = AIFunctionFactory.Create((int a, int b) => a + b, "add", "adds");
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("c1", "add", new Dictionary<string, object?> { ["a"] = 2, ["b"] = 3 })
             .PushText("5");
         var options = new AgentOptions { CheckpointStore = store, Checkpoint = CheckpointStrategy.AfterToolCall };
@@ -54,7 +54,7 @@ public class CheckpointTests
     public async Task NoCheckpoint_WhenStrategyNever()
     {
         var store = new InMemoryCheckpointStore();
-        var mock = new MockChatClient().PushText("hi");
+        var mock = new MockLlmProvider().PushText("hi");
         var agent = new SmoothAgent(mock, new AgentOptions { CheckpointStore = store, Checkpoint = CheckpointStrategy.Never });
         var thread = agent.GetNewThread();
 
@@ -69,14 +69,14 @@ public class CheckpointTests
         var store = new InMemoryCheckpointStore();
 
         // "Process 1": run turn 1, checkpointing each iteration.
-        var mock1 = new MockChatClient().PushText("Nice to meet you, Brent.");
+        var mock1 = new MockLlmProvider().PushText("Nice to meet you, Brent.");
         var agent1 = new SmoothAgent(mock1, new AgentOptions { CheckpointStore = store, Checkpoint = CheckpointStrategy.AfterEachIteration });
         var thread1 = agent1.GetNewThread();
         await agent1.RunAsync("My name is Brent.", thread1);
         var threadId = thread1.Id;
 
         // "Process 2": a brand-new agent resumes the thread from the store, then runs turn 2.
-        var mock2 = new MockChatClient().PushText("Your name is Brent.");
+        var mock2 = new MockLlmProvider().PushText("Your name is Brent.");
         var agent2 = new SmoothAgent(mock2, new AgentOptions { CheckpointStore = store, Checkpoint = CheckpointStrategy.AfterEachIteration });
         var resumed = await agent2.ResumeThreadAsync(threadId);
         await agent2.RunAsync("What's my name?", resumed);

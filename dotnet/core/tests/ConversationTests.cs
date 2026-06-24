@@ -12,7 +12,7 @@ public class ConversationTests
     [Fact]
     public async Task Thread_CarriesHistoryAcrossTurns()
     {
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushText("Nice to meet you, Brent.")
             .PushText("Your name is Brent.");
         var agent = new SmoothAgent(mock, new AgentOptions { Instructions = "be helpful" });
@@ -33,7 +33,7 @@ public class ConversationTests
     [Fact]
     public async Task StatelessRun_DoesNotLeakIntoNextRun()
     {
-        var mock = new MockChatClient().PushText("first").PushText("second");
+        var mock = new MockLlmProvider().PushText("first").PushText("second");
         var agent = new SmoothAgent(mock, new AgentOptions());
 
         await agent.RunAsync("turn one");
@@ -46,7 +46,7 @@ public class ConversationTests
     [Fact]
     public async Task Compaction_TrimsOldMessages_PreservingSystemAndLatestUser()
     {
-        var mock = new MockChatClient().PushText("ok");
+        var mock = new MockLlmProvider().PushText("ok");
         var options = new AgentOptions
         {
             Instructions = "SYSTEM PROMPT",

@@ -32,6 +32,15 @@ public sealed class AgentOptions
     public IList<AITool> Tools { get; } = new List<AITool>();
 
     /// <summary>
+    /// Tools whose schemas are hidden from the model until promoted. When non-empty, the agent
+    /// advertises a single <c>tool_search(query)</c> meta-tool; the model calls it to discover and
+    /// promote the deferred tools it needs, keeping the visible tool set (and its token cost) small.
+    /// A deferred tool isn't dispatchable until <c>tool_search</c> promotes it. Mirrors the Rust
+    /// reference's deferred-tools / <c>tool_search</c> behaviour.
+    /// </summary>
+    public IList<AITool> DeferredTools { get; } = new List<AITool>();
+
+    /// <summary>
     /// Soft ceiling (estimated tokens) on the conversation sent to the model. When exceeded,
     /// the <see cref="Compaction"/> strategy trims older messages before the next LLM call.
     /// Mirrors the Rust engine's <c>max_context_tokens</c>.
