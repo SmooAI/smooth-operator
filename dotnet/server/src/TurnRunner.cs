@@ -27,8 +27,9 @@ public sealed class TurnRunner
     private readonly IKnowledgeBase? _knowledge;
     private readonly IReranker? _reranker;
     private readonly string _systemPrompt;
+    private readonly IReadOnlyList<AITool> _tools;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -36,6 +37,7 @@ public sealed class TurnRunner
         _reranker = reranker;
         _systemPrompt = systemPrompt ??
             "You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don't know.";
+        _tools = tools ?? Array.Empty<AITool>();
     }
 
     public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, CancellationToken cancellationToken = default)
@@ -69,7 +71,15 @@ public sealed class TurnRunner
         }
 
         // 2. Build the agent + replay prior history as memory (before persisting this turn's inbound).
-        var agent = new SmoothAgent(_chatClient, new AgentOptions { Instructions = _systemPrompt, Knowledge = _knowledge });
+        //    Registered tools (default none) are passed straight to the engine's agentic loop; the
+        //    streaming block below already translates the resulting tool-call/result events into
+        //    stream_chunks, so enabling tools is purely a matter of supplying them here.
+        var options = new AgentOptions { Instructions = _systemPrompt, Knowledge = _knowledge };
+        foreach (var tool in _tools)
+        {
+            options.Tools.Add(tool);
+        }
+        var agent = new SmoothAgent(_chatClient, options);
         var thread = agent.GetNewThread();
         foreach (var message in await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false))
         {
