@@ -12,7 +12,7 @@
  * `runStream` mapped event-by-event onto protocol events.
  */
 import { SmoothAgent } from '@smooai/smooth-operator-core';
-import type { AgentOptions, ChatClientLike, Knowledge, StreamEvent } from '@smooai/smooth-operator-core';
+import type { AgentOptions, ChatClientLike, Knowledge, StreamEvent, Tool } from '@smooai/smooth-operator-core';
 
 import * as protocol from './protocol.js';
 import type { Citation, Frame } from './protocol.js';
@@ -42,6 +42,8 @@ export interface TurnRunnerOptions {
     /** Optional knowledge retriever, already SCOPED to the connection's access (ACL). */
     knowledge?: Knowledge;
     systemPrompt?: string;
+    /** Tools the agent may call during the turn (default none); passed straight to the engine. */
+    tools?: Tool[];
 }
 
 export class TurnRunner {
@@ -49,12 +51,14 @@ export class TurnRunner {
     private readonly store: SessionStore;
     private readonly knowledge?: Knowledge;
     private readonly systemPrompt: string;
+    private readonly tools: Tool[];
 
     constructor(options: TurnRunnerOptions) {
         this.chatClient = options.chatClient;
         this.store = options.store;
         this.knowledge = options.knowledge;
         this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+        this.tools = options.tools ?? [];
     }
 
     /**
@@ -87,6 +91,7 @@ export class TurnRunner {
         //    messages passed to runStream.
         const agentOptions: AgentOptions = { instructions: this.systemPrompt };
         if (this.knowledge) agentOptions.knowledge = this.knowledge;
+        if (this.tools.length > 0) agentOptions.tools = this.tools;
         const agent = new SmoothAgent(this.chatClient, agentOptions);
 
         const prior = await this.store.listMessages(conversationId, MAX_PRIOR_MESSAGES);
