@@ -119,7 +119,7 @@ public sealed class FrameDispatcher
         var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
-            sink(ProtocolEvents.Error(requestId, "NOT_FOUND", "Session not found"));
+            sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
             return;
         }
 
@@ -139,7 +139,7 @@ public sealed class FrameDispatcher
         var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
-            sink(ProtocolEvents.Error(requestId, "NOT_FOUND", "Session not found"));
+            sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
             return;
         }
 

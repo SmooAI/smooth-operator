@@ -91,10 +91,16 @@ public static class ProtocolEvents
 
     public static JsonObject Error(string? requestId, string code, string message)
     {
+        // The {code, message} descriptor is duplicated at the envelope top level (`error`) and nested
+        // under `data.error`, per spec/events/error.schema.json — the top-level copy is "kept for clients
+        // that pattern-match on the envelope-level `error` field". Mirrors the Python reference server.
+        var data = new JsonObject { ["error"] = new JsonObject { ["code"] = code, ["message"] = message } };
+        if (requestId is not null) data["requestId"] = requestId;
         var ev = new JsonObject
         {
             ["type"] = "error",
-            ["data"] = new JsonObject { ["error"] = new JsonObject { ["code"] = code, ["message"] = message } },
+            ["error"] = new JsonObject { ["code"] = code, ["message"] = message },
+            ["data"] = data,
             ["timestamp"] = NowMs(),
         };
         if (requestId is not null) ev["requestId"] = requestId;
