@@ -1,0 +1,68 @@
+{
+    "name": "multi-turn-conversation",
+    "description": "Two messages in one session must each run a turn and stream the matching reply — proving session continuity and that the engine advances through its mock script turn by turn (turn 1 → first reply, turn 2 → second reply). Every server must produce the same two-turn protocol flow.",
+    "mockLlmScript": [
+        { "kind": "text", "text": "First reply from the engine." },
+        { "kind": "text", "text": "Second reply from the engine." }
+    ],
+    "steps": [
+        {
+            "send": {
+                "action": "create_conversation_session",
+                "requestId": "r-create",
+                "agentId": "11111111-1111-1111-1111-111111111111",
+                "userName": "Alice",
+                "userEmail": "alice@example.com"
+            },
+            "expect": [
+                { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } }
+            ]
+        },
+        {
+            "send": {
+                "action": "send_message",
+                "requestId": "r-msg-1",
+                "sessionId": "{{sessionId}}",
+                "message": "first question",
+                "stream": true
+            },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "stream_token",
+                    "repeat": true,
+                    "accumulate": "token",
+                    "assertAccumulated": "First reply from the engine."
+                },
+                {
+                    "type": "eventual_response",
+                    "status": 200,
+                    "assert": { "data.data.response.responseParts": ["First reply from the engine."] }
+                }
+            ]
+        },
+        {
+            "send": {
+                "action": "send_message",
+                "requestId": "r-msg-2",
+                "sessionId": "{{sessionId}}",
+                "message": "second question",
+                "stream": true
+            },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "stream_token",
+                    "repeat": true,
+                    "accumulate": "token",
+                    "assertAccumulated": "Second reply from the engine."
+                },
+                {
+                    "type": "eventual_response",
+                    "status": 200,
+                    "assert": { "data.data.response.responseParts": ["Second reply from the engine."] }
+                }
+            ]
+        }
+    ]
+}
