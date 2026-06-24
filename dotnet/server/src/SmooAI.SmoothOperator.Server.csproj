@@ -14,8 +14,9 @@
 
   <ItemGroup>
     <!-- The service is built ON the engine: it drives SmoothAgent per turn and adds the
-         protocol/session/storage surface around it. -->
-    <ProjectReference Include="..\..\core\src\SmooAI.SmoothOperator.Core.csproj" />
+         protocol/session/storage surface around it. The engine now lives in (and publishes
+         from) the smooth-operator-core repo; consume it as the published NuGet package. -->
+    <PackageReference Include="SmooAI.SmoothOperator.Core" Version="1.3.0" />
   </ItemGroup>
 
 </Project>

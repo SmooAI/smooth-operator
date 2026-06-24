@@ -100,20 +100,9 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
                   NPM_TOKEN: ${{ secrets.SMOOAI_NPM_TOKEN }}
 
-            - name: Publish SmooAI.SmoothOperator.Core to NuGet
-              if: steps.changesets.outputs.published == 'true'
-              env:
-                  NUGET_API_KEY: ${{ secrets.SMOOAI_NUGET_API_KEY }}
-              run: |
-                  if [ -z "${NUGET_API_KEY}" ]; then
-                      echo "::error::SMOOAI_NUGET_API_KEY secret is not set"
-                      exit 1
-                  fi
-                  dotnet pack dotnet/core/src/SmooAI.SmoothOperator.Core.csproj -c Release --no-build -o dist
-                  dotnet nuget push "dist/*.nupkg" \
-                      --api-key "${NUGET_API_KEY}" \
-                      --source https://api.nuget.org/v3/index.json \
-                      --skip-duplicate
+            # The C# engine (SmooAI.SmoothOperator.Core) now lives in and publishes from
+            # the smooth-operator-core repo (.github/workflows/publish-nuget.yml there).
+            # The server consumes it as a NuGet PackageReference; nothing to publish here.
 
             # --- Rust → crates.io --------------------------------------------------
             # Publish in TOPOLOGICAL order (a crate must exist on the index before the
