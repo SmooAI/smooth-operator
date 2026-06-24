@@ -1,0 +1,40 @@
+{
+    "name": "@smooai/smooth-operator-server",
+    "version": "1.2.0",
+    "private": true,
+    "description": "Native TypeScript smooth-operator server: a WebSocket service that speaks the smooth-operator wire protocol and runs the @smooai/smooth-operator-core engine in-process per turn. The TS sibling of the Rust (rust/smooth-operator-server) and C# (dotnet/server) servers; the client lives in ../src and is untouched.",
+    "license": "MIT",
+    "type": "module",
+    "engines": {
+        "node": ">=22"
+    },
+    "main": "./dist/index.js",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "bin": {
+        "smooth-operator-server": "./dist/main.js"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "start": "node dist/main.js"
+    },
+    "dependencies": {
+        "@smooai/smooth-operator-core": "^0.1.1",
+        "ws": "^8.18.0"
+    },
+    "devDependencies": {
+        "@types/node": "^25.9.2",
+        "@types/ws": "^8.5.13",
+        "typescript": "^5.7.3",
+        "vitest": "^2.1.8"
+    }
+}
