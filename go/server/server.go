@@ -24,6 +24,11 @@ type Server struct {
 	auth      AuthVerifier
 	backplane Backplane
 	systemP   string
+	// tools are registered with the agent on every turn (default none → no behavior
+	// change). The dispatcher threads them into the turn runner, which passes them
+	// straight to the engine AgentOptions; the engine drives the tool loop and the
+	// runner already maps its tool-call/tool-result stream events to stream_chunk frames.
+	tools []core.Tool
 
 	// drainCtx is the single shutdown source for the whole server (one source,
 	// default uncancelled). Each connection loop selects on its Done() so an
@@ -57,6 +62,10 @@ func WithBackplane(b Backplane) Option { return func(srv *Server) { srv.backplan
 
 // WithSystemPrompt overrides the agent system prompt (default: support-agent prompt).
 func WithSystemPrompt(p string) Option { return func(srv *Server) { srv.systemP = p } }
+
+// WithTools registers the engine tools the agent may call during a turn (default none).
+// Threaded into every turn via the dispatcher → turn runner → engine AgentOptions.
+func WithTools(tools []core.Tool) Option { return func(srv *Server) { srv.tools = tools } }
 
 // New builds a Server with the given options, defaulting every collaborator to its
 // in-memory / permissive reference impl so New() with no options is a working server.
@@ -181,7 +190,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	s.backplane.Attach(s.drainCtx, connID, send)
 	defer s.backplane.Detach(context.Background(), connID)
 
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP)
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.tools)
 
 	// teardown closes the writer sink once (under sendMu, so an in-flight send can't race
 	// the close), waits for the writer to drain, and closes the socket.
