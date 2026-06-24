@@ -58,7 +58,8 @@ public static class SmoothOperatorWebSocketExtensions
             services.GetRequiredService<IChatClient>(),
             services.GetService<IAccessKnowledge>(),
             access,
-            reranker: services.GetService<IReranker>()); // null unless the host registered one (rerank is opt-in)
+            reranker: services.GetService<IReranker>(), // null unless the host registered one (rerank is opt-in)
+            tools: services.GetService<IReadOnlyList<AITool>>()); // the tools the agent may call (default none — the DI analog of Python's ServerState.tools)
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)

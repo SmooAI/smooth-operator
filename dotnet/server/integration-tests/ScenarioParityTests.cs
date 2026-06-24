@@ -39,8 +39,9 @@ public class ScenarioParityTests
         _ = name; // surfaced as the test id via MemberData
         var scenario = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
         var chat = BuildMock(scenario["mockLlmScript"]?.AsArray());
+        var tools = BuildTools(scenario["server"]?.AsObject()?["tools"]?.AsArray());
 
-        await using var app = BuildApp(chat);
+        await using var app = BuildApp(chat, tools);
         await app.StartAsync();
         using var socket = await ConnectAsync(app.GetTestServer());
 
@@ -87,6 +88,32 @@ public class ScenarioParityTests
         }
 
         return mock;
+    }
+
+    /// <summary>
+    /// Build deterministic test tools from a scenario's <c>server.tools</c> directive. Each tool ignores
+    /// its arguments and returns the spec's fixed <c>result</c> string, so a tool-call turn is fully
+    /// deterministic across every server. The C# analog of the Python runner's <c>_build_tools</c>.
+    /// </summary>
+    private static IReadOnlyList<AITool> BuildTools(JsonArray? specs)
+    {
+        if (specs is null)
+        {
+            return Array.Empty<AITool>();
+        }
+
+        var tools = new List<AITool>();
+        foreach (var specNode in specs)
+        {
+            var spec = specNode!.AsObject();
+            var result = spec["result"]!.GetValue<string>();
+            tools.Add(AIFunctionFactory.Create(
+                () => result,
+                spec["name"]!.GetValue<string>(),
+                spec["description"]?.GetValue<string>() ?? string.Empty));
+        }
+
+        return tools;
     }
 
     /// <summary>
@@ -248,11 +275,17 @@ public class ScenarioParityTests
         return JsonNode.DeepEquals(a, b);
     }
 
-    private static WebApplication BuildApp(IChatClient chat)
+    private static WebApplication BuildApp(IChatClient chat, IReadOnlyList<AITool> tools)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(chat);
+        if (tools.Count > 0)
+        {
+            // Register the scenario's tools as the DI-resolved tool set the WebSocket host threads into
+            // each per-connection dispatcher (the analog of seeding Python's ServerState.tools).
+            builder.Services.AddSingleton(tools);
+        }
         builder.Services.AddSmoothOperatorServer();
 
         var app = builder.Build();

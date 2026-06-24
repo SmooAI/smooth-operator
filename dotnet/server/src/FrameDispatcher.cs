@@ -22,6 +22,7 @@ public sealed class FrameDispatcher
     private readonly IReranker? _reranker;
     private readonly AccessContext _access;
     private readonly string? _systemPrompt;
+    private readonly IReadOnlyList<AITool> _tools;
 
     public FrameDispatcher(
         ISessionStore store,
@@ -29,7 +30,8 @@ public sealed class FrameDispatcher
         IAccessKnowledge? knowledge = null,
         AccessContext? access = null,
         string? systemPrompt = null,
-        IReranker? reranker = null)
+        IReranker? reranker = null,
+        IReadOnlyList<AITool>? tools = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -37,6 +39,7 @@ public sealed class FrameDispatcher
         _access = access ?? AccessContext.Anonymous;
         _systemPrompt = systemPrompt;
         _reranker = reranker;
+        _tools = tools ?? Array.Empty<AITool>();
     }
 
     public async Task DispatchAsync(string rawFrame, Action<JsonObject> sink, CancellationToken cancellationToken = default)
@@ -151,7 +154,7 @@ public sealed class FrameDispatcher
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools);
         var result = await runner.RunAsync(session.ConversationId, requestId, message, sink, cancellationToken).ConfigureAwait(false);
 
         // 3. Terminal eventual_response.
