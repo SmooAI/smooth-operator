@@ -7,6 +7,12 @@
 #
 # `console` (the admin app) is private (never published) and is a member too, so
 # one `pnpm install` at the repo root links everything.
+#
+# `typescript/server` is the native TypeScript server — a WebSocket service that
+# speaks the protocol and runs `@smooai/smooth-operator-core` per turn (the TS
+# sibling of `rust/smooth-operator-server` and `dotnet/server`). Private (not
+# published); the client in `typescript/` is the published SDK.
 packages:
     - typescript
+    - typescript/server
     - console
