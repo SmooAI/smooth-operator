@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 import { MockLlmProvider } from '@smooai/smooth-operator-core';
+import type { Tool } from '@smooai/smooth-operator-core';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { serve, type RunningServer } from '../src/server.js';
@@ -59,10 +60,18 @@ interface Step {
     expect: Matcher[];
 }
 
+interface ToolSpec {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+    result: string;
+}
+
 interface Scenario {
     name: string;
     description?: string;
     mockLlmScript?: MockScriptEntry[];
+    server?: { tools?: ToolSpec[] };
     steps: Step[];
 }
 
@@ -88,6 +97,21 @@ function buildMock(script: MockScriptEntry[]): MockLlmProvider {
         }
     }
     return mock;
+}
+
+/**
+ * Build deterministic test tools from a scenario's `server.tools` directive — the
+ * TS analog of the Python runner's `_build_tools`. Each tool ignores its arguments
+ * and returns the spec's fixed `result` string, so a tool-call turn is fully
+ * deterministic across every server.
+ */
+function buildTools(specs: ToolSpec[]): Tool[] {
+    return specs.map((spec) => ({
+        name: spec.name,
+        description: spec.description ?? '',
+        parameters: spec.parameters ?? { type: 'object', properties: {} },
+        execute: async (_args: Record<string, unknown>): Promise<string> => spec.result,
+    }));
 }
 
 /** Replace `{{name}}` placeholders in string fields from captured vars. */
@@ -157,7 +181,10 @@ describe('scenario parity — TS server runs the shared conformance corpus', () 
     for (const path of SCENARIOS) {
         const scenario = JSON.parse(readFileSync(path, 'utf8')) as Scenario;
         it(scenario.name, async () => {
-            server = await serve({ chatClient: buildMock(scenario.mockLlmScript ?? []) });
+            server = await serve({
+                chatClient: buildMock(scenario.mockLlmScript ?? []),
+                tools: buildTools(scenario.server?.tools ?? []),
+            });
             const client = await TestClient.connect(server.url);
             const vars: Record<string, unknown> = {};
             try {

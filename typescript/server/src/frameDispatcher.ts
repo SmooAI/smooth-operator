@@ -10,7 +10,7 @@
  * the `?token=` slot), so retrieval for each turn is scoped to it — ACL is enforced
  * on the live chat path, not just at ingest.
  */
-import type { ChatClientLike, Knowledge } from '@smooai/smooth-operator-core';
+import type { ChatClientLike, Knowledge, Tool } from '@smooai/smooth-operator-core';
 import { randomUUID } from 'node:crypto';
 
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
@@ -36,6 +36,8 @@ export interface FrameDispatcherOptions {
     knowledge?: AccessKnowledge;
     access?: AccessContext;
     systemPrompt?: string;
+    /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
+    tools?: Tool[];
 }
 
 export class FrameDispatcher {
@@ -44,6 +46,7 @@ export class FrameDispatcher {
     private readonly knowledge?: AccessKnowledge;
     private readonly access: AccessContext;
     private readonly systemPrompt?: string;
+    private readonly tools: Tool[];
 
     constructor(options: FrameDispatcherOptions) {
         this.store = options.store;
@@ -51,6 +54,7 @@ export class FrameDispatcher {
         this.knowledge = options.knowledge;
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
+        this.tools = options.tools ?? [];
     }
 
     /**
@@ -161,6 +165,7 @@ export class FrameDispatcher {
             store: this.store,
             knowledge: scopedKnowledge,
             systemPrompt: this.systemPrompt,
+            tools: this.tools,
         });
         const result = await runner.run(session.conversationId, reqId, message, sink, signal);
 

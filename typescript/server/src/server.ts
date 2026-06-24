@@ -25,7 +25,7 @@ import { ANONYMOUS_ACCESS } from './auth.js';
 import { Backplane, InMemoryBackplane } from './backplane.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
 import type { Frame } from './protocol.js';
-import type { ChatClientLike } from '@smooai/smooth-operator-core';
+import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
 import type { AuthVerifier } from './auth.js';
 import { NoAuthVerifier } from './auth.js';
 import { InMemorySessionStore, type SessionStore } from './sessionStore.js';
@@ -38,6 +38,12 @@ export interface ServerOptions {
     auth?: AuthVerifier;
     backplane?: Backplane;
     systemPrompt?: string;
+    /**
+     * Tools the agent may call during a turn (default none). Each is an engine
+     * {@link Tool}; the dispatcher forwards them to the turn runner, which passes
+     * them straight to the agent. Empty by default, so behaviour is unchanged.
+     */
+    tools?: Tool[];
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -93,6 +99,7 @@ export function buildServer(options: ServerOptions): {
             knowledge: options.knowledge,
             access,
             systemPrompt: options.systemPrompt,
+            tools: options.tools,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);
