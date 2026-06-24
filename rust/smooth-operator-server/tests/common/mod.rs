@@ -14,6 +14,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use smooth_operator_server::config::ServerConfig;
 use smooth_operator_server::server::{build_state, router};
+use smooth_operator_server::state::AppState;
 
 /// A connected client WS stream.
 pub type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -22,7 +23,14 @@ pub type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// return the bound `ws://…/ws` URL. The server runs in a background task for
 /// the lifetime of the test process.
 pub async fn boot(config: ServerConfig) -> String {
-    let state = build_state(config);
+    boot_state(build_state(config)).await
+}
+
+/// Boot the server from a **prebuilt** [`AppState`] (so a test can install a
+/// builder-configured collaborator — e.g. a `MockLlmClient` via
+/// [`AppState::with_chat_provider`](smooth_operator_server::state::AppState::with_chat_provider)
+/// for the scenario-parity corpus). Returns the bound `ws://…/ws` URL.
+pub async fn boot_state(state: AppState) -> String {
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await

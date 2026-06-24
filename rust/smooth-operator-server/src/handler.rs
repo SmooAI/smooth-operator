@@ -440,16 +440,29 @@ async fn handle_send_message(
         return;
     };
 
-    // No gateway key → can't run an LLM turn. Return a clean error (the server
-    // stays usable for protocol-only checks).
-    let Some(llm) = state.config.llm_config() else {
-        let _ = sink.send(protocol::error(
-            Some(request_id),
-            "LLM_UNAVAILABLE",
-            "SMOOAI_GATEWAY_KEY is not configured; this server cannot serve LLM turns. \
-             Set the gateway key to enable send_message.",
-        ));
-        return;
+    // A test-injected provider (the scenario-parity corpus's `MockLlmClient`)
+    // overrides the live gateway client entirely — the turn never touches the
+    // network — so it does NOT need a configured gateway key. Production leaves
+    // `chat_provider` `None`, so this clone is `None` and the key gate below is
+    // unchanged.
+    let chat_provider = state.chat_provider.clone();
+
+    // No gateway key → can't run a *live* LLM turn. Return a clean error (the
+    // server stays usable for protocol-only checks). When a mock provider is
+    // injected we fall back to a placeholder config — the mock replaces the
+    // client built from it, so its url/key/model are never used.
+    let llm = match state.config.llm_config() {
+        Some(llm) => llm,
+        None if chat_provider.is_some() => state.config.placeholder_llm_config(),
+        None => {
+            let _ = sink.send(protocol::error(
+                Some(request_id),
+                "LLM_UNAVAILABLE",
+                "SMOOAI_GATEWAY_KEY is not configured; this server cannot serve LLM turns. \
+                 Set the gateway key to enable send_message.",
+            ));
+            return;
+        }
     };
 
     // Ack: processing started.
@@ -472,7 +485,9 @@ async fn handle_send_message(
             // filtered to what this requester may read (org-public only when the
             // connection is anonymous).
             access: access.clone(),
-            llm_provider: None,
+            // Production: `None` (a live client is built from `llm`). Tests: the
+            // scenario corpus's `MockLlmClient`, which runs the turn offline.
+            llm_provider: chat_provider,
             // Opt-in rerank stage (feature gap G8): `None` unless the operator
             // enabled it via `SMOOTH_AGENT_RERANK` (gateway/lexical). Default-off
             // keeps retrieval behavior unchanged.

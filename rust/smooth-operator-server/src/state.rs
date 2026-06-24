@@ -22,6 +22,7 @@ use smooth_operator::domain::Session;
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
 
+use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
 
 use crate::config::ServerConfig;
@@ -56,6 +57,16 @@ pub struct AppState {
     /// Redis/NATS impl via [`with_backplane`](Self::with_backplane) to scale out
     /// and to let non-AI publishers push realtime events to connected clients.
     pub backplane: Arc<dyn Backplane>,
+    /// Test-only injected LLM surface. When `Some`, every `send_message` turn
+    /// runs the engine against this provider (a
+    /// [`MockLlmClient`](smooth_operator_core::llm_provider::MockLlmClient))
+    /// instead of building a live gateway client from `config` — exactly the
+    /// `ServerState(chat_client=mock)` seam the Python reference uses to drive the
+    /// scenario-parity corpus deterministically offline. **`None` in production**
+    /// (a live client is built from the gateway config), so the `/ws` path is
+    /// byte-for-byte unchanged for real deployments. Installed via
+    /// [`with_chat_provider`](Self::with_chat_provider).
+    pub chat_provider: Option<Arc<dyn LlmProvider>>,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Document-set registry, **org-scoped**: `org_id` → (set name → document
@@ -98,6 +109,7 @@ impl AppState {
             settings: Arc::new(InMemorySettingsStore::new()),
             widget_auth: Arc::new(PermissiveWidgetAuth),
             backplane: Arc::new(InMemoryBackplane::new()),
+            chat_provider: None,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
@@ -146,6 +158,17 @@ impl AppState {
     #[must_use]
     pub fn with_backplane(mut self, backplane: Arc<dyn Backplane>) -> Self {
         self.backplane = backplane;
+        self
+    }
+
+    /// Install a test-injected LLM provider (builder). Every `send_message` turn
+    /// then runs the engine against this provider instead of a live gateway
+    /// client — the [`MockLlmClient`](smooth_operator_core::llm_provider::MockLlmClient)
+    /// seam the scenario-parity corpus drives. Production never calls this, so the
+    /// live path is unchanged. See [`chat_provider`](Self::chat_provider).
+    #[must_use]
+    pub fn with_chat_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.chat_provider = Some(provider);
         self
     }
 
