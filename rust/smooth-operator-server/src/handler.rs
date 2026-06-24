@@ -553,6 +553,10 @@ async fn handle_send_message(
     // server stays usable for protocol-only checks). When a mock provider is
     // injected we fall back to a placeholder config — the mock replaces the
     // client built from it, so its url/key/model are never used.
+    // Keep a copy of the resolved key to thread into the turn's
+    // `ToolProviderContext` (a retrieval-style host tool calls the same gateway);
+    // `None` on the mock/placeholder path so a host tool can fall back.
+    let turn_gateway_key = resolved_key.clone();
     let llm = match resolved_key {
         Some(key) => state.config.llm_config_with_key(key),
         None if chat_provider.is_some() => state.config.placeholder_llm_config(),
@@ -643,6 +647,9 @@ async fn handle_send_message(
                 // SEAM 2 — resolved per-org persona (None ⇒ const prompt).
                 system_prompt,
                 org_id: Some(org_id),
+                // The per-org key resolved above, threaded so a host tool
+                // provider's retrieval tools call the same gateway this turn used.
+                gateway_key: turn_gateway_key,
             },
             &sink_owned,
         )

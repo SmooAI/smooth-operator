@@ -510,6 +510,10 @@ async fn send_message(
             tool_provider: None,
             system_prompt: None,
             org_id: Some(config.org_id.clone()),
+            // The lambda flavor installs no tool provider, but thread the
+            // configured gateway key through so a future host provider could
+            // scope per-org (mirrors `org_id`).
+            gateway_key: config.gateway_key.clone(),
         },
         &tx,
     )

@@ -56,15 +56,27 @@ impl Tool for StubHostTool {
     }
 }
 
-/// A provider that contributes [`StubHostTool`] and records the org it saw.
+/// The per-turn facts a provider observed, captured for assertions.
+#[derive(Default)]
+struct SeenCtx {
+    org_id: Option<String>,
+    conversation_id: Option<String>,
+    gateway_key: Option<String>,
+}
+
+/// A provider that contributes [`StubHostTool`] and records the per-turn context
+/// it saw (org + conversation + gateway key).
 struct StubProvider {
-    seen_org: Arc<std::sync::Mutex<Option<String>>>,
+    seen: Arc<std::sync::Mutex<SeenCtx>>,
 }
 
 #[async_trait]
 impl ToolProvider for StubProvider {
     async fn tools_for(&self, ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
-        *self.seen_org.lock().unwrap() = ctx.org_id.clone();
+        let mut seen = self.seen.lock().unwrap();
+        seen.org_id = ctx.org_id.clone();
+        seen.conversation_id = ctx.conversation_id.clone();
+        seen.gateway_key = ctx.gateway_key.clone();
         vec![Arc::new(StubHostTool) as Arc<dyn Tool>]
     }
 }
@@ -78,6 +90,17 @@ async fn run_turn(
     tool_provider: Option<Arc<dyn ToolProvider>>,
     system_prompt: Option<String>,
     org_id: Option<String>,
+) -> (TurnResult, MockLlmClient) {
+    run_turn_with_key(tool_provider, system_prompt, org_id, None).await
+}
+
+/// Like [`run_turn`] but also threads a resolved per-turn gateway key, so a test
+/// can assert the provider sees it.
+async fn run_turn_with_key(
+    tool_provider: Option<Arc<dyn ToolProvider>>,
+    system_prompt: Option<String>,
+    org_id: Option<String>,
+    gateway_key: Option<String>,
 ) -> (TurnResult, MockLlmClient) {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
 
@@ -107,6 +130,7 @@ async fn run_turn(
             tool_provider,
             system_prompt,
             org_id,
+            gateway_key,
         },
         &tx,
     )
@@ -162,10 +186,8 @@ async fn no_tool_provider_offers_only_builtins() {
 /// org_id so a host can return per-org tools.
 #[tokio::test]
 async fn injected_provider_tools_reach_the_model() {
-    let seen_org = Arc::new(std::sync::Mutex::new(None));
-    let provider = Arc::new(StubProvider {
-        seen_org: seen_org.clone(),
-    });
+    let seen = Arc::new(std::sync::Mutex::new(SeenCtx::default()));
+    let provider = Arc::new(StubProvider { seen: seen.clone() });
 
     let (_r, mock) = run_turn(Some(provider), None, Some("org-acme".into())).await;
 
@@ -180,9 +202,38 @@ async fn injected_provider_tools_reach_the_model() {
         "the injected host tool must be merged with the built-ins"
     );
     assert_eq!(
-        seen_org.lock().unwrap().as_deref(),
+        seen.lock().unwrap().org_id.as_deref(),
         Some("org-acme"),
         "the provider must receive the turn's org_id for per-org tools"
+    );
+}
+
+/// The provider must see the turn's `conversation_id` and resolved `gateway_key`
+/// so a host's conversation-persisting tools and retrieval tools work (instead of
+/// degrading to no-ops on an empty conversation id / missing key).
+#[tokio::test]
+async fn provider_sees_conversation_id_and_gateway_key() {
+    let seen = Arc::new(std::sync::Mutex::new(SeenCtx::default()));
+    let provider = Arc::new(StubProvider { seen: seen.clone() });
+
+    let (_r, _mock) = run_turn_with_key(
+        Some(provider),
+        None,
+        Some("org-acme".into()),
+        Some("sk-org-acme".into()),
+    )
+    .await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.conversation_id.as_deref(),
+        Some("conv-seam"),
+        "the provider must receive the turn's conversation_id"
+    );
+    assert_eq!(
+        seen.gateway_key.as_deref(),
+        Some("sk-org-acme"),
+        "the provider must receive the resolved per-org gateway key"
     );
 }
 

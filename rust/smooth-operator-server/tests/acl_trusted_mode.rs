@@ -135,6 +135,7 @@ async fn run_turn_as(
             tool_provider: None,
             system_prompt: None,
             org_id: None,
+            gateway_key: None,
         },
         &tx,
     )
