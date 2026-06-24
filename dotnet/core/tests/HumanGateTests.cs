@@ -28,7 +28,7 @@ public class HumanGateTests
     public async Task DeniedTool_DoesNotExecute_AndModelGetsDenial()
     {
         var (tool, fired) = Destructive("delete_account");
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("c1", "delete_account", new Dictionary<string, object?>())
             .PushText("Okay, I won't delete it.");
         var options = new AgentOptions
@@ -52,7 +52,7 @@ public class HumanGateTests
     public async Task ApprovedTool_Executes_AndGateSawTheCall()
     {
         var (tool, fired) = Destructive("delete_account");
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("c1", "delete_account", new Dictionary<string, object?> { ["id"] = 42 })
             .PushText("Done.");
         var seen = new List<HumanApprovalRequest>();
@@ -81,7 +81,7 @@ public class HumanGateTests
     {
         var (tool, fired) = Destructive("read_status"); // not flagged for approval
         var gateConsulted = 0;
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("c1", "read_status", new Dictionary<string, object?>())
             .PushText("all good");
         var options = new AgentOptions

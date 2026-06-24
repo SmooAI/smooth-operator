@@ -50,7 +50,7 @@ public class CastTests
     {
         var cast = new Cast().Register(new OperatorRole("researcher", RoleKind.Sidekick, "you research things"));
 
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("c1", SubagentDispatcher.ToolName, new Dictionary<string, object?> { ["role"] = "researcher", ["task"] = "research the return window" })
             .PushText("The return window is 17 days.")  // the sidekick's answer
             .PushText("It's 17 days.");                  // the lead's final answer
@@ -85,7 +85,7 @@ public class CastTests
         var cast = new Cast().Register(
             new OperatorRole("limited", RoleKind.Sidekick, "you tidy up") { Permissions = Clearance.Deny("delete") });
 
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("c1", SubagentDispatcher.ToolName, new Dictionary<string, object?> { ["role"] = "limited", ["task"] = "clean up" })
             .PushToolCall("c2", "delete", new Dictionary<string, object?>())  // sidekick tries the denied tool
             .PushText("I couldn't delete anything.")                          // after it comes back unknown

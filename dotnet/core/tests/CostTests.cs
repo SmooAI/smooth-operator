@@ -33,9 +33,9 @@ public class CostTests
     [Fact]
     public async Task Agent_TracksCost_WithPricing()
     {
-        var mock = new MockChatClient().PushText("hi"); // usage 10 in / 5 out
+        var mock = new MockLlmProvider().PushText("hi"); // usage 10 in / 5 out
         var options = new AgentOptions();
-        options.Pricing[MockChatClient.ModelId] = new ModelPricing(PromptPerMillionTokens: 1m, CompletionPerMillionTokens: 2m);
+        options.Pricing[MockLlmProvider.ModelId] = new ModelPricing(PromptPerMillionTokens: 1m, CompletionPerMillionTokens: 2m);
         var agent = new SmoothAgent(mock, options);
 
         var result = await agent.RunAsync("hello");
@@ -51,7 +51,7 @@ public class CostTests
     public async Task TokenBudget_HaltsTheRun()
     {
         // The model keeps wanting the tool; each call is 15 tokens. Budget is 20.
-        var mock = new MockChatClient();
+        var mock = new MockLlmProvider();
         for (var i = 0; i < 10; i++)
         {
             mock.PushToolCall($"c{i}", "noop", new Dictionary<string, object?>());
@@ -77,7 +77,7 @@ public class CostTests
     [Fact]
     public async Task CostBudget_HaltsOnUsd()
     {
-        var mock = new MockChatClient();
+        var mock = new MockLlmProvider();
         for (var i = 0; i < 10; i++)
         {
             mock.PushToolCall($"c{i}", "noop", new Dictionary<string, object?>());
@@ -89,7 +89,7 @@ public class CostTests
             // Each call: 10 in * $100/Mtok + 5 out * $100/Mtok = $0.0015. Budget $0.002 → halts after call 2.
             Budget = new CostBudget { MaxCostUsd = 0.002m },
         };
-        options.Pricing[MockChatClient.ModelId] = new ModelPricing(100m, 100m);
+        options.Pricing[MockLlmProvider.ModelId] = new ModelPricing(100m, 100m);
         options.Tools.Add(noop);
         var agent = new SmoothAgent(mock, options);
 

@@ -14,7 +14,7 @@ public class AgentLoopTests
     [Fact]
     public async Task TextResponse_EndsLoopAfterOneCall()
     {
-        var mock = new MockChatClient().PushText("the answer is 42");
+        var mock = new MockLlmProvider().PushText("the answer is 42");
         var agent = new SmoothAgent(mock, new AgentOptions { Instructions = "be helpful" });
 
         var result = await agent.RunAsync("what is the answer?");
@@ -43,7 +43,7 @@ public class AgentLoopTests
             "add",
             "Adds two integers");
 
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("call-1", "add", new Dictionary<string, object?> { ["a"] = 2, ["b"] = 3 })
             .PushText("The sum is 5.");
 
@@ -66,7 +66,7 @@ public class AgentLoopTests
     [Fact]
     public async Task UnknownTool_ReturnsErrorResult_WithoutThrowing()
     {
-        var mock = new MockChatClient()
+        var mock = new MockLlmProvider()
             .PushToolCall("call-1", "does_not_exist", new Dictionary<string, object?>())
             .PushText("sorry, I could not do that");
         var agent = new SmoothAgent(mock, new AgentOptions());
@@ -83,7 +83,7 @@ public class AgentLoopTests
     [Fact]
     public async Task MaxIterations_StopsRunawayToolLoop()
     {
-        var mock = new MockChatClient();
+        var mock = new MockLlmProvider();
         for (var i = 0; i < 10; i++)
         {
             mock.PushToolCall($"call-{i}", "noop", new Dictionary<string, object?>());
@@ -102,7 +102,7 @@ public class AgentLoopTests
     [Fact]
     public async Task RunStreaming_YieldsTextDeltas()
     {
-        var mock = new MockChatClient().PushText("hello world");
+        var mock = new MockLlmProvider().PushText("hello world");
         var agent = new SmoothAgent(mock, new AgentOptions());
 
         var streamed = new System.Text.StringBuilder();

@@ -26,12 +26,14 @@ public sealed class SmoothAgent
     private readonly IChatClient _chatClient;
     private readonly AgentOptions _options;
     private readonly Dictionary<string, AIFunction> _functions;
+    private readonly ToolSearch? _toolSearch;
 
     public SmoothAgent(IChatClient chatClient, AgentOptions options)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _functions = options.Tools.OfType<AIFunction>().ToDictionary(f => f.Name, StringComparer.Ordinal);
+        _toolSearch = options.DeferredTools.Count > 0 ? new ToolSearch(options.DeferredTools.OfType<AIFunction>()) : null;
     }
 
     /// <summary>Start a fresh conversation thread for multi-turn use. (MAF: <c>GetNewThread</c>.)</summary>
@@ -50,7 +52,6 @@ public sealed class SmoothAgent
     {
         var working = await SeedConversationAsync(message, thread, cancellationToken).ConfigureAwait(false);
         var newThisTurn = new List<ChatMessage> { working[^1] }; // the live user message
-        var chatOptions = BuildChatOptions();
         var usage = new UsageDetails();
         var cost = new CostTracker();
         BudgetExceeded? budgetHit = null;
@@ -61,6 +62,9 @@ public sealed class SmoothAgent
             iterations++;
             Compactor.Compact(working, _options.Compaction, _options.MaxContextTokens);
 
+            // Recompute the visible tool set each iteration: tool_search promotions during the
+            // previous iteration widen what the model can see/call now.
+            var chatOptions = BuildChatOptions();
             var response = await _chatClient.GetResponseAsync(working, chatOptions, cancellationToken).ConfigureAwait(false);
             Accumulate(usage, response.Usage);
             cost.Record(response.ModelId, response.Usage, LookupPricing(response.ModelId));
@@ -109,7 +113,6 @@ public sealed class SmoothAgent
     {
         var working = await SeedConversationAsync(message, thread, cancellationToken).ConfigureAwait(false);
         var newThisTurn = new List<ChatMessage> { working[^1] };
-        var chatOptions = BuildChatOptions();
         var iterations = 0;
 
         while (true)
@@ -117,6 +120,7 @@ public sealed class SmoothAgent
             iterations++;
             Compactor.Compact(working, _options.Compaction, _options.MaxContextTokens);
 
+            var chatOptions = BuildChatOptions();
             var updates = new List<ChatResponseUpdate>();
             await foreach (var update in _chatClient.GetStreamingResponseAsync(working, chatOptions, cancellationToken).ConfigureAwait(false))
             {
@@ -252,11 +256,38 @@ public sealed class SmoothAgent
         return builder.Length > 0 ? new ChatMessage(ChatRole.System, builder.ToString()) : null;
     }
 
-    private ChatOptions? BuildChatOptions() =>
-        _options.Tools.Count > 0 ? new ChatOptions { Tools = _options.Tools.ToList() } : null;
+    private ChatOptions? BuildChatOptions()
+    {
+        var tools = new List<AITool>(_options.Tools);
+        if (_toolSearch is not null)
+        {
+            // Advertise the tool_search meta-tool plus any deferred tools promoted so far. The
+            // unpromoted deferred tools stay hidden — their schemas never reach the model.
+            tools.Add(_toolSearch.MetaTool);
+            tools.AddRange(_toolSearch.PromotedTools());
+        }
+        return tools.Count > 0 ? new ChatOptions { Tools = tools } : null;
+    }
 
     private static List<FunctionCallContent> ExtractToolCalls(IEnumerable<ChatMessage> messages) =>
         messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToList();
+
+    /// <summary>
+    /// Resolve a tool call to its function: the <c>tool_search</c> meta-tool, a regular tool, or a
+    /// <i>promoted</i> deferred tool. Unpromoted deferred tools resolve to null (unknown tool).
+    /// </summary>
+    private AIFunction? ResolveTool(string name)
+    {
+        if (_toolSearch is not null && name == ToolSearch.ToolName)
+        {
+            return _toolSearch.MetaTool;
+        }
+        if (_functions.TryGetValue(name, out var function))
+        {
+            return function;
+        }
+        return _toolSearch?.ResolvePromoted(name);
+    }
 
     private async Task<ChatMessage> ExecuteToolsAsync(IReadOnlyList<FunctionCallContent> calls, CancellationToken cancellationToken)
     {
@@ -270,7 +301,8 @@ public sealed class SmoothAgent
 
     private async Task<FunctionResultContent> InvokeToolAsync(FunctionCallContent call, CancellationToken cancellationToken)
     {
-        if (!_functions.TryGetValue(call.Name, out var function))
+        var function = ResolveTool(call.Name);
+        if (function is null)
         {
             return new FunctionResultContent(call.CallId, $"Error: unknown tool '{call.Name}'");
         }

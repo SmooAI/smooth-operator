@@ -29,7 +29,7 @@ public class KnowledgeMemoryTests
         var kb = new InMemoryKnowledgeBase();
         await kb.IngestAsync(new KnowledgeDocument("returns", "The return window is 17 days.", "policy.md"));
 
-        var mock = new MockChatClient().PushText("It's 17 days.");
+        var mock = new MockLlmProvider().PushText("It's 17 days.");
         var options = new AgentOptions { Instructions = "be helpful", Knowledge = kb };
         var agent = new SmoothAgent(mock, options);
 
@@ -46,7 +46,7 @@ public class KnowledgeMemoryTests
         var kb = new InMemoryKnowledgeBase();
         await kb.IngestAsync(new KnowledgeDocument("hours", "Support hours are 9 to 5.", "policy.md"));
 
-        var mock = new MockChatClient().PushText("I don't have that.");
+        var mock = new MockLlmProvider().PushText("I don't have that.");
         var agent = new SmoothAgent(mock, new AgentOptions { Knowledge = kb });
 
         await agent.RunAsync("What is the meaning of life?");
@@ -76,7 +76,7 @@ public class KnowledgeMemoryTests
         var memory = new InMemoryAgentMemory();
         await memory.StoreAsync(new MemoryEntry("u1", "The user's name is Brent.", MemoryType.User));
 
-        var mock = new MockChatClient().PushText("Hi Brent!");
+        var mock = new MockLlmProvider().PushText("Hi Brent!");
         var agent = new SmoothAgent(mock, new AgentOptions { Memory = memory });
 
         await agent.RunAsync("What is my name?");
