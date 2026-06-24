@@ -19,11 +19,13 @@ type FrameDispatcher struct {
 	client  core.ChatClient
 	access  AccessContext
 	systemP string
+	tools   []core.Tool
 }
 
-// NewFrameDispatcher binds a dispatcher to a connection's stores + access context.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string) *FrameDispatcher {
-	return &FrameDispatcher{store: store, client: client, access: access, systemP: systemPrompt}
+// NewFrameDispatcher binds a dispatcher to a connection's stores + access context. The
+// tools (default none) are threaded into every turn the runner builds.
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, tools []core.Tool) *FrameDispatcher {
+	return &FrameDispatcher{store: store, client: client, access: access, systemP: systemPrompt, tools: tools}
 }
 
 // inboundFrame is the minimal envelope shared by every client→server action.
@@ -120,7 +122,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	sink(immediateResponse(requestID, 202, "Processing your request...", nil))
 
 	// 2. Stream the turn.
-	runner := NewTurnRunner(d.client, d.store, d.systemP)
+	runner := NewTurnRunner(d.client, d.store, d.systemP, d.tools)
 	result, err := runner.Run(ctx, session.ConversationID, requestID, frame.Message, sink)
 	if err != nil {
 		// A turn failed (no engine configured, or a model/DB error). Emit a clean

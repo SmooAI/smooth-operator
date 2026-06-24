@@ -32,8 +32,25 @@ import (
 type scenario struct {
 	Name          string           `json:"name"`
 	Description   string           `json:"description"`
+	Server        scenarioServer   `json:"server"`
 	MockLlmScript []mockScriptStep `json:"mockLlmScript"`
 	Steps         []scenarioStep   `json:"steps"`
+}
+
+// scenarioServer is the optional `server` directive: deployment-time config the runner
+// applies when starting the server. Currently just the tools the agent may call.
+type scenarioServer struct {
+	Tools []toolSpec `json:"tools"`
+}
+
+// toolSpec is one deterministic test tool a scenario registers via `server.tools`. The
+// tool ignores its arguments and returns the fixed Result, so a tool-call turn is fully
+// reproducible across every native server.
+type toolSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+	Result      string         `json:"result"`
 }
 
 type mockScriptStep struct {
@@ -109,6 +126,32 @@ func buildMock(t *testing.T, script []mockScriptStep) *core.MockLlmProvider {
 		}
 	}
 	return mock
+}
+
+// buildTools turns a scenario's `server.tools` directive into engine tools the agent
+// can call. Each tool ignores its arguments and returns the spec's fixed Result, so the
+// tool-call turn is fully deterministic across every native server.
+func buildTools(specs []toolSpec) []core.Tool {
+	if len(specs) == 0 {
+		return nil
+	}
+	tools := make([]core.Tool, 0, len(specs))
+	for _, spec := range specs {
+		params := spec.Parameters
+		if params == nil {
+			params = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		result := spec.Result
+		tools = append(tools, core.FuncTool{
+			ToolName: spec.Name,
+			Desc:     spec.Description,
+			Params:   params,
+			Fn: func(_ context.Context, _ map[string]any) (string, error) {
+				return result, nil
+			},
+		})
+	}
+	return tools
 }
 
 // subst replaces "{{name}}" placeholders in string fields from captured vars. A whole
@@ -207,8 +250,13 @@ func runScenario(t *testing.T, path string) {
 	}
 
 	mock := buildMock(t, sc.MockLlmScript)
+	tools := buildTools(sc.Server.Tools)
 
-	ls, err := SpawnLocal(WithLocalAddr("127.0.0.1:0"), WithLocalChatClient(mock))
+	ls, err := SpawnLocal(
+		WithLocalAddr("127.0.0.1:0"),
+		WithLocalChatClient(mock),
+		WithLocalServerOption(WithTools(tools)),
+	)
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

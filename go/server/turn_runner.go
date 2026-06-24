@@ -40,15 +40,17 @@ type TurnRunner struct {
 	client       core.ChatClient
 	store        SessionStore
 	systemPrompt string
+	tools        []core.Tool
 }
 
 // NewTurnRunner builds a runner over the engine chat client + session store. An empty
-// systemPrompt falls back to the default support-agent prompt.
-func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string) *TurnRunner {
+// systemPrompt falls back to the default support-agent prompt. tools (default none) are
+// passed straight to the engine AgentOptions so the agent can call them mid-turn.
+func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, tools []core.Tool) *TurnRunner {
 	if systemPrompt == "" {
 		systemPrompt = defaultSystemPrompt
 	}
-	return &TurnRunner{client: client, store: store, systemPrompt: systemPrompt}
+	return &TurnRunner{client: client, store: store, systemPrompt: systemPrompt, tools: tools}
 }
 
 // Run streams one turn for conversationID keyed on requestID, emitting events through
@@ -64,7 +66,7 @@ func (r *TurnRunner) Run(ctx context.Context, conversationID, requestID, userMes
 
 	// 1. Build the agent + replay prior history into a thread (before persisting this
 	//    turn's inbound message, so the thread doesn't double-count it).
-	agent := core.NewSmoothAgent(r.client, core.AgentOptions{Instructions: r.systemPrompt})
+	agent := core.NewSmoothAgent(r.client, core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools})
 	thread := core.NewThread()
 	prior, err := r.store.ListMessages(ctx, conversationID, maxPriorMessages)
 	if err != nil {
