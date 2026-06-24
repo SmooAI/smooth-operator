@@ -32,6 +32,16 @@ public sealed class AgentOptions
     public IList<AITool> Tools { get; } = new List<AITool>();
 
     /// <summary>
+    /// When true and an assistant turn returns ≥2 tool calls, dispatch them concurrently
+    /// (<see cref="Task.WhenAll(IEnumerable{Task})"/>) instead of sequentially. The tool-result
+    /// contents are still assembled in the original tool-call order, so the transcript stays
+    /// deterministic regardless of completion order. Default false preserves the sequential
+    /// behaviour. Per-tool semantics (clearance, human-gate approval, tool_search promotion,
+    /// argument binding, error handling) are unchanged — only the dispatch loop runs in parallel.
+    /// </summary>
+    public bool ParallelToolCalls { get; set; }
+
+    /// <summary>
     /// Tools whose schemas are hidden from the model until promoted. When non-empty, the agent
     /// advertises a single <c>tool_search(query)</c> meta-tool; the model calls it to discover and
     /// promote the deferred tools it needs, keeping the visible tool set (and its token cost) small.

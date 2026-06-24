@@ -52,6 +52,16 @@ export interface AgentOptions {
     memoryTopK?: number;
     tools?: Tool[];
     /**
+     * When `true` and an assistant turn returns ≥2 tool calls, dispatch them
+     * concurrently (`Promise.all`) instead of sequentially. The tool-result
+     * messages are still appended in the original `tool_calls` order, so the
+     * transcript stays deterministic regardless of completion order. Default
+     * `false` preserves the sequential behaviour. Per-tool semantics (clearance,
+     * human-gate approval, tool_search promotion, JSON parsing, error handling)
+     * are unchanged — only the dispatch loop runs in parallel.
+     */
+    parallelToolCalls?: boolean;
+    /**
      * Deferred tools — registered but with their schemas HIDDEN from the model.
      * When any are present, a built-in `tool_search` meta-tool is advertised in
      * their place; the model calls it to fuzzy-match and promote the ones it needs,
@@ -273,10 +283,23 @@ export class SmoothAgent {
                     return { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false };
                 }
     
-                for (const tc of choice.tool_calls) {
-                    toolCalls++;
-                    const result = await this.dispatchTool(tc.function.name, tc.function.arguments, search);
-                    const toolMsg: Record<string, unknown> = { role: 'tool', tool_call_id: tc.id, content: result };
+                toolCalls += choice.tool_calls.length;
+                // Dispatch the tool calls — concurrently when enabled and there's more than
+                // one — but always append the results in the original tool_calls order so the
+                // transcript stays deterministic. dispatchTool turns failures/denials into a
+                // result string, so Promise.all never rejects and cancels its siblings.
+                const calls = choice.tool_calls;
+                let results: string[];
+                if (this.options.parallelToolCalls && calls.length > 1) {
+                    results = await Promise.all(calls.map((tc) => this.dispatchTool(tc.function.name, tc.function.arguments, search)));
+                } else {
+                    results = [];
+                    for (const tc of calls) {
+                        results.push(await this.dispatchTool(tc.function.name, tc.function.arguments, search));
+                    }
+                }
+                for (let i = 0; i < calls.length; i++) {
+                    const toolMsg: Record<string, unknown> = { role: 'tool', tool_call_id: calls[i].id, content: results[i] };
                     messages.push(toolMsg);
                     turnMessages.push(toolMsg);
                 }

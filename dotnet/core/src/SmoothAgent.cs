@@ -291,10 +291,24 @@ public sealed class SmoothAgent
 
     private async Task<ChatMessage> ExecuteToolsAsync(IReadOnlyList<FunctionCallContent> calls, CancellationToken cancellationToken)
     {
-        var results = new List<AIContent>(calls.Count);
-        foreach (var call in calls)
+        // Dispatch the tool calls — concurrently when enabled and there's more than one — but
+        // always assemble the results in the original call order so the transcript stays
+        // deterministic. InvokeToolAsync turns failures/denials into a result content, so a
+        // single tool's failure can't cancel its siblings under Task.WhenAll.
+        List<AIContent> results;
+        if (_options.ParallelToolCalls && calls.Count > 1)
         {
-            results.Add(await InvokeToolAsync(call, cancellationToken).ConfigureAwait(false));
+            var tasks = calls.Select(call => InvokeToolAsync(call, cancellationToken)).ToList();
+            var completed = await Task.WhenAll(tasks).ConfigureAwait(false);
+            results = completed.Cast<AIContent>().ToList();
+        }
+        else
+        {
+            results = new List<AIContent>(calls.Count);
+            foreach (var call in calls)
+            {
+                results.Add(await InvokeToolAsync(call, cancellationToken).ConfigureAwait(false));
+            }
         }
         return new ChatMessage(ChatRole.Tool, results);
     }
