@@ -134,6 +134,8 @@ describe('protocol conformance', () => {
         expect(protocol.pong('p1').type).toBe('pong');
         const err = protocol.error('e1', 'VALIDATION_ERROR', 'bad');
         expect(err.type).toBe('error');
+        // Descriptor is duplicated at the envelope level and under `data.error`.
+        expect((err.error as Record<string, unknown>).code).toBe('VALIDATION_ERROR');
         expect(((err.data as Record<string, unknown>).error as Record<string, unknown>).code).toBe('VALIDATION_ERROR');
     });
 });
