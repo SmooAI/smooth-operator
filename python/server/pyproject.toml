@@ -1,0 +1,47 @@
+[project]
+name = "smooai-smooth-operator-server"
+version = "0.1.0"
+description = "Native async WebSocket server for the smooth-operator protocol — parity with the Rust and C# reference servers, consuming the in-process smooai-smooth-operator-core engine."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    # The engine the server runs in-process per turn. `SmoothAgent.run_stream(...)`
+    # is mapped onto the protocol's stream_token / stream_chunk / eventual_response.
+    "smooai-smooth-operator-core>=1.3",
+    # asyncio WebSocket transport (server side).
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+# A live (non-mock) turn needs an OpenAI-compatible async client against the
+# SmooAI gateway. Optional: the server is fully testable on MockLlmProvider with
+# no gateway, and protocol-only paths (create/get/ping) need no LLM at all.
+gateway = ["openai>=1.40"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    # The turn round-trip test drives the engine on MockLlmProvider, which ships
+    # in smooai-smooth-operator-core — no gateway needed.
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smooth_operator_server"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["I"]
