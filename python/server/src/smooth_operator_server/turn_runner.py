@@ -65,12 +65,14 @@ class TurnRunner:
         knowledge: Knowledge | None = None,
         system_prompt: str | None = None,
         model: str | None = None,
+        tools: list[Any] | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
         self._knowledge = knowledge
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self._model = model
+        self._tools = tools or []
 
     async def run(
         self,
@@ -86,6 +88,8 @@ class TurnRunner:
             "instructions": self._system_prompt,
             "knowledge": self._knowledge,
         }
+        if self._tools:
+            options_kwargs["tools"] = self._tools
         if self._model is not None:
             options_kwargs["model"] = self._model
         agent = SmoothAgent(self._chat_client, AgentOptions(**options_kwargs))

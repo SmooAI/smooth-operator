@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import websockets
-from smooth_operator_core import MockLlmProvider
+from smooth_operator_core import FunctionTool, MockLlmProvider
 
 from smooth_operator_server import ServerState, serve
 from smooth_operator_server.session_store import InMemorySessionStore
@@ -46,6 +46,28 @@ def _build_mock(script: list[dict]) -> MockLlmProvider:
     return mock
 
 
+def _build_tools(specs: list[dict]) -> list[FunctionTool]:
+    """Build deterministic test tools from a scenario's ``server.tools`` directive.
+    Each tool ignores its arguments and returns the spec's fixed ``result`` string,
+    so a tool-call turn is fully deterministic across every server."""
+    tools: list[FunctionTool] = []
+    for spec in specs:
+        result = spec["result"]
+
+        async def _fn(_args: dict, _result: str = result) -> str:
+            return _result
+
+        tools.append(
+            FunctionTool(
+                name=spec["name"],
+                description=spec.get("description", ""),
+                parameters=spec.get("parameters", {"type": "object", "properties": {}}),
+                func=_fn,
+            )
+        )
+    return tools
+
+
 def _subst(value, vars_: dict):
     """Replace ``{{name}}`` placeholders in string fields from captured vars."""
     if isinstance(value, str) and value.startswith("{{") and value.endswith("}}"):
@@ -60,7 +82,8 @@ def _subst(value, vars_: dict):
 async def test_scenario_parity(path: Path) -> None:
     scenario = json.loads(path.read_text())
     mock = _build_mock(scenario.get("mockLlmScript", []))
-    server, _ = await _start(chat_client=mock)
+    tools = _build_tools(scenario.get("server", {}).get("tools", []))
+    server, _ = await _start(chat_client=mock, tools=tools)
     vars_: dict = {}
     try:
         async with websockets.connect(server.ws_url()) as ws:
@@ -71,8 +94,8 @@ async def test_scenario_parity(path: Path) -> None:
         await server.shutdown()
 
 
-async def _start(chat_client=None):
-    state = ServerState(store=InMemorySessionStore(), chat_client=chat_client)
+async def _start(chat_client=None, tools=None):
+    state = ServerState(store=InMemorySessionStore(), chat_client=chat_client, tools=tools or [])
     server = await serve(state, "127.0.0.1", 0)
     return server, state
 
