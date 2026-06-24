@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 import websockets
-
 from smooth_operator_core import MockLlmProvider
+
 from smooth_operator_server import ServerState, serve
 from smooth_operator_server.session_store import InMemorySessionStore
 
