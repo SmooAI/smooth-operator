@@ -53,6 +53,9 @@ class ServerState:
     backplane: Backplane = field(default_factory=InMemoryBackplane)
     system_prompt: str | None = None
     model: str | None = None
+    #: Tools the agent may call during a turn (default none). Each is an engine
+    #: ``FunctionTool``/``Tool``; the turn runner passes them straight to the agent.
+    tools: list[Any] = field(default_factory=list)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -103,6 +106,7 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         access=access,
         system_prompt=state.system_prompt,
         model=state.model,
+        tools=state.tools,
     )
 
     cancel_wait = asyncio.ensure_future(state.cancel.wait())

@@ -33,6 +33,7 @@ class FrameDispatcher:
         access: AccessContext | None = None,
         system_prompt: str | None = None,
         model: str | None = None,
+        tools: list[Any] | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -40,6 +41,7 @@ class FrameDispatcher:
         self._access = access if access is not None else AccessContext.ANONYMOUS  # type: ignore[attr-defined]
         self._system_prompt = system_prompt
         self._model = model
+        self._tools = tools or []
 
     async def dispatch(self, raw_frame: str, sink: Sink) -> None:
         try:
@@ -152,6 +154,7 @@ class FrameDispatcher:
             knowledge=self._knowledge,
             system_prompt=self._system_prompt,
             model=self._model,
+            tools=self._tools,
         )
         result = await runner.run(session.conversation_id, request_id, message, sink)
 
