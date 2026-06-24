@@ -102,10 +102,17 @@ func eventualResponse(requestID string, status int, messageID string, response m
 }
 
 // errorEvent reports a handler/validation failure without dropping the connection.
+//
+// The {code, message} descriptor is duplicated at the envelope top level (`error`)
+// AND nested under `data.error`, per spec/events/error.schema.json — the top-level
+// copy is what clients and the conformance corpus pattern-match on; `data.error` is
+// kept for wire backward-compatibility. Mirrors the Python/Rust/C#/TS servers.
 func errorEvent(requestID, code, message string) map[string]any {
+	descriptor := map[string]any{"code": code, "message": message}
 	ev := map[string]any{
 		"type":      "error",
-		"data":      map[string]any{"error": map[string]any{"code": code, "message": message}},
+		"error":     descriptor,
+		"data":      map[string]any{"error": descriptor},
 		"timestamp": nowMs(),
 	}
 	if requestID != "" {

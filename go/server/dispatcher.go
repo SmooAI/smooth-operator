@@ -89,7 +89,7 @@ func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFra
 		return
 	}
 	if session == nil {
-		sink(errorEvent(frame.RequestID, "NOT_FOUND", "Session not found"))
+		sink(errorEvent(frame.RequestID, "SESSION_NOT_FOUND", "Session not found"))
 		return
 	}
 	data := map[string]any{
@@ -112,7 +112,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		return
 	}
 	if session == nil {
-		sink(errorEvent(requestID, "NOT_FOUND", "Session not found"))
+		sink(errorEvent(requestID, "SESSION_NOT_FOUND", "Session not found"))
 		return
 	}
 

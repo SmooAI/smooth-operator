@@ -151,11 +151,11 @@ func TestUnknownSessionErrors(t *testing.T) {
 	turn := client.SendMessage(protocol.SendMessageParams{SessionID: "does-not-exist", Message: "hi"})
 	_, err = turn.Wait(ctx)
 	if err == nil {
-		t.Fatal("expected NOT_FOUND error, got nil")
+		t.Fatal("expected SESSION_NOT_FOUND error, got nil")
 	}
 	var pe *protocol.ProtocolError
-	if !asProtocolError(err, &pe) || pe.Code != "NOT_FOUND" {
-		t.Fatalf("expected NOT_FOUND protocol error, got %v", err)
+	if !asProtocolError(err, &pe) || pe.Code != "SESSION_NOT_FOUND" {
+		t.Fatalf("expected SESSION_NOT_FOUND protocol error, got %v", err)
 	}
 }
 

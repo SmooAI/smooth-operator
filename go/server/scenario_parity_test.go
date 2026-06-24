@@ -190,32 +190,9 @@ func TestScenarioParity(t *testing.T) {
 		path := path
 		name := strings.TrimSuffix(filepath.Base(path), ".json")
 		t.Run(name, func(t *testing.T) {
-			if reason, skip := knownGoDivergence[name]; skip {
-				t.Skip(reason)
-			}
 			runScenario(t, path)
 		})
 	}
-}
-
-// knownGoDivergence lists conformance scenarios the Go server does NOT yet pass
-// because the Go server's protocol output diverges from the canonical (Python
-// reference) shape. These are real Go-server protocol bugs, not runner bugs — the
-// runner faithfully ports the reference state machine and the divergence reproduces
-// against the live wire frame. They are skipped (rather than left red) so the parity
-// runner can land green and CI-safe; each entry must be deleted the moment the Go
-// server is fixed to match the corpus, restoring true parity.
-//
-//   - unknown-session-error: on a send_message to an unknown session the Go server
-//     emits {"data":{"error":{"code":"NOT_FOUND", …}}, "requestId":…, "type":"error"}.
-//     The corpus (and the Python reference, the Rust server/lambda, and the
-//     spec/events/error.schema.json examples) require the error descriptor ALSO at the
-//     event top level — event.error.{code,message} — and the code SESSION_NOT_FOUND,
-//     not NOT_FOUND. Two divergences: (1) missing top-level `error` descriptor;
-//     (2) NOT_FOUND vs canonical SESSION_NOT_FOUND. dispatcher.go handleSendMessage +
-//     protocol.go errorEvent. (The C# server shares divergence (2): NOT_FOUND.)
-var knownGoDivergence = map[string]string{
-	"unknown-session-error": "Go-server protocol divergence: error event lacks the top-level `error` descriptor and uses code NOT_FOUND instead of canonical SESSION_NOT_FOUND (see knownGoDivergence doc). Real server bug, reported — delete this skip when the Go server is fixed.",
 }
 
 func runScenario(t *testing.T, path string) {
