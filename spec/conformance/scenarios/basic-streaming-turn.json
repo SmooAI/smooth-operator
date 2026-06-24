@@ -1,0 +1,51 @@
+{
+    "name": "basic-streaming-turn",
+    "description": "Create a session, send one streamed message, and receive the engine's reply as stream_token deltas followed by a terminal eventual_response. The single most important parity case: every server must produce this identical protocol flow when its engine is driven by the same deterministic mock script.",
+    "mockLlmScript": [
+        { "kind": "text", "text": "Hello from the engine!" }
+    ],
+    "steps": [
+        {
+            "send": {
+                "action": "create_conversation_session",
+                "requestId": "r-create",
+                "agentId": "11111111-1111-1111-1111-111111111111",
+                "userName": "Alice",
+                "userEmail": "alice@example.com"
+            },
+            "expect": [
+                {
+                    "type": "immediate_response",
+                    "status": 200,
+                    "capture": { "sessionId": "data.sessionId" }
+                }
+            ]
+        },
+        {
+            "send": {
+                "action": "send_message",
+                "requestId": "r-msg",
+                "sessionId": "{{sessionId}}",
+                "message": "hi there",
+                "stream": true
+            },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "stream_token",
+                    "repeat": true,
+                    "accumulate": "token",
+                    "assertAccumulated": "Hello from the engine!"
+                },
+                {
+                    "type": "eventual_response",
+                    "status": 200,
+                    "assert": {
+                        "data.data.response.responseParts": ["Hello from the engine!"],
+                        "data.data.needsEscalation": false
+                    }
+                }
+            ]
+        }
+    ]
+}

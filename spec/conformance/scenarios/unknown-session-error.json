@@ -1,0 +1,25 @@
+{
+    "name": "unknown-session-error",
+    "description": "A send_message addressed to a session that was never created must return a clean error response (not a crash, not a silent drop). Every server must reject it identically. No mock script is needed — the turn never reaches the engine.",
+    "mockLlmScript": [],
+    "steps": [
+        {
+            "send": {
+                "action": "send_message",
+                "requestId": "r-orphan",
+                "sessionId": "00000000-0000-0000-0000-000000000000",
+                "message": "is anyone there?",
+                "stream": true
+            },
+            "expect": [
+                {
+                    "type": "error",
+                    "assert": {
+                        "error.code": "SESSION_NOT_FOUND",
+                        "requestId": "r-orphan"
+                    }
+                }
+            ]
+        }
+    ]
+}
