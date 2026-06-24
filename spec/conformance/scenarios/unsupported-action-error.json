@@ -1,0 +1,22 @@
+{
+    "name": "unsupported-action-error",
+    "description": "An unrecognized action must return a clean error event with code UNSUPPORTED_ACTION and the request's requestId echoed — not a crash, not a silent drop, not a closed connection. Every server must reject it identically. No mock script is needed; the frame never reaches the engine.",
+    "mockLlmScript": [],
+    "steps": [
+        {
+            "send": {
+                "action": "frobnicate_widget",
+                "requestId": "r-bad"
+            },
+            "expect": [
+                {
+                    "type": "error",
+                    "assert": {
+                        "error.code": "UNSUPPORTED_ACTION",
+                        "requestId": "r-bad"
+                    }
+                }
+            ]
+        }
+    ]
+}
