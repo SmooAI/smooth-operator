@@ -1,0 +1,16 @@
+{
+    "name": "missing-action-error",
+    "description": "A frame with no `action` field is a client error: the server must return error/VALIDATION_ERROR and echo the request's requestId (so the client can correlate the failure) — not drop it, not close the connection. No mock script; the frame never reaches the engine.",
+    "mockLlmScript": [],
+    "steps": [
+        {
+            "send": { "requestId": "r-noaction", "message": "hi but no action" },
+            "expect": [
+                {
+                    "type": "error",
+                    "assert": { "error.code": "VALIDATION_ERROR", "requestId": "r-noaction" }
+                }
+            ]
+        }
+    ]
+}
