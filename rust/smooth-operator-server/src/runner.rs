@@ -181,6 +181,14 @@ pub struct TurnRequest<'a> {
     /// so a [`ToolProvider`] can return per-org tools. `None` when no org is
     /// resolved (e.g. an anonymous reference-server connection).
     pub org_id: Option<String>,
+    /// The resolved per-org LLM-gateway key for this turn, threaded into the
+    /// [`ToolProviderContext`](smooth_operator::tool_provider::ToolProviderContext)
+    /// so a retrieval-style host tool (e.g. agent-brain's `knowledge_search`)
+    /// can call the same gateway this turn was billed/scoped to. `None` when no
+    /// key resolved (e.g. a mock-driven offline turn). The runner does not use
+    /// it to talk to the gateway itself — that comes from [`llm`](Self::llm); it
+    /// only carries it through to the provider context.
+    pub gateway_key: Option<String>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -219,6 +227,7 @@ pub async fn run_streaming_turn(
         tool_provider,
         system_prompt,
         org_id,
+        gateway_key,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -286,7 +295,14 @@ pub async fn run_streaming_turn(
     // name simply adds. With no provider this block is a no-op, leaving the
     // registry as exactly today's built-ins.
     if let Some(provider) = tool_provider {
-        let ctx = ToolProviderContext::new(org_id, access.clone());
+        // Thread the per-turn handles the runner already has — the conversation
+        // this turn runs in and the resolved per-org gateway key — so a host's
+        // conversation-persisting / retrieval tools aren't degraded to no-ops.
+        let mut ctx =
+            ToolProviderContext::new(org_id, access.clone()).with_conversation_id(conversation_id);
+        if let Some(key) = gateway_key {
+            ctx = ctx.with_gateway_key(key);
+        }
         for tool in provider.tools_for(&ctx).await {
             tools.register_arc(tool);
         }
