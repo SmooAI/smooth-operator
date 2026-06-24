@@ -148,7 +148,11 @@ describe('turn round-trip over a real WebSocket', () => {
         client.sendAction({ action: 'send_message', requestId: 'sm', sessionId: 'does-not-exist', message: 'hi' });
         const error = await client.receive();
         expect(error.type).toBe('error');
-        expect(((error.data as Record<string, unknown>).error as Record<string, unknown>).code).toBe('NOT_FOUND');
+        // Parity with the Python/Rust reference + the conformance corpus: the
+        // descriptor lives both at the envelope level (`error`) and nested under
+        // `data.error`, with code `SESSION_NOT_FOUND`.
+        expect((error.error as Record<string, unknown>).code).toBe('SESSION_NOT_FOUND');
+        expect(((error.data as Record<string, unknown>).error as Record<string, unknown>).code).toBe('SESSION_NOT_FOUND');
 
         client.sendAction({ action: 'ping', requestId: 'after' });
         expect((await client.receive()).type).toBe('pong');

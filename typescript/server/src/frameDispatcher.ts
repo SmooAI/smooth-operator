@@ -123,9 +123,10 @@ export class FrameDispatcher {
     }
 
     private async handleGetSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
-        const session = await this.store.getSession(typeof frame.sessionId === 'string' ? frame.sessionId : '');
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
+        const session = await this.store.getSession(sessionId);
         if (!session) {
-            sink(protocol.error(requestId, 'NOT_FOUND', 'Session not found'));
+            sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
         sink(
@@ -140,9 +141,10 @@ export class FrameDispatcher {
 
     private async handleSendMessage(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink, signal?: AbortSignal): Promise<void> {
         const reqId = requestId ?? randomUUID();
-        const session = await this.store.getSession(typeof frame.sessionId === 'string' ? frame.sessionId : '');
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
+        const session = await this.store.getSession(sessionId);
         if (!session) {
-            sink(protocol.error(reqId, 'NOT_FOUND', 'Session not found'));
+            sink(protocol.error(reqId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
 

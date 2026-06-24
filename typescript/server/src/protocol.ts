@@ -94,11 +94,23 @@ export function eventualResponse(
     };
 }
 
-/** A protocol-level error event. The connection survives; this just signals it. */
+/**
+ * A protocol-level error event. The connection survives; this just signals it.
+ *
+ * The `{ code, message }` descriptor is duplicated at the envelope level (`error`)
+ * AND nested under `data.error` — matching the Python/Rust reference servers and the
+ * `error.schema.json` shape. The envelope-level `error` is what clients (and the
+ * conformance corpus) pattern-match on; `data.error` is kept for wire
+ * backward-compatibility.
+ */
 export function error(requestId: string | undefined, code: string, message: string): Frame {
+    const descriptor = { code, message };
+    const data: Record<string, unknown> = { error: descriptor };
+    if (requestId !== undefined) data.requestId = requestId;
     const ev: Frame = {
         type: 'error',
-        data: { error: { code, message } },
+        error: descriptor,
+        data,
         timestamp: nowMs(),
     };
     if (requestId !== undefined) ev.requestId = requestId;
