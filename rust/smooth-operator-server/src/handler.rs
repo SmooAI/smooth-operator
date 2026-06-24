@@ -598,6 +598,17 @@ async fn handle_send_message(
         }
     });
 
+    // The reference server is single-org; a multi-tenant host derives this from
+    // auth. Used to (a) resolve the org's persona override (SEAM 2) and (b)
+    // scope the host's tool provider (SEAM 1).
+    let org_id = crate::server::SEED_ORG_ID.to_string();
+    // SEAM 2 — resolve the per-org persona. With the default in-memory settings
+    // store the override is `None`, so the runner stays on its const prompt and
+    // behavior is unchanged.
+    let system_prompt = state.settings.get(&org_id).persona;
+    // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
+    let tool_provider = state.tool_provider.clone();
+
     let state_for_turn = state.clone();
     let access_owned = access.clone();
     let sink_owned = sink.clone();
@@ -627,6 +638,11 @@ async fn handle_send_message(
                     &crate::reranker::RerankerConfig::from_server_config(&state_for_turn.config),
                 ),
                 confirmation,
+                // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
+                tool_provider,
+                // SEAM 2 — resolved per-org persona (None ⇒ const prompt).
+                system_prompt,
+                org_id: Some(org_id),
             },
             &sink_owned,
         )

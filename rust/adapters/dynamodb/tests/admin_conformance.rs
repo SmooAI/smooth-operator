@@ -179,6 +179,7 @@ async fn admin_stores_round_trip_through_dynamodb() -> anyhow::Result<()> {
             org_id: "org-a".into(),
             model: "claude-x".into(),
             system_prompt: "be terse".into(),
+            persona: None,
             default_tools: vec!["knowledge_search".into(), "fetch_url".into()],
             updated_at: Utc::now(),
         });
@@ -195,6 +196,7 @@ async fn admin_stores_round_trip_through_dynamodb() -> anyhow::Result<()> {
             org_id: "org-a".into(),
             model: "claude-y".into(),
             system_prompt: "be verbose".into(),
+            persona: None,
             default_tools: vec![],
             updated_at: Utc::now(),
         });

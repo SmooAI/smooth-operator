@@ -795,6 +795,10 @@ impl<C: Connector> Connector for NamedConnector<C> {
 struct SettingsWrite {
     model: String,
     system_prompt: String,
+    /// Optional per-org agent persona override (see [`AgentSettings::persona`]).
+    /// Omitted ⇒ `None` ⇒ the runner stays on its built-in const prompt.
+    #[serde(default)]
+    persona: Option<String>,
     #[serde(default)]
     default_tools: Vec<String>,
 }
@@ -806,6 +810,7 @@ fn settings_json(s: &AgentSettings) -> Value {
             "orgId": s.org_id,
             "model": s.model,
             "systemPrompt": s.system_prompt,
+            "persona": s.persona,
             "defaultTools": s.default_tools,
             "updatedAt": s.updated_at,
         }
@@ -831,6 +836,7 @@ async fn put_settings(
         org_id: principal.org_id.clone(),
         model: body.model,
         system_prompt: body.system_prompt,
+        persona: body.persona,
         default_tools: body.default_tools,
         updated_at: chrono::Utc::now(),
     };

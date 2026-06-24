@@ -240,6 +240,11 @@ impl PgSettingsStore {
                     org_id: row.get("org_id"),
                     model: row.get("model"),
                     system_prompt: row.get("system_prompt"),
+                    // The `agent_settings` table predates the per-org persona
+                    // override; until a column is added, persisted rows read back
+                    // with no override (runner stays on its const prompt). The
+                    // in-memory store + admin API already carry `persona`.
+                    persona: None,
                     default_tools,
                     updated_at: row.get("updated_at"),
                 }))

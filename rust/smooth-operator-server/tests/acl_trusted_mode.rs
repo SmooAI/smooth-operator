@@ -132,6 +132,9 @@ async fn run_turn_as(
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,
             confirmation: None,
+            tool_provider: None,
+            system_prompt: None,
+            org_id: None,
         },
         &tx,
     )
