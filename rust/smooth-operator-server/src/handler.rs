@@ -521,19 +521,43 @@ async fn handle_send_message(
     // unchanged.
     let chat_provider = state.chat_provider.clone();
 
-    // No gateway key → can't run a *live* LLM turn. Return a clean error (the
+    // Resolve the gateway key for this turn's org. The conversation carries the
+    // org; the resolver maps it to a per-org key (e.g. a LiteLLM virtual key per
+    // tenant) so a multi-tenant flavor bills/scopes each org separately. The
+    // default `EnvGatewayKeyResolver` returns the single env key for every org,
+    // so the local/default flavor is unchanged. On `None` (no per-org key) we
+    // fall back to the env key; only when neither supplies a key do we error.
+    let org_id = match state
+        .storage
+        .get_conversation(&session.conversation_id)
+        .await
+    {
+        Ok(Some(conversation)) => conversation.organization_id,
+        // No conversation row (shouldn't happen for a live session) → resolve as
+        // if anonymous; the env fallback still applies.
+        Ok(None) | Err(_) => String::new(),
+    };
+    let resolved_key = smooth_operator::gateway_key::resolve_gateway_key(
+        &state.gateway_key_resolver,
+        &org_id,
+        state.config.gateway_key.as_deref(),
+    )
+    .await;
+
+    // No resolvable key → can't run a *live* LLM turn. Return a clean error (the
     // server stays usable for protocol-only checks). When a mock provider is
     // injected we fall back to a placeholder config — the mock replaces the
     // client built from it, so its url/key/model are never used.
-    let llm = match state.config.llm_config() {
-        Some(llm) => llm,
+    let llm = match resolved_key {
+        Some(key) => state.config.llm_config_with_key(key),
         None if chat_provider.is_some() => state.config.placeholder_llm_config(),
         None => {
             let _ = sink.send(protocol::error(
                 Some(request_id),
                 "LLM_UNAVAILABLE",
-                "SMOOAI_GATEWAY_KEY is not configured; this server cannot serve LLM turns. \
-                 Set the gateway key to enable send_message.",
+                "No LLM gateway key is available for this turn (SMOOAI_GATEWAY_KEY is unset and no \
+                 per-org key resolved); this server cannot serve LLM turns. Configure the gateway \
+                 key to enable send_message.",
             ));
             return;
         }

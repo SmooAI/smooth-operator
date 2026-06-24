@@ -205,14 +205,33 @@ impl ServerConfig {
         self.gateway_key.is_some()
     }
 
-    /// Build the smooth-operator [`LlmConfig`] for live turns.
+    /// Build the smooth-operator [`LlmConfig`] for live turns using the server's
+    /// configured (env) gateway key.
     ///
     /// Returns `None` when no gateway key is configured (callers should emit a
     /// clean protocol `error` rather than attempting a turn).
+    ///
+    /// In a multi-tenant flavor the per-turn key comes from a
+    /// [`GatewayKeyResolver`](smooth_operator::gateway_key::GatewayKeyResolver)
+    /// instead; use [`llm_config_with_key`](Self::llm_config_with_key) once the
+    /// per-org key is resolved.
     #[must_use]
     pub fn llm_config(&self) -> Option<LlmConfig> {
         let key = self.gateway_key.clone()?;
-        Some(LlmConfig {
+        Some(self.llm_config_with_key(key))
+    }
+
+    /// Build the smooth-operator [`LlmConfig`] for live turns with an explicit
+    /// gateway key (gateway URL, model, and limits still come from this config).
+    ///
+    /// This is the per-org seam's entry point: a
+    /// [`GatewayKeyResolver`](smooth_operator::gateway_key::GatewayKeyResolver)
+    /// resolves the key for the turn's org (falling back to the env key), and the
+    /// resolved key is threaded through here. With the default env resolver this
+    /// produces exactly the same config as [`llm_config`](Self::llm_config).
+    #[must_use]
+    pub fn llm_config_with_key(&self, key: String) -> LlmConfig {
+        LlmConfig {
             api_url: self.gateway_url.clone(),
             api_key: key,
             model: self.model.clone(),
@@ -220,7 +239,7 @@ impl ServerConfig {
             temperature: 0.0,
             retry_policy: RetryPolicy::default(),
             api_format: ApiFormat::OpenAiCompat,
-        })
+        }
     }
 
     /// Build an [`LlmConfig`] **without** requiring a gateway key, for the

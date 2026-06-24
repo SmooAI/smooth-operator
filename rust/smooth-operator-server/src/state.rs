@@ -19,6 +19,7 @@ use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
+use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
 
@@ -67,6 +68,14 @@ pub struct AppState {
     /// byte-for-byte unchanged for real deployments. Installed via
     /// [`with_chat_provider`](Self::with_chat_provider).
     pub chat_provider: Option<Arc<dyn LlmProvider>>,
+    /// Per-org LLM gateway-key resolver: maps a turn's `org_id` to the gateway
+    /// key it should bill/scope to. Defaults to [`EnvGatewayKeyResolver`] (the
+    /// single `SMOOAI_GATEWAY_KEY` for every org — unchanged local behavior); a
+    /// multi-tenant host installs a per-org resolver via
+    /// [`with_gateway_key_resolver`](Self::with_gateway_key_resolver) so each
+    /// tenant's usage is attributed to its own key. The per-turn LLM-config build
+    /// falls back to the env key whenever the resolver returns `None`.
+    pub gateway_key_resolver: Arc<dyn GatewayKeyResolver>,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Document-set registry, **org-scoped**: `org_id` → (set name → document
@@ -100,6 +109,11 @@ impl AppState {
     /// uses none of these, so existing callers are unaffected.
     #[must_use]
     pub fn new(storage: Arc<dyn StorageAdapter>, config: ServerConfig) -> Self {
+        // Default resolver returns the single env gateway key for every org, so
+        // the local/default flavor is unchanged until a host installs a per-org
+        // resolver via `with_gateway_key_resolver`.
+        let gateway_key_resolver: Arc<dyn GatewayKeyResolver> =
+            Arc::new(EnvGatewayKeyResolver::new(config.gateway_key.clone()));
         Self {
             storage,
             config: Arc::new(config),
@@ -110,6 +124,7 @@ impl AppState {
             widget_auth: Arc::new(PermissiveWidgetAuth),
             backplane: Arc::new(InMemoryBackplane::new()),
             chat_provider: None,
+            gateway_key_resolver,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
@@ -169,6 +184,19 @@ impl AppState {
     #[must_use]
     pub fn with_chat_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
         self.chat_provider = Some(provider);
+        self
+    }
+
+    /// Install a per-org gateway-key resolver (builder). A multi-tenant host
+    /// installs a resolver backed by its per-org key store (e.g. one LiteLLM
+    /// virtual key per tenant) so each org's turns are billed/scoped to its own
+    /// key. The per-turn LLM-config build falls back to the env key whenever the
+    /// resolver returns `None`, so a resolver covering only some orgs is safe.
+    /// Leaving this unset keeps the default [`EnvGatewayKeyResolver`] (single env
+    /// key for every org — unchanged local behavior).
+    #[must_use]
+    pub fn with_gateway_key_resolver(mut self, resolver: Arc<dyn GatewayKeyResolver>) -> Self {
+        self.gateway_key_resolver = resolver;
         self
     }
 
@@ -237,5 +265,98 @@ impl AppState {
         let mut out = map.get(org_id).cloned().unwrap_or_default();
         out.sort();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use smooth_operator::gateway_key::resolve_gateway_key;
+    use smooth_operator_adapter_memory::InMemoryStorageAdapter;
+
+    use crate::config::{ServerConfig, StorageBackend, DEFAULT_GATEWAY_URL, DEFAULT_MODEL};
+
+    /// Build a config with an explicit env gateway key for the resolver tests.
+    fn config_with_env_key(env_key: Option<&str>) -> ServerConfig {
+        ServerConfig {
+            bind: "127.0.0.1".to_string(),
+            port: 0,
+            gateway_url: DEFAULT_GATEWAY_URL.to_string(),
+            gateway_key: env_key.map(str::to_string),
+            model: DEFAULT_MODEL.to_string(),
+            seed_kb: false,
+            max_iterations: 6,
+            max_tokens: 512,
+            storage: StorageBackend::Memory,
+            widget_auth_strict: false,
+        }
+    }
+
+    fn state_with(config: ServerConfig) -> AppState {
+        AppState::new(Arc::new(InMemoryStorageAdapter::new()), config)
+    }
+
+    /// Per-org resolver covering exactly one org; `None` (→ env fallback) for any
+    /// other org. Mirrors what a multi-tenant host installs.
+    struct OneOrgResolver {
+        org: String,
+        key: String,
+    }
+
+    #[async_trait]
+    impl GatewayKeyResolver for OneOrgResolver {
+        async fn resolve(&self, org_id: &str) -> Option<String> {
+            (org_id == self.org).then(|| self.key.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_state_resolves_env_key_for_every_org() {
+        // No resolver injected: the default `EnvGatewayKeyResolver` returns the
+        // single env key for every org — unchanged local behavior.
+        let state = state_with(config_with_env_key(Some("env-key")));
+        let env = state.config.gateway_key.as_deref();
+        assert_eq!(
+            resolve_gateway_key(&state.gateway_key_resolver, "org-a", env).await,
+            Some("env-key".to_string())
+        );
+        assert_eq!(
+            resolve_gateway_key(&state.gateway_key_resolver, "org-z", env).await,
+            Some("env-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_resolver_overrides_per_org_and_falls_back_to_env() {
+        let config = config_with_env_key(Some("env-key"));
+        let state = state_with(config).with_gateway_key_resolver(Arc::new(OneOrgResolver {
+            org: "org-a".to_string(),
+            key: "org-a-key".to_string(),
+        }));
+        let env = state.config.gateway_key.as_deref();
+
+        // Covered org → its own key.
+        assert_eq!(
+            resolve_gateway_key(&state.gateway_key_resolver, "org-a", env).await,
+            Some("org-a-key".to_string())
+        );
+        // Uncovered org → env fallback.
+        assert_eq!(
+            resolve_gateway_key(&state.gateway_key_resolver, "org-b", env).await,
+            Some("env-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn no_env_key_and_no_resolver_match_resolves_to_none() {
+        // Env key absent + default resolver → no key (turn is unavailable). Same
+        // behavior as today's `llm_config()` returning `None`.
+        let state = state_with(config_with_env_key(None));
+        let env = state.config.gateway_key.as_deref();
+        assert_eq!(
+            resolve_gateway_key(&state.gateway_key_resolver, "org-a", env).await,
+            None
+        );
     }
 }
