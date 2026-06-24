@@ -40,8 +40,21 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws_upgrade))
+        // Unauthenticated liveness/readiness probe. A WebSocket `/ws` upgrade is
+        // not a plain GET, so HTTP load balancers (AWS ALB / nginx ingress) need a
+        // real HTTP route that answers 200 to confirm the listener is up. Cheap
+        // and dependency-free — it does not touch storage/LLM, so it stays Ready
+        // even when an optional backend (gateway key, DB) is degraded.
+        .route("/health", get(health))
         .merge(crate::admin::router())
         .with_state(state)
+}
+
+/// `GET /health` → `200 OK`. The minimal HTTP health endpoint for container
+/// orchestrators and HTTP load balancers (the WS `/ws` route can't serve a plain
+/// GET healthcheck).
+async fn health() -> &'static str {
+    "ok"
 }
 
 /// The document set the seeded demo docs are tagged into, so
