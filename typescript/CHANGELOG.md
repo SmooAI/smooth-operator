@@ -1,5 +1,87 @@
 # @smooai/smooth-operator
 
+## 1.3.0
+
+### Minor Changes
+
+- 12d348a: Add two host provider-injection seams to the chat runner so a deployment flavor can run a turn with its OWN tools and persona without forking the runner:
+
+  - **Custom tool injection** — a new `ToolProvider` trait (`tools_for(&ToolProviderContext) -> Vec<Arc<dyn Tool>>`) plus `AppState::with_tools(provider)`. When installed, the runner merges the provider's per-turn tools into the turn's `ToolRegistry` alongside the built-ins; the `ToolProviderContext` carries the turn's `org_id` + `AccessContext` so a host can return per-org tools. No provider ⇒ the registry is exactly today's built-ins.
+  - **Per-org agent persona** — an optional `AgentSettings.persona: Option<String>`; the runner uses the resolved persona as the turn's system prompt when present, else falls back to the existing const `KNOWLEDGE_CHAT_SYSTEM_PROMPT`. No persona ⇒ identical prompt to today.
+
+  Both seams are behavior-preserving by default — the local/default flavor is unaffected.
+
+- ab1aa9d: feat(server): `confirm_tool_action` — write-confirmation human-in-the-loop pause/resume
+
+  The reference WebSocket server can now gate write tools behind human approval.
+  When an agent turn calls a tool whose name matches `SMOOTH_AGENT_CONFIRM_TOOLS`
+  (comma-separated substrings), the turn **parks** and emits a
+  `write_confirmation_required` event (matching
+  `spec/events/write-confirmation-required.schema.json`) carrying
+  `{ toolId, actionDescription }`. The client resumes it by sending
+  `confirm_tool_action` (`{ sessionId, requestId, approved }`, per
+  `spec/actions/confirm-tool-action.schema.json`): on `approved: true` the parked
+  tool executes; on `false` it is skipped with a rejection result the model sees,
+  and the turn still completes.
+
+  Built entirely on the existing smooth-operator-core human-gate primitive
+  (`ConfirmationHook` + `human_channel()` + `AgentConfig::with_human_channel`) —
+  **no core change required**. The server wires the hook's `HumanRequest` stream to
+  a WS event and bridges an inbound `confirm_tool_action` back to the hook's
+  `HumanResponse`, keyed by session. The `send_message` turn now runs in a spawned
+  task so the socket reader stays free to receive the confirmation on the same
+  connection (the turn would otherwise deadlock awaiting a frame it is blocking).
+
+  With `SMOOTH_AGENT_CONFIRM_TOOLS` unset (the default), no `ConfirmationHook` is
+  installed, no tool ever parks, and behavior is byte-for-byte unchanged. The
+  local/default flavor is unaffected.
+
+- feec0b5: Add a per-org LLM gateway-key resolution seam so a multi-tenant flavor can
+  bill/scope each org's turns to its own gateway key (e.g. a per-tenant LiteLLM
+  virtual key), while the local/default flavor keeps using the single environment
+  key.
+
+  - New `GatewayKeyResolver` trait (`smooth_operator::gateway_key`) — the public,
+    contributable hook: `async fn resolve(&self, org_id: &str) -> Option<String>`.
+  - Default `EnvGatewayKeyResolver` returns the single `SMOOAI_GATEWAY_KEY` for
+    every org, so behavior is unchanged unless a host injects a per-org resolver.
+  - `resolve_gateway_key(resolver, org_id, env_key)` helper centralizes the
+    resolve-then-fall-back-to-env contract used by the per-turn LLM-config build.
+  - The server's `AppState` holds an `Arc<dyn GatewayKeyResolver>` (default =
+    `EnvGatewayKeyResolver`) with a `with_gateway_key_resolver(...)` builder for
+    injection. `send_message` resolves the turn's `org_id` from its conversation,
+    resolves the key, and falls back to the env key when the resolver returns
+    `None`.
+
+  Behavior-preserving by default: with no resolver injected, every turn uses the
+  env key exactly as before. No SmooAI/DB specifics live in the shared code — only
+  the trait and the env default; a host injects its own per-org key store.
+
+- 45be211: Add a `get_conversation_messages` WebSocket action to `smooth-operator-server`. Returns paginated message history for a session's conversation (`{ conversationId, messages, nextCursor, hasMore }`), wrapping the existing `StorageAdapter::list_messages_by_conversation` (the same call the admin API + turn runner use). Optional `limit` (default 50) + opaque `cursor`, newest-first. Completes wire-compat for chat clients that page history over the socket (previously only `/admin` exposed it).
+- cf6fab4: feat(server): graceful SIGTERM/ctrl_c drain of WebSocket connections.
+
+  The reference WebSocket server (`smooth-operator-server`) now drains in-flight
+  turns on shutdown instead of being killed mid-flight. Previously `run()` did a
+  plain `axum::serve(listener, app).await` with no `with_graceful_shutdown`, so on
+  a Kubernetes pod termination (scale-down / rollout) the process was killed while
+  turns were in progress — in-flight WebSocket turns dropped and connections never
+  `detach`ed from the `Backplane`, leaving stale registry entries in Valkey/NATS.
+
+  A single shared `tokio_util::sync::CancellationToken` is now threaded through
+  `AppState` (`shutdown`, defaulted to a fresh never-cancelled token in
+  `AppState::new`, plus a `with_shutdown` builder). Each per-connection reader loop
+  `select!`s on that token (`biased`, shutdown wins ties) with the inbound-frame
+  read — and keeps `handle_frame(...).await` inside the frame arm so a turn already
+  in flight finishes before the next shutdown check. After the loop the existing
+  `backplane.detach(...)` runs, so the connection always leaves the registry clean.
+  The serve loop (`run`) wires `axum::serve(...).with_graceful_shutdown(...)` to
+  SIGTERM (k8s) or ctrl_c (interactive), cancelling the token to fan the drain out
+  to every connection within the chart's `terminationGracePeriodSeconds` window.
+
+### Patch Changes
+
+- 7545ea8: Add an unauthenticated `GET /health` HTTP route to `smooth-operator-server`. A WebSocket `/ws` upgrade can't answer a plain GET healthcheck, so HTTP load balancers (AWS ALB, nginx ingress) had nothing to probe; `GET /health` now returns `200 OK`, dependency-free (no storage/LLM touch). Enables HTTP health checks for the K8s deployment flavor.
+
 ## 1.2.0
 
 ### Minor Changes
