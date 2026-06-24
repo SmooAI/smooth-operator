@@ -124,7 +124,7 @@ jobs:
             # retry loop tolerates crates.io index-propagation lag and treats an
             # "already uploaded/exists" error as success (idempotent re-runs).
             - name: Publish Rust crates to crates.io
-              if: steps.changesets.outputs.published == 'true'
+              if: steps.changesets.outputs.published == 'true' || github.event_name == 'workflow_dispatch'
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
               run: |
@@ -132,6 +132,14 @@ jobs:
                       echo "::error::SMOOAI_CARGO_REGISTRY_TOKEN secret is not set"
                       exit 1
                   fi
+                  # The workspace core dep keeps a sibling-repo `path` for local
+                  # two-repo dev; that path is absent on CI runners, which breaks
+                  # `cargo publish`'s workspace load (it reads every member's path
+                  # deps). Strip it so both the load and the published manifest
+                  # resolve smooai-smooth-operator-core from crates.io — the
+                  # `version` is the authoritative requirement. Publish-time only;
+                  # not committed.
+                  sed -i -E 's#smooai-smooth-operator-core = \{ path = "[^"]*", version = "0.14" \}#smooai-smooth-operator-core = "0.14"#' rust/Cargo.toml
                   publish_crate() {
                       local crate="$1"
                       local attempt=1
@@ -173,7 +181,7 @@ jobs:
             # back to a token if SMOOAI_PYPI_TOKEN is set. Build + publish the client,
             # then the engine core.
             - name: Publish Python packages to PyPI
-              if: steps.changesets.outputs.published == 'true'
+              if: steps.changesets.outputs.published == 'true' || github.event_name == 'workflow_dispatch'
               env:
                   UV_PUBLISH_TOKEN: ${{ secrets.SMOOAI_PYPI_TOKEN }}
               run: |
@@ -186,7 +194,7 @@ jobs:
             # ./go, so the tag MUST be the subdir form `go/v<VERSION>` (NOT `go-v...`)
             # for `go get github.com/SmooAI/smooth-operator/go@v<VERSION>` to resolve.
             - name: Tag Go module
-              if: steps.changesets.outputs.published == 'true'
+              if: steps.changesets.outputs.published == 'true' || github.event_name == 'workflow_dispatch'
               env:
                   GH_TOKEN: ${{ secrets.GH_PAT }}
               run: |
