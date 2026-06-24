@@ -27,6 +27,7 @@ pub mod connector_config;
 pub mod curation;
 pub mod domain;
 pub mod embedding;
+pub mod gateway_key;
 pub mod rerank;
 pub mod runtime;
 pub mod settings;
@@ -54,6 +55,7 @@ pub use domain::{
 pub use embedding::{
     cosine_similarity, DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
 };
+pub use gateway_key::{resolve_gateway_key, EnvGatewayKeyResolver, GatewayKeyResolver};
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
 pub use runtime::{
     AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState, MAX_CITATIONS,
