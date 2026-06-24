@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // ToolCall is a model-requested tool invocation.
@@ -121,6 +122,14 @@ type AgentOptions struct {
 	// MemoryTopK is how many memory entries to recall per turn (0 = default 4).
 	MemoryTopK int
 	Tools      []Tool
+	// ParallelToolCalls, when true and an assistant turn returns >=2 tool calls,
+	// dispatches them concurrently (goroutines + sync.WaitGroup) instead of
+	// sequentially. Tool-result messages are still appended in the original
+	// ToolCalls order, so the transcript stays deterministic regardless of
+	// completion order. Default false preserves the sequential behaviour. Per-tool
+	// semantics (clearance, human-gate approval, tool_search promotion, JSON
+	// parsing, error handling) are unchanged — only the dispatch loop runs in parallel.
+	ParallelToolCalls bool
 	// DeferredTools are registered but with their schemas HIDDEN from the model.
 	// When any are present, a built-in tool_search meta-tool is advertised in their
 	// place; the model calls it to fuzzy-match and promote the ones it needs, which
@@ -376,10 +385,29 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 			return AgentRunResponse{Text: lastText, Iterations: iteration, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}, nil
 		}
 
-		for _, tc := range resp.ToolCalls {
-			toolCalls++
-			result := a.dispatchTool(ctx, tc, search)
-			toolMsg := ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: result}
+		toolCalls += len(resp.ToolCalls)
+		// Dispatch the tool calls — concurrently when enabled and there's more than
+		// one — but always append the results in the original ToolCalls order so the
+		// transcript stays deterministic. dispatchTool turns failures/denials into a
+		// result string, so a panicking sibling can't abort the others.
+		results := make([]string, len(resp.ToolCalls))
+		if a.options.ParallelToolCalls && len(resp.ToolCalls) > 1 {
+			var wg sync.WaitGroup
+			for i, tc := range resp.ToolCalls {
+				wg.Add(1)
+				go func(i int, tc ToolCall) {
+					defer wg.Done()
+					results[i] = a.dispatchTool(ctx, tc, search)
+				}(i, tc)
+			}
+			wg.Wait()
+		} else {
+			for i, tc := range resp.ToolCalls {
+				results[i] = a.dispatchTool(ctx, tc, search)
+			}
+		}
+		for i, tc := range resp.ToolCalls {
+			toolMsg := ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: results[i]}
 			messages = append(messages, toolMsg)
 			turnMessages = append(turnMessages, toolMsg)
 		}

@@ -13,6 +13,7 @@ when the C# core grew past Phase 0.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -73,6 +74,14 @@ class AgentOptions:
     #: How many memory entries to recall per turn.
     memory_top_k: int = 4
     tools: list[Tool] = field(default_factory=list)
+    #: When True and an assistant turn returns >=2 tool calls, dispatch them
+    #: concurrently (``asyncio.gather``) instead of sequentially. Tool-result
+    #: messages are still appended in the original ``tool_calls`` order, so the
+    #: transcript stays deterministic regardless of completion order. Default
+    #: False preserves the sequential behaviour. Per-tool semantics (clearance,
+    #: human-gate approval, tool_search promotion, JSON parsing, error handling)
+    #: are unchanged — only the dispatch loop runs in parallel.
+    parallel_tool_calls: bool = False
     #: Deferred tools — registered but with their schemas HIDDEN from the model.
     #: When any are present, a built-in ``tool_search`` meta-tool is advertised in
     #: their place; the model calls it to fuzzy-match and promote the ones it needs,
@@ -292,9 +301,24 @@ class SmoothAgent:
                         cost_usd=tracker.cost_usd,
                     )
 
-                for tc in choice.tool_calls:
-                    tool_call_count += 1
-                    result = await self._dispatch_tool(tc.function.name, tc.function.arguments, search)
+                tool_call_count += len(choice.tool_calls)
+                if self._options.parallel_tool_calls and len(choice.tool_calls) > 1:
+                    # Dispatch all tool calls concurrently, but append the results in the
+                    # original tool_calls order so the transcript stays deterministic. Each
+                    # _dispatch_tool already turns failures/denials into a result string, so
+                    # gather never sees an exception that would cancel its siblings.
+                    results = await asyncio.gather(
+                        *(
+                            self._dispatch_tool(tc.function.name, tc.function.arguments, search)
+                            for tc in choice.tool_calls
+                        )
+                    )
+                else:
+                    results = [
+                        await self._dispatch_tool(tc.function.name, tc.function.arguments, search)
+                        for tc in choice.tool_calls
+                    ]
+                for tc, result in zip(choice.tool_calls, results):
                     tool_msg = {"role": "tool", "tool_call_id": tc.id, "content": result}
                     messages.append(tool_msg)
                     turn_messages.append(tool_msg)
