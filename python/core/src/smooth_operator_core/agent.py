@@ -118,6 +118,15 @@ class AgentOptions:
     #:
     #:     lambda name, args: name in {"delete_record", "send_email"}
     requires_approval: Callable[[str, dict[str, Any]], bool] | None = None
+    #: Number of ADDITIONAL attempts after the first if the model call raises a
+    #: transient error (rate-limit, 5xx, dropped connection). ``0`` (the default)
+    #: preserves today's behaviour: a single attempt, error propagates immediately.
+    #: Only the model call is retried — never tool execution.
+    max_retries: int = 0
+    #: Base delay (milliseconds) for exponential backoff between retries. The wait
+    #: before retry attempt ``n`` (1-indexed) is ``retry_backoff_ms * 2 ** (n - 1)``.
+    #: Set to ``0`` to retry without sleeping (used by tests).
+    retry_backoff_ms: int = 200
 
 
 @dataclass
@@ -256,13 +265,7 @@ class SmoothAgent:
                 # Recompute tool specs each iteration: a ``tool_search`` call in the
                 # previous iteration may have promoted deferred tools into view.
                 tool_specs = self._tool_specs(search)
-                response = await self._client.chat.completions.create(
-                    model=self._options.model,
-                    messages=messages,
-                    tools=tool_specs,
-                    temperature=self._options.temperature,
-                    max_tokens=self._options.max_tokens,
-                )
+                response = await self._call_model(messages, tool_specs)
                 tracker.record(self._options.model, _extract_usage(response), self._options.pricing)
                 choice = response.choices[0].message
                 last_text = choice.content or ""
@@ -340,6 +343,33 @@ class SmoothAgent:
             # back to the thread so the next run sees the full conversation.
             if thread is not None:
                 thread.extend(turn_messages)
+
+    async def _call_model(self, messages: list[dict[str, Any]], tool_specs: list[dict[str, Any]] | None) -> Any:
+        """Invoke the model with bounded retry-with-exponential-backoff.
+
+        On a transient error (anything the client raises — rate-limit, 5xx, dropped
+        connection) the call is retried up to ``max_retries`` additional times, waiting
+        ``retry_backoff_ms * 2 ** (n - 1)`` ms before the n-th (1-indexed) retry. If all
+        attempts fail the LAST error propagates, so the turn fails exactly as it did
+        before retries existed. Only this model call is retried — tool execution is not.
+        """
+        attempt = 0
+        while True:
+            try:
+                return await self._client.chat.completions.create(
+                    model=self._options.model,
+                    messages=messages,
+                    tools=tool_specs,
+                    temperature=self._options.temperature,
+                    max_tokens=self._options.max_tokens,
+                )
+            except Exception:
+                if attempt >= self._options.max_retries:
+                    raise  # retries exhausted (or disabled): propagate the last error
+                attempt += 1
+                delay_ms = self._options.retry_backoff_ms * (2 ** (attempt - 1))
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000)
 
     async def _dispatch_tool(self, name: str, raw_arguments: str, search: ToolSearch | None) -> str:
         import json

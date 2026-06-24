@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ToolCall is a model-requested tool invocation.
@@ -163,6 +164,16 @@ type AgentOptions struct {
 	//
 	//	func(name string, _ map[string]any) bool { return name == "delete_record" }
 	RequiresApproval func(name string, args map[string]any) bool
+	// MaxRetries is the number of ADDITIONAL attempts after the first if the model
+	// call returns a transient error (rate-limit, 5xx, dropped connection). 0 (the
+	// default) preserves today's behaviour: a single attempt, error returned
+	// immediately. Only the model call is retried — never tool execution.
+	MaxRetries int
+	// RetryBackoff is the base delay for exponential backoff between retries. The
+	// wait before retry attempt n (1-indexed) is RetryBackoff * 2^(n-1). The zero
+	// value means no real delay (retries fire immediately) — which is what tests use
+	// so they don't sleep; production should set a small base such as 200ms.
+	RetryBackoff time.Duration
 }
 
 // AgentRunResponse is the result of a turn.
@@ -359,7 +370,7 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 		// Recompute tool specs each iteration: a tool_search call in the previous
 		// iteration may have promoted deferred tools into view.
 		tools := a.toolSpecs(search)
-		resp, err := a.client.Chat(ctx, ChatRequest{
+		resp, err := a.callModel(ctx, ChatRequest{
 			Model:       model,
 			Messages:    messages,
 			Tools:       tools,
@@ -414,6 +425,35 @@ func (a *SmoothAgent) run(ctx context.Context, message string, history []ChatMes
 	}
 
 	return AgentRunResponse{Text: lastText, Iterations: maxIter, ToolCalls: toolCalls, Usage: tracker.Usage, CostUSD: tracker.CostUSD}, nil
+}
+
+// callModel invokes the model with bounded retry-with-exponential-backoff.
+//
+// On a transient error (anything the client returns — rate-limit, 5xx, dropped
+// connection) the call is retried up to MaxRetries additional times, waiting
+// RetryBackoff * 2^(n-1) before the n-th (1-indexed) retry. If all attempts fail the
+// LAST error is returned, so the turn fails exactly as it did before retries existed.
+// Only this model call is retried — tool execution is not. A zero RetryBackoff (the
+// test default) means retries fire with no real sleep.
+func (a *SmoothAgent) callModel(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		resp, err := a.client.Chat(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt >= a.options.MaxRetries {
+			return ChatResponse{}, lastErr // retries exhausted (or disabled): propagate last error
+		}
+		if delay := a.options.RetryBackoff * (1 << attempt); delay > 0 {
+			select {
+			case <-ctx.Done():
+				return ChatResponse{}, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
 }
 
 func (a *SmoothAgent) dispatchTool(ctx context.Context, tc ToolCall, search *ToolSearch) string {

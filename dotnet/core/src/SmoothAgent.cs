@@ -65,7 +65,7 @@ public sealed class SmoothAgent
             // Recompute the visible tool set each iteration: tool_search promotions during the
             // previous iteration widen what the model can see/call now.
             var chatOptions = BuildChatOptions();
-            var response = await _chatClient.GetResponseAsync(working, chatOptions, cancellationToken).ConfigureAwait(false);
+            var response = await CallModelAsync(working, chatOptions, cancellationToken).ConfigureAwait(false);
             Accumulate(usage, response.Usage);
             cost.Record(response.ModelId, response.Usage, LookupPricing(response.ModelId));
             working.AddRange(response.Messages);
@@ -97,6 +97,37 @@ public sealed class SmoothAgent
     private ModelPricing? LookupPricing(string? modelId) =>
         modelId is not null && _options.Pricing.TryGetValue(modelId, out var pricing) ? pricing : null;
 
+    /// <summary>
+    /// Invoke the model with bounded retry-with-exponential-backoff. On a transient error
+    /// (anything the client throws — rate-limit, 5xx, dropped connection) the call is retried up to
+    /// <see cref="AgentOptions.MaxRetries"/> additional times, waiting
+    /// <c>RetryBackoff * 2^(n-1)</c> before the n-th (1-indexed) retry. If all attempts fail the
+    /// LAST error propagates, so the turn fails exactly as it did before retries existed. Only this
+    /// model call is retried — tool execution is not. (Retry is scoped to the non-streaming
+    /// <see cref="RunAsync(string, SmoothAgentThread?, CancellationToken)"/>; streaming connect
+    /// retry is out of scope — see the note in <see cref="RunStreamingAsync(string, SmoothAgentThread?, CancellationToken)"/>.)
+    /// </summary>
+    private async Task<ChatResponse> CallModelAsync(IList<ChatMessage> working, ChatOptions? chatOptions, CancellationToken cancellationToken)
+    {
+        var attempt = 0;
+        while (true)
+        {
+            try
+            {
+                return await _chatClient.GetResponseAsync(working, chatOptions, cancellationToken).ConfigureAwait(false);
+            }
+            catch when (attempt < _options.MaxRetries)
+            {
+                attempt++;
+                var delay = _options.RetryBackoff * Math.Pow(2, attempt - 1);
+                if (delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
     /// <summary>Stream a single stateless turn.</summary>
     public IAsyncEnumerable<ChatResponseUpdate> RunStreamingAsync(string message, CancellationToken cancellationToken = default) =>
         RunStreamingAsync(message, null, cancellationToken);
@@ -121,6 +152,11 @@ public sealed class SmoothAgent
             Compactor.Compact(working, _options.Compaction, _options.MaxContextTokens);
 
             var chatOptions = BuildChatOptions();
+            // NOTE: retry-with-backoff (AgentOptions.MaxRetries/RetryBackoff) is intentionally NOT
+            // applied here. Streaming yields updates to the consumer as they arrive, so re-running
+            // the call after a mid-stream failure would re-emit already-yielded chunks. Retry is
+            // scoped to the non-streaming RunAsync (see CallModelAsync); streaming connect retry can
+            // be layered on later by retrying just the enumerator's first MoveNextAsync.
             var updates = new List<ChatResponseUpdate>();
             await foreach (var update in _chatClient.GetStreamingResponseAsync(working, chatOptions, cancellationToken).ConfigureAwait(false))
             {

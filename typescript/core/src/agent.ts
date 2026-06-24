@@ -102,6 +102,19 @@ export interface AgentOptions {
      * Example: `requiresApproval: (name) => name === 'delete_record' || name === 'send_email'`.
      */
     requiresApproval?: (name: string, args: Record<string, unknown>) => boolean;
+    /**
+     * Number of ADDITIONAL attempts after the first if the model call throws a transient
+     * error (rate-limit, 5xx, dropped connection). `0` (the default) preserves today's
+     * behaviour: a single attempt, error propagates immediately. Only the model call is
+     * retried — never tool execution.
+     */
+    maxRetries?: number;
+    /**
+     * Base delay (milliseconds) for exponential backoff between retries. The wait before
+     * retry attempt `n` (1-indexed) is `retryBackoffMs * 2 ** (n - 1)`. Defaults to 200.
+     * Set to `0` to retry without sleeping (used by tests).
+     */
+    retryBackoffMs?: number;
 }
 
 export interface AgentRunResponse {
@@ -141,7 +154,14 @@ const DEFAULTS = {
     temperature: 0,
     knowledgeTopK: 4,
     maxContextTokens: 8000,
+    maxRetries: 0,
+    retryBackoffMs: 200,
 };
+
+/** Sleep for `ms` milliseconds; a no-op when `ms <= 0` (so tests don't actually wait). */
+function sleep(ms: number): Promise<void> {
+    return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
 
 /** Pull token usage from an OpenAI-shaped response, defaulting to zero when absent. */
 function extractUsage(usage: { prompt_tokens?: number | null; completion_tokens?: number | null } | null | undefined): Usage {
@@ -252,7 +272,7 @@ export class SmoothAgent {
                 // Recompute tool specs each iteration: a `tool_search` call in the
                 // previous iteration may have promoted deferred tools into view.
                 const tools = this.toolSpecs(search);
-                const response = await this.client.chat.completions.create({
+                const response = await this.callModel({
                     model,
                     messages,
                     ...(tools ? { tools } : {}),
@@ -314,6 +334,30 @@ export class SmoothAgent {
             // Append this turn's new messages (user + assistant + tool, never system)
             // back to the thread so the next run sees the full conversation.
             if (thread) thread.extend(turnMessages);
+        }
+    }
+
+    /**
+     * Invoke the model with bounded retry-with-exponential-backoff.
+     *
+     * On a transient error (anything the client throws — rate-limit, 5xx, dropped
+     * connection) the call is retried up to `maxRetries` additional times, waiting
+     * `retryBackoffMs * 2 ** (n - 1)` ms before the n-th (1-indexed) retry. If all
+     * attempts fail the LAST error propagates, so the turn fails exactly as it did
+     * before retries existed. Only this model call is retried — tool execution is not.
+     */
+    private async callModel(body: Record<string, unknown>): Promise<Awaited<ReturnType<ChatClientLike['chat']['completions']['create']>>> {
+        const maxRetries = this.options.maxRetries ?? DEFAULTS.maxRetries;
+        const backoffMs = this.options.retryBackoffMs ?? DEFAULTS.retryBackoffMs;
+        let attempt = 0;
+        for (;;) {
+            try {
+                return await this.client.chat.completions.create(body);
+            } catch (err) {
+                if (attempt >= maxRetries) throw err; // retries exhausted (or disabled): propagate last error
+                attempt++;
+                await sleep(backoffMs * 2 ** (attempt - 1));
+            }
         }
     }
 
