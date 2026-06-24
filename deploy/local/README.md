@@ -135,6 +135,44 @@ let server = LocalServer::builder()
 # }
 ```
 
+### Lean build (drop the cloud adapters)
+
+By default the server crate compiles **every** backend in (Postgres, DynamoDB,
+Redis, NATS) so one binary can serve any flavor — that's the `cloud` feature, and
+it's **on by default**, so the `k8s` / `sst` build artifacts are unchanged.
+
+For a laptop dev loop or an **in-process embed**, none of those are needed (the
+local flavor is in-memory only), and pulling `tokio-postgres`, the AWS SDK,
+`redis`, and `async-nats` just inflates build time and binary size. Opt out with
+`--no-default-features` to get a **lean** build that excludes all four cloud
+adapters and their transitive deps:
+
+```bash
+cd rust
+# Lean: in-memory storage + in-memory backplane only — no tokio-postgres / AWS
+# SDK / redis / async-nats compiled in.
+cargo build -p smooai-smooth-operator-server --no-default-features
+cargo run   -p smooai-smooth-operator-server --no-default-features
+```
+
+An **embedder** (e.g. the smooth daemon depending on this crate in-process) sets
+the same opt-out in its `Cargo.toml` and runs entirely on the in-memory backends:
+
+```toml
+[dependencies]
+smooai-smooth-operator-server = { version = "1.2", default-features = false }
+```
+
+The lean build only supports `SMOOTH_AGENT_STORAGE=memory` and
+`SMOOTH_AGENT_BACKPLANE=memory` (the defaults). Requesting a cloud backend at
+runtime fails loud with an actionable error (e.g.
+`SMOOTH_AGENT_STORAGE=postgres requires building with --features postgres …`)
+rather than silently degrading. The gateway-backed semantic embedder/reranker
+also live in the postgres adapter crate, so the lean build uses the network-free
+`DeterministicEmbedder` / `Noop`/`Lexical` reranker — which is exactly what the
+keyless local flavor already does. Re-enable any subset à la carte with
+`--features postgres,nats,…` (or the full `--features cloud`).
+
 ---
 
 ## Verify (no external services)
