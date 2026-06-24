@@ -1,19 +1,24 @@
-<p align="center"><img src="../assets/smooth-logo.svg" alt="Smooth" width="360" /></p>
-
-<p align="center"><strong><code>@smooai/smooth-operator</code></strong> — the Lambda-native TypeScript client for the smooth-operator protocol. Streaming agent turns, HITL resume, fully typed.</p>
+<p align="center">
+  <a href="https://smoo.ai"><img src="https://raw.githubusercontent.com/SmooAI/smooth-operator/main/.github/banner-typescript.png" alt="@smooai/smooth-operator — the TypeScript client for the smooth-operator protocol." width="100%" /></a>
+</p>
 
 <p align="center">
-  <a href="../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/tests-16%20passing-success" alt="16 tests passing" />
-  <img src="https://img.shields.io/badge/serverless%20%C2%B7%20polyglot%20%C2%B7%20TDD-6f42c1" alt="serverless · polyglot · TDD" />
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-0aa" alt="lom.smoo.ai" /></a>
+  <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
+  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://www.npmjs.com/package/@smooai/smooth-operator"><img src="https://img.shields.io/npm/v/@smooai/smooth-operator?style=for-the-badge&labelColor=020618&color=00A6A6" alt="npm"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node-%E2%89%A522-00A6A6?style=for-the-badge&labelColor=020618" alt="Node ≥ 22"></a>
+</p>
+
+<p align="center">
+  <b><code>@smooai/smooth-operator</code></b> — the Lambda-native TypeScript client for the <a href="https://github.com/SmooAI/smooth-operator">smooth-operator</a> service.<br/>Streaming agent turns, HITL resume, fully typed. One of <b>five native SDKs</b> over one schema-driven WebSocket protocol.
 </p>
 
 ---
 
 ## What is this?
 
-The **native TypeScript client** for the [smooth-operator](../docs/PROTOCOL.md) WebSocket protocol — and the one the [smooai monorepo dogfoods](https://github.com/SmooAI/smooth-operator). Types are **generated** from the language-neutral JSON Schemas in [`../spec`](../spec) (and committed, so consumers don't need the generator), with an ergonomic layer — discriminated unions + type guards — on top. It's Lambda-native and transport-injectable, so it runs in a browser, on Node, or inside a Lambda handler unchanged.
+The **native TypeScript client** for the [smooth-operator](https://github.com/SmooAI/smooth-operator/blob/main/docs/PROTOCOL.md) WebSocket protocol — and the one the [smooai monorepo dogfoods](https://github.com/SmooAI/smooth-operator). It connects to a running smooth-operator **service** (create a session, send a message, stream the agent's events back) — not the agent engine itself. Types are **generated** from the language-neutral JSON Schemas in [`spec/`](https://github.com/SmooAI/smooth-operator/tree/main/spec) (and committed, so consumers don't need the generator), with an ergonomic layer — discriminated unions + type guards — on top. It's Lambda-native and transport-injectable, so it runs in a browser, on Node, or inside a Lambda handler unchanged.
 
 ---
 
@@ -35,7 +40,7 @@ pulls React into their bundle.
 | Import | What |
 | --- | --- |
 | `@smooai/smooth-operator` | the protocol client (`SmoothAgentClient`, streaming turns, HITL) |
-| `@smooai/smooth-operator/react` | React bindings — `useConversation` hook + `<SmoothChat>` (see [the guide](../docs/Guides/React%20Components%20and%20Custom%20UIs.md)) |
+| `@smooai/smooth-operator/react` | React bindings — `useConversation` hook + `<SmoothChat>` (see [the guide](https://github.com/SmooAI/smooth-operator/blob/main/docs/Guides/React%20Components%20and%20Custom%20UIs.md)) |
 | `@smooai/smooth-operator/react/styles.css` | default stylesheet for the React components |
 | `@smooai/smooth-operator/widget` | the embeddable web-component chat widget (`mountChatWidget`, `<smooth-agent-chat>`) |
 | `@smooai/smooth-operator/widget/standalone` | the prebuilt IIFE bundle for a no-build `<script>` embed |
@@ -54,7 +59,7 @@ const final = await turn; // EventualResponse — cost, tokens, messageId
 console.log(final.data.payload.messageId);
 ```
 
-(Point `url` at your own [`smooth-operator-server`](../rust/README.md), or at the hosted endpoint.)
+(Point `url` at your own [`smooth-operator-server`](https://github.com/SmooAI/smooth-operator/blob/main/rust/README.md), or at the hosted endpoint.)
 
 ---
 
@@ -115,7 +120,7 @@ v.validateEvent(incomingEvent); // { valid, errors } — ajv-compiled from the s
 
 ## Polyglot — one spec, five clients
 
-This is one of five native clients generated from the same protocol. Need C# / Microsoft.Extensions.AI? The **`IChatClient` facade** lives in the [.NET client](../dotnet/README.md) (it's a .NET-ecosystem feature). This TypeScript package is the native streaming client.
+This is one of five native clients generated from the same protocol. Need C# / Microsoft.Extensions.AI? The **`IChatClient` facade** lives in the [.NET client](https://github.com/SmooAI/smooth-operator/tree/main/dotnet/src) (it's a .NET-ecosystem feature). This TypeScript package is the native streaming client.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
@@ -145,7 +150,7 @@ flowchart TD
 
 **16 tests** cover the conformance fixtures, the client (with a mock transport so real parsing/correlation/HITL run), and type-level checks. In the **live cross-language E2E**, this client boots a real `smooth-operator-server` subprocess (KB seeded), drives a real `claude-haiku-4-5` turn over WebSocket, and asserts ≥1 streamed event, a knowledge-grounded "17", and per-session memory.
 
-**The proof story:** an LLM-as-judge scored a multi-turn answer **1/5** (the runtime forgot turn 1's context); the failing eval drove a per-session-memory fix; **it now scores 5/5** — a regression a substring test would have missed. See [`docs/EVALS.md`](../docs/EVALS.md).
+**The proof story:** an LLM-as-judge scored a multi-turn answer **1/5** (the runtime forgot turn 1's context); the failing eval drove a per-session-memory fix; **it now scores 5/5** — a regression a substring test would have missed. See [`docs/EVALS.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/EVALS.md).
 
 Live tests are **gated, never silently skipped**: they run with `SMOOTH_AGENT_E2E=1` + `SMOOAI_GATEWAY_KEY` and skip cleanly otherwise.
 
@@ -169,6 +174,27 @@ The generated types are committed; CI runs `pnpm generate` + `git diff --exit-co
 
 Point the client at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` (AWS Lambda or k8s) — same protocol, same client, same code.
 
-## License
+## 🧩 Part of Smoo AI
 
-MIT © 2026 Smoo AI
+`@smooai/smooth-operator` is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product. It's the TypeScript member of the **polyglot SDK set** (TypeScript · Python · Go · .NET · Rust) for the [smooth-operator](https://github.com/SmooAI/smooth-operator) service.
+
+- 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, server, the five clients, AWS/k8s deploy)
+- 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
+- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+
+## 🔗 Links
+
+- 📦 **npm** — [`@smooai/smooth-operator`](https://www.npmjs.com/package/@smooai/smooth-operator)
+- 🛰️ **Protocol** — [`docs/PROTOCOL.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/PROTOCOL.md)
+- 🧪 **Evals** — [`docs/EVALS.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/EVALS.md)
+- 💬 **Issues** — [github.com/SmooAI/smooth-operator/issues](https://github.com/SmooAI/smooth-operator/issues)
+
+## 📄 License
+
+MIT © 2026 Smoo AI. See [LICENSE](https://github.com/SmooAI/smooth-operator/blob/main/LICENSE).
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>

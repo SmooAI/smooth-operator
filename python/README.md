@@ -1,19 +1,24 @@
-<p align="center"><img src="../assets/smooth-logo.svg" alt="Smooth" width="360" /></p>
-
-<p align="center"><strong>smooth-operator — Python client.</strong> A native, fully-async WebSocket client for the smooth-operator protocol, with pydantic v2 models.</p>
+<p align="center">
+  <a href="https://smoo.ai"><img src="https://raw.githubusercontent.com/SmooAI/smooth-operator/main/.github/banner-python.png" alt="smooai-smooth-operator — the Python client for the smooth-operator protocol." width="100%" /></a>
+</p>
 
 <p align="center">
-  <a href="../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/tests-26%20passing-success" alt="26 tests passing" />
-  <img src="https://img.shields.io/badge/serverless%20%C2%B7%20polyglot%20%C2%B7%20TDD-6f42c1" alt="serverless · polyglot · TDD" />
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-0aa" alt="lom.smoo.ai" /></a>
+  <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
+  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://pypi.org/project/smooai-smooth-operator/"><img src="https://img.shields.io/pypi/v/smooai-smooth-operator?style=for-the-badge&labelColor=020618&color=00A6A6" alt="PyPI"></a>
+  <a href="https://www.python.org"><img src="https://img.shields.io/badge/Python-%E2%89%A53.11-00A6A6?style=for-the-badge&labelColor=020618" alt="Python ≥ 3.11"></a>
+</p>
+
+<p align="center">
+  <b><code>smooai-smooth-operator</code></b> — the native, fully-async Python client for the <a href="https://github.com/SmooAI/smooth-operator">smooth-operator</a> service.<br/>Streaming agent turns, HITL resume, pydantic v2 models. One of <b>five native SDKs</b> over one schema-driven WebSocket protocol.
 </p>
 
 ---
 
 ## What is this?
 
-The **native async Python client** for the [smooth-operator](../docs/PROTOCOL.md) WebSocket protocol. The pydantic v2 models in `smooth_operator._generated` are generated from the language-neutral JSON Schemas in [`../spec/`](../spec) (and committed), using pydantic discriminated unions so events deserialize to the right concrete type. The wire is camelCase; you work in idiomatic snake_case.
+The **native async Python client** for the [smooth-operator](https://github.com/SmooAI/smooth-operator/blob/main/docs/PROTOCOL.md) WebSocket protocol. It connects to a running smooth-operator **service** (create a session, send a message, stream the agent's events back) — not the agent engine itself. The pydantic v2 models in `smooth_operator._generated` are generated from the language-neutral JSON Schemas in [`spec/`](https://github.com/SmooAI/smooth-operator/tree/main/spec) (and committed), using pydantic discriminated unions so events deserialize to the right concrete type. The wire is camelCase; you work in idiomatic snake_case.
 
 ---
 
@@ -46,7 +51,7 @@ async def main():
 asyncio.run(main())
 ```
 
-(Point `url` at your own [`smooth-operator-server`](../rust/README.md) or the hosted endpoint.)
+(Point `url` at your own [`smooth-operator-server`](https://github.com/SmooAI/smooth-operator/blob/main/rust/README.md) or the hosted endpoint.)
 
 ---
 
@@ -126,7 +131,7 @@ flowchart TD
 
 **A real bug the live E2E caught (mocks masked it):** `agentId` is UUID-typed in `spec/`, so pydantic rejected a bare string the lenient Go/TS clients accepted — surfacing a real cross-client `string`-vs-`UUID` alignment gap. A mock fixture using a valid UUID would have hidden it.
 
-**The proof story:** an LLM-as-judge scored a multi-turn answer **1/5** (the runtime forgot turn 1's context); the failing eval drove a per-session-memory fix; **it now scores 5/5** — a regression a substring test would have missed. See [`docs/EVALS.md`](../docs/EVALS.md).
+**The proof story:** an LLM-as-judge scored a multi-turn answer **1/5** (the runtime forgot turn 1's context); the failing eval drove a per-session-memory fix; **it now scores 5/5** — a regression a substring test would have missed. See [`docs/EVALS.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/EVALS.md).
 
 Live tests are **gated, never silently skipped** — `SMOOTH_AGENT_E2E=1` + `SMOOAI_GATEWAY_KEY` to run; skip cleanly otherwise.
 
@@ -147,6 +152,27 @@ uv run python scripts/generate.py    # regen pydantic models from ../spec via da
 
 Point `url` at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` — same protocol, same client.
 
-## License
+## 🧩 Part of Smoo AI
 
-MIT © 2026 Smoo AI
+`smooai-smooth-operator` is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product. It's the Python member of the **polyglot SDK set** (TypeScript · Python · Go · .NET · Rust) for the [smooth-operator](https://github.com/SmooAI/smooth-operator) service.
+
+- 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, server, the five clients, AWS/k8s deploy)
+- 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
+- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+
+## 🔗 Links
+
+- 📦 **PyPI** — [`smooai-smooth-operator`](https://pypi.org/project/smooai-smooth-operator/)
+- 🛰️ **Protocol** — [`docs/PROTOCOL.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/PROTOCOL.md)
+- 🧪 **Evals** — [`docs/EVALS.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/EVALS.md)
+- 💬 **Issues** — [github.com/SmooAI/smooth-operator/issues](https://github.com/SmooAI/smooth-operator/issues)
+
+## 📄 License
+
+MIT © 2026 Smoo AI. See [LICENSE](https://github.com/SmooAI/smooth-operator/blob/main/LICENSE).
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>
