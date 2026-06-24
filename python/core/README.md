@@ -1,1 +1,0 @@
-# smooth-operator-core (Python)

@@ -9,5 +9,4 @@
 # one `pnpm install` at the repo root links everything.
 packages:
     - typescript
-    - typescript/core
     - console

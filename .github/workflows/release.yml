@@ -178,8 +178,7 @@ jobs:
 
             # --- Python → PyPI -----------------------------------------------------
             # Prefer Trusted Publishing (OIDC) via the job's `id-token: write`; fall
-            # back to a token if SMOOAI_PYPI_TOKEN is set. Build + publish the client,
-            # then the engine core.
+            # back to a token if SMOOAI_PYPI_TOKEN is set. Build + publish the client.
             - name: Publish Python packages to PyPI
               if: steps.changesets.outputs.published == 'true' || github.event_name == 'workflow_dispatch'
               env:
@@ -187,7 +186,6 @@ jobs:
               run: |
                   export PATH="$HOME/.local/bin:$PATH"
                   (cd python && uv build && uv publish)
-                  (cd python/core && uv build && uv publish)
 
             # --- Go → git tag ------------------------------------------------------
             # The Go module is published by tagging. The subdir module lives at
