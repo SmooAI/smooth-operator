@@ -213,9 +213,9 @@ One protocol, defined once in [`spec/`](spec) (JSON Schema). Everything else is 
 | --- | --- |
 | **Engine** ([`smooth-operator-core`](https://github.com/SmooAI/smooth-operator-core)) | **5-language parity engine** — Rust · C# · Python · TypeScript · Go, each published (crates.io / NuGet / PyPI / npm / Go module). Rust is the reference; the others mirror its surface. |
 | **Protocol clients** | **All five languages** — TypeScript (`@smooai/smooth-operator`), Go, .NET (with a `Microsoft.Extensions.AI` `IChatClient` facade), Python, Rust. The TS side also ships a **React binding** and an **embeddable widget**. |
-| **Servers** | **Reference servers in Rust and C#** today. TypeScript, Python, and Go servers are **in progress** — each will consume its own language's engine so a host can run the full service in its native stack. |
+| **Servers** | **All five languages** — Rust · C# · Python · TypeScript · Go, each consuming its own language's engine so a host can run the full service in its native stack. Rust + C# carry the full surface (ingestion, admin, ACL, storage adapters); Python/TS/Go are native servers (transport · frame dispatch · per-turn engine · sessions · auth · graceful drain). **All five run the shared scenario conformance corpus** — protocol parity, tested. |
 
-> We don't claim five native servers exist — they don't yet. The Rust server is the reference (and what the deploy paths ship); the C# server is built on the published C# engine; TS/Python/Go servers are the next step. The five **clients** and the five **engines** are real and published today.
+> All five native servers now exist and run the same [`spec/conformance/scenarios`](spec/conformance/scenarios) corpus — driven by the engine's deterministic mock, so they must produce identical protocol output (the corpus already caught and fixed real error-handling divergences in the TS and C# servers). The Rust + C# servers carry the full surface; the Python/TS/Go servers are native and at protocol parity, growing toward the full feature surface. The five clients, five engines, and five servers are all real.
 
 ---
 
@@ -239,7 +239,7 @@ flowchart TD
   class J warm
 ```
 
-The Rust reference server and the C# server are both covered by their own protocol, ingestion, ACL, rerank, and embedder suites; the engine carries its own offline suite ([337 tests](https://github.com/SmooAI/smooth-operator-core) on a deterministic `MockLlmClient`). The five protocol clients are exercised against a real WebSocket in a cross-language E2E harness.
+All five native servers run a **shared scenario conformance corpus** ([`spec/conformance/scenarios`](spec/conformance/scenarios)) — language-neutral protocol flows driven by the engine's deterministic mock, so every server must produce identical output. That's the polyglot parity oracle, on top of each server's own protocol/ingestion/ACL/rerank/embedder suites and the engine's offline suite ([337 tests](https://github.com/SmooAI/smooth-operator-core) on a deterministic `MockLlmClient`). The five protocol clients are exercised against a real WebSocket in a cross-language E2E harness.
 
 ### The proof story
 
