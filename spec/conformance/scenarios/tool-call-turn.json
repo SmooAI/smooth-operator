@@ -1,0 +1,70 @@
+{
+    "name": "tool-call-turn",
+    "description": "The engine calls a server-registered tool mid-turn, the server dispatches it and streams the call + result, then streams the final grounded reply. The `server.tools` directive registers a deterministic test tool (it ignores its args and returns a fixed result), so the whole tool-calling turn is reproducible across every server.",
+    "server": {
+        "tools": [
+            {
+                "name": "lookup_order",
+                "description": "Look up an order's status by its id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                },
+                "result": "Order 123: shipped, arrives Tuesday."
+            }
+        ]
+    },
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "lookup_order", "arguments": "{\"id\": \"123\"}" },
+        { "kind": "text", "text": "Your order 123 has shipped and arrives Tuesday." }
+    ],
+    "steps": [
+        {
+            "send": {
+                "action": "create_conversation_session",
+                "requestId": "r-create",
+                "agentId": "11111111-1111-1111-1111-111111111111",
+                "userName": "Alice",
+                "userEmail": "alice@example.com"
+            },
+            "expect": [
+                { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } }
+            ]
+        },
+        {
+            "send": {
+                "action": "send_message",
+                "requestId": "r-msg",
+                "sessionId": "{{sessionId}}",
+                "message": "where is order 123?",
+                "stream": true
+            },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "stream_chunk",
+                    "assert": { "data.state.rawResponse.toolCall.name": "lookup_order" }
+                },
+                {
+                    "type": "stream_chunk",
+                    "assert": {
+                        "data.state.rawResponse.toolResult.name": "lookup_order",
+                        "data.state.rawResponse.toolResult.isError": false
+                    }
+                },
+                {
+                    "type": "stream_token",
+                    "repeat": true,
+                    "accumulate": "token",
+                    "assertAccumulated": "Your order 123 has shipped and arrives Tuesday."
+                },
+                {
+                    "type": "eventual_response",
+                    "status": 200,
+                    "assert": { "data.data.response.responseParts": ["Your order 123 has shipped and arrives Tuesday."] }
+                }
+            ]
+        }
+    ]
+}
