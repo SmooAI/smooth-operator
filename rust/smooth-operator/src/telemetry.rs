@@ -172,7 +172,7 @@ where
     // Keep the provider alive for the process lifetime so the batch processor
     // keeps flushing. It's intentionally leaked (process-global, like the
     // installed subscriber) rather than dropped at the end of this fn.
-    let _ = opentelemetry::global::set_tracer_provider(provider);
+    opentelemetry::global::set_tracer_provider(provider);
 
     Ok(tracing_opentelemetry::layer().with_tracer(tracer).boxed())
 }
