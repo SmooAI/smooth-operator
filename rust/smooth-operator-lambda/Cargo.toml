@@ -1,6 +1,8 @@
 [package]
 name = "smooai-smooth-operator-lambda"
 version = "0.1.0"
+# Deploy binary, not a consumable library — exclude from crates.io.
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
