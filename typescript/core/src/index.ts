@@ -7,7 +7,7 @@
  */
 
 export { delegateTool, SmoothAgent } from './agent.js';
-export type { AgentOptions, AgentRunResponse, ChatClientLike, Tool } from './agent.js';
+export type { AgentOptions, AgentRunResponse, ChatChunk, ChatClientLike, StreamEvent, Tool } from './agent.js';
 export { Cast, Clearance, makeRole, RoleKind } from './cast.js';
 export type { OperatorRole } from './cast.js';
 export { InMemoryCheckpointStore } from './checkpoint.js';
@@ -19,7 +19,7 @@ export type { HumanApprovalRequest, HumanApprovalResponse, HumanGate } from './h
 export { InMemoryKnowledge } from './knowledge.js';
 export type { Knowledge, KnowledgeHit } from './knowledge.js';
 export { MockLlmProvider, textResponse, toolCallResponse } from './llmProvider.js';
-export type { LlmProvider, RecordedCall, ScriptedMessage } from './llmProvider.js';
+export type { LlmProvider, RecordedCall, ScriptedMessage, ScriptedUsage } from './llmProvider.js';
 export { InMemoryMemory } from './memory.js';
 export type { Memory, MemoryEntry } from './memory.js';
 export { LexicalReranker, NoopReranker } from './rerank.js';

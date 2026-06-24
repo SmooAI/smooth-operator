@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol, Union
 
 from .cast import Clearance
 from .checkpoint import Checkpoint, CheckpointStore
@@ -140,6 +140,47 @@ class AgentRunResponse:
     cost_usd: float = 0.0
     #: True if the turn stopped because the cost/token budget was hit.
     budget_exceeded: bool = False
+
+
+@dataclass(frozen=True)
+class TextEvent:
+    """An incremental assistant content delta as it streams in."""
+
+    text: str
+    type: str = "text"
+
+
+@dataclass(frozen=True)
+class ToolCallEvent:
+    """A tool call the model requested, emitted once before it is dispatched."""
+
+    name: str
+    arguments: str
+    type: str = "tool_call"
+
+
+@dataclass(frozen=True)
+class ToolResultEvent:
+    """A tool's result, emitted after it finishes."""
+
+    name: str
+    result: str
+    type: str = "tool_result"
+
+
+@dataclass(frozen=True)
+class DoneEvent:
+    """The single terminal event, carrying the same :class:`AgentRunResponse`
+    that :meth:`SmoothAgent.run` would return for the same script."""
+
+    response: AgentRunResponse
+    type: str = "done"
+
+
+#: A streamed event from :meth:`SmoothAgent.run_stream`. A tagged union (each variant
+#: carries a literal ``type``), mirroring the C# ``RunStreamingAsync`` update sequence
+#: and the Rust reference engine's event stream.
+StreamEvent = Union[TextEvent, ToolCallEvent, ToolResultEvent, DoneEvent]
 
 
 def _extract_usage(response: Any) -> Usage:
@@ -343,6 +384,197 @@ class SmoothAgent:
             # back to the thread so the next run sees the full conversation.
             if thread is not None:
                 thread.extend(turn_messages)
+
+    async def run_stream(
+        self,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        thread: SmoothAgentThread | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream a single turn, yielding incremental :data:`StreamEvent`s.
+
+        Drives the SAME agentic loop as :meth:`run` (system/knowledge/memory build,
+        seed messages, per-iteration compaction, cost tracking, budget early-stop,
+        deferred-tool specs, clearance + human-gate on dispatch, checkpoint/thread
+        persistence on exit) — but calls the model in STREAMING mode and emits events
+        as work happens:
+
+        * a :class:`TextEvent` per non-empty content delta as it streams in;
+        * a :class:`ToolCallEvent` per requested tool call, after that iteration's
+          model stream ends, BEFORE the call is dispatched;
+        * a :class:`ToolResultEvent` per tool, after it finishes (in original call
+          order even when ``parallel_tool_calls`` runs them concurrently);
+        * exactly one terminal :class:`DoneEvent` carrying the same
+          :class:`AgentRunResponse` :meth:`run` would return for the same script.
+
+        NOTE: retry-with-backoff (``max_retries``/``retry_backoff_ms``) is intentionally
+        NOT applied here — re-running the call after a mid-stream failure would re-emit
+        already-yielded chunks. Retry stays scoped to non-streaming :meth:`run`; this
+        mirrors the C# ``RunStreamingAsync`` decision.
+        """
+        messages: list[dict[str, Any]] = []
+        system = self._build_system(message)
+        if system:
+            messages.append({"role": "system", "content": system})
+
+        cp_store = self._options.checkpoint_store
+        cp_id = self._options.conversation_id
+        prior = history
+        if cp_store is not None and cp_id is not None:
+            loaded = cp_store.load(cp_id)
+            if loaded is not None:
+                prior = loaded.messages
+        if thread is not None:
+            prior = list(thread.messages)
+        if prior:
+            messages.extend(prior)
+        user_msg = {"role": "user", "content": message}
+        messages.append(user_msg)
+
+        turn_messages: list[dict[str, Any]] = [user_msg]
+        search = ToolSearch(self._options.deferred_tools) if self._options.deferred_tools else None
+        tool_call_count = 0
+        last_text = ""
+        tracker = CostTracker()
+
+        try:
+            for iteration in range(1, self._options.max_iterations + 1):
+                messages = compact(messages, self._options.max_context_tokens)
+                tool_specs = self._tool_specs(search)
+
+                # Stream the model call, yielding text deltas while accumulating the full
+                # assistant message (content + tool calls + usage).
+                content = ""
+                partials: dict[int, dict[str, str]] = {}
+                usage: Usage = Usage()
+                stream = await self._call_model_stream(messages, tool_specs)
+                async for chunk in stream:
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage is not None:
+                        usage = Usage(
+                            prompt_tokens=int(getattr(chunk_usage, "prompt_tokens", 0) or 0),
+                            completion_tokens=int(getattr(chunk_usage, "completion_tokens", 0) or 0),
+                        )
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0], "delta", None)
+                    if delta is None:
+                        continue
+                    text_delta = getattr(delta, "content", None)
+                    if text_delta:
+                        content += text_delta
+                        yield TextEvent(text=text_delta)
+                    for tc in getattr(delta, "tool_calls", None) or []:
+                        idx = int(getattr(tc, "index", 0))
+                        cur = partials.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                        if getattr(tc, "id", None):
+                            cur["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                cur["name"] = fn.name
+                            if getattr(fn, "arguments", None):
+                                cur["arguments"] += fn.arguments
+
+                tool_calls = [partials[i] for i in sorted(partials)]
+                tracker.record(self._options.model, usage, self._options.pricing)
+                last_text = content
+
+                assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+                if tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                        }
+                        for tc in tool_calls
+                    ]
+                messages.append(assistant_msg)
+                turn_messages.append(assistant_msg)
+
+                if tracker.exceeds(self._options.budget):
+                    yield DoneEvent(
+                        response=AgentRunResponse(
+                            text=last_text,
+                            iterations=iteration,
+                            tool_calls=tool_call_count,
+                            usage=tracker.usage,
+                            cost_usd=tracker.cost_usd,
+                            budget_exceeded=True,
+                        )
+                    )
+                    return
+
+                if not tool_calls:
+                    yield DoneEvent(
+                        response=AgentRunResponse(
+                            text=last_text,
+                            iterations=iteration,
+                            tool_calls=tool_call_count,
+                            usage=tracker.usage,
+                            cost_usd=tracker.cost_usd,
+                        )
+                    )
+                    return
+
+                tool_call_count += len(tool_calls)
+                # Emit a tool_call event per requested call (original order) BEFORE dispatch.
+                for tc in tool_calls:
+                    yield ToolCallEvent(name=tc["name"], arguments=tc["arguments"])
+
+                # Reuse the SAME dispatch path as ``run`` (clearance, human-gate,
+                # tool_search, JSON parsing, error-to-string, parallel_tool_calls).
+                # Results surface in original call order so the stream stays deterministic.
+                if self._options.parallel_tool_calls and len(tool_calls) > 1:
+                    results = await asyncio.gather(
+                        *(self._dispatch_tool(tc["name"], tc["arguments"], search) for tc in tool_calls)
+                    )
+                else:
+                    results = [await self._dispatch_tool(tc["name"], tc["arguments"], search) for tc in tool_calls]
+                for tc, result in zip(tool_calls, results):
+                    tool_msg = {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                    messages.append(tool_msg)
+                    turn_messages.append(tool_msg)
+                    yield ToolResultEvent(name=tc["name"], result=result)
+
+            yield DoneEvent(
+                response=AgentRunResponse(
+                    text=last_text,
+                    iterations=self._options.max_iterations,
+                    tool_calls=tool_call_count,
+                    usage=tracker.usage,
+                    cost_usd=tracker.cost_usd,
+                )
+            )
+        finally:
+            if cp_store is not None and cp_id is not None:
+                cp_store.save(
+                    Checkpoint(conversation_id=cp_id, messages=[m for m in messages if m.get("role") != "system"])
+                )
+            if thread is not None:
+                thread.extend(turn_messages)
+
+    async def _call_model_stream(
+        self, messages: list[dict[str, Any]], tool_specs: list[dict[str, Any]] | None
+    ) -> AsyncIterator[Any]:
+        """Open a streaming model call, returning the async iterator of chunks.
+
+        Production wires this to the real ``openai`` SDK's
+        ``chat.completions.create(..., stream=True)`` (which returns an async stream
+        of OpenAI chunk objects). The seam exists so the mock + loop are testable
+        without a live model. Retry is deliberately not applied here — see
+        :meth:`run_stream`.
+        """
+        return await self._client.chat.completions.create(
+            model=self._options.model,
+            messages=messages,
+            tools=tool_specs,
+            temperature=self._options.temperature,
+            max_tokens=self._options.max_tokens,
+            stream=True,
+        )
 
     async def _call_model(self, messages: list[dict[str, Any]], tool_specs: list[dict[str, Any]] | None) -> Any:
         """Invoke the model with bounded retry-with-exponential-backoff.

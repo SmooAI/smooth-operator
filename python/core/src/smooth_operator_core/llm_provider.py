@@ -17,17 +17,18 @@ ad-hoc fake clients the tests rolled by hand. The mock:
   assert on what the agent sent.
 
 This mirrors the BEHAVIOR of the Rust reference's ``MockLlmClient``
-(``rust/smooth-operator-core/src/llm_provider.rs``). The Rust reference also
-exposes streaming (``chat_stream``) and structured-output (``chat_structured``)
-methods; the Python/TS/Go cores' agent loop only uses the single non-streaming
-chat call, so the provider seam here covers that one surface. Streaming /
-structured-output land when those features land in this engine.
+(``rust/smooth-operator-core/src/llm_provider.rs``). The mock implements both the
+non-streaming call (``create(...)``, used by :meth:`SmoothAgent.run`) and the
+streaming call (``create(..., stream=True)``, used by :meth:`SmoothAgent.run_stream`):
+it replays the SAME FIFO script as chunked deltas — text split into a few pieces,
+tool-call ``arguments`` split across two chunks to exercise the accumulator, and a
+final chunk carrying usage. Structured-output lands when that feature lands here.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -49,19 +50,30 @@ class LlmProvider(Protocol):
 # ── response builders (handy for scripting the mock and for assertions) ──────
 
 
-def text_response(content: str) -> SimpleNamespace:
-    """An OpenAI-shaped assistant message that is plain text (no tool calls)."""
-    return SimpleNamespace(content=content, tool_calls=None)
+def usage(prompt_tokens: int = 0, completion_tokens: int = 0) -> SimpleNamespace:
+    """An OpenAI-shaped ``usage`` object to attach to a scripted response."""
+    return SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
 
 
-def tool_call_response(call_id: str, name: str, arguments: str) -> SimpleNamespace:
+def text_response(content: str, usage: SimpleNamespace | None = None) -> SimpleNamespace:
+    """An OpenAI-shaped assistant message that is plain text (no tool calls).
+
+    An optional ``usage`` rides along (used by the streaming path's final chunk and
+    the non-streaming response's ``.usage``).
+    """
+    return SimpleNamespace(content=content, tool_calls=None, usage=usage)
+
+
+def tool_call_response(
+    call_id: str, name: str, arguments: str, usage: SimpleNamespace | None = None
+) -> SimpleNamespace:
     """An OpenAI-shaped assistant message that requests a single tool call.
 
     ``arguments`` is the raw JSON-string the model emits for the call's arguments
     (mirroring the wire shape the agent parses).
     """
     tool_call = SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
-    return SimpleNamespace(content=None, tool_calls=[tool_call])
+    return SimpleNamespace(content=None, tool_calls=[tool_call], usage=usage)
 
 
 class RecordedCall:
@@ -86,22 +98,74 @@ class _ScriptedError(Exception):
     """Marker for an error the script wants raised from a chat call."""
 
 
+def _split_into_chunks(s: str, n: int = 3) -> list[str]:
+    """Split ``s`` into up to ``n`` roughly-equal non-empty pieces."""
+    if not s:
+        return []
+    parts = min(n, max(1, len(s)))
+    size = -(-len(s) // parts)  # ceil division
+    return [s[i : i + size] for i in range(0, len(s), size)]
+
+
+async def _stream_chunks(message: SimpleNamespace) -> AsyncIterator[SimpleNamespace]:
+    """Yield OpenAI-shaped streaming chunks for a scripted ``message``.
+
+    Text is split into a few content-delta chunks; each tool call is emitted as an
+    opening chunk (id + name + first half of arguments) plus a second chunk with the
+    rest of the arguments (exercising the agent's index-keyed accumulator); a final
+    empty-delta chunk carries usage.
+    """
+    content = message.content or ""
+    for piece in _split_into_chunks(content):
+        if piece:
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=piece, tool_calls=None))], usage=None
+            )
+    for index, tc in enumerate(message.tool_calls or []):
+        args = tc.function.arguments or ""
+        mid = len(args) // 2
+        open_tc = SimpleNamespace(
+            index=index, id=tc.id, function=SimpleNamespace(name=tc.function.name, arguments=args[:mid])
+        )
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=[open_tc]))], usage=None
+        )
+        rest_tc = SimpleNamespace(index=index, id=None, function=SimpleNamespace(name=None, arguments=args[mid:]))
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=[rest_tc]))], usage=None
+        )
+    yield SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=None))],
+        usage=getattr(message, "usage", None),
+    )
+
+
 class _Completions:
     """Implements the ``chat.completions`` surface: replay + record."""
 
     def __init__(self, owner: MockLlmProvider) -> None:
         self._owner = owner
 
-    async def create(self, **kwargs: Any) -> SimpleNamespace:
+    async def create(self, **kwargs: Any) -> Any:
+        # ``stream=True`` returns an async iterator of chunks; otherwise a full response.
+        streaming = bool(kwargs.pop("stream", False))
         self._owner._calls.append(RecordedCall(kwargs))
         if not self._owner._script:
-            # Empty script: a benign terminal text response so loops don't hang.
             message: Any = text_response("")
         else:
             message = self._owner._script.pop(0)
         if isinstance(message, _ScriptedError):
+            if streaming:
+                # The error surfaces when the stream is first iterated.
+                async def _erroring() -> AsyncIterator[SimpleNamespace]:
+                    raise message
+                    yield  # pragma: no cover - unreachable, makes this an async generator
+
+                return _erroring()
             raise message
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        if streaming:
+            return _stream_chunks(message)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=getattr(message, "usage", None))
 
 
 class MockLlmProvider:
@@ -135,13 +199,15 @@ class MockLlmProvider:
         self._script.append(message)
         return self
 
-    def push_text(self, content: str) -> MockLlmProvider:
-        """Queue a plain-text response for the next call."""
-        return self.push_response(text_response(content))
+    def push_text(self, content: str, usage: SimpleNamespace | None = None) -> MockLlmProvider:
+        """Queue a plain-text response (with optional usage) for the next call."""
+        return self.push_response(text_response(content, usage))
 
-    def push_tool_call(self, call_id: str, name: str, arguments: str) -> MockLlmProvider:
-        """Queue a single-tool-call response for the next call."""
-        return self.push_response(tool_call_response(call_id, name, arguments))
+    def push_tool_call(
+        self, call_id: str, name: str, arguments: str, usage: SimpleNamespace | None = None
+    ) -> MockLlmProvider:
+        """Queue a single-tool-call response (with optional usage) for the next call."""
+        return self.push_response(tool_call_response(call_id, name, arguments, usage))
 
     def push_error(self, message: str) -> MockLlmProvider:
         """Queue an error to be raised on the next call."""

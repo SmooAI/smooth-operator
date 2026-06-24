@@ -18,14 +18,15 @@
  *   assert on what the agent sent.
  *
  * This mirrors the BEHAVIOR of the Rust reference's `MockLlmClient`
- * (`rust/smooth-operator-core/src/llm_provider.rs`). The Rust reference also
- * exposes streaming (`chat_stream`) and structured-output (`chat_structured`)
- * methods; this engine's agent loop only uses the single non-streaming chat call,
- * so the provider seam covers that one surface. Streaming / structured-output
- * land when those features land in this engine.
+ * (`rust/smooth-operator-core/src/llm_provider.rs`). The mock implements both the
+ * non-streaming `create` seam (used by {@link SmoothAgent.run}) and the streaming
+ * `createStream` seam (used by {@link SmoothAgent.runStream}): it replays the SAME
+ * FIFO script as chunked deltas — text split into a few pieces, tool-call
+ * `arguments` split across two chunks to exercise the accumulator, and a final
+ * chunk carrying usage. Structured-output lands when that feature lands here.
  */
 
-import type { ChatClientLike } from './agent.js';
+import type { ChatChunk, ChatClientLike } from './agent.js';
 
 /** The LLM call surface the agent loop depends on. Identical to {@link ChatClientLike}. */
 export type LlmProvider = ChatClientLike;
@@ -56,8 +57,14 @@ export interface RecordedCall {
     tools?: Array<Record<string, unknown>>;
 }
 
-/** A scripted outcome: either a response message or an error to throw. */
-type Outcome = { kind: 'message'; message: ScriptedMessage } | { kind: 'error'; message: string };
+/** Optional token usage to attach to a scripted response (the model/gateway reports it). */
+export interface ScriptedUsage {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+}
+
+/** A scripted outcome: either a response message (with optional usage) or an error to throw. */
+type Outcome = { kind: 'message'; message: ScriptedMessage; usage?: ScriptedUsage } | { kind: 'error'; message: string };
 
 /**
  * A deterministic {@link LlmProvider} for tests. Script the responses it should
@@ -84,20 +91,20 @@ export class MockLlmProvider implements ChatClientLike {
 
     // ── scripting (fluent: each returns this) ────────────────────────────────
 
-    /** Queue a raw OpenAI-shaped assistant message for the next call. */
-    pushResponse(message: ScriptedMessage): this {
-        this.script.push({ kind: 'message', message });
+    /** Queue a raw OpenAI-shaped assistant message (with optional usage) for the next call. */
+    pushResponse(message: ScriptedMessage, usage?: ScriptedUsage): this {
+        this.script.push({ kind: 'message', message, usage });
         return this;
     }
 
-    /** Queue a plain-text response for the next call. */
-    pushText(content: string): this {
-        return this.pushResponse(textResponse(content));
+    /** Queue a plain-text response (with optional usage) for the next call. */
+    pushText(content: string, usage?: ScriptedUsage): this {
+        return this.pushResponse(textResponse(content), usage);
     }
 
-    /** Queue a single-tool-call response for the next call. */
-    pushToolCall(id: string, name: string, args: string): this {
-        return this.pushResponse(toolCallResponse(id, name, args));
+    /** Queue a single-tool-call response (with optional usage) for the next call. */
+    pushToolCall(id: string, name: string, args: string, usage?: ScriptedUsage): this {
+        return this.pushResponse(toolCallResponse(id, name, args), usage);
     }
 
     /** Queue an error to be thrown on the next call. */
@@ -125,20 +132,72 @@ export class MockLlmProvider implements ChatClientLike {
 
     // ── the ChatClientLike surface ───────────────────────────────────────────
 
+    private record(body: Record<string, unknown>): void {
+        this.recorded.push({
+            body,
+            messages: (body.messages as Array<Record<string, unknown>>) ?? [],
+            tools: body.tools as Array<Record<string, unknown>> | undefined,
+        });
+    }
+
     readonly chat = {
         completions: {
             create: async (body: Record<string, unknown>) => {
-                this.recorded.push({
-                    body,
-                    messages: (body.messages as Array<Record<string, unknown>>) ?? [],
-                    tools: body.tools as Array<Record<string, unknown>> | undefined,
-                });
+                this.record(body);
                 const outcome = this.script.shift();
                 if (outcome?.kind === 'error') throw new Error(outcome.message);
                 // Empty script: a benign terminal text response so loops don't hang.
                 const message: ScriptedMessage = outcome?.message ?? { content: '' };
-                return { choices: [{ message }] };
+                const usage = outcome?.kind === 'message' ? outcome.usage : undefined;
+                return { choices: [{ message }], usage: usage ?? null };
+            },
+
+            // Streaming seam: replays the SAME FIFO script as chunked deltas. Text is
+            // split into a few pieces (so consumers see multiple `text` events); a
+            // tool call's `arguments` is split across two chunks (so the agent's
+            // accumulator is exercised); a final empty-delta chunk carries usage.
+            createStream: (body: Record<string, unknown>): AsyncIterable<ChatChunk> => {
+                this.record(body);
+                const outcome = this.script.shift();
+                const message: ScriptedMessage = outcome?.kind === 'message' ? outcome.message : { content: '' };
+                const usage = outcome?.kind === 'message' ? outcome.usage : undefined;
+                const error = outcome?.kind === 'error' ? outcome.message : undefined;
+
+                async function* gen(): AsyncGenerator<ChatChunk> {
+                    if (error) throw new Error(error);
+                    // Text content → 2-3 deltas.
+                    const content = message.content ?? '';
+                    for (const piece of splitIntoChunks(content, 3)) {
+                        if (piece) yield { choices: [{ delta: { content: piece } }] };
+                    }
+                    // Tool calls → opening chunk (id + name + first arg half), then a
+                    // second chunk with the rest of the arguments. Exercises the
+                    // index-keyed accumulator on the agent side.
+                    for (const [index, tc] of (message.tool_calls ?? []).entries()) {
+                        const args = tc.function.arguments ?? '';
+                        const mid = Math.floor(args.length / 2);
+                        yield {
+                            choices: [{ delta: { tool_calls: [{ index, id: tc.id, function: { name: tc.function.name, arguments: args.slice(0, mid) } }] } }],
+                        };
+                        yield {
+                            choices: [{ delta: { tool_calls: [{ index, function: { arguments: args.slice(mid) } }] } }],
+                        };
+                    }
+                    // Final chunk carries usage (gateways send it on the last chunk).
+                    yield { choices: [{ delta: {} }], usage: usage ? { prompt_tokens: usage.prompt_tokens ?? 0, completion_tokens: usage.completion_tokens ?? 0 } : null };
+                }
+                return gen();
             },
         },
     };
+}
+
+/** Split `s` into up to `n` roughly-equal non-empty pieces (≥2 when long enough). */
+function splitIntoChunks(s: string, n: number): string[] {
+    if (s.length === 0) return [];
+    const parts = Math.min(n, Math.max(1, s.length));
+    const size = Math.ceil(s.length / parts);
+    const out: string[] = [];
+    for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
+    return out;
 }

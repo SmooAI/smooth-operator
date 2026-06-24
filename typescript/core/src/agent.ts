@@ -128,8 +128,36 @@ export interface AgentRunResponse {
 }
 
 /**
+ * One streamed chunk from a streaming chat completion — the standard OpenAI
+ * `chat.completions` streaming chunk shape. `content` deltas concatenate into the
+ * assistant text; `tool_calls` fragments are assembled by their `index` (the `id`
+ * + `function.name` appear when the call first opens, `function.arguments` arrives
+ * in fragments). `usage` is sent by gateways on (typically) the final chunk.
+ */
+export interface ChatChunk {
+    choices: Array<{
+        delta: {
+            content?: string | null;
+            tool_calls?: Array<{
+                index: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+            }> | null;
+        };
+    }>;
+    usage?: { prompt_tokens?: number | null; completion_tokens?: number | null } | null;
+}
+
+/**
  * The minimal shape of the OpenAI-compatible client the agent needs. The real
  * `openai` SDK's `OpenAI` satisfies this; tests inject a fake.
+ *
+ * `chat.completions.create` is the non-streaming call the {@link SmoothAgent.run}
+ * loop uses. `createStream` is the optional streaming call the
+ * {@link SmoothAgent.runStream} loop uses — production wires it to the real SDK's
+ * `create({ ...body, stream: true })` (which returns an async-iterable of
+ * {@link ChatChunk}s). It is optional so non-streaming consumers and the existing
+ * fakes keep satisfying the interface; `runStream` throws if it is absent.
  */
 export interface ChatClientLike {
     chat: {
@@ -143,8 +171,40 @@ export interface ChatClientLike {
                 }>;
                 usage?: { prompt_tokens?: number | null; completion_tokens?: number | null } | null;
             }>;
+            /**
+             * Streaming variant of {@link create}. Production wires this to the real
+             * `openai` SDK's `create({ ...body, stream: true })`, which returns an
+             * `AsyncIterable<ChatChunk>`. Optional so non-streaming clients still satisfy
+             * the seam; {@link SmoothAgent.runStream} requires it.
+             */
+            createStream?(body: Record<string, unknown>): AsyncIterable<ChatChunk>;
         };
     };
+}
+
+/**
+ * A streamed event from {@link SmoothAgent.runStream}. A tagged union discriminated
+ * on `type`, mirroring the C# `RunStreamingAsync` update sequence and the Rust
+ * reference engine's event stream:
+ *
+ * - `text`     — an incremental assistant content delta as it streams in.
+ * - `tool_call`— a tool call the model requested, emitted once (after the model
+ *                stream for the iteration completes) before it is dispatched.
+ * - `tool_result` — a tool's result, emitted after it finishes.
+ * - `done`     — the single terminal event, carrying the same {@link AgentRunResponse}
+ *                that {@link SmoothAgent.run} would return for the same script.
+ */
+export type StreamEvent =
+    | { type: 'text'; text: string }
+    | { type: 'tool_call'; name: string; arguments: string }
+    | { type: 'tool_result'; name: string; result: string }
+    | { type: 'done'; response: AgentRunResponse };
+
+/** An assistant message assembled from streamed {@link ChatChunk} deltas. */
+interface AssembledMessage {
+    content: string;
+    toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
+    usage: { prompt_tokens?: number | null; completion_tokens?: number | null } | null;
 }
 
 const DEFAULTS = {
@@ -333,6 +393,164 @@ export class SmoothAgent {
             }
             // Append this turn's new messages (user + assistant + tool, never system)
             // back to the thread so the next run sees the full conversation.
+            if (thread) thread.extend(turnMessages);
+        }
+    }
+
+    /**
+     * Stream a single turn, yielding incremental {@link StreamEvent}s as the model
+     * produces them. This drives the SAME agentic loop as {@link run} (system /
+     * knowledge / memory build, seed messages, per-iteration compaction, cost
+     * tracking, budget early-stop, deferred-tool specs, clearance + human-gate on
+     * dispatch, checkpoint/thread persistence on exit) — but calls the model in
+     * STREAMING mode and emits events as work happens:
+     *
+     * - a `text` event per non-empty content delta as it streams in;
+     * - a `tool_call` event per requested tool call, after that iteration's model
+     *   stream ends, BEFORE the call is dispatched;
+     * - a `tool_result` event per tool, after it finishes (in original call order
+     *   even when `parallelToolCalls` runs them concurrently);
+     * - exactly one terminal `done` event carrying the same {@link AgentRunResponse}
+     *   {@link run} would return for the same script.
+     *
+     * NOTE: retry-with-backoff (`maxRetries`/`retryBackoffMs`) is intentionally NOT
+     * applied here — re-running the call after a mid-stream failure would re-emit
+     * already-yielded chunks. Retry stays scoped to non-streaming {@link run}; this
+     * mirrors the C# `RunStreamingAsync` decision.
+     */
+    async *runStream(message: string, history?: Array<Record<string, unknown>>, thread?: SmoothAgentThread): AsyncGenerator<StreamEvent> {
+        const createStream = this.client.chat.completions.createStream?.bind(this.client.chat.completions);
+        if (!createStream) throw new Error('runStream requires a streaming-capable client (chat.completions.createStream)');
+
+        const messages: Array<Record<string, unknown>> = [];
+        const system = this.buildSystem(message);
+        if (system) messages.push({ role: 'system', content: system });
+
+        // Source prior conversation: the thread (if passed) wins, then the checkpoint
+        // store (if configured), then the explicit `history` argument. (Same as `run`.)
+        const cpStore = this.options.checkpointStore;
+        const cpId = this.options.conversationId;
+        let prior = history;
+        if (cpStore && cpId) {
+            const loaded = cpStore.load(cpId);
+            if (loaded) prior = loaded.messages;
+        }
+        if (thread) prior = [...thread.messages];
+        if (prior) messages.push(...prior);
+        const userMsg: Record<string, unknown> = { role: 'user', content: message };
+        messages.push(userMsg);
+
+        const turnMessages: Array<Record<string, unknown>> = [userMsg];
+        const search = this.options.deferredTools && this.options.deferredTools.length > 0 ? new ToolSearch(this.options.deferredTools) : undefined;
+        const maxIterations = this.options.maxIterations ?? DEFAULTS.maxIterations;
+        let toolCalls = 0;
+        let lastText = '';
+
+        const maxContextTokens = this.options.maxContextTokens ?? DEFAULTS.maxContextTokens;
+        const model = this.options.model ?? DEFAULTS.model;
+        const tracker = new CostTracker();
+        try {
+            for (let iteration = 1; iteration <= maxIterations; iteration++) {
+                messages.splice(0, messages.length, ...compact(messages, maxContextTokens));
+                const tools = this.toolSpecs(search);
+
+                // Stream the model call, yielding text deltas as they arrive while
+                // accumulating the full assistant message (content + tool calls + usage).
+                const assembled: AssembledMessage = { content: '', toolCalls: [], usage: null };
+                const partials = new Map<number, { id: string; name: string; arguments: string }>();
+                const stream = createStream({
+                    model,
+                    messages,
+                    ...(tools ? { tools } : {}),
+                    temperature: this.options.temperature ?? DEFAULTS.temperature,
+                    max_tokens: this.options.maxTokens ?? DEFAULTS.maxTokens,
+                    stream: true,
+                });
+                for await (const chunk of stream) {
+                    if (chunk.usage) assembled.usage = chunk.usage;
+                    const delta = chunk.choices[0]?.delta;
+                    if (!delta) continue;
+                    if (delta.content) {
+                        assembled.content += delta.content;
+                        yield { type: 'text', text: delta.content };
+                    }
+                    for (const tc of delta.tool_calls ?? []) {
+                        const cur = partials.get(tc.index) ?? { id: '', name: '', arguments: '' };
+                        if (tc.id) cur.id = tc.id;
+                        if (tc.function?.name) cur.name = tc.function.name;
+                        if (tc.function?.arguments) cur.arguments += tc.function.arguments;
+                        partials.set(tc.index, cur);
+                    }
+                }
+                // Materialize accumulated tool calls in ascending index order.
+                assembled.toolCalls = [...partials.entries()]
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([, p]) => ({ id: p.id, function: { name: p.name, arguments: p.arguments } }));
+
+                tracker.record(model, extractUsage(assembled.usage), this.options.pricing);
+                lastText = assembled.content;
+
+                const assistantMsg: Record<string, unknown> = { role: 'assistant', content: assembled.content };
+                if (assembled.toolCalls.length > 0) {
+                    assistantMsg.tool_calls = assembled.toolCalls.map((tc) => ({
+                        id: tc.id,
+                        type: 'function',
+                        function: { name: tc.function.name, arguments: tc.function.arguments },
+                    }));
+                }
+                messages.push(assistantMsg);
+                turnMessages.push(assistantMsg);
+
+                if (tracker.exceeds(this.options.budget)) {
+                    yield {
+                        type: 'done',
+                        response: { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: true },
+                    };
+                    return;
+                }
+
+                if (assembled.toolCalls.length === 0) {
+                    yield {
+                        type: 'done',
+                        response: { text: lastText, iterations: iteration, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false },
+                    };
+                    return;
+                }
+
+                toolCalls += assembled.toolCalls.length;
+                const calls = assembled.toolCalls;
+                // Emit a tool_call event per requested call (original order) BEFORE dispatch.
+                for (const tc of calls) {
+                    yield { type: 'tool_call', name: tc.function.name, arguments: tc.function.arguments };
+                }
+                // Reuse the SAME dispatch path as `run` (clearance, human-gate, tool_search,
+                // JSON parsing, error-to-string, parallelToolCalls). Results are surfaced in
+                // original call order so the event stream stays deterministic.
+                let results: string[];
+                if (this.options.parallelToolCalls && calls.length > 1) {
+                    results = await Promise.all(calls.map((tc) => this.dispatchTool(tc.function.name, tc.function.arguments, search)));
+                } else {
+                    results = [];
+                    for (const tc of calls) {
+                        results.push(await this.dispatchTool(tc.function.name, tc.function.arguments, search));
+                    }
+                }
+                for (let i = 0; i < calls.length; i++) {
+                    const toolMsg: Record<string, unknown> = { role: 'tool', tool_call_id: calls[i].id, content: results[i] };
+                    messages.push(toolMsg);
+                    turnMessages.push(toolMsg);
+                    yield { type: 'tool_result', name: calls[i].function.name, result: results[i] };
+                }
+            }
+
+            yield {
+                type: 'done',
+                response: { text: lastText, iterations: maxIterations, toolCalls, usage: tracker.usage, costUsd: tracker.costUsd, budgetExceeded: false },
+            };
+        } finally {
+            if (cpStore && cpId) {
+                cpStore.save({ conversationId: cpId, messages: messages.filter((m) => m.role !== 'system') });
+            }
             if (thread) thread.extend(turnMessages);
         }
     }
