@@ -72,11 +72,13 @@ const rustMembers = [
 
 /** @type {{ name: string, url: URL, apply: (text: string) => string }[]} */
 const targets = [
-    {
-        name: 'SmooAI.SmoothOperator.Core.csproj',
-        url: new URL('../dotnet/core/src/SmooAI.SmoothOperator.Core.csproj', import.meta.url),
-        apply: (text) => text.replace(/<Version>[^<]*<\/Version>/, `<Version>${version}</Version>`),
-    },
+    // NOTE: the .NET Core package (SmooAI.SmoothOperator.Core) moved OUT of this
+    // repo — commit 1f566ce ("repoint C# server to published NuGet Core 1.3.0 +
+    // remove in-tree engine") deleted dotnet/core/src/SmooAI.SmoothOperator.Core.csproj
+    // and the package is now versioned + published from the smooth-operator-core
+    // repo. The remaining dotnet/ binding has no <Version> (pack-time versioned),
+    // so there is no .csproj to stamp here. (Previously this target ENOENT-crashed
+    // the release after the dotnet restructure.)
     {
         name: 'python/pyproject.toml',
         url: new URL('../python/pyproject.toml', import.meta.url),
