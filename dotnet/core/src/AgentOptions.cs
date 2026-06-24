@@ -117,4 +117,19 @@ public sealed class AgentOptions
     /// works without it; only USD requires pricing.
     /// </summary>
     public IDictionary<string, ModelPricing> Pricing { get; } = new Dictionary<string, ModelPricing>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Number of ADDITIONAL attempts after the first if the model call throws a transient error
+    /// (rate-limit, 5xx, dropped connection). <c>0</c> (the default) preserves today's behaviour:
+    /// a single attempt, the error propagates immediately. Only the model call is retried — never
+    /// tool execution.
+    /// </summary>
+    public int MaxRetries { get; set; }
+
+    /// <summary>
+    /// Base delay for exponential backoff between retries. The wait before retry attempt <c>n</c>
+    /// (1-indexed) is <c>RetryBackoff * 2^(n-1)</c>. Defaults to 200ms; set to
+    /// <see cref="TimeSpan.Zero"/> to retry without sleeping (used by tests).
+    /// </summary>
+    public TimeSpan RetryBackoff { get; set; } = TimeSpan.FromMilliseconds(200);
 }
