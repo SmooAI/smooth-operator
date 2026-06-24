@@ -145,6 +145,10 @@ fn install_widget_auth_from_env(state: AppState) -> AppState {
 /// persistent backend fails to connect / migrate.
 pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState> {
     use crate::config::StorageBackend;
+    // Only the Postgres / DynamoDB arms name `StorageAdapter` (for the
+    // `Arc<dyn StorageAdapter>` annotation); on a lean build with neither feature
+    // those arms are compiled out, so the import would be unused.
+    #[cfg(any(feature = "postgres", feature = "dynamodb"))]
     use smooth_operator::adapter::StorageAdapter;
 
     let verifier = smooth_operator::auth::AuthConfig::from_env()
@@ -154,6 +158,11 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
         // The in-memory path is unchanged (synchronous, no external services).
         StorageBackend::Memory => build_state(config),
 
+        // The Postgres storage backend (and its matching durable admin stores)
+        // is only compiled in on a build with the `postgres` feature (the default
+        // / cloud build). A lean `--no-default-features` build returns a clear
+        // error if `SMOOTH_AGENT_STORAGE=postgres` is requested at runtime.
+        #[cfg(feature = "postgres")]
         StorageBackend::Postgres => {
             use smooth_operator_adapter_postgres::PostgresAdapter;
             // The pgvector column width MUST match the embedder the `/index`
@@ -187,6 +196,10 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
                 .with_indexing(indexing)
         }
 
+        // The DynamoDB storage backend is only compiled in on a build with the
+        // `dynamodb` feature (the default / cloud build). A lean build returns a
+        // clear error if `SMOOTH_AGENT_STORAGE=dynamodb` is requested at runtime.
+        #[cfg(feature = "dynamodb")]
         StorageBackend::Dynamodb => {
             use smooth_operator_adapter_dynamodb::DynamoDbAdapter;
             let adapter = Arc::new(
@@ -207,6 +220,26 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
                 .with_connector_configs(connectors)
                 .with_settings(settings)
                 .with_indexing(indexing)
+        }
+
+        // Lean build: a persistent backend was requested but its feature wasn't
+        // compiled in. Fail loud with an actionable message rather than silently
+        // running in-memory (which would lose data on restart).
+        #[cfg(not(feature = "postgres"))]
+        StorageBackend::Postgres => {
+            anyhow::bail!(
+                "SMOOTH_AGENT_STORAGE=postgres requires building with --features postgres \
+                 (this is a lean/local build); use SMOOTH_AGENT_STORAGE=memory or rebuild \
+                 with the 'cloud'/'postgres' feature"
+            );
+        }
+        #[cfg(not(feature = "dynamodb"))]
+        StorageBackend::Dynamodb => {
+            anyhow::bail!(
+                "SMOOTH_AGENT_STORAGE=dynamodb requires building with --features dynamodb \
+                 (this is a lean/local build); use SMOOTH_AGENT_STORAGE=memory or rebuild \
+                 with the 'cloud'/'dynamodb' feature"
+            );
         }
     };
 
@@ -251,19 +284,48 @@ async fn install_backplane_from_env(state: AppState) -> Result<AppState> {
 
     match kind.as_str() {
         "" | "memory" | "inmemory" => Ok(state), // default InMemoryBackplane already installed
+        // The Redis backplane is only compiled in on a build with the `redis`
+        // feature (the default / cloud build). A lean `--no-default-features`
+        // build returns a clear error rather than silently running single-process.
         "redis" | "valkey" => {
-            use smooth_operator_adapter_backplane_redis::RedisBackplane;
-            let backplane = RedisBackplane::connect(&url("SMOOTH_AGENT_REDIS_URL")?)
-                .await
-                .map_err(|e| anyhow::anyhow!("connecting Redis backplane: {e}"))?;
-            Ok(state.with_backplane(Arc::new(backplane)))
+            #[cfg(feature = "redis")]
+            {
+                use smooth_operator_adapter_backplane_redis::RedisBackplane;
+                let backplane = RedisBackplane::connect(&url("SMOOTH_AGENT_REDIS_URL")?)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("connecting Redis backplane: {e}"))?;
+                Ok(state.with_backplane(Arc::new(backplane)))
+            }
+            #[cfg(not(feature = "redis"))]
+            {
+                let _ = url; // silence unused-closure warning on the lean build
+                anyhow::bail!(
+                    "SMOOTH_AGENT_BACKPLANE={kind} requires building with --features redis \
+                     (this is a lean/local build); use SMOOTH_AGENT_BACKPLANE=memory or rebuild \
+                     with the 'cloud'/'redis' feature"
+                )
+            }
         }
+        // The NATS backplane is only compiled in on a build with the `nats`
+        // feature (the default / cloud build). A lean build returns a clear error.
         "nats" => {
-            use smooth_operator_adapter_backplane_nats::NatsBackplane;
-            let backplane = NatsBackplane::connect(&url("SMOOTH_AGENT_NATS_URL")?)
-                .await
-                .map_err(|e| anyhow::anyhow!("connecting NATS backplane: {e}"))?;
-            Ok(state.with_backplane(Arc::new(backplane)))
+            #[cfg(feature = "nats")]
+            {
+                use smooth_operator_adapter_backplane_nats::NatsBackplane;
+                let backplane = NatsBackplane::connect(&url("SMOOTH_AGENT_NATS_URL")?)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("connecting NATS backplane: {e}"))?;
+                Ok(state.with_backplane(Arc::new(backplane)))
+            }
+            #[cfg(not(feature = "nats"))]
+            {
+                let _ = url; // silence unused-closure warning on the lean build
+                anyhow::bail!(
+                    "SMOOTH_AGENT_BACKPLANE=nats requires building with --features nats \
+                     (this is a lean/local build); use SMOOTH_AGENT_BACKPLANE=memory or rebuild \
+                     with the 'cloud'/'nats' feature"
+                )
+            }
         }
         other => Err(anyhow::anyhow!(
             "unknown SMOOTH_AGENT_BACKPLANE '{other}' (expected: memory | redis | valkey | nats)"

@@ -25,7 +25,17 @@
 use std::sync::Arc;
 
 use smooth_operator::embedding::{DeterministicEmbedder, Embedder};
+#[cfg(feature = "postgres")]
 use smooth_operator_adapter_postgres::GatewayEmbedder;
+
+/// The dimension of the gateway embedder's `text-embedding-3-small` output. Re-
+/// exported from the postgres adapter on the default (cloud) build; defined
+/// locally on the lean build so the constant — and any caller that names it —
+/// still resolves without the postgres crate. The two definitions agree (1536).
+#[cfg(feature = "postgres")]
+pub use smooth_operator_adapter_postgres::OPENAI_SMALL_EMBEDDING_DIM;
+#[cfg(not(feature = "postgres"))]
+pub const OPENAI_SMALL_EMBEDDING_DIM: usize = 1536;
 
 /// Inputs the embedder selector needs. A small struct (rather than the whole
 /// [`ServerConfig`](crate::config::ServerConfig)) so the `dev-support` example —
@@ -71,6 +81,12 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 #[must_use]
 pub fn build_embedder(config: &EmbedderConfig) -> Arc<dyn Embedder> {
     match &config.gateway_key {
+        // The real, semantic GatewayEmbedder lives in the postgres adapter crate,
+        // so it's only available on a build with the `postgres` feature (the
+        // default / cloud build). On a lean `--no-default-features` build this arm
+        // is compiled out and a present key falls through to the deterministic
+        // fallback below — the lean/embed build has no gateway-backed retrieval.
+        #[cfg(feature = "postgres")]
         Some(key) if !key.trim().is_empty() => {
             tracing::info!(
                 model = %config.model,
@@ -80,7 +96,7 @@ pub fn build_embedder(config: &EmbedderConfig) -> Arc<dyn Embedder> {
                 config.gateway_url.clone(),
                 key.clone(),
                 config.model.clone(),
-                smooth_operator_adapter_postgres::OPENAI_SMALL_EMBEDDING_DIM,
+                OPENAI_SMALL_EMBEDDING_DIM,
             ))
         }
         _ => {
@@ -97,7 +113,6 @@ pub fn build_embedder(config: &EmbedderConfig) -> Arc<dyn Embedder> {
 mod tests {
     use super::*;
     use smooth_operator::embedding::DEFAULT_EMBEDDING_DIM;
-    use smooth_operator_adapter_postgres::OPENAI_SMALL_EMBEDDING_DIM;
 
     fn cfg(key: Option<&str>) -> EmbedderConfig {
         EmbedderConfig {
@@ -107,16 +122,32 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn keyed_config_selects_gateway_embedder_1536() {
         // A present key ⇒ the real GatewayEmbedder. We assert via its 1536-d
         // signature (no network call — `dim()` is local). This is the production
-        // path the adversarial review flagged was never reached.
+        // path the adversarial review flagged was never reached. Only on a build
+        // with the `postgres` feature (the gateway embedder lives in that crate).
         let embedder = build_embedder(&cfg(Some("sk-test")));
         assert_eq!(
             embedder.dim(),
             OPENAI_SMALL_EMBEDDING_DIM,
             "keyed config must select the 1536-d GatewayEmbedder"
+        );
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    #[test]
+    fn keyed_config_falls_back_to_deterministic_on_lean_build() {
+        // On a lean `--no-default-features` build the GatewayEmbedder isn't
+        // compiled in, so even a present key falls back to the deterministic
+        // (1024-d) embedder — the lean/embed build has no gateway retrieval.
+        let embedder = build_embedder(&cfg(Some("sk-test")));
+        assert_eq!(
+            embedder.dim(),
+            DEFAULT_EMBEDDING_DIM,
+            "lean build (no postgres feature) has no GatewayEmbedder; key is ignored"
         );
     }
 

@@ -31,7 +31,17 @@
 use std::sync::Arc;
 
 use smooth_operator::rerank::{LexicalReranker, NoopReranker, Reranker};
-use smooth_operator_adapter_postgres::{GatewayReranker, DEFAULT_RERANK_MODEL};
+#[cfg(feature = "postgres")]
+use smooth_operator_adapter_postgres::GatewayReranker;
+
+/// The default rerank model. Re-exported from the postgres adapter on the default
+/// (cloud) build; defined locally on the lean build so the constant — and any
+/// `RerankerConfig` that defaults to it — still resolves without the postgres
+/// crate. The two definitions agree.
+#[cfg(feature = "postgres")]
+pub use smooth_operator_adapter_postgres::DEFAULT_RERANK_MODEL;
+#[cfg(not(feature = "postgres"))]
+pub const DEFAULT_RERANK_MODEL: &str = "rerank-english-v3.0";
 
 /// Inputs the reranker selector needs. A small struct (rather than the whole
 /// [`ServerConfig`](crate::config::ServerConfig)) so other callers can build the
@@ -123,6 +133,12 @@ pub fn build_reranker(config: &RerankerConfig) -> Option<Arc<dyn Reranker>> {
             None
         }
         RerankMode::Gateway => match &config.gateway_key {
+            // The real GatewayReranker lives in the postgres adapter crate, so
+            // it's only available on a build with the `postgres` feature (the
+            // default / cloud build). On a lean `--no-default-features` build this
+            // arm is compiled out and gateway mode falls back to the offline
+            // LexicalReranker below regardless of the key.
+            #[cfg(feature = "postgres")]
             Some(key) if !key.trim().is_empty() => {
                 tracing::info!(
                     model = %config.model,
@@ -136,7 +152,8 @@ pub fn build_reranker(config: &RerankerConfig) -> Option<Arc<dyn Reranker>> {
             }
             _ => {
                 tracing::warn!(
-                    "SMOOTH_AGENT_RERANK=gateway but no gateway key — \
+                    "SMOOTH_AGENT_RERANK=gateway but no GatewayReranker available \
+                     (no gateway key, or a lean build without the `postgres` feature) — \
                      falling back to the offline LexicalReranker"
                 );
                 Some(Arc::new(LexicalReranker::new()))
