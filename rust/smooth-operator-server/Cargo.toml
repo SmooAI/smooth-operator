@@ -59,6 +59,11 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
+# CancellationToken backs the graceful SIGTERM/ctrl_c drain: one shared token on
+# AppState fans cancellation out to every per-connection reader loop so an
+# in-flight turn finishes, the loop exits, and the connection detaches from the
+# backplane (no stale registry entries) before the process exits.
+tokio-util = "0.7"
 
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"

@@ -22,6 +22,7 @@ use smooth_operator::domain::Session;
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
+use tokio_util::sync::CancellationToken;
 
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
@@ -76,6 +77,14 @@ pub struct AppState {
     /// tenant's usage is attributed to its own key. The per-turn LLM-config build
     /// falls back to the env key whenever the resolver returns `None`.
     pub gateway_key_resolver: Arc<dyn GatewayKeyResolver>,
+    /// Graceful-shutdown signal, shared across every per-connection clone of this
+    /// state. On SIGTERM/ctrl_c the serve loop cancels this token; each
+    /// connection's reader loop selects on [`CancellationToken::cancelled`] so it
+    /// finishes its in-flight turn, exits, and detaches from the [`Backplane`] —
+    /// no in-flight turn dropped, no stale registry entry left behind. A fresh
+    /// token from [`new`](Self::new) is never cancelled, so the `/ws` path and
+    /// tests are unaffected until a `run`/serve path wires the signal.
+    pub shutdown: CancellationToken,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Document-set registry, **org-scoped**: `org_id` → (set name → document
@@ -125,6 +134,11 @@ impl AppState {
             backplane: Arc::new(InMemoryBackplane::new()),
             chat_provider: None,
             gateway_key_resolver,
+            // A fresh, never-cancelled token: every clone of this state shares
+            // its cancellation state, so the serve loop cancelling once fans out
+            // to every connection. Defaulting here (rather than at each call
+            // site) keeps construction ripple-free.
+            shutdown: CancellationToken::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
@@ -197,6 +211,17 @@ impl AppState {
     #[must_use]
     pub fn with_gateway_key_resolver(mut self, resolver: Arc<dyn GatewayKeyResolver>) -> Self {
         self.gateway_key_resolver = resolver;
+        self
+    }
+
+    /// Install the graceful-shutdown signal (builder). The serve loop owns a
+    /// clone of this token and cancels it on SIGTERM/ctrl_c; every per-connection
+    /// clone observes the cancellation and drains. Defaulted to a fresh token in
+    /// [`new`](Self::new), so this is only needed when a caller wants to drive
+    /// shutdown from its own token.
+    #[must_use]
+    pub fn with_shutdown(mut self, shutdown: CancellationToken) -> Self {
+        self.shutdown = shutdown;
         self
     }
 
