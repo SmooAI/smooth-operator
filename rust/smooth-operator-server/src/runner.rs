@@ -21,15 +21,16 @@
 //!    of truth the adapter already persists.)
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::json;
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::{
-    Agent, AgentConfig, AgentEvent, KnowledgeBase, KnowledgeResult, LlmConfig,
-    Message as EngineMessage, Role, ToolRegistry,
+    human_channel, Agent, AgentConfig, AgentEvent, ConfirmationHook, HumanRequest, HumanResponse,
+    KnowledgeBase, KnowledgeResult, LlmConfig, Message as EngineMessage, Role, ToolRegistry,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{MessageQuery, StorageAdapter};
@@ -59,6 +60,52 @@ const KNOWLEDGE_CHAT_SYSTEM_PROMPT: &str =
 /// growth on long sessions; the in-memory log is small but a real backend could
 /// be large.
 const MAX_PRIOR_MESSAGES: usize = 50;
+
+/// How long a parked write-tool confirmation waits for a `confirm_tool_action`
+/// before the core `ConfirmationHook` gives up and treats the tool as denied
+/// (a timeout). Bounds a stuck turn so a client that never confirms can't pin a
+/// task forever. Generous (5 min) because a human is in the loop.
+const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Registers a parked turn's [`HumanResponse`] sender under a session id (so a
+/// later `confirm_tool_action` can take it). Typically `AppState::register_confirmation`.
+pub type RegisterConfirmation = Arc<dyn Fn(&str, UnboundedSender<HumanResponse>) + Send + Sync>;
+
+/// Clears any registered confirmation sender for a session id when its turn ends.
+/// Typically `AppState::clear_confirmation`.
+pub type ClearConfirmation = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Hooks the runner needs to wire **write-confirmation HITL** into a turn
+/// without depending on `AppState` directly (keeps the runner unit-testable).
+///
+/// When `Some`, the runner installs a core [`ConfirmationHook`] over every tool
+/// whose name matches one of [`tool_patterns`](Self::tool_patterns). When such a
+/// tool is about to run, the agent loop **parks** inside the hook's `pre_call`
+/// and emits a [`HumanRequest::Confirm`]; the runner's bridge:
+///   1. calls [`register`](Self::register) with the session's
+///      [`HumanResponse`] sender, so a later `confirm_tool_action` can resume,
+///   2. emits a `confirm_tool_action_required` event through the turn sink.
+///
+/// On `confirm_tool_action`, the handler feeds the sender [`HumanResponse`] and
+/// the parked tool either executes (approved) or is skipped with a rejection
+/// result (denied). `None` (the default) installs no hook → no tool ever parks →
+/// behavior is byte-for-byte identical to before HITL.
+pub struct ConfirmationConfig {
+    /// Tool-name substrings that require human approval (matched by core's
+    /// `ConfirmationHook`, which uses `contains` matching). Empty disables HITL.
+    pub tool_patterns: Vec<String>,
+    /// The session this turn belongs to — carried on the
+    /// `confirm_tool_action_required` event and the registration key so the
+    /// inbound `confirm_tool_action` (keyed by `sessionId`) routes back here.
+    pub session_id: String,
+    /// Registers the parked turn's [`HumanResponse`] sender under
+    /// [`session_id`](Self::session_id) (typically `AppState::register_confirmation`).
+    pub register: RegisterConfirmation,
+    /// Clears any registered sender for [`session_id`](Self::session_id) when the
+    /// turn ends (typically `AppState::clear_confirmation`), so a stale sender
+    /// can't mis-route a later confirmation.
+    pub clear: ClearConfirmation,
+}
 
 /// The terminal outcome of a streamed turn.
 pub struct TurnResult {
@@ -108,6 +155,13 @@ pub struct TurnRequest<'a> {
     /// retrieval order unchanged, so default behavior is byte-for-byte the same.
     /// Selected by [`build_reranker`](crate::reranker::build_reranker).
     pub reranker: Option<Arc<dyn Reranker>>,
+    /// Optional **write-confirmation HITL** wiring. `None` (the default) installs
+    /// no confirmation hook, so no tool ever parks the turn and behavior is
+    /// identical to before HITL. `Some` installs a core [`ConfirmationHook`] over
+    /// the configured tool patterns and bridges its [`HumanRequest`]s to a
+    /// `confirm_tool_action_required` event + a registered resumable sender. See
+    /// [`ConfirmationConfig`].
+    pub confirmation: Option<ConfirmationConfig>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -142,6 +196,7 @@ pub async fn run_streaming_turn(
         access,
         llm_provider,
         reranker,
+        confirmation,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -194,6 +249,36 @@ pub async fn run_streaming_turn(
         knowledge_search = knowledge_search.with_reranker(reranker);
     }
     tools.register(knowledge_search);
+
+    // 3a. Write-confirmation HITL: when configured with tool patterns, install a
+    //     core `ConfirmationHook` over those tools and spawn a bridge that turns
+    //     each `HumanRequest::Confirm` into a `confirm_tool_action_required`
+    //     event + a registered resumable `HumanResponse` sender. With no
+    //     `confirmation` (the default) or empty patterns, no hook is installed —
+    //     no tool parks the turn, byte-for-byte unchanged from before HITL.
+    let confirmation_bridge = match &confirmation {
+        Some(cfg) if !cfg.tool_patterns.is_empty() => {
+            let pair = human_channel();
+            // The hook owns the request *sender* (emits Confirm) and the response
+            // *receiver* (awaits the human's verdict). The runner keeps the
+            // request *receiver* and the response *sender* for the bridge.
+            tools.add_hook(ConfirmationHook::new(
+                cfg.tool_patterns.clone(),
+                pair.request_tx,
+                pair.response_rx,
+                CONFIRMATION_TIMEOUT,
+            ));
+            Some(spawn_confirmation_bridge(
+                pair.request_rx,
+                pair.response_tx,
+                sink.clone(),
+                request_id.to_string(),
+                cfg.session_id.clone(),
+                Arc::clone(&cfg.register),
+            ))
+        }
+        _ => None,
+    };
 
     let agent = {
         let agent = Agent::new(config, tools).with_checkpoint_store(storage.checkpoints());
@@ -274,6 +359,18 @@ pub async fn run_streaming_turn(
     // the channel closes and the translator task drains and finishes.
     let conversation = agent.run_with_channel(user_message, tx).await?;
 
+    // The turn is over: tear down the confirmation bridge. `run_with_channel`
+    // borrows `&self`, so the agent (and the `ConfirmationHook` it owns via the
+    // tool registry) is STILL alive here — and the hook holds the bridge's
+    // request *sender*. Dropping the agent closes that sender, which is what
+    // lets the bridge's `request_rx.recv()` return `None` and the task finish.
+    // Without this explicit drop, awaiting the bridge below would hang forever.
+    drop(agent);
+    if let (Some(handle), Some(cfg)) = (confirmation_bridge, confirmation.as_ref()) {
+        let _ = handle.await;
+        (cfg.clear)(&cfg.session_id);
+    }
+
     let invoked_knowledge_search = translator.await.unwrap_or(false);
 
     let reply = conversation
@@ -311,6 +408,62 @@ pub async fn run_streaming_turn(
         message_id,
         invoked_knowledge_search,
         citations,
+    })
+}
+
+/// Spawn the **confirmation bridge** for a turn that has a `ConfirmationHook`
+/// installed. The bridge owns the request *receiver* (each item is a
+/// [`HumanRequest::Confirm`] the hook emitted when a write tool is about to run)
+/// and the response *sender* (the hook awaits the verdict on its paired
+/// receiver). For every confirm request it:
+///   1. registers `response_tx` under `session_id` via `register`, so an inbound
+///      `confirm_tool_action` can take it and feed the verdict back, and
+///   2. emits a `write_confirmation_required` event through the turn `sink`,
+///      parking the turn until the client confirms.
+///
+/// The `tool_name` is used as the event's opaque `toolId`: core's
+/// `HumanRequest::Confirm` doesn't carry the LLM's tool-call id, but a turn only
+/// parks one write tool at a time (the loop blocks inside `pre_call`), so the
+/// tool name is a stable, sufficient correlation key for the resume. The bridge
+/// loops until the request channel closes (the hook/agent dropped at turn end),
+/// then returns — letting the caller clear the registration.
+fn spawn_confirmation_bridge(
+    mut request_rx: UnboundedReceiver<HumanRequest>,
+    response_tx: UnboundedSender<HumanResponse>,
+    sink: UnboundedSender<serde_json::Value>,
+    request_id: String,
+    session_id: String,
+    register: RegisterConfirmation,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(req) = request_rx.recv().await {
+            match req {
+                HumanRequest::Confirm {
+                    tool_name, prompt, ..
+                } => {
+                    // Register THIS turn's response sender so the next
+                    // `confirm_tool_action` for this session resumes it. Re-clone
+                    // per request: the hook takes one verdict per parked tool.
+                    register(&session_id, response_tx.clone());
+                    // Per spec the event carries a `requestId` (correlation), an
+                    // opaque `toolId` (the tool name — one tool parks at a time),
+                    // and the human-readable `actionDescription` (the hook prompt).
+                    let _ = sink.send(crate::protocol::write_confirmation_required(
+                        &request_id,
+                        &tool_name,
+                        &prompt,
+                    ));
+                }
+                // The chat HITL path only emits `Confirm`; a free-form `Input`
+                // request has no chat affordance, so auto-decline it rather than
+                // hang the turn (keeps the loop live for the next confirm).
+                HumanRequest::Input { .. } => {
+                    let _ = response_tx.send(HumanResponse::Denied {
+                        reason: "free-form human input is not supported on this channel".into(),
+                    });
+                }
+            }
+        }
     })
 }
 

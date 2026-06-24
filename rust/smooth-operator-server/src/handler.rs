@@ -7,6 +7,8 @@
 //! streaming actions (`send_message`) can emit many events while still being
 //! driven from one place.
 
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -64,6 +66,9 @@ pub async fn handle_frame(
         }
         Some("send_message") => {
             handle_send_message(state, access, &parsed, request_id, sink).await;
+        }
+        Some("confirm_tool_action") => {
+            handle_confirm_tool_action(state, &parsed, request_id, sink);
         }
         Some(other) => {
             let _ = sink.send(protocol::error(
@@ -571,50 +576,162 @@ async fn handle_send_message(
         json!({}),
     ));
 
-    let result = runner::run_streaming_turn(
-        TurnRequest {
-            storage: state.storage.clone(),
-            llm,
-            max_iterations: state.config.max_iterations,
-            conversation_id: &session.conversation_id,
-            request_id,
-            user_message: &message,
-            // The connection's resolved document-level entitlement: retrieval is
-            // filtered to what this requester may read (org-public only when the
-            // connection is anonymous).
-            access: access.clone(),
-            // Production: `None` (a live client is built from `llm`). Tests: the
-            // scenario corpus's `MockLlmClient`, which runs the turn offline.
-            llm_provider: chat_provider,
-            // Opt-in rerank stage (feature gap G8): `None` unless the operator
-            // enabled it via `SMOOTH_AGENT_RERANK` (gateway/lexical). Default-off
-            // keeps retrieval behavior unchanged.
-            reranker: crate::reranker::build_reranker(
-                &crate::reranker::RerankerConfig::from_server_config(&state.config),
-            ),
-        },
-        sink,
-    )
-    .await;
+    // Run the turn in a spawned task, NOT inline. A turn that calls a
+    // confirmation-gated write tool **parks** awaiting a later
+    // `confirm_tool_action` frame; the socket reader dispatches that frame on the
+    // same connection, so blocking the reader here would deadlock (the confirm
+    // can never be read). Spawning frees the reader to receive the confirmation
+    // while the turn streams its events through the (cloned) sink. Pearl: HITL
+    // pause/resume.
+    let confirmation = state.config.confirmation_tool_patterns().map(|patterns| {
+        crate::runner::ConfirmationConfig {
+            tool_patterns: patterns,
+            session_id: session.session_id.clone(),
+            register: {
+                let state = state.clone();
+                Arc::new(move |sid: &str, responder| state.register_confirmation(sid, responder))
+            },
+            clear: {
+                let state = state.clone();
+                Arc::new(move |sid: &str| state.clear_confirmation(sid))
+            },
+        }
+    });
 
-    match result {
-        Ok(turn) => {
-            let response = runner::general_agent_response(&turn.reply);
-            let _ = sink.send(protocol::eventual_response(
-                request_id,
-                200,
-                &turn.message_id,
-                response,
-                false,
-                &turn.citations,
-            ));
+    let state_for_turn = state.clone();
+    let access_owned = access.clone();
+    let sink_owned = sink.clone();
+    let request_id_owned = request_id.to_string();
+    let conversation_id = session.conversation_id.clone();
+
+    tokio::spawn(async move {
+        let result = runner::run_streaming_turn(
+            TurnRequest {
+                storage: state_for_turn.storage.clone(),
+                llm,
+                max_iterations: state_for_turn.config.max_iterations,
+                conversation_id: &conversation_id,
+                request_id: &request_id_owned,
+                user_message: &message,
+                // The connection's resolved document-level entitlement: retrieval is
+                // filtered to what this requester may read (org-public only when the
+                // connection is anonymous).
+                access: access_owned,
+                // Production: `None` (a live client is built from `llm`). Tests: the
+                // scenario corpus's `MockLlmClient`, which runs the turn offline.
+                llm_provider: chat_provider,
+                // Opt-in rerank stage (feature gap G8): `None` unless the operator
+                // enabled it via `SMOOTH_AGENT_RERANK` (gateway/lexical). Default-off
+                // keeps retrieval behavior unchanged.
+                reranker: crate::reranker::build_reranker(
+                    &crate::reranker::RerankerConfig::from_server_config(&state_for_turn.config),
+                ),
+                confirmation,
+            },
+            &sink_owned,
+        )
+        .await;
+
+        match result {
+            Ok(turn) => {
+                let response = runner::general_agent_response(&turn.reply);
+                let _ = sink_owned.send(protocol::eventual_response(
+                    &request_id_owned,
+                    200,
+                    &turn.message_id,
+                    response,
+                    false,
+                    &turn.citations,
+                ));
+            }
+            Err(e) => {
+                let _ = sink_owned.send(protocol::error(
+                    Some(&request_id_owned),
+                    "AGENT_ERROR",
+                    &format!("agent turn failed: {e}"),
+                ));
+            }
         }
-        Err(e) => {
-            let _ = sink.send(protocol::error(
-                Some(request_id),
-                "AGENT_ERROR",
-                &format!("agent turn failed: {e}"),
-            ));
+    });
+}
+
+/// `confirm_tool_action` — resume a turn parked on a write-tool confirmation.
+///
+/// Per `spec/actions/confirm-tool-action.schema.json` the client sends
+/// `{ action, sessionId, requestId, approved }` in reply to a
+/// `write_confirmation_required` event. We look up the session's registered
+/// [`HumanResponse`](smooth_operator_core::HumanResponse) sender (set by the
+/// runner's confirmation bridge when the turn parked), take it, and feed it the
+/// verdict: `approved` → `Approved` (the parked tool executes), else `Denied`
+/// (the tool is skipped with a rejection result the model sees). There is no
+/// dedicated response event — the resumed workflow signals continuation via its
+/// normal streaming sequence (`stream_chunk`/`stream_token` → `eventual_response`);
+/// we additionally ack with an `immediate_response`. Taking the sender makes a
+/// duplicate confirm a no-op (`NO_PENDING_CONFIRMATION`).
+fn handle_confirm_tool_action(
+    state: &AppState,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "VALIDATION_ERROR",
+            "confirm_tool_action requires a 'sessionId'",
+        ));
+        return;
+    };
+
+    // `approved` is required and must be a boolean — a missing/garbled verdict
+    // must NOT silently approve a write. Fail closed on a bad shape.
+    let Some(approved) = parsed.get("approved").and_then(Value::as_bool) else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "VALIDATION_ERROR",
+            "confirm_tool_action requires a boolean 'approved'",
+        ));
+        return;
+    };
+
+    let Some(responder) = state.take_confirmation(session_id) else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "NO_PENDING_CONFIRMATION",
+            &format!("no tool action is awaiting confirmation for session '{session_id}'"),
+        ));
+        return;
+    };
+
+    let verdict = if approved {
+        smooth_operator_core::HumanResponse::Approved
+    } else {
+        smooth_operator_core::HumanResponse::Denied {
+            reason: "user rejected the action".to_string(),
         }
+    };
+
+    if responder.send(verdict).is_err() {
+        // The parked turn ended (timeout / disconnect) before the confirm landed.
+        let _ = sink.send(protocol::error(
+            request_id,
+            "NO_PENDING_CONFIRMATION",
+            &format!(
+                "the turn awaiting confirmation for session '{session_id}' is no longer active"
+            ),
+        ));
+        return;
     }
+
+    // Ack the confirmation; the resumed turn streams its own follow-on events.
+    let _ = sink.send(protocol::immediate_response(
+        request_id,
+        200,
+        if approved {
+            "Tool action approved"
+        } else {
+            "Tool action rejected"
+        },
+        json!({ "sessionId": session_id, "approved": approved }),
+    ));
 }
