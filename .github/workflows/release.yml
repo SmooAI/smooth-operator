@@ -147,7 +147,7 @@ jobs:
                       while [ "${attempt}" -le "${max}" ]; do
                           echo "Publishing ${crate} (attempt ${attempt}/${max})..."
                           local out
-                          if out=$(cargo publish -p "${crate}" --no-verify --manifest-path rust/Cargo.toml 2>&1); then
+                          if out=$(cargo publish -p "${crate}" --no-verify --allow-dirty --manifest-path rust/Cargo.toml 2>&1); then
                               echo "${out}"
                               echo "Published ${crate}."
                               return 0
