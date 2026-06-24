@@ -24,6 +24,7 @@ use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorC
 use smooth_operator::domain::Session;
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
+use smooth_operator::tool_provider::ToolProvider;
 use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
 use tokio_util::sync::CancellationToken;
 
@@ -52,6 +53,12 @@ pub struct AppState {
     pub connector_configs: Arc<dyn ConnectorConfigStore>,
     /// Per-org agent settings store, read/written by `/admin/settings`.
     pub settings: Arc<dyn SettingsStore>,
+    /// **Host tool-injection seam.** When `Some`, the runner asks this provider
+    /// for EXTRA tools and merges them into every turn's `ToolRegistry`
+    /// alongside the built-ins. Defaults to `None` (built-ins only); a host
+    /// installs one via [`with_tools`](Self::with_tools) to contribute its own
+    /// per-org tool catalog without forking the runner.
+    pub tool_provider: Option<Arc<dyn ToolProvider>>,
     /// Embeddable-widget auth hook: resolves an agent's origin-allowlist +
     /// public-key policy for `<smooth-agent-chat>` connections. Defaults to
     /// [`PermissiveWidgetAuth`] (no enforcement) until a host installs a real
@@ -144,6 +151,7 @@ impl AppState {
             indexing: Arc::new(InMemoryIndexingStore::new()),
             connector_configs: Arc::new(InMemoryConnectorConfigStore::new()),
             settings: Arc::new(InMemorySettingsStore::new()),
+            tool_provider: None,
             widget_auth: Arc::new(PermissiveWidgetAuth),
             backplane: Arc::new(InMemoryBackplane::new()),
             chat_provider: None,
@@ -185,6 +193,16 @@ impl AppState {
     #[must_use]
     pub fn with_settings(mut self, store: Arc<dyn SettingsStore>) -> Self {
         self.settings = store;
+        self
+    }
+
+    /// Install a host [`ToolProvider`] (builder). The runner merges the
+    /// provider's per-turn tools into every turn's registry alongside the
+    /// built-ins. Without this, the registry is exactly the built-ins, so the
+    /// default/local flavor is unaffected.
+    #[must_use]
+    pub fn with_tools(mut self, provider: Arc<dyn ToolProvider>) -> Self {
+        self.tool_provider = Some(provider);
         self
     }
 

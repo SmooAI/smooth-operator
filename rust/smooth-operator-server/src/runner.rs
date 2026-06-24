@@ -36,6 +36,7 @@ use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{MessageQuery, StorageAdapter};
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use smooth_operator::rerank::Reranker;
+use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator::tools::{KnowledgeResultSink, KnowledgeSearchTool};
 use smooth_operator::MAX_CITATIONS;
 
@@ -162,6 +163,24 @@ pub struct TurnRequest<'a> {
     /// `confirm_tool_action_required` event + a registered resumable sender. See
     /// [`ConfirmationConfig`].
     pub confirmation: Option<ConfirmationConfig>,
+    /// **SEAM 1 — host tool injection.** When `Some`, the runner asks this
+    /// provider for EXTRA tools and merges them into the turn's
+    /// [`ToolRegistry`] alongside the built-ins. `None` (the default) leaves the
+    /// registry as exactly the built-ins, so default behavior is byte-for-byte
+    /// unchanged. A host installs one via [`AppState::with_tools`](crate::state::AppState::with_tools).
+    pub tool_provider: Option<Arc<dyn ToolProvider>>,
+    /// **SEAM 2 — per-org agent persona.** The resolved system prompt for this
+    /// turn. When `Some`, it REPLACES the built-in [`KNOWLEDGE_CHAT_SYSTEM_PROMPT`]
+    /// as the agent's system prompt (the host resolves it from per-org settings,
+    /// e.g. [`AgentSettings::persona`](smooth_operator::settings::AgentSettings::persona)).
+    /// `None` (the default) keeps the const prompt, so default behavior is
+    /// byte-for-byte unchanged.
+    pub system_prompt: Option<String>,
+    /// The owning org for this turn, threaded into the
+    /// [`ToolProviderContext`](smooth_operator::tool_provider::ToolProviderContext)
+    /// so a [`ToolProvider`] can return per-org tools. `None` when no org is
+    /// resolved (e.g. an anonymous reference-server connection).
+    pub org_id: Option<String>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -197,6 +216,9 @@ pub async fn run_streaming_turn(
         llm_provider,
         reranker,
         confirmation,
+        tool_provider,
+        system_prompt,
+        org_id,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -233,7 +255,14 @@ pub async fn run_streaming_turn(
 
     // 3. Build the agent: ACL-grounded config + knowledge_search tool (over the
     //    SAME ACL-filtered handle) + replayed prior messages for memory.
-    let config = AgentConfig::new("smooth-agent-chat", KNOWLEDGE_CHAT_SYSTEM_PROMPT, llm)
+    //
+    //    SEAM 2 — resolve the system prompt: a host-supplied per-org persona
+    //    (`system_prompt`) overrides the built-in const; absent ⇒ the const, so
+    //    default behavior is byte-for-byte unchanged.
+    let resolved_prompt = system_prompt
+        .as_deref()
+        .unwrap_or(KNOWLEDGE_CHAT_SYSTEM_PROMPT);
+    let config = AgentConfig::new("smooth-agent-chat", resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior);
@@ -249,6 +278,19 @@ pub async fn run_streaming_turn(
         knowledge_search = knowledge_search.with_reranker(reranker);
     }
     tools.register(knowledge_search);
+
+    // SEAM 1 — merge host-contributed tools. When a provider is installed, ask
+    // it (with the turn's org + access context) for extra tools and register
+    // each alongside the built-ins. Built-ins are registered FIRST, so a host
+    // tool that intentionally reuses a built-in name replaces it; a distinct
+    // name simply adds. With no provider this block is a no-op, leaving the
+    // registry as exactly today's built-ins.
+    if let Some(provider) = tool_provider {
+        let ctx = ToolProviderContext::new(org_id, access.clone());
+        for tool in provider.tools_for(&ctx).await {
+            tools.register_arc(tool);
+        }
+    }
 
     // 3a. Write-confirmation HITL: when configured with tool patterns, install a
     //     core `ConfirmationHook` over those tools and spawn a bridge that turns

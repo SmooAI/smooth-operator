@@ -40,6 +40,17 @@ pub struct AgentSettings {
     pub model: String,
     /// The agent's system prompt.
     pub system_prompt: String,
+    /// Optional per-org **agent persona** — when set, the runner uses it as the
+    /// turn's system prompt INSTEAD of its built-in default, letting a host give
+    /// each org its own agent voice without forking the runner. `None` (the
+    /// default) leaves the runner on its built-in const prompt, so default
+    /// behavior is byte-for-byte unchanged.
+    ///
+    /// Distinct from [`system_prompt`](Self::system_prompt) (which always has a
+    /// value for the management console to edit): `persona` is the *override
+    /// signal* the runner keys off — absent ⇒ fall back to the const.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
     /// Tool names enabled by default for this org's agent.
     pub default_tools: Vec<String>,
     /// When the settings were last written.
@@ -54,6 +65,7 @@ impl AgentSettings {
             org_id: org_id.into(),
             model: DEFAULT_MODEL.to_string(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            persona: None,
             default_tools: Vec::new(),
             updated_at: Utc::now(),
         }
@@ -111,6 +123,8 @@ mod tests {
         assert_eq!(s.org_id, "org-x");
         assert_eq!(s.model, DEFAULT_MODEL);
         assert!(!s.system_prompt.is_empty());
+        // No per-org persona override by default — the runner stays on its const.
+        assert!(s.persona.is_none());
         assert!(s.default_tools.is_empty());
     }
 
@@ -121,6 +135,7 @@ mod tests {
             org_id: "org-a".into(),
             model: "claude-x".into(),
             system_prompt: "be terse".into(),
+            persona: Some("You are Org A's snarky concierge.".into()),
             default_tools: vec!["knowledge_search".into(), "fetch_url".into()],
             updated_at: Utc::now(),
         });
@@ -128,6 +143,10 @@ mod tests {
         let a = store.get("org-a");
         assert_eq!(a.model, "claude-x");
         assert_eq!(a.system_prompt, "be terse");
+        assert_eq!(
+            a.persona.as_deref(),
+            Some("You are Org A's snarky concierge.")
+        );
         assert_eq!(a.default_tools, vec!["knowledge_search", "fetch_url"]);
 
         // A different org still sees defaults.
@@ -141,6 +160,7 @@ mod tests {
             org_id: "o".into(),
             model: "m1".into(),
             system_prompt: "p".into(),
+            persona: None,
             default_tools: vec![],
             updated_at: Utc::now(),
         });
@@ -148,6 +168,7 @@ mod tests {
             org_id: "o".into(),
             model: "m2".into(),
             system_prompt: "p".into(),
+            persona: None,
             default_tools: vec![],
             updated_at: Utc::now(),
         });

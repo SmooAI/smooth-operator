@@ -32,6 +32,7 @@ pub mod rerank;
 pub mod runtime;
 pub mod settings;
 pub mod telemetry;
+pub mod tool_provider;
 pub mod tools;
 pub mod widget_auth;
 
@@ -64,6 +65,7 @@ pub use settings::{
     AgentSettings, InMemorySettingsStore, SettingsStore, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
 };
 pub use telemetry::init_telemetry;
+pub use tool_provider::{ToolProvider, ToolProviderContext};
 pub use tools::{
     builtin_tools, ConversationHistoryTool, FetchUrlTool, KnowledgeResultSink, KnowledgeSearchTool,
     NoopWebSearchProvider, SearchResult, ToolContext, WebSearchProvider, WebSearchTool,

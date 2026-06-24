@@ -503,6 +503,13 @@ async fn send_message(
             // receive a later `confirm_tool_action` frame. Write-confirmation
             // HITL pause/resume does not apply here; leave it disabled.
             confirmation: None,
+            // Injection seams (server `AppState::with_tools` / per-org persona):
+            // the AWS lambda flavor installs neither, so both stay default —
+            // built-in tools only and the runner's const prompt. `org_id` is
+            // threaded through so a future host provider could scope per-org.
+            tool_provider: None,
+            system_prompt: None,
+            org_id: Some(config.org_id.clone()),
         },
         &tx,
     )
