@@ -35,13 +35,83 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::{json, Value};
+use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator_core::llm_provider::{tool_call_response, MockLlmClient};
-use smooth_operator_core::StreamEvent;
+use smooth_operator_core::{StreamEvent, Tool, ToolSchema};
 
 use smooth_operator_server::config::{ServerConfig, StorageBackend};
 use smooth_operator_server::server::build_state;
+
+/// A deterministic test tool: it ignores its arguments and returns a fixed
+/// `result` string, so a tool-call turn is fully reproducible. The Rust analogue
+/// of the Python runner's `FunctionTool(func=lambda: result)`. Installed via the
+/// host `ToolProvider` seam (the cross-language `server.tools` corpus directive
+/// maps onto whatever each server's tool-injection mechanism is).
+struct CorpusTool {
+    name: String,
+    description: String,
+    parameters: Value,
+    result: String,
+}
+
+#[async_trait]
+impl Tool for CorpusTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            parameters: self.parameters.clone(),
+        }
+    }
+
+    async fn execute(&self, _arguments: Value) -> anyhow::Result<String> {
+        Ok(self.result.clone())
+    }
+}
+
+/// Contributes a scenario's `server.tools` as deterministic tools on every turn.
+struct CorpusToolProvider {
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+#[async_trait]
+impl ToolProvider for CorpusToolProvider {
+    async fn tools_for(&self, _ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
+        self.tools.clone()
+    }
+}
+
+/// Build a `ToolProvider` from a scenario's `server.tools` directive, or `None`
+/// when the scenario installs no tools.
+fn build_tool_provider(scenario: &Value) -> Option<Arc<dyn ToolProvider>> {
+    let specs = scenario.get("server")?.get("tools")?.as_array()?;
+    if specs.is_empty() {
+        return None;
+    }
+    let tools: Vec<Arc<dyn Tool>> = specs
+        .iter()
+        .map(|spec| {
+            Arc::new(CorpusTool {
+                name: spec["name"].as_str().unwrap_or_default().to_string(),
+                description: spec
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                parameters: spec
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                result: spec["result"].as_str().unwrap_or_default().to_string(),
+            }) as Arc<dyn Tool>
+        })
+        .collect();
+    Some(Arc::new(CorpusToolProvider { tools }))
+}
 
 /// Resolve the conformance scenarios directory relative to THIS crate, so the
 /// test works regardless of the cwd the harness runs it from. From
@@ -310,8 +380,13 @@ async fn run_scenario(path: &Path) {
     let mock = build_mock(&script);
 
     // Boot the reference server with the injected mock — the exact analogue of
-    // the Python reference's `ServerState(chat_client=mock)`.
-    let state = build_state(parity_config()).with_chat_provider(std::sync::Arc::new(mock));
+    // the Python reference's `ServerState(chat_client=mock)`. A scenario's
+    // `server.tools` directive installs deterministic tools via the host
+    // `ToolProvider` seam so tool-calling turns run offline.
+    let mut state = build_state(parity_config()).with_chat_provider(Arc::new(mock));
+    if let Some(provider) = build_tool_provider(&scenario) {
+        state = state.with_tools(provider);
+    }
     let url = common::boot_state(state).await;
     let mut client = common::connect(&url).await;
 
