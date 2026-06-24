@@ -26,6 +26,7 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use smooth_operator::access_control::AccessContext;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
 use smooth_operator_core::{Document, DocumentType};
@@ -380,7 +381,7 @@ pub fn seed_knowledge(storage: &InMemoryStorageAdapter) {
 ///
 /// # Errors
 /// Returns an error if the auth configuration is invalid or the TCP bind fails.
-pub async fn bind(config: ServerConfig) -> Result<(TcpListener, Router)> {
+pub async fn bind(config: ServerConfig) -> Result<(TcpListener, Router, CancellationToken)> {
     let ip: std::net::IpAddr = config
         .bind
         .parse()
@@ -389,11 +390,15 @@ pub async fn bind(config: ServerConfig) -> Result<(TcpListener, Router)> {
     // Async so a Postgres / DynamoDB storage backend (and its matching durable
     // admin stores) can be wired; in-memory stays synchronous inside.
     let state = build_state_from_env_async(config).await?;
+    // Clone the shutdown token BEFORE the state is consumed into the router, so
+    // `run` can cancel it (which fans out to every per-connection clone) when a
+    // SIGTERM/ctrl_c arrives.
+    let shutdown = state.shutdown.clone();
     let app = router(state);
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding WebSocket server on {addr}"))?;
-    Ok((listener, app))
+    Ok((listener, app, shutdown))
 }
 
 /// Serve a **pre-built** [`AppState`] to completion (blocks), binding on
@@ -464,7 +469,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let has_llm = config.has_llm();
     let model = config.model.clone();
     let gateway = config.gateway_url.clone();
-    let (listener, app) = bind(config).await?;
+    let (listener, app, shutdown) = bind(config).await?;
     let local = listener.local_addr().context("local addr")?;
 
     tracing::info!(
@@ -481,10 +486,51 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         "smooth-operator-server listening on ws://{local}/ws (model={model}, llm_enabled={has_llm})"
     );
 
+    // Graceful drain: stop accepting new connections AND cancel the shared
+    // shutdown token on SIGTERM (k8s pod termination) / ctrl_c. Cancelling fans
+    // out to every per-connection reader loop so each finishes its in-flight turn
+    // and detaches from the backplane before the process exits — within the
+    // chart's `terminationGracePeriodSeconds` window.
     axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            wait_for_shutdown_signal().await;
+            tracing::info!("shutdown signal received; draining in-flight WebSocket turns");
+            shutdown.cancel();
+        })
         .await
         .context("serving WebSocket connections")?;
     Ok(())
+}
+
+/// Resolve when the process receives a termination request: SIGTERM (how
+/// Kubernetes asks a pod to stop on scale-down / rollout) **or** ctrl_c
+/// (SIGINT — interactive `cargo run`), whichever comes first.
+///
+/// Unix-only signal handling (the server targets Linux/k8s); on a non-unix host
+/// it falls back to ctrl_c alone so the binary still stops cleanly.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // If installing the SIGTERM handler somehow fails, fall back to ctrl_c
+        // only rather than panicking the serve task.
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler; ctrl_c only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Query parameters accepted on the `/ws` upgrade. `token` carries the bearer
@@ -597,35 +643,60 @@ async fn connection_loop(
     });
 
     // Reader: dispatch inbound frames. Handlers emit events via `sink_tx`.
-    while let Some(frame) = ws_rx.next().await {
-        match frame {
-            Ok(Message::Text(text)) => {
-                handler::handle_frame(
-                    &state,
-                    &access,
-                    &conn_id,
-                    origin.as_deref(),
-                    text.as_str(),
-                    &sink_tx,
-                )
-                .await;
+    //
+    // The `select!` lets a graceful shutdown (SIGTERM/ctrl_c → `state.shutdown`
+    // cancelled by the serve loop) break this loop so the connection drains: it
+    // stops reading new frames, falls out, and detaches below. `biased` so the
+    // shutdown branch wins a tie. Crucially, `handle_frame(...).await` stays
+    // INSIDE the frame arm (not a `select!` condition), so a turn already in
+    // flight when the cancel fires runs to completion before the next loop
+    // iteration observes the cancellation — that is the in-flight drain.
+    loop {
+        tokio::select! {
+            biased;
+
+            () = state.shutdown.cancelled() => {
+                // Pod is terminating: stop accepting frames on this connection.
+                // Returning closes the socket (the writer task ends when
+                // `sink_tx` drops below); any turn that was mid-flight already
+                // finished in the frame arm before we got here.
+                break;
             }
-            Ok(Message::Binary(_)) => {
-                let _ = sink_tx.send(crate::protocol::error(
-                    None,
-                    "VALIDATION_ERROR",
-                    "binary frames are not supported; send JSON text frames",
-                ));
+
+            frame = ws_rx.next() => {
+                match frame {
+                    Some(Ok(Message::Text(text))) => {
+                        handler::handle_frame(
+                            &state,
+                            &access,
+                            &conn_id,
+                            origin.as_deref(),
+                            text.as_str(),
+                            &sink_tx,
+                        )
+                        .await;
+                    }
+                    Some(Ok(Message::Binary(_))) => {
+                        let _ = sink_tx.send(crate::protocol::error(
+                            None,
+                            "VALIDATION_ERROR",
+                            "binary frames are not supported; send JSON text frames",
+                        ));
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    // Ping/Pong control frames are handled by axum automatically.
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                    // Stream ended (peer hung up).
+                    None => break,
+                }
             }
-            Ok(Message::Close(_)) => break,
-            // Ping/Pong control frames are handled by axum automatically.
-            Ok(_) => {}
-            Err(_) => break,
         }
     }
 
-    // Reader finished → detach from the backplane, then drop the sink so the
-    // writer task exits.
+    // Reader finished (peer closed, error, or graceful shutdown) → detach from
+    // the backplane so no stale registry entry is left behind, then drop the
+    // sink so the writer task exits.
     state.backplane.detach(&conn_id).await;
     drop(sink_tx);
     let _ = writer.await;
