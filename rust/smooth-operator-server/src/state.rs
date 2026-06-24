@@ -14,6 +14,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use smooth_operator_core::HumanResponse;
+use tokio::sync::mpsc::UnboundedSender;
+
 use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::backplane::{Backplane, InMemoryBackplane};
@@ -98,6 +101,17 @@ pub struct AppState {
     /// connector in two orgs does not collide, and `GET /admin/indexing/runs`
     /// only ever lists the caller's org's connectors.
     connectors: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// **Human-in-the-loop pending confirmations**: `sessionId` →
+    /// [`HumanResponse`] sender for a turn currently parked on a write-tool
+    /// confirmation. When an agent turn calls a tool that requires human
+    /// approval, the runner installs a `ConfirmationHook` (smooth-operator-core)
+    /// that parks the loop and registers its response sender here. A subsequent
+    /// `confirm_tool_action` frame looks the session up, takes the sender, and
+    /// feeds it [`HumanResponse::Approved`] / [`HumanResponse::Denied`] to resume
+    /// the parked turn (execute or reject the tool). Keyed by session so each
+    /// session has at most one outstanding confirmation; an empty map means no
+    /// turn is parked (the default, byte-for-byte unchanged from before HITL).
+    pending_confirmations: Arc<RwLock<HashMap<String, UnboundedSender<HumanResponse>>>>,
 }
 
 /// Namespace a connector name by org for the [`IndexingStore`] key, so two orgs
@@ -142,6 +156,7 @@ impl AppState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
+            pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -291,6 +306,40 @@ impl AppState {
         out.sort();
         out
     }
+
+    /// Register a parked turn's [`HumanResponse`] sender for `session_id`, so a
+    /// later `confirm_tool_action` can resume it. Any prior pending sender for
+    /// the same session is replaced (one outstanding confirmation per session).
+    /// Called by the runner's confirmation bridge when a write tool emits a
+    /// `HumanRequest::Confirm`.
+    pub fn register_confirmation(
+        &self,
+        session_id: impl Into<String>,
+        responder: UnboundedSender<HumanResponse>,
+    ) {
+        if let Ok(mut map) = self.pending_confirmations.write() {
+            map.insert(session_id.into(), responder);
+        }
+    }
+
+    /// Take (remove + return) the pending [`HumanResponse`] sender for
+    /// `session_id`, if a turn is parked on a confirmation. Returns `None` when
+    /// no turn awaits confirmation for that session (the common case). Taking it
+    /// out — rather than cloning — guarantees a single confirmation resolves a
+    /// single parked tool call, and a duplicate `confirm_tool_action` is a no-op.
+    #[must_use]
+    pub fn take_confirmation(&self, session_id: &str) -> Option<UnboundedSender<HumanResponse>> {
+        self.pending_confirmations.write().ok()?.remove(session_id)
+    }
+
+    /// Drop any pending confirmation registered for `session_id` without
+    /// resolving it. Called when a parked turn ends (the bridge task finishes)
+    /// so a stale sender can't linger and mis-route a later confirmation.
+    pub fn clear_confirmation(&self, session_id: &str) {
+        if let Ok(mut map) = self.pending_confirmations.write() {
+            map.remove(session_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +364,7 @@ mod tests {
             max_tokens: 512,
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
+            confirm_tools: Vec::new(),
         }
     }
 

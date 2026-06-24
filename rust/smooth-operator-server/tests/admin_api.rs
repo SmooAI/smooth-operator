@@ -42,6 +42,7 @@ fn test_config(seed_kb: bool) -> ServerConfig {
         max_tokens: 128,
         storage: smooth_operator_server::config::StorageBackend::Memory,
         widget_auth_strict: false,
+        confirm_tools: Vec::new(),
     }
 }
 

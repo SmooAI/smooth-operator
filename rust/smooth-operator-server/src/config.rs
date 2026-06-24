@@ -22,6 +22,7 @@
 //! | `SMOOTH_AGENT_BACKPLANE` | `memory` | Connection backplane: `memory` (single-process) \| `redis`/`valkey` \| `nats`. A distributed backend is required for >1 replica and to let non-AI publishers push events via `Backplane::publish`. |
 //! | `SMOOTH_AGENT_BACKPLANE_URL` | *(unset)* | Bus URL for `redis`/`nats` (e.g. `redis://valkey:6379`, `nats://nats:4222`); falls back to `SMOOTH_AGENT_REDIS_URL` / `SMOOTH_AGENT_NATS_URL`. |
 //! | `WIDGET_AUTH_STRICT` | *(unset → `false`)* | Fail-closed embeddable-widget auth: when `1`/`true`, a session for an agent the [`WidgetAuthProvider`](smooth_operator::widget_auth::WidgetAuthProvider) has no policy for is rejected. Origin + `authContext` are always enforced for policied agents. |
+//! | `SMOOTH_AGENT_CONFIRM_TOOLS` | *(unset → off)* | Comma-separated tool-name substrings that require **human confirmation** before the agent may run them (write-confirmation HITL). A turn that calls a matching tool parks and emits a `write_confirmation_required` event; the client resumes it with `confirm_tool_action` (`{sessionId, requestId, approved}`). Empty = no tool ever requires confirmation (byte-for-byte unchanged). |
 //! | `WIDGET_AUTH_URL` | *(unset → permissive)* | When set, install an [`HttpWidgetAuth`](smooth_operator::widget_auth::HttpWidgetAuth) provider resolving each agent's embed policy from `{url}/{agentId}` — enforce widget auth against a host policy service with no custom binary. |
 //! | `WIDGET_AUTH_BEARER` | *(unset)* | Optional bearer token sent to `WIDGET_AUTH_URL` (e.g. an M2M token). |
 //! | `WIDGET_AUTH_TTL_SECS` | `60` | Policy cache TTL for `WIDGET_AUTH_URL` (incl. cached 404 no-policy results). |
@@ -124,6 +125,14 @@ pub struct ServerConfig {
     /// in front of a real provider. Origin + `authContext` are always enforced
     /// for agents that *do* have a policy, regardless of this flag.
     pub widget_auth_strict: bool,
+    /// **Write-confirmation HITL**: tool-name substrings that require human
+    /// approval before the agent may run them. When non-empty, a turn that calls
+    /// a matching tool **parks** and emits a `confirm_tool_action_required` event;
+    /// the client resumes it with `confirm_tool_action`. Read from
+    /// `SMOOTH_AGENT_CONFIRM_TOOLS` (comma-separated). Empty (the default) means
+    /// no tool ever requires confirmation — no turn parks, byte-for-byte
+    /// unchanged from before HITL. Matched by core's `ConfirmationHook` (`contains`).
+    pub confirm_tools: Vec<String>,
 }
 
 impl ServerConfig {
@@ -185,6 +194,11 @@ impl ServerConfig {
             })
             .unwrap_or(false);
 
+        let confirm_tools = std::env::var("SMOOTH_AGENT_CONFIRM_TOOLS")
+            .ok()
+            .map(|s| parse_confirm_tools(&s))
+            .unwrap_or_default();
+
         Self {
             bind,
             port,
@@ -196,6 +210,20 @@ impl ServerConfig {
             max_tokens,
             storage,
             widget_auth_strict,
+            confirm_tools,
+        }
+    }
+
+    /// The configured write-confirmation tool patterns, or `None` when none are
+    /// configured (so the runner installs no `ConfirmationHook` and the turn
+    /// behaves exactly as before HITL). `Some` only when at least one non-empty
+    /// pattern is set.
+    #[must_use]
+    pub fn confirmation_tool_patterns(&self) -> Option<Vec<String>> {
+        if self.confirm_tools.is_empty() {
+            None
+        } else {
+            Some(self.confirm_tools.clone())
         }
     }
 
@@ -263,6 +291,17 @@ impl ServerConfig {
     }
 }
 
+/// Parse the comma-separated `SMOOTH_AGENT_CONFIRM_TOOLS` value into trimmed,
+/// non-empty tool-name patterns. Whitespace-only / empty entries are dropped so
+/// `","` or `" "` yields no patterns (HITL stays off).
+fn parse_confirm_tools(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +321,7 @@ mod tests {
             max_tokens: DEFAULT_MAX_TOKENS,
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
+            confirm_tools: Vec::new(),
         };
         assert_eq!(cfg.port, 8787);
         assert_eq!(cfg.storage, StorageBackend::Memory);
@@ -304,6 +344,7 @@ mod tests {
             max_tokens: 128,
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
+            confirm_tools: Vec::new(),
         };
         assert!(cfg.has_llm());
         let llm = cfg.llm_config().expect("llm config");

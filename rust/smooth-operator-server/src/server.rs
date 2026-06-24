@@ -734,6 +734,7 @@ mod tests {
             max_tokens: 128,
             storage: crate::config::StorageBackend::Memory,
             widget_auth_strict: false,
+            confirm_tools: Vec::new(),
         };
         let state = build_state(cfg);
         assert!(!state.config.has_llm());

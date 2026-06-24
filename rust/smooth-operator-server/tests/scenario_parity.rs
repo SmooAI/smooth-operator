@@ -164,6 +164,7 @@ fn parity_config() -> ServerConfig {
         max_tokens: 128,
         storage: StorageBackend::Memory,
         widget_auth_strict: false,
+        confirm_tools: Vec::new(),
     }
 }
 

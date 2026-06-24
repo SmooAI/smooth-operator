@@ -498,6 +498,11 @@ async fn send_message(
                     config.gateway_key.clone(),
                 ),
             ),
+            // The Lambda path is request/response over API Gateway management,
+            // not a persistent socket, so there is no same-connection reader to
+            // receive a later `confirm_tool_action` frame. Write-confirmation
+            // HITL pause/resume does not apply here; leave it disabled.
+            confirmation: None,
         },
         &tx,
     )

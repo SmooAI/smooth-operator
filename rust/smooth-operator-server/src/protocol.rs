@@ -115,6 +115,41 @@ pub fn eventual_response(
     })
 }
 
+/// `write_confirmation_required` — emitted mid-turn when the agent calls a
+/// state-mutating tool that requires explicit human approval before it runs. The
+/// turn is **parked** (the agent loop blocks inside the core
+/// `ConfirmationHook::pre_call`, corresponding to
+/// `AgentEvent::HumanInputRequired { Confirm }`) until the client replies with a
+/// `confirm_tool_action` action carrying the same `requestId` and an `approved`
+/// boolean.
+///
+/// Wire shape matches `spec/events/write-confirmation-required.schema.json`
+/// exactly (the generated TS/Go/.NET/Python clients deserialize it unmodified):
+/// the `requestId` echoes the originating `send_message`, and the prompt detail
+/// is double-nested under `data.data.{ toolId, actionDescription }`. `tool_id` is
+/// an opaque correlation handle (the runner uses the tool name — a turn parks one
+/// tool at a time); `action_description` is the human-readable prompt the client
+/// renders in its confirmation dialog.
+#[must_use]
+pub fn write_confirmation_required(
+    request_id: &str,
+    tool_id: &str,
+    action_description: &str,
+) -> Value {
+    json!({
+        "type": "write_confirmation_required",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {
+                "toolId": tool_id,
+                "actionDescription": action_description,
+            },
+        },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `error` — an unrecoverable error. The `{ code, message }` descriptor is
 /// duplicated at the envelope level and nested under `data.error` for wire
 /// backward-compatibility (per `error.schema.json`).
@@ -257,6 +292,26 @@ mod tests {
             "a urless citation should omit `url`, not emit null"
         );
         assert_eq!(cites[1]["id"], "doc-2");
+    }
+
+    #[test]
+    fn write_confirmation_required_matches_spec_shape() {
+        let ev = write_confirmation_required(
+            "r1",
+            "delete_record",
+            "Tool 'delete_record' requires confirmation. Allow?",
+        );
+        // Per spec/events/write-confirmation-required.schema.json.
+        assert_eq!(ev["type"], "write_confirmation_required");
+        assert_eq!(ev["requestId"], "r1");
+        assert_eq!(ev["data"]["requestId"], "r1");
+        let inner = &ev["data"]["data"];
+        assert_eq!(inner["toolId"], "delete_record");
+        assert!(inner["actionDescription"]
+            .as_str()
+            .unwrap()
+            .contains("delete_record"));
+        assert!(ev["timestamp"].is_i64());
     }
 
     #[test]
