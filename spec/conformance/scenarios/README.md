@@ -32,6 +32,10 @@ Every server consumes the same engine (`smooth-operator-core`), which ships a de
 
 **`mockLlmScript`** — ordered model outputs. `{ "kind": "text", "text": "..." }` (one assistant turn of text); `{ "kind": "toolCall", "name": "...", "arguments": "{...}" }` (a tool call). The runner loads these into the engine's `MockLlmProvider` before driving the server.
 
+**`server`** *(optional)* — server-side setup the runner applies before booting, so a scenario can exercise more than a bare chat turn:
+
+- **`server.tools`** — deterministic tools to register on the agent. Each is `{ name, description, parameters, result }`; the tool ignores its arguments and returns the fixed `result` string, so a tool-calling turn is fully reproducible. A `mockLlmScript` `toolCall` entry names one of these; the server dispatches it and streams a `stream_chunk` with `data.state.rawResponse.toolCall` then one with `data.state.rawResponse.toolResult` before the final text. Each server maps this onto its own tool-injection mechanism (a tools list for Python/TS/Go/C#; the `ToolProvider` seam for Rust) — the corpus is identical.
+
 **`steps[].send`** — one inbound protocol frame. `{{name}}` placeholders are substituted from values `capture`d earlier (e.g. `"sessionId": "{{sessionId}}"`).
 
 **`steps[].expect`** — the outbound events the frame must produce, **in order**. Each matcher:
