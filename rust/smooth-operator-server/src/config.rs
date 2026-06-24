@@ -222,6 +222,26 @@ impl ServerConfig {
             api_format: ApiFormat::OpenAiCompat,
         })
     }
+
+    /// Build an [`LlmConfig`] **without** requiring a gateway key, for the
+    /// test-only path where a [`MockLlmClient`](smooth_operator_core::llm_provider::MockLlmClient)
+    /// is injected (the scenario-parity corpus). The mock replaces the client
+    /// built from this config, so its url/key/model are never used to make a
+    /// network call — this just satisfies the engine's `LlmConfig` argument so a
+    /// keyless deterministic turn can run. Not reachable on the production path
+    /// (only consulted when `chat_provider` is `Some`).
+    #[must_use]
+    pub fn placeholder_llm_config(&self) -> LlmConfig {
+        LlmConfig {
+            api_url: self.gateway_url.clone(),
+            api_key: "mock-no-network".to_string(),
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            temperature: 0.0,
+            retry_policy: RetryPolicy::default(),
+            api_format: ApiFormat::OpenAiCompat,
+        }
+    }
 }
 
 #[cfg(test)]
