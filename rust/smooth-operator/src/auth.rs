@@ -597,7 +597,7 @@ impl AuthVerifier for TrustedIdentityVerifier {
 /// Leaving `AUTH_MODE` **unset** with no key boots the server with the admin API
 /// **disabled** ([`AdminDisabledVerifier`]) so `/ws` serves without forcing auth
 /// config; `/admin` then returns 401 until configured (or `AUTH_MODE=none` for dev).
-
+///
 /// A verifier that rejects every request. The default when neither `AUTH_MODE`
 /// nor a key is configured: the server still boots (so `/ws` serves) but the
 /// `/admin` API is disabled until an operator sets `AUTH_MODE` + a key, or

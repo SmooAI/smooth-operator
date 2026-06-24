@@ -21,6 +21,10 @@
 //!   smooth-operator [`Agent`](smooth_operator_core::Agent).
 //! - [`server`] — the axum app + per-connection socket loop. [`server::bind`]
 //!   and [`server::router`] let tests boot the service in-process.
+//! - [`local`] — the **local deployment flavor** (the third target alongside
+//!   `deploy/k8s` and `deploy/sst`): an embeddable, fully in-memory, auth-off
+//!   server. [`local::serve_local`] runs it to completion;
+//!   [`local::LocalServer::builder`] boots it in-process with a shutdown handle.
 //! - [`admin`] — the auth-gated admin HTTP API (Phase 12) mounted under
 //!   `/admin`: whoami, chat history, indexing status, document sets. Consumed by
 //!   the Next.js management console (increment 2). See `docs/ADMIN-API.md`.
@@ -35,6 +39,7 @@ pub mod admin;
 pub mod config;
 pub mod embedder;
 pub mod handler;
+pub mod local;
 pub mod protocol;
 pub mod reranker;
 pub mod runner;
@@ -43,6 +48,7 @@ pub mod state;
 
 pub use config::ServerConfig;
 pub use embedder::{build_embedder, EmbedderConfig};
+pub use local::{serve_local, LocalServer, LocalServerBuilder, DEFAULT_LOCAL_ADDR};
 pub use reranker::{build_reranker, RerankMode, RerankerConfig};
 pub use server::{
     bind, build_state, build_state_from_env, build_state_from_env_async, router, run, serve_state,
