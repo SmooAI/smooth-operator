@@ -59,6 +59,9 @@ pub async fn handle_frame(
         Some("get_session") => {
             handle_get_session(state, &parsed, request_id, sink);
         }
+        Some("get_conversation_messages") => {
+            handle_get_conversation_messages(state, &parsed, request_id, sink).await;
+        }
         Some("send_message") => {
             handle_send_message(state, access, &parsed, request_id, sink).await;
         }
@@ -384,6 +387,77 @@ fn handle_get_session(
                 request_id,
                 "SESSION_NOT_FOUND",
                 &format!("session '{session_id}' not found"),
+            ));
+        }
+    }
+}
+
+/// `get_conversation_messages` — paginated message history for a session's
+/// conversation. Wraps the storage adapter's `list_messages_by_conversation`
+/// (the same call the admin API + the turn runner use) and replies with an
+/// `immediate_response` carrying `{ conversationId, messages, nextCursor, hasMore }`.
+///
+/// Optional inputs: `limit` (default 50) and an opaque `cursor` from a prior
+/// page's `nextCursor`. Newest-first (the common "recent history" read).
+async fn handle_get_conversation_messages(
+    state: &AppState,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "VALIDATION_ERROR",
+            "missing 'sessionId'",
+        ));
+        return;
+    };
+    let Some(session) = state.get_session(session_id) else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "SESSION_NOT_FOUND",
+            &format!("session '{session_id}' not found"),
+        ));
+        return;
+    };
+
+    const DEFAULT_LIMIT: usize = 50;
+    let limit = parsed
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_LIMIT);
+    let cursor = parsed
+        .get("cursor")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut query = smooth_operator::adapter::MessageQuery::new(&session.conversation_id, limit);
+    query.cursor = cursor;
+    query.descending = true;
+
+    match state.storage.list_messages_by_conversation(query).await {
+        Ok(page) => {
+            let data = json!({
+                "conversationId": session.conversation_id,
+                "messages": page.messages,
+                "nextCursor": page.next_cursor,
+                "hasMore": page.next_cursor.is_some(),
+            });
+            let _ = sink.send(protocol::immediate_response(
+                request_id,
+                200,
+                "ConversationMessages",
+                data,
+            ));
+        }
+        Err(e) => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "STORAGE_ERROR",
+                &format!("failed to list messages: {e}"),
             ));
         }
     }
