@@ -16,17 +16,17 @@ path = "src/main.rs"
 [dependencies]
 smooth-operator = { workspace = true }
 smooai-smooth-operator-core = { workspace = true }
-smooai-smooth-operator-adapter-memory = { path = "../adapters/in-memory" }
+smooai-smooth-operator-adapter-memory = { path = "../adapters/in-memory", version = "0.1.0" }
 # Persistent storage + admin-store backends, selected at runtime to match the
 # configured storage backend (Postgres / DynamoDB; default in-memory).
-smooai-smooth-operator-adapter-postgres = { path = "../adapters/postgres" }
-smooai-smooth-operator-adapter-dynamodb = { path = "../adapters/dynamodb" }
+smooai-smooth-operator-adapter-postgres = { path = "../adapters/postgres", version = "0.1.0" }
+smooai-smooth-operator-adapter-dynamodb = { path = "../adapters/dynamodb", version = "0.1.0" }
 # Distributed Backplane backends for horizontal scale-out, selected at runtime
 # via SMOOTH_AGENT_BACKPLANE (default in-memory / single-process).
-smooai-smooth-operator-adapter-backplane-redis = { path = "../adapters/backplane-redis" }
-smooai-smooth-operator-adapter-backplane-nats = { path = "../adapters/backplane-nats" }
+smooai-smooth-operator-adapter-backplane-redis = { path = "../adapters/backplane-redis", version = "0.1.0" }
+smooai-smooth-operator-adapter-backplane-nats = { path = "../adapters/backplane-nats", version = "0.1.0" }
 # Admin API surfaces indexing-run status via the ingestion crate's IndexingStore.
-smooai-smooth-operator-ingestion = { path = "../ingestion" }
+smooai-smooth-operator-ingestion = { path = "../ingestion", version = "0.1.0" }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }

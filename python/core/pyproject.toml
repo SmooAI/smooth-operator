@@ -1,5 +1,5 @@
 [project]
-name = "smooth-operator-core"
+name = "smooai-smooth-operator-core"
 version = "0.1.0"
 description = "Native Python implementation of the smooth-operator agent engine — an in-process, OpenAI-compatible agentic tool-calling loop with knowledge grounding. The Python sibling of the Rust reference engine and the C# core."
 readme = "README.md"

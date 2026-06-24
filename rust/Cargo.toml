@@ -20,10 +20,16 @@ license = "MIT"
 repository = "https://github.com/SmooAI/smooth-operator"
 
 [workspace.dependencies]
-# Reference core depends on the agent engine.
-# TODO: switch to crates.io once smooth-operator is published (roadmap Phase 0)
-smooai-smooth-operator-core = { path = "../../smooth-operator-core/rust/smooth-operator-core" }
-smooth-operator = { package = "smooai-smooth-operator", path = "smooth-operator" }
+# Reference core depends on the agent engine. The core is published to crates.io
+# (SmooAI/smooth-operator-core, 0.14). The `path` is kept for local two-repo dev
+# (sibling checkout); `version` is what the PUBLISHED crates reference, so these
+# crates can ship to crates.io (roadmap Phase 0). When the sibling checkout is
+# absent, cargo resolves the version from crates.io.
+smooai-smooth-operator-core = { path = "../../smooth-operator-core/rust/smooth-operator-core", version = "0.14" }
+# Intra-workspace dep on the reference lib carries its version so the adapters /
+# ingestion / server that depend on it are publishable (path = local dev,
+# version = the crates.io requirement).
+smooth-operator = { package = "smooai-smooth-operator", path = "smooth-operator", version = "0.1.0" }
 
 async-trait = "0.1"
 anyhow = "1"

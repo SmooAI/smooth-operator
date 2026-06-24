@@ -20,13 +20,14 @@ The **native async Python client** for the [smooth-operator](../docs/PROTOCOL.md
 ## 30-second quickstart
 
 ```bash
-uv add smooth-operator          # PyPI publish pending — install from the local path today
+uv add smooai-smooth-operator   # PyPI publish pending — install from the local path today
 ```
 
 Until this package is published to PyPI, install it from a sibling checkout
 (`uv add ../smooth-operator/python`, or `pip install -e path/to/smooth-operator/python`).
-The unqualified PyPI name is **not** this package yet — don't `pip install smooth-operator`
-from the public index until the SmooAI release lands.
+The PyPI distribution name is **`smooai-smooth-operator`** (the import package stays
+`smooth_operator`) — don't `pip install smooth-operator` from the public index until
+the SmooAI release lands.
 
 ```python
 import asyncio
