@@ -1,0 +1,25 @@
+{
+    "name": "citations-grounded-turn",
+    "description": "When the server's knowledge base is seeded and a turn is grounded on it, the eventual_response must carry data.data.citations with the source(s) that grounded the answer (the engine's retrieval mirror). Rust/TS/C# do this; Go + Python must reach parity. Asserts the deterministic citation fields (id/title/snippet), not the computed score. Canonical order verified against the Rust reference.",
+    "server": {
+        "knowledge": [
+            { "source": "returns.md", "content": "SmooAI returns are accepted within 30 days of delivery for a full refund." }
+        ]
+    },
+    "mockLlmScript": [
+        { "kind": "text", "text": "Our return window is 30 days." }
+    ],
+    "steps": [
+        { "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com" }, "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ] },
+        { "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "what is the return policy?", "stream": true }, "expect": [
+            { "type": "immediate_response", "status": 202 },
+            { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Our return window is 30 days." },
+            { "type": "eventual_response", "status": 200, "assert": {
+                "data.data.citations.0.id": "returns.md",
+                "data.data.citations.0.title": "returns.md",
+                "data.data.citations.0.snippet": "SmooAI returns are accepted within 30 days of delivery for a full refund.",
+                "data.data.response.responseParts": ["Our return window is 30 days."]
+            } }
+        ] }
+    ]
+}
