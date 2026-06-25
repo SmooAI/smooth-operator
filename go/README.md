@@ -167,6 +167,17 @@ Generated with [`go-jsonschema`](https://github.com/atombender/go-jsonschema) (p
 
 Point the transport at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` — same protocol, same client.
 
+Authenticating to a token-gated server? Pass a connection `Token` — it rides the `?token=` query slot of the WS URL (browsers can't set WebSocket headers):
+
+```go
+c, _ := protocol.New(protocol.Options{
+	Transport: protocol.NewWebSocketTransportWithOptions(
+		"wss://lom.smoo.ai/ws",
+		protocol.WebSocketOptions{Token: connToken},
+	),
+})
+```
+
 ## 🧩 Part of Smoo AI
 
 This Go client is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product. It's the Go member of the **polyglot SDK set** (TypeScript · Python · Go · .NET · Rust) for the [smooth-operator](https://github.com/SmooAI/smooth-operator) service.
