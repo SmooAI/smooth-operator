@@ -10,6 +10,7 @@ slot) so retrieval for each turn is scoped to it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -18,6 +19,7 @@ from smooth_operator_core import Knowledge
 
 from . import protocol
 from .auth import AccessContext
+from .confirmation import ConfirmationRegistry
 from .session_store import SessionStore
 from .turn_runner import Sink, TurnRunner
 
@@ -34,6 +36,8 @@ class FrameDispatcher:
         system_prompt: str | None = None,
         model: str | None = None,
         tools: list[Any] | None = None,
+        confirm_tools: list[str] | None = None,
+        confirmations: ConfirmationRegistry | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -42,6 +46,26 @@ class FrameDispatcher:
         self._system_prompt = system_prompt
         self._model = model
         self._tools = tools or []
+        #: Tool-name patterns gated behind human confirmation (empty → HITL off).
+        self._confirm_tools = confirm_tools or []
+        #: Session-keyed pending-confirmation registry shared with the runner so a
+        #: `confirm_tool_action` frame resolves the future a parked turn awaits.
+        #: Created on demand (one per connection) when HITL is enabled.
+        self._confirmations = confirmations if confirmations is not None else ConfirmationRegistry()
+        #: Spawned turn tasks kept alive (the event loop only holds weak refs to
+        #: tasks); cleared as each completes so they don't accumulate.
+        self._turn_tasks: set[asyncio.Task[Any]] = set()
+
+    async def wait_for_turns(self) -> None:
+        """Await every in-flight spawned ``send_message`` turn to completion.
+
+        ``send_message`` runs its turn as a background task (so the read loop stays
+        free to receive a `confirm_tool_action` while a turn is parked). The
+        connection loop calls this in its teardown so an in-flight turn finishes —
+        and its `eventual_response` is flushed — before the writer stops and the
+        backplane detach runs (preserves the graceful-drain contract)."""
+        if self._turn_tasks:
+            await asyncio.gather(*tuple(self._turn_tasks), return_exceptions=True)
 
     async def dispatch(self, raw_frame: str, sink: Sink) -> None:
         try:
@@ -66,6 +90,8 @@ class FrameDispatcher:
                 await self._handle_get_session(frame, request_id, sink)
             elif action == "send_message":
                 await self._handle_send_message(frame, request_id, sink)
+            elif action == "confirm_tool_action":
+                self._handle_confirm_tool_action(frame, request_id, sink)
             elif action is None:
                 sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'action' field"))
             else:
@@ -155,17 +181,83 @@ class FrameDispatcher:
             system_prompt=self._system_prompt,
             model=self._model,
             tools=self._tools,
+            confirm_tools=self._confirm_tools,
+            confirmations=self._confirmations,
         )
-        result = await runner.run(session.conversation_id, request_id, message, sink)
 
-        # 3. Terminal eventual_response.
+        # Run the turn as a background task, NOT awaited inline. A turn that calls a
+        # confirmation-gated tool **parks** awaiting a later `confirm_tool_action`
+        # frame; the connection's read loop dispatches that frame, so awaiting the
+        # turn here would block the reader and deadlock (the confirm could never be
+        # read). Spawning frees the reader to receive the confirmation while the turn
+        # streams its events through the sink. Mirrors the Rust `tokio::spawn`.
+        # The 202 ack above is already on the wire (the reader pumps the writer),
+        # and the terminal `eventual_response` is emitted from the task on completion.
+        request_id_str: str = request_id
+        session_id_str: str = session_id
+
+        async def _run_turn() -> None:
+            try:
+                result = await runner.run(
+                    session.conversation_id, request_id_str, message, sink, session_id=session_id_str
+                )
+            except Exception:
+                # Mirror the dispatcher's outer guard: a turn failure surfaces a clean
+                # error and keeps the connection alive (detail stays server-side).
+                sink(protocol.error(request_id_str, "INTERNAL_ERROR", "Internal error processing the request."))
+                return
+            sink(
+                protocol.eventual_response(
+                    request_id_str,
+                    200,
+                    result.message_id,
+                    protocol.general_agent_response(result.reply),
+                    needs_escalation=False,
+                    citations=result.citations or None,
+                )
+            )
+
+        task = asyncio.ensure_future(_run_turn())
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+
+    def _handle_confirm_tool_action(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``confirm_tool_action`` — resume a turn parked on a write-tool confirmation.
+
+        Per ``spec/actions/confirm-tool-action.schema.json`` the client replies with
+        ``{action, sessionId, requestId, approved}`` to a ``write_confirmation_required``
+        event. We resolve the session's pending confirmation with the verdict: the
+        parked ``HumanGate`` returns and the turn resumes (runs the tool on approve,
+        skips it with a rejection result on deny). There is no dedicated response
+        event — continuation is signalled by the resumed streaming sequence; we ack
+        with an ``immediate_response``. Resolving takes the future out, so a duplicate
+        confirm is a clean ``NO_PENDING_CONFIRMATION`` no-op. Fails closed: a missing
+        ``sessionId`` or non-bool ``approved`` is rejected (never silently approve)."""
+        session_id = frame.get("sessionId")
+        if not session_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "confirm_tool_action requires a 'sessionId'"))
+            return
+
+        approved = frame.get("approved")
+        if not isinstance(approved, bool):
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "confirm_tool_action requires a boolean 'approved'"))
+            return
+
+        if not self._confirmations.resolve(session_id, approved):
+            sink(
+                protocol.error(
+                    request_id,
+                    "NO_PENDING_CONFIRMATION",
+                    f"no tool action is awaiting confirmation for session '{session_id}'",
+                )
+            )
+            return
+
         sink(
-            protocol.eventual_response(
+            protocol.immediate_response(
                 request_id,
                 200,
-                result.message_id,
-                protocol.general_agent_response(result.reply),
-                needs_escalation=False,
-                citations=result.citations or None,
+                "Tool action approved" if approved else "Tool action rejected",
+                {"sessionId": session_id, "approved": approved},
             )
         )

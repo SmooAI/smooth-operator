@@ -31,6 +31,7 @@ from smooth_operator_core import Knowledge
 
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
+from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
 from .session_store import InMemorySessionStore, SessionStore
 
@@ -56,6 +57,11 @@ class ServerState:
     #: Tools the agent may call during a turn (default none). Each is an engine
     #: ``FunctionTool``/``Tool``; the turn runner passes them straight to the agent.
     tools: list[Any] = field(default_factory=list)
+    #: Tool-name patterns gated behind write-confirmation HITL (default empty → no
+    #: gating, behavior unchanged). When a turn calls a tool whose name contains one
+    #: of these, the server parks the turn and emits ``write_confirmation_required``
+    #: until the client replies with ``confirm_tool_action``.
+    confirm_tools: list[str] = field(default_factory=list)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -99,6 +105,10 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         # Sync enqueue (the dispatcher's sink is sync); the writer task drains it.
         outbound.put_nowait(event)
 
+    # One pending-confirmation registry per connection: a `confirm_tool_action`
+    # frame and the parked turn it resumes are always on the same connection (the
+    # session id keys within it), so the registry need not be server-wide.
+    confirmations = ConfirmationRegistry()
     dispatcher = FrameDispatcher(
         state.store,
         state.chat_client,
@@ -107,6 +117,8 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         system_prompt=state.system_prompt,
         model=state.model,
         tools=state.tools,
+        confirm_tools=state.confirm_tools,
+        confirmations=confirmations,
     )
 
     cancel_wait = asyncio.ensure_future(state.cancel.wait())
@@ -139,6 +151,14 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
                 break
     finally:
         cancel_wait.cancel()
+        # Any turn parked on a write-confirmation must unpark before we can finish:
+        # reject outstanding confirmations (fail closed — a write is never auto-
+        # approved on disconnect), then await every in-flight spawned turn so its
+        # `eventual_response` is enqueued before the writer stops (preserves the
+        # graceful-drain "in-flight turn finishes" contract now that turns run as
+        # background tasks rather than inline).
+        confirmations.reject_all()
+        await dispatcher.wait_for_turns()
         # Stop the writer (drain any already-queued events first), then detach —
         # the detach-after-loop runs regardless of how the loop exited.
         outbound.put_nowait(None)

@@ -101,6 +101,30 @@ def eventual_response(
     }
 
 
+def write_confirmation_required(request_id: str, tool_id: str, action_description: str) -> dict[str, Any]:
+    """``write_confirmation_required`` — emitted mid-turn when the agent calls a
+    state-mutating tool that requires explicit human approval before it runs. The
+    turn is **parked** (the engine's ``HumanGate`` awaits the verdict) until the
+    client replies with a ``confirm_tool_action`` action carrying the same
+    ``requestId`` and an ``approved`` boolean.
+
+    Wire shape matches ``spec/events/write-confirmation-required.schema.json`` and
+    the Rust reference's ``write_confirmation_required`` byte-for-byte: the
+    ``requestId`` echoes the originating ``send_message``, and the prompt detail is
+    double-nested under ``data.data.{toolId, actionDescription}``. ``toolId`` is an
+    opaque correlation handle (the tool name — a turn parks one tool at a time);
+    ``actionDescription`` is the human-readable prompt the client renders."""
+    return {
+        "type": "write_confirmation_required",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {"toolId": tool_id, "actionDescription": action_description},
+        },
+        "timestamp": _now_ms(),
+    }
+
+
 def error(request_id: str | None, code: str, message: str) -> dict[str, Any]:
     """``error`` — an unrecoverable error. The ``{code, message}`` descriptor is
     duplicated at the envelope level and nested under ``data.error`` for wire

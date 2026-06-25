@@ -82,8 +82,13 @@ def _subst(value, vars_: dict):
 async def test_scenario_parity(path: Path) -> None:
     scenario = json.loads(path.read_text())
     mock = _build_mock(scenario.get("mockLlmScript", []))
-    tools = _build_tools(scenario.get("server", {}).get("tools", []))
-    server, _ = await _start(chat_client=mock, tools=tools)
+    server_spec = scenario.get("server", {})
+    tools = _build_tools(server_spec.get("tools", []))
+    # `server.confirmTools` gates tools behind write-confirmation HITL: a turn that
+    # calls one parks and emits `write_confirmation_required` until the client sends
+    # `confirm_tool_action`. Empty/absent → no gating (every existing scenario).
+    confirm_tools = server_spec.get("confirmTools", [])
+    server, _ = await _start(chat_client=mock, tools=tools, confirm_tools=confirm_tools)
     vars_: dict = {}
     try:
         async with websockets.connect(server.ws_url()) as ws:
@@ -94,8 +99,13 @@ async def test_scenario_parity(path: Path) -> None:
         await server.shutdown()
 
 
-async def _start(chat_client=None, tools=None):
-    state = ServerState(store=InMemorySessionStore(), chat_client=chat_client, tools=tools or [])
+async def _start(chat_client=None, tools=None, confirm_tools=None):
+    state = ServerState(
+        store=InMemorySessionStore(),
+        chat_client=chat_client,
+        tools=tools or [],
+        confirm_tools=confirm_tools or [],
+    )
     server = await serve(state, "127.0.0.1", 0)
     return server, state
 
