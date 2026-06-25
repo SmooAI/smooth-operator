@@ -19,6 +19,8 @@ from typing import Any, Callable
 from smooth_operator_core import (
     AgentOptions,
     DoneEvent,
+    HumanApprovalRequest,
+    HumanApprovalResponse,
     Knowledge,
     SmoothAgent,
     SmoothAgentThread,
@@ -28,6 +30,7 @@ from smooth_operator_core import (
 )
 
 from . import protocol
+from .confirmation import ConfirmationRegistry
 from .session_store import MessageDirection, SessionStore
 
 #: Max prior turns replayed into the thread for memory (bounds context growth).
@@ -66,6 +69,8 @@ class TurnRunner:
         system_prompt: str | None = None,
         model: str | None = None,
         tools: list[Any] | None = None,
+        confirm_tools: list[str] | None = None,
+        confirmations: ConfirmationRegistry | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
@@ -73,6 +78,18 @@ class TurnRunner:
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self._model = model
         self._tools = tools or []
+        #: Tool-name substrings that require human approval before they run (empty →
+        #: HITL off, behavior unchanged). Matched by substring like the Rust hook.
+        self._confirm_tools = confirm_tools or []
+        #: The session-keyed pending-confirmation registry the gate parks on.
+        self._confirmations = confirmations
+
+    def _is_gated(self, tool_name: str) -> bool:
+        """True when ``tool_name`` matches a confirmation-gated pattern (substring,
+        like the Rust hook). Only meaningful when a confirmation registry is wired."""
+        if self._confirmations is None:
+            return False
+        return any(pattern in tool_name for pattern in self._confirm_tools)
 
     async def run(
         self,
@@ -80,6 +97,7 @@ class TurnRunner:
         request_id: str,
         user_message: str,
         sink: Sink,
+        session_id: str | None = None,
     ) -> TurnResult:
         # 1. Build the agent. The knowledge base (when present) auto-injects the
         #    top hits into the system prompt — the engine handles retrieval + rerank
@@ -92,6 +110,50 @@ class TurnRunner:
             options_kwargs["tools"] = self._tools
         if self._model is not None:
             options_kwargs["model"] = self._model
+
+        # Write-confirmation HITL: when configured with tool patterns AND a registry
+        # is present, install a HumanGate that parks the turn before a gated tool
+        # runs (emit `write_confirmation_required`, await the client's verdict via
+        # the session-keyed registry). With no patterns (the default) no gate is
+        # installed → no tool ever parks → behavior identical to before HITL. The
+        # gate keys its pending future by `session_id`, so a `confirm_tool_action`
+        # frame (also keyed by sessionId) routes back here.
+        confirm_session = session_id or conversation_id
+        if self._confirm_tools and self._confirmations is not None:
+            patterns = self._confirm_tools
+            registry = self._confirmations
+
+            def _requires_approval(tool_name: str, _args: dict[str, Any]) -> bool:
+                return any(pattern in tool_name for pattern in patterns)
+
+            async def _gate(req: HumanApprovalRequest) -> HumanApprovalResponse:
+                # Park: register a fresh future, emit the confirmation event, then
+                # await the client's `confirm_tool_action`. The toolId is the tool
+                # name (one tool parks at a time — a stable correlation key).
+                #
+                # Event ORDER matters for cross-language parity: the reference (Rust)
+                # server emits `write_confirmation_required` BEFORE the gated tool's
+                # `stream_chunk(toolCall)`. The engine, however, yields the
+                # ToolCallEvent before consulting the gate — so the stream loop
+                # DEFERS a gated tool's `stream_chunk` (see `_is_gated`) and we emit
+                # it HERE, right after the confirmation prompt, to match.
+                future = registry.register(confirm_session)
+                sink(protocol.write_confirmation_required(request_id, req.tool_name, req.prompt))
+                sink(
+                    protocol.stream_chunk(
+                        request_id, req.tool_name, _tool_call_state_from(req.tool_name, req.arguments)
+                    )
+                )
+                approved = await future
+                if approved:
+                    return HumanApprovalResponse.approve()
+                return HumanApprovalResponse.deny("user rejected the action")
+
+            from smooth_operator_core import DelegateHumanGate
+
+            options_kwargs["human_gate"] = DelegateHumanGate(_gate)
+            options_kwargs["requires_approval"] = _requires_approval
+
         agent = SmoothAgent(self._chat_client, AgentOptions(**options_kwargs))
 
         # 2. Replay prior history as the thread (before persisting this turn's
@@ -111,17 +173,30 @@ class TurnRunner:
         #    AgentRunResponse, whose `text` is authoritative for the reply.
         reply_parts: list[str] = []
         final_text: str | None = None
-        async for event in agent.run_stream(user_message, thread=thread):
-            if isinstance(event, TextEvent):
-                if event.text:
-                    reply_parts.append(event.text)
-                    sink(protocol.stream_token(request_id, event.text))
-            elif isinstance(event, ToolCallEvent):
-                sink(protocol.stream_chunk(request_id, event.name, _tool_call_state(event)))
-            elif isinstance(event, ToolResultEvent):
-                sink(protocol.stream_chunk(request_id, event.name, _tool_result_state(event)))
-            elif isinstance(event, DoneEvent):
-                final_text = event.response.text
+        try:
+            async for event in agent.run_stream(user_message, thread=thread):
+                if isinstance(event, TextEvent):
+                    if event.text:
+                        reply_parts.append(event.text)
+                        sink(protocol.stream_token(request_id, event.text))
+                elif isinstance(event, ToolCallEvent):
+                    # DEFER a confirmation-gated tool's toolCall chunk: it is emitted
+                    # from the gate AFTER `write_confirmation_required`, so the wire
+                    # order matches the reference (Rust) server. Non-gated tools emit
+                    # their chunk inline as before.
+                    if self._is_gated(event.name):
+                        continue
+                    sink(protocol.stream_chunk(request_id, event.name, _tool_call_state(event)))
+                elif isinstance(event, ToolResultEvent):
+                    sink(protocol.stream_chunk(request_id, event.name, _tool_result_state(event)))
+                elif isinstance(event, DoneEvent):
+                    final_text = event.response.text
+        finally:
+            # Turn over: drop any lingering pending confirmation so a stale entry
+            # can't mis-route a later `confirm_tool_action` (mirrors the Rust
+            # `(cfg.clear)(session_id)` at turn end). No-op when HITL is off.
+            if self._confirmations is not None:
+                self._confirmations.clear(confirm_session)
 
         # The DoneEvent's text wins (it's the engine's authoritative final), falling
         # back to the concatenated streamed deltas if it's empty.
@@ -134,12 +209,19 @@ class TurnRunner:
 
 def _tool_call_state(event: ToolCallEvent) -> dict[str, Any]:
     """The ``stream_chunk`` state for a requested tool call (matches the Rust/C#
-    ``rawResponse.toolCall`` shape)."""
+    ``rawResponse.toolCall`` shape). ``event.arguments`` is a raw JSON string."""
     try:
         arguments: Any = json.loads(event.arguments) if event.arguments else {}
     except (json.JSONDecodeError, TypeError):
         arguments = event.arguments
     return {"rawResponse": {"toolCall": {"name": event.name, "arguments": arguments}}}
+
+
+def _tool_call_state_from(name: str, arguments: Any) -> dict[str, Any]:
+    """The ``stream_chunk`` toolCall state built from an already-parsed ``arguments``
+    dict (the shape the engine's ``HumanApprovalRequest`` carries). Used to emit a
+    gated tool's deferred toolCall chunk from the HumanGate."""
+    return {"rawResponse": {"toolCall": {"name": name, "arguments": arguments}}}
 
 
 def _tool_result_state(event: ToolResultEvent) -> dict[str, Any]:
