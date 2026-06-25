@@ -25,6 +25,8 @@ export type { RunningServer, ServerOptions } from './server.js';
 export { FrameDispatcher } from './frameDispatcher.js';
 export type { AccessKnowledge, FrameDispatcherOptions } from './frameDispatcher.js';
 
+export { ConfirmationRegistry } from './confirmation.js';
+
 export { TurnRunner } from './turnRunner.js';
 export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
 

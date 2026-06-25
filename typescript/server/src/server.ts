@@ -44,6 +44,13 @@ export interface ServerOptions {
      * them straight to the agent. Empty by default, so behaviour is unchanged.
      */
     tools?: Tool[];
+    /**
+     * Tool-name patterns gated behind write-confirmation HITL (default empty → no
+     * gating, behavior unchanged). When a turn calls a tool whose name contains one of
+     * these, the server parks the turn and emits `write_confirmation_required` until the
+     * client replies with `confirm_tool_action`.
+     */
+    confirmTools?: string[];
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -100,6 +107,7 @@ export function buildServer(options: ServerOptions): {
             access,
             systemPrompt: options.systemPrompt,
             tools: options.tools,
+            confirmTools: options.confirmTools,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);
@@ -263,6 +271,15 @@ async function runConnection(socket: WebSocket, dispatcher: FrameDispatcher, bac
         // the loop exited (cancel, socket close, or error).
         drainSignal.removeEventListener('abort', onDrain);
         await backplane.detach(connId);
+
+        // A turn parked on a write-confirmation must unpark before we can finish: reject
+        // outstanding confirmations (fail closed — a write is never auto-approved on
+        // disconnect), then await every in-flight spawned turn so its `eventual_response`
+        // is enqueued before the writer stops (preserves the graceful-drain "in-flight
+        // turn finishes" contract now that turns run as background tasks). No-op when no
+        // turn is parked / in flight.
+        dispatcher.rejectPendingConfirmations();
+        await dispatcher.waitForTurns();
 
         // Stop the writer and let it flush what's queued, then close the socket one-way.
         writerStop = true;

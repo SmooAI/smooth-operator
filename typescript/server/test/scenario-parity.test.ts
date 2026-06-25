@@ -71,7 +71,7 @@ interface Scenario {
     name: string;
     description?: string;
     mockLlmScript?: MockScriptEntry[];
-    server?: { tools?: ToolSpec[] };
+    server?: { tools?: ToolSpec[]; confirmTools?: string[] };
     steps: Step[];
 }
 
@@ -184,6 +184,11 @@ describe('scenario parity — TS server runs the shared conformance corpus', () 
             server = await serve({
                 chatClient: buildMock(scenario.mockLlmScript ?? []),
                 tools: buildTools(scenario.server?.tools ?? []),
+                // A tool listed in `server.confirmTools` is gated behind write-confirmation
+                // HITL: the turn parks and emits `write_confirmation_required` until the
+                // client sends `confirm_tool_action`. Empty/absent → no gating (every
+                // existing scenario). Mirrors the Python runner's `confirmTools` directive.
+                confirmTools: scenario.server?.confirmTools ?? [],
             });
             const client = await TestClient.connect(server.url);
             const vars: Record<string, unknown> = {};

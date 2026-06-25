@@ -11,9 +11,10 @@
  * agent per turn, prior messages replayed onto a fresh thread as memory, then
  * `runStream` mapped event-by-event onto protocol events.
  */
-import { SmoothAgent } from '@smooai/smooth-operator-core';
-import type { AgentOptions, ChatClientLike, Knowledge, StreamEvent, Tool } from '@smooai/smooth-operator-core';
+import { approve, deny, SmoothAgent } from '@smooai/smooth-operator-core';
+import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool } from '@smooai/smooth-operator-core';
 
+import type { ConfirmationRegistry } from './confirmation.js';
 import * as protocol from './protocol.js';
 import type { Citation, Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
@@ -44,6 +45,16 @@ export interface TurnRunnerOptions {
     systemPrompt?: string;
     /** Tools the agent may call during the turn (default none); passed straight to the engine. */
     tools?: Tool[];
+    /**
+     * Tool-name substrings gated behind write-confirmation HITL (default empty → no
+     * gating, behavior unchanged). A tool whose name contains one of these parks the
+     * turn (emits `write_confirmation_required`) until the client confirms.
+     */
+    confirmTools?: string[];
+    /** The session-keyed pending-confirmation registry the gate parks on (shared with the dispatcher). */
+    confirmations?: ConfirmationRegistry;
+    /** The session id a parked confirmation is keyed by (so a `confirm_tool_action` frame routes here). */
+    sessionId?: string;
 }
 
 export class TurnRunner {
@@ -52,6 +63,9 @@ export class TurnRunner {
     private readonly knowledge?: Knowledge;
     private readonly systemPrompt: string;
     private readonly tools: Tool[];
+    private readonly confirmTools: string[];
+    private readonly confirmations?: ConfirmationRegistry;
+    private readonly sessionId?: string;
 
     constructor(options: TurnRunnerOptions) {
         this.chatClient = options.chatClient;
@@ -59,6 +73,15 @@ export class TurnRunner {
         this.knowledge = options.knowledge;
         this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
         this.tools = options.tools ?? [];
+        this.confirmTools = options.confirmTools ?? [];
+        this.confirmations = options.confirmations;
+        this.sessionId = options.sessionId;
+    }
+
+    /** True when `name` matches a confirmation-gated pattern (substring, like the Rust hook). */
+    private isGated(name: string): boolean {
+        if (!this.confirmations) return false;
+        return this.confirmTools.some((pattern) => name.includes(pattern));
     }
 
     /**
@@ -92,6 +115,38 @@ export class TurnRunner {
         const agentOptions: AgentOptions = { instructions: this.systemPrompt };
         if (this.knowledge) agentOptions.knowledge = this.knowledge;
         if (this.tools.length > 0) agentOptions.tools = this.tools;
+
+        // Write-confirmation HITL: when configured with tool patterns AND a registry
+        // is present, install a HumanGate that parks the turn before a gated tool runs
+        // (emit `write_confirmation_required`, await the client's verdict via the
+        // session-keyed registry). With no patterns (the default) no gate is installed
+        // → no tool ever parks → behavior identical to before HITL. The gate keys its
+        // pending deferred by `sessionId`, so a `confirm_tool_action` frame (also keyed
+        // by sessionId) routes back here.
+        const confirmSession = this.sessionId ?? conversationId;
+        if (this.confirmTools.length > 0 && this.confirmations) {
+            const patterns = this.confirmTools;
+            const registry = this.confirmations;
+            agentOptions.requiresApproval = (name: string): boolean => patterns.some((pattern) => name.includes(pattern));
+            agentOptions.humanGate = async (req: HumanApprovalRequest): Promise<HumanApprovalResponse> => {
+                // Park: register a fresh deferred, emit the confirmation event, then
+                // await the client's `confirm_tool_action`. The toolId is the tool name
+                // (one tool parks at a time — a stable correlation key).
+                //
+                // Event ORDER matters for cross-language parity: the reference (Rust)
+                // server emits `write_confirmation_required` BEFORE the gated tool's
+                // `stream_chunk(toolCall)`. The engine, however, yields the tool_call
+                // event before consulting the gate — so the stream loop DEFERS a gated
+                // tool's `stream_chunk` (see `isGated`) and we emit it HERE, right after
+                // the confirmation prompt, to match.
+                const verdict = registry.register(confirmSession);
+                sink(protocol.writeConfirmationRequired(requestId, req.toolName, req.prompt));
+                sink(protocol.streamChunk(requestId, req.toolName, toolCallStateFrom(req.toolName, req.arguments)));
+                const approved = await verdict;
+                return approved ? approve() : deny('user rejected the action');
+            };
+        }
+
         const agent = new SmoothAgent(this.chatClient, agentOptions);
 
         const prior = await this.store.listMessages(conversationId, MAX_PRIOR_MESSAGES);
@@ -107,10 +162,21 @@ export class TurnRunner {
         //    call / tool result (the TS parity of the Rust runner translating
         //    ToolCallStart/Complete and the C# FunctionCall/FunctionResult mapping).
         let reply = '';
-        for await (const event of agent.runStream(userMessage, history)) {
-            if (signal?.aborted) break;
-            this.emit(requestId, event, sink);
-            if (event.type === 'text') reply += event.text;
+        try {
+            for await (const event of agent.runStream(userMessage, history)) {
+                if (signal?.aborted) break;
+                // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from
+                // the gate AFTER `write_confirmation_required`, so the wire order matches
+                // the reference (Rust) server. Non-gated tools emit their chunk inline.
+                if (event.type === 'tool_call' && this.isGated(event.name)) continue;
+                this.emit(requestId, event, sink);
+                if (event.type === 'text') reply += event.text;
+            }
+        } finally {
+            // Turn over: drop any lingering pending confirmation so a stale entry can't
+            // mis-route a later `confirm_tool_action` (mirrors the Rust `(cfg.clear)`
+            // at turn end). No-op when HITL is off.
+            this.confirmations?.clear(confirmSession);
         }
 
         // 5. Persist the outbound reply and return.
@@ -153,6 +219,16 @@ function toolCallState(name: string, args: string): Record<string, unknown> {
         parsed = { _raw: args };
     }
     return { rawResponse: { toolCall: { name, arguments: parsed } } };
+}
+
+/**
+ * The `stream_chunk` toolCall state built from an already-parsed `arguments` object
+ * (the shape the engine's {@link HumanApprovalRequest} carries). Used to emit a gated
+ * tool's deferred toolCall chunk from the HumanGate — the TS analog of the Python
+ * `_tool_call_state_from`.
+ */
+function toolCallStateFrom(name: string, args: Record<string, unknown>): Record<string, unknown> {
+    return { rawResponse: { toolCall: { name, arguments: args } } };
 }
 
 function toolResultState(name: string, result: string): Record<string, unknown> {
