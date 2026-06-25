@@ -1,0 +1,42 @@
+{
+    "name": "hitl-write-confirmation",
+    "description": "Human-in-the-loop write confirmation. A tool listed in server.confirmTools is gated: when the engine calls it, the server PARKS the turn and emits write_confirmation_required (per spec/events/write-confirmation-required.schema.json) — the gated tool's toolCall chunk is deferred until after the prompt. The client replies with a confirm_tool_action frame (sessionId + approved=true); the server acks with immediate_response(approved=true), the parked turn resumes, runs the tool, and streams the result + final reply. Proves the pause -> confirm -> resume seam is at parity across servers (canonical order verified against the Rust reference).",
+    "server": {
+        "tools": [
+            {
+                "name": "delete_record",
+                "description": "Delete a record by id (a state-mutating write).",
+                "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] },
+                "result": "Record 42 deleted."
+            }
+        ],
+        "confirmTools": ["delete_record"]
+    },
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "delete_record", "arguments": "{\"id\": \"42\"}" },
+        { "kind": "text", "text": "Done — record 42 was deleted." }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com" },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "delete record 42", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                { "type": "write_confirmation_required", "assert": { "requestId": "r-msg", "data.data.toolId": "delete_record" } },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "delete_record" } }
+            ]
+        },
+        {
+            "send": { "action": "confirm_tool_action", "requestId": "r-confirm", "sessionId": "{{sessionId}}", "approved": true },
+            "expect": [
+                { "type": "immediate_response", "status": 200, "assert": { "data.approved": true } },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "delete_record" } },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Done — record 42 was deleted." },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["Done — record 42 was deleted."] } }
+            ]
+        }
+    ]
+}
