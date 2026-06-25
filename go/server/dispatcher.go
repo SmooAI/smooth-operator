@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	core "github.com/SmooAI/smooth-operator-core/go/core"
 	"github.com/google/uuid"
@@ -20,13 +21,44 @@ type FrameDispatcher struct {
 	access  AccessContext
 	systemP string
 	tools   []core.Tool
+	// confirmTools are tool-name substrings gated behind write-confirmation HITL
+	// (empty → HITL off). Threaded into every turn the runner builds.
+	confirmTools []string
+	// confirmations is the per-connection session-keyed pending-confirmation registry.
+	// A confirm_tool_action frame resolves the verdict the parked turn awaits. Shared
+	// with the turn runner. Created on demand (one per connection) when HITL is enabled.
+	confirmations *ConfirmationRegistry
+	// turns tracks in-flight spawned send_message turns so the connection loop can wait
+	// for them to finish (and flush their eventual_response) on teardown — the
+	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
+	// loop stays free to receive a confirm_tool_action while a turn is parked).
+	turns sync.WaitGroup
 }
 
 // NewFrameDispatcher binds a dispatcher to a connection's stores + access context. The
-// tools (default none) are threaded into every turn the runner builds.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, tools []core.Tool) *FrameDispatcher {
-	return &FrameDispatcher{store: store, client: client, access: access, systemP: systemPrompt, tools: tools}
+// tools (default none) are threaded into every turn the runner builds. confirmTools +
+// confirmations wire write-confirmation HITL; pass nil/empty + a registry to disable.
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *FrameDispatcher {
+	if confirmations == nil {
+		confirmations = NewConfirmationRegistry()
+	}
+	return &FrameDispatcher{
+		store:         store,
+		client:        client,
+		access:        access,
+		systemP:       systemPrompt,
+		tools:         tools,
+		confirmTools:  confirmTools,
+		confirmations: confirmations,
+	}
 }
+
+// WaitForTurns blocks until every in-flight spawned send_message turn has completed.
+// send_message runs its turn as a background goroutine (so the read loop stays free to
+// receive a confirm_tool_action while a turn is parked); the connection loop calls this
+// in its teardown so an in-flight turn finishes — and its eventual_response is flushed —
+// before the writer stops and the backplane detach runs (the graceful-drain contract).
+func (d *FrameDispatcher) WaitForTurns() { d.turns.Wait() }
 
 // inboundFrame is the minimal envelope shared by every client→server action.
 type inboundFrame struct {
@@ -36,9 +68,12 @@ type inboundFrame struct {
 	AgentID   string `json:"agentId"`
 	UserName  string `json:"userName"`
 	UserEmail string `json:"userEmail"`
-	// get_session / send_message
+	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
+	// confirm_tool_action — *bool so a missing verdict is distinguishable from
+	// false (fail closed: a missing/garbled approved must NOT silently approve).
+	Approved *bool `json:"approved"`
 }
 
 // Dispatch parses one raw frame and routes it. A handler failure mid-turn emits a
@@ -60,6 +95,8 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 		d.handleGetSession(ctx, frame, sink)
 	case "send_message":
 		d.handleSendMessage(ctx, frame, sink)
+	case "confirm_tool_action":
+		d.handleConfirmToolAction(frame, sink)
 	case "":
 		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'action'"))
 	default:
@@ -121,16 +158,68 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	// 1. Immediate ack (202).
 	sink(immediateResponse(requestID, 202, "Processing your request...", nil))
 
-	// 2. Stream the turn.
-	runner := NewTurnRunner(d.client, d.store, d.systemP, d.tools)
-	result, err := runner.Run(ctx, session.ConversationID, requestID, frame.Message, sink)
-	if err != nil {
-		// A turn failed (no engine configured, or a model/DB error). Emit a clean
-		// error and keep the connection alive. Detail stays server-side.
-		sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+	// 2. Stream the turn in a goroutine, NOT inline. A turn that calls a
+	//    confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the
+	//    connection's read loop dispatches that frame, so running the turn inline would
+	//    block the reader and deadlock (the confirm could never be read). Spawning frees
+	//    the reader to receive the confirmation while the turn streams its events through
+	//    the sink. Mirrors the Rust tokio::spawn / the Python ensure_future. The 202 ack
+	//    above is already on the wire, and the terminal eventual_response is emitted from
+	//    the goroutine on completion. The WaitGroup lets the connection loop await every
+	//    in-flight turn on teardown (graceful drain).
+	//
+	//    The turn uses a context decoupled from the per-frame ctx: the read loop's
+	//    Dispatch returns as soon as this goroutine is spawned, and the per-frame ctx
+	//    (ioCtx) stays alive for the whole connection, so the turn keeps the connection's
+	//    lifetime — torn down (and the gate unparked) only when the connection closes.
+	d.turns.Add(1)
+	go func() {
+		defer d.turns.Done()
+		runner := NewTurnRunner(d.client, d.store, d.systemP, d.tools, d.confirmTools, d.confirmations)
+		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
+		if err != nil {
+			// A turn failed (no engine configured, or a model/DB error). Emit a clean
+			// error and keep the connection alive. Detail stays server-side.
+			sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+			return
+		}
+		// 3. Terminal eventual_response.
+		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations))
+	}()
+}
+
+// handleConfirmToolAction resumes a turn parked on a write-tool confirmation.
+//
+// Per spec/actions/confirm-tool-action.schema.json the client replies with
+// {action, sessionId, requestId, approved} to a write_confirmation_required event.
+// We resolve the session's pending confirmation with the verdict: the parked HumanGate
+// returns and the turn resumes (runs the tool on approve, skips it with a rejection
+// result on deny). There is no dedicated response event — continuation is signalled by
+// the resumed streaming sequence; we ack with an immediate_response. Resolving takes the
+// channel out, so a duplicate confirm is a clean NO_PENDING_CONFIRMATION no-op. Fails
+// closed: a missing sessionId or non-bool approved is rejected (never silently approve).
+func (d *FrameDispatcher) handleConfirmToolAction(frame inboundFrame, sink EventSink) {
+	if frame.SessionID == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "confirm_tool_action requires a 'sessionId'"))
+		return
+	}
+	if frame.Approved == nil {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "confirm_tool_action requires a boolean 'approved'"))
+		return
+	}
+	approved := *frame.Approved
+
+	if !d.confirmations.Resolve(frame.SessionID, approved) {
+		sink(errorEvent(frame.RequestID, "NO_PENDING_CONFIRMATION", "no tool action is awaiting confirmation for session '"+frame.SessionID+"'"))
 		return
 	}
 
-	// 3. Terminal eventual_response.
-	sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations))
+	message := "Tool action rejected"
+	if approved {
+		message = "Tool action approved"
+	}
+	sink(immediateResponse(frame.RequestID, 200, message, map[string]any{
+		"sessionId": frame.SessionID,
+		"approved":  approved,
+	}))
 }

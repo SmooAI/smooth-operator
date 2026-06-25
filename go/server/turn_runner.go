@@ -41,22 +41,56 @@ type TurnRunner struct {
 	store        SessionStore
 	systemPrompt string
 	tools        []core.Tool
+	// confirmTools are tool-name substrings gated behind write-confirmation HITL
+	// (empty → HITL off, behavior unchanged). When a turn calls a tool whose name
+	// contains one of these, the runner parks the turn and emits
+	// write_confirmation_required until the client replies with confirm_tool_action.
+	confirmTools []string
+	// confirmations is the session-keyed pending-confirmation registry shared with
+	// the dispatcher so a confirm_tool_action frame resolves the verdict a parked
+	// turn awaits. nil → HITL off.
+	confirmations *ConfirmationRegistry
 }
 
 // NewTurnRunner builds a runner over the engine chat client + session store. An empty
 // systemPrompt falls back to the default support-agent prompt. tools (default none) are
 // passed straight to the engine AgentOptions so the agent can call them mid-turn.
-func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, tools []core.Tool) *TurnRunner {
+// confirmTools + confirmations wire write-confirmation HITL; pass nil/empty to disable.
+func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *TurnRunner {
 	if systemPrompt == "" {
 		systemPrompt = defaultSystemPrompt
 	}
-	return &TurnRunner{client: client, store: store, systemPrompt: systemPrompt, tools: tools}
+	return &TurnRunner{
+		client:        client,
+		store:         store,
+		systemPrompt:  systemPrompt,
+		tools:         tools,
+		confirmTools:  confirmTools,
+		confirmations: confirmations,
+	}
+}
+
+// isGated reports whether toolName matches a confirmation-gated pattern (substring,
+// like the Rust ConfirmationHook + the Python gate). Only meaningful when a
+// confirmation registry is wired.
+func (r *TurnRunner) isGated(toolName string) bool {
+	if r.confirmations == nil {
+		return false
+	}
+	for _, pattern := range r.confirmTools {
+		if strings.Contains(toolName, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // Run streams one turn for conversationID keyed on requestID, emitting events through
-// sink, and returns the settled TurnResult. A nil client (no engine configured)
-// surfaces to the caller as an error so the handler can emit a clean protocol error.
-func (r *TurnRunner) Run(ctx context.Context, conversationID, requestID, userMessage string, sink EventSink) (TurnResult, error) {
+// sink, and returns the settled TurnResult. sessionID keys the write-confirmation
+// registry (so a confirm_tool_action for the same session resumes this turn). A nil
+// client (no engine configured) surfaces to the caller as an error so the handler can
+// emit a clean protocol error.
+func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, requestID, userMessage string, sink EventSink) (TurnResult, error) {
 	// No engine configured (the keyless / no-gateway path): fail with a clear error the
 	// dispatcher turns into a clean protocol error, rather than letting the engine's
 	// NewSmoothAgent panic on a nil client.
@@ -66,7 +100,52 @@ func (r *TurnRunner) Run(ctx context.Context, conversationID, requestID, userMes
 
 	// 1. Build the agent + replay prior history into a thread (before persisting this
 	//    turn's inbound message, so the thread doesn't double-count it).
-	agent := core.NewSmoothAgent(r.client, core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools})
+	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools}
+
+	// Write-confirmation HITL: when configured with tool patterns AND a registry is
+	// present, install a HumanGate that parks the turn before a gated tool runs (emit
+	// write_confirmation_required, await the client's verdict via the session-keyed
+	// registry). With no patterns (the default) no gate is installed → no tool ever
+	// parks → behavior identical to before HITL. The gate keys its pending channel by
+	// sessionID, so a confirm_tool_action frame (also keyed by sessionId) routes back
+	// here.
+	//
+	// Event ORDER matters for cross-language parity: the reference (Rust) server emits
+	// write_confirmation_required BEFORE the gated tool's stream_chunk(toolCall). The
+	// engine, however, yields the StreamToolCall event before consulting the gate — so
+	// the stream loop below DEFERS a gated tool's stream_chunk (see isGated) and the
+	// gate emits it HERE, right after the confirmation prompt, to match.
+	if len(r.confirmTools) > 0 && r.confirmations != nil {
+		opts.RequiresApproval = func(name string, _ map[string]any) bool {
+			return r.isGated(name)
+		}
+		opts.HumanGate = func(gateCtx context.Context, req core.HumanApprovalRequest) (core.HumanApprovalResponse, error) {
+			// Park: register a fresh verdict channel, emit the confirmation event +
+			// the deferred toolCall chunk, then await the client's confirm_tool_action.
+			// The toolId is the tool name (one tool parks at a time — a stable
+			// correlation key); actionDescription is the engine's prompt.
+			verdict := r.confirmations.Register(sessionID)
+			argsJSON, err := json.Marshal(req.Arguments)
+			if err != nil {
+				argsJSON = []byte("{}")
+			}
+			sink(writeConfirmationRequired(requestID, req.ToolName, req.Prompt))
+			sink(streamChunk(requestID, req.ToolName, toolCallState(req.ToolName, string(argsJSON))))
+			select {
+			case approved := <-verdict:
+				if approved {
+					return core.Approve(), nil
+				}
+				return core.Deny("user rejected the action"), nil
+			case <-gateCtx.Done():
+				// The turn's context was cancelled (connection torn down before a
+				// verdict landed) — fail closed: deny, never auto-approve a write.
+				return core.Deny("connection closed before confirmation"), gateCtx.Err()
+			}
+		}
+	}
+
+	agent := core.NewSmoothAgent(r.client, opts)
 	thread := core.NewThread()
 	prior, err := r.store.ListMessages(ctx, conversationID, maxPriorMessages)
 	if err != nil {
@@ -92,6 +171,12 @@ func (r *TurnRunner) Run(ctx context.Context, conversationID, requestID, userMes
 	if err != nil {
 		return TurnResult{}, err
 	}
+	// Turn over: drop any lingering pending confirmation so a stale entry can't
+	// mis-route a later confirm_tool_action (mirrors the Rust (cfg.clear)(session_id)
+	// at turn end). No-op when HITL is off.
+	if r.confirmations != nil {
+		defer r.confirmations.Clear(sessionID)
+	}
 	var reply strings.Builder
 	for ev := range stream.Events() {
 		switch ev.Kind {
@@ -101,6 +186,12 @@ func (r *TurnRunner) Run(ctx context.Context, conversationID, requestID, userMes
 				sink(streamToken(requestID, ev.Text))
 			}
 		case core.StreamToolCall:
+			// DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
+			// gate AFTER write_confirmation_required, so the wire order matches the
+			// reference (Rust) server. Non-gated tools emit their chunk inline as before.
+			if r.isGated(ev.Name) {
+				continue
+			}
 			sink(streamChunk(requestID, ev.Name, toolCallState(ev.Name, ev.Arguments)))
 		case core.StreamToolResult:
 			sink(streamChunk(requestID, ev.Name, toolResultState(ev.Name, ev.Result)))
