@@ -28,8 +28,10 @@ public sealed class TurnRunner
     private readonly IReranker? _reranker;
     private readonly string _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
+    private readonly IReadOnlyList<string> _confirmTools;
+    private readonly ConfirmationRegistry? _confirmations;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -38,9 +40,22 @@ public sealed class TurnRunner
         _systemPrompt = systemPrompt ??
             "You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don't know.";
         _tools = tools ?? Array.Empty<AITool>();
+        // Tool-name substrings that require human approval before they run (empty → HITL off,
+        // behavior unchanged). Matched by substring like the Rust/Python gate.
+        _confirmTools = confirmTools ?? Array.Empty<string>();
+        // The session-keyed pending-confirmation registry the gate parks on (null → HITL off).
+        _confirmations = confirmations;
     }
 
-    public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, CancellationToken cancellationToken = default)
+    /// <summary>True when <paramref name="toolName"/> matches a confirmation-gated pattern (substring,
+    /// like the Rust/Python gate). Only meaningful when a confirmation registry is wired.</summary>
+    private bool IsGated(string toolName) =>
+        _confirmations is not null && _confirmTools.Any(pattern => toolName.Contains(pattern, StringComparison.Ordinal));
+
+    public Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, CancellationToken cancellationToken = default) =>
+        RunAsync(conversationId, requestId, userMessage, sink, sessionId: conversationId, cancellationToken);
+
+    public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, string sessionId, CancellationToken cancellationToken = default)
     {
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources.
         //    With a reranker configured, fetch a wider candidate pool and let it reorder down to
@@ -79,6 +94,37 @@ public sealed class TurnRunner
         {
             options.Tools.Add(tool);
         }
+
+        // Write-confirmation HITL: when configured with tool patterns AND a registry is present,
+        // install an IHumanGate that PARKS the turn before a gated tool runs — emit
+        // write_confirmation_required, then await the client's verdict via the session-keyed
+        // registry. With no patterns (the default) no gate is installed → no tool ever parks →
+        // behavior identical to before HITL. The gate keys its pending task by sessionId, so a
+        // confirm_tool_action frame (also keyed by sessionId) routes back here.
+        if (_confirmTools.Count > 0 && _confirmations is not null)
+        {
+            var registry = _confirmations;
+            var session = sessionId;
+            options.RequiresApproval = call => _confirmTools.Any(p => call.Name.Contains(p, StringComparison.Ordinal));
+            options.HumanGate = new DelegateHumanGate(async (HumanApprovalRequest req, CancellationToken ct) =>
+            {
+                // Park: register a fresh task, emit the confirmation event, then await the client's
+                // confirm_tool_action. toolId is the tool name (one tool parks at a time — a stable
+                // correlation key).
+                //
+                // Event ORDER matters for cross-language parity: the canonical (Rust) server emits
+                // write_confirmation_required BEFORE the gated tool's stream_chunk(toolCall). The
+                // engine, however, yields the FunctionCallContent before consulting the gate — so the
+                // stream loop DEFERS a gated tool's stream_chunk (see IsGated) and we emit it HERE,
+                // right after the confirmation prompt, to match.
+                var pending = registry.Register(session);
+                sink(ProtocolEvents.WriteConfirmationRequired(requestId, req.ToolName, req.Prompt));
+                sink(ProtocolEvents.StreamChunk(requestId, req.ToolName, ToolCallStateFrom(req.ToolName, req.Arguments)));
+                var approved = await pending.ConfigureAwait(false);
+                return approved ? HumanApprovalResponse.Approve() : HumanApprovalResponse.Deny("user rejected the action");
+            });
+        }
+
         var agent = new SmoothAgent(_chatClient, options);
         var thread = agent.GetNewThread();
         foreach (var message in await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false))
@@ -97,35 +143,66 @@ public sealed class TurnRunner
         var reply = new StringBuilder();
         var toolNames = new Dictionary<string, string>();
         var emittedCalls = new HashSet<string>();
-        await foreach (var update in agent.RunStreamingAsync(userMessage, thread, cancellationToken).ConfigureAwait(false))
+        try
         {
-            var text = update.Text;
-            if (!string.IsNullOrEmpty(text))
+            await foreach (var update in agent.RunStreamingAsync(userMessage, thread, cancellationToken).ConfigureAwait(false))
             {
-                reply.Append(text);
-                sink(ProtocolEvents.StreamToken(requestId, text));
-            }
-
-            foreach (var content in update.Contents)
-            {
-                switch (content)
+                var text = update.Text;
+                if (!string.IsNullOrEmpty(text))
                 {
-                    case FunctionCallContent call when emittedCalls.Add(call.CallId):
-                        toolNames[call.CallId] = call.Name;
-                        sink(ProtocolEvents.StreamChunk(requestId, call.Name, ToolCallState(call)));
-                        break;
-                    case FunctionResultContent result:
-                        var name = toolNames.TryGetValue(result.CallId, out var resolved) ? resolved : "tool";
-                        sink(ProtocolEvents.StreamChunk(requestId, name, ToolResultState(name, result)));
-                        break;
+                    reply.Append(text);
+                    sink(ProtocolEvents.StreamToken(requestId, text));
+                }
+
+                foreach (var content in update.Contents)
+                {
+                    switch (content)
+                    {
+                        case FunctionCallContent call when emittedCalls.Add(call.CallId):
+                            toolNames[call.CallId] = call.Name;
+                            // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
+                            // gate AFTER write_confirmation_required, so the wire order matches the
+                            // canonical (Rust) server. Non-gated tools emit their chunk inline as before.
+                            if (IsGated(call.Name))
+                            {
+                                break;
+                            }
+                            sink(ProtocolEvents.StreamChunk(requestId, call.Name, ToolCallState(call)));
+                            break;
+                        case FunctionResultContent result:
+                            var name = toolNames.TryGetValue(result.CallId, out var resolved) ? resolved : "tool";
+                            sink(ProtocolEvents.StreamChunk(requestId, name, ToolResultState(name, result)));
+                            break;
+                    }
                 }
             }
+        }
+        finally
+        {
+            // Turn over: drop any lingering pending confirmation so a stale entry can't mis-route a
+            // later confirm_tool_action (mirrors the Rust clear at turn end). No-op when HITL is off.
+            _confirmations?.Clear(sessionId);
         }
 
         // 5. Persist the outbound reply and return.
         var outbound = await _store.AppendMessageAsync(conversationId, MessageDirection.Outbound, reply.ToString(), cancellationToken).ConfigureAwait(false);
         return new TurnResult(reply.ToString(), outbound.Id, citations);
     }
+
+    /// <summary>The stream_chunk toolCall state built from a gated tool's name + already-parsed
+    /// arguments (the shape the engine's <see cref="HumanApprovalRequest"/> carries). Used to emit a
+    /// gated tool's deferred toolCall chunk from the HumanGate.</summary>
+    private static JsonObject ToolCallStateFrom(string name, IDictionary<string, object?>? arguments) => new()
+    {
+        ["rawResponse"] = new JsonObject
+        {
+            ["toolCall"] = new JsonObject
+            {
+                ["name"] = name,
+                ["arguments"] = arguments is null ? new JsonObject() : JsonSerializer.SerializeToNode(arguments),
+            },
+        },
+    };
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max];
 

@@ -39,9 +39,11 @@ public class ScenarioParityTests
         _ = name; // surfaced as the test id via MemberData
         var scenario = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
         var chat = BuildMock(scenario["mockLlmScript"]?.AsArray());
-        var tools = BuildTools(scenario["server"]?.AsObject()?["tools"]?.AsArray());
+        var serverDirective = scenario["server"]?.AsObject();
+        var tools = BuildTools(serverDirective?["tools"]?.AsArray());
+        var confirmTools = BuildConfirmTools(serverDirective?["confirmTools"]?.AsArray());
 
-        await using var app = BuildApp(chat, tools);
+        await using var app = BuildApp(chat, tools, confirmTools);
         await app.StartAsync();
         using var socket = await ConnectAsync(app.GetTestServer());
 
@@ -114,6 +116,21 @@ public class ScenarioParityTests
         }
 
         return tools;
+    }
+
+    /// <summary>
+    /// Build the write-confirmation HITL tool-name patterns from a scenario's <c>server.confirmTools</c>
+    /// directive. When non-empty the server gates each matching tool behind a <c>confirm_tool_action</c>
+    /// round-trip. The C# analog of seeding Python's <c>ServerState.confirm_tools</c>.
+    /// </summary>
+    private static IReadOnlyList<string> BuildConfirmTools(JsonArray? patterns)
+    {
+        if (patterns is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        return patterns.Select(p => p!.GetValue<string>()).ToArray();
     }
 
     /// <summary>
@@ -275,7 +292,7 @@ public class ScenarioParityTests
         return JsonNode.DeepEquals(a, b);
     }
 
-    private static WebApplication BuildApp(IChatClient chat, IReadOnlyList<AITool> tools)
+    private static WebApplication BuildApp(IChatClient chat, IReadOnlyList<AITool> tools, IReadOnlyList<string> confirmTools)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -285,6 +302,12 @@ public class ScenarioParityTests
             // Register the scenario's tools as the DI-resolved tool set the WebSocket host threads into
             // each per-connection dispatcher (the analog of seeding Python's ServerState.tools).
             builder.Services.AddSingleton(tools);
+        }
+        if (confirmTools.Count > 0)
+        {
+            // Register the scenario's confirmTools so the WebSocket host gates them behind a
+            // confirm_tool_action round-trip (the analog of seeding Python's ServerState.confirm_tools).
+            builder.Services.AddSingleton(new ConfirmTools(confirmTools));
         }
         builder.Services.AddSmoothOperatorServer();
 

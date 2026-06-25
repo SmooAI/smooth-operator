@@ -23,6 +23,14 @@ public sealed class FrameDispatcher
     private readonly AccessContext _access;
     private readonly string? _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
+    private readonly IReadOnlyList<string> _confirmTools;
+    private readonly ConfirmationRegistry _confirmations;
+
+    // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
+    // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
+    // inline) to keep the read loop free; the connection awaits these on teardown (graceful drain).
+    private readonly object _turnsLock = new();
+    private readonly HashSet<Task> _turnTasks = new();
 
     public FrameDispatcher(
         ISessionStore store,
@@ -31,7 +39,9 @@ public sealed class FrameDispatcher
         AccessContext? access = null,
         string? systemPrompt = null,
         IReranker? reranker = null,
-        IReadOnlyList<AITool>? tools = null)
+        IReadOnlyList<AITool>? tools = null,
+        IReadOnlyList<string>? confirmTools = null,
+        ConfirmationRegistry? confirmations = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -40,7 +50,48 @@ public sealed class FrameDispatcher
         _systemPrompt = systemPrompt;
         _reranker = reranker;
         _tools = tools ?? Array.Empty<AITool>();
+        // Tool-name patterns gated behind write-confirmation HITL (empty → no gating, behavior
+        // unchanged). When a turn calls a tool whose name contains one of these, the server parks the
+        // turn and emits write_confirmation_required until the client replies with confirm_tool_action.
+        _confirmTools = confirmTools ?? Array.Empty<string>();
+        // Session-keyed pending-confirmation registry shared with each spawned turn so a
+        // confirm_tool_action frame resolves the verdict a parked turn awaits. One per connection.
+        _confirmations = confirmations ?? new ConfirmationRegistry();
     }
+
+    /// <summary>
+    /// Await every in-flight spawned <c>send_message</c> turn to completion. <c>send_message</c> runs
+    /// its turn as a background task (so the read loop stays free to receive a <c>confirm_tool_action</c>
+    /// while a turn is parked). The connection loop calls this in its teardown so an in-flight turn
+    /// finishes — and its <c>eventual_response</c> is flushed — before the writer stops (preserves the
+    /// graceful-drain contract).
+    /// </summary>
+    public async Task WaitForTurnsAsync()
+    {
+        Task[] pending;
+        lock (_turnsLock)
+        {
+            pending = _turnTasks.ToArray();
+        }
+        if (pending.Length > 0)
+        {
+            try
+            {
+                await Task.WhenAll(pending).ConfigureAwait(false);
+            }
+            catch
+            {
+                // A turn that faulted already surfaced its own error event; the drain must not throw.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reject every outstanding write-confirmation as denied (fail closed — a write is never
+    /// auto-approved on disconnect), so any turn parked on a confirmation unparks and finishes
+    /// cleanly. Called by the connection loop on teardown, before <see cref="WaitForTurnsAsync"/>.
+    /// </summary>
+    public void RejectPendingConfirmations() => _confirmations.RejectAll();
 
     public async Task DispatchAsync(string rawFrame, Action<JsonObject> sink, CancellationToken cancellationToken = default)
     {
@@ -79,6 +130,9 @@ public sealed class FrameDispatcher
                     break;
                 case "send_message":
                     await HandleSendMessageAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "confirm_tool_action":
+                    HandleConfirmToolAction(frame, requestId, sink);
                     break;
                 case null:
                     sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "Missing 'action'"));
@@ -154,16 +208,95 @@ public sealed class FrameDispatcher
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools);
-        var result = await runner.RunAsync(session.ConversationId, requestId, message, sink, cancellationToken).ConfigureAwait(false);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools, _confirmTools, _confirmations);
 
-        // 3. Terminal eventual_response.
-        sink(ProtocolEvents.EventualResponse(
+        // Run the turn as a background task, NOT awaited inline. A turn that calls a
+        // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's
+        // read loop dispatches that frame, so awaiting the turn here would block the reader and
+        // deadlock (the confirm could never be read). Spawning frees the reader to receive the
+        // confirmation while the turn streams its events through the sink. Mirrors the Rust
+        // tokio::spawn / the Python background task. The 202 ack above is already enqueued, and the
+        // terminal eventual_response is emitted from the task on completion.
+        var requestIdStr = requestId;
+        var sessionIdStr = session.SessionId;
+        var conversationId = session.ConversationId;
+
+        var task = Task.Run(async () =>
+        {
+            try
+            {
+                var result = await runner.RunAsync(conversationId, requestIdStr, message, sink, sessionIdStr, cancellationToken).ConfigureAwait(false);
+                sink(ProtocolEvents.EventualResponse(
+                    requestIdStr,
+                    200,
+                    result.MessageId,
+                    ProtocolEvents.GeneralResponse(result.Reply),
+                    needsEscalation: false,
+                    result.Citations));
+            }
+            catch (OperationCanceledException)
+            {
+                // Connection torn down mid-turn — nothing to surface; the socket is gone.
+            }
+            catch (Exception)
+            {
+                // Mirror the dispatcher's outer guard: a turn failure surfaces a clean error and
+                // keeps the connection alive (detail stays server-side).
+                sink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
+            }
+        }, CancellationToken.None);
+
+        lock (_turnsLock)
+        {
+            _turnTasks.Add(task);
+        }
+        _ = task.ContinueWith(t =>
+        {
+            lock (_turnsLock)
+            {
+                _turnTasks.Remove(t);
+            }
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// <c>confirm_tool_action</c> — resume a turn parked on a write-tool confirmation. Per
+    /// <c>spec/actions/confirm-tool-action.schema.json</c> the client replies with
+    /// <c>{action, sessionId, requestId, approved}</c> to a <c>write_confirmation_required</c> event.
+    /// We resolve the session's pending confirmation with the verdict: the parked <c>IHumanGate</c>
+    /// returns and the turn resumes (runs the tool on approve, skips it with a rejection result on
+    /// deny). There is no dedicated response event — continuation is signalled by the resumed
+    /// streaming sequence; we ack with an <c>immediate_response</c>. Resolving takes the task out, so
+    /// a duplicate confirm is a clean <c>NO_PENDING_CONFIRMATION</c> no-op. Fails closed: a missing
+    /// <c>sessionId</c> or non-bool <c>approved</c> is rejected (never silently approve).
+    /// </summary>
+    private void HandleConfirmToolAction(JsonObject frame, string? requestId, Action<JsonObject> sink)
+    {
+        var sessionId = frame["sessionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "confirm_tool_action requires a 'sessionId'"));
+            return;
+        }
+
+        // `approved` is required and must be a boolean — a missing/garbled verdict must NOT silently
+        // approve a write. Fail closed on a bad shape.
+        if (frame["approved"] is not JsonValue approvedNode || !approvedNode.TryGetValue<bool>(out var approved))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "confirm_tool_action requires a boolean 'approved'"));
+            return;
+        }
+
+        if (!_confirmations.Resolve(sessionId, approved))
+        {
+            sink(ProtocolEvents.Error(requestId, "NO_PENDING_CONFIRMATION", $"no tool action is awaiting confirmation for session '{sessionId}'"));
+            return;
+        }
+
+        sink(ProtocolEvents.ImmediateResponse(
             requestId,
             200,
-            result.MessageId,
-            ProtocolEvents.GeneralResponse(result.Reply),
-            needsEscalation: false,
-            result.Citations));
+            approved ? "Tool action approved" : "Tool action rejected",
+            new JsonObject { ["sessionId"] = sessionId, ["approved"] = approved }));
     }
 }

@@ -38,6 +38,7 @@ docker run -p 8080:8080 -e SMOOTH_GATEWAY_KEY=… -e SMOOTH_AUTH_MODE=jwt -e SMO
 | `SMOOTH_JWT_HS256_SECRET` | — | Shared secret when `SMOOTH_AUTH_MODE=jwt`. |
 | `SMOOTH_GITHUB_REPOS` | — | Comma list of `owner/repo[@ref]` to ingest at startup. |
 | `SMOOTH_GITHUB_TOKEN` | — | GitHub token for private repos / higher rate limits. |
+| `SMOOTH_AGENT_CONFIRM_TOOLS` | *(unset → off)* | Comma list of tool-name substrings gated behind **write-confirmation HITL**: a turn that calls a matching tool parks and emits `write_confirmation_required`; the client resumes it with `confirm_tool_action` (`{sessionId, requestId, approved}`). Unset = no tool requires confirmation (unchanged). |
 
 ## How auth + ACL fit
 
