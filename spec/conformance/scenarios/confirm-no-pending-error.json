@@ -1,0 +1,13 @@
+{
+    "name": "confirm-no-pending-error",
+    "description": "A confirm_tool_action for a session with no parked tool action must fail closed with error/NO_PENDING_CONFIRMATION (echoing requestId) — never silently approve a phantom write, never crash. Guards the HITL resume path against stray/duplicate confirms. No session or mock needed; the frame is rejected before any turn.",
+    "mockLlmScript": [],
+    "steps": [
+        {
+            "send": { "action": "confirm_tool_action", "requestId": "r-stray", "sessionId": "00000000-0000-0000-0000-000000000000", "approved": true },
+            "expect": [
+                { "type": "error", "assert": { "error.code": "NO_PENDING_CONFIRMATION", "requestId": "r-stray" } }
+            ]
+        }
+    ]
+}
