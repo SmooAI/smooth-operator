@@ -30,6 +30,12 @@ type Server struct {
 	// runner already maps its tool-call/tool-result stream events to stream_chunk frames.
 	tools []core.Tool
 
+	// confirmTools are tool-name substrings gated behind write-confirmation HITL
+	// (default empty → no gating, behavior unchanged). When a turn calls a tool whose
+	// name contains one of these, the server parks the turn and emits
+	// write_confirmation_required until the client replies with confirm_tool_action.
+	confirmTools []string
+
 	// drainCtx is the single shutdown source for the whole server (one source,
 	// default uncancelled). Each connection loop selects on its Done() so an
 	// in-flight turn can finish before the loop exits (graceful SIGTERM drain).
@@ -66,6 +72,14 @@ func WithSystemPrompt(p string) Option { return func(srv *Server) { srv.systemP 
 // WithTools registers the engine tools the agent may call during a turn (default none).
 // Threaded into every turn via the dispatcher → turn runner → engine AgentOptions.
 func WithTools(tools []core.Tool) Option { return func(srv *Server) { srv.tools = tools } }
+
+// WithConfirmTools gates the named tools (matched by name substring) behind
+// write-confirmation HITL (default none → no gating). A turn that calls a matching tool
+// parks and emits write_confirmation_required; the client resumes it with
+// confirm_tool_action. Empty preserves byte-for-byte behavior from before HITL.
+func WithConfirmTools(tools []string) Option {
+	return func(srv *Server) { srv.confirmTools = tools }
+}
 
 // New builds a Server with the given options, defaulting every collaborator to its
 // in-memory / permissive reference impl so New() with no options is a working server.
@@ -190,11 +204,23 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	s.backplane.Attach(s.drainCtx, connID, send)
 	defer s.backplane.Detach(context.Background(), connID)
 
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.tools)
+	// One pending-confirmation registry per connection: a confirm_tool_action frame and
+	// the parked turn it resumes are always on the same connection (the session id keys
+	// within it), so the registry need not be server-wide.
+	confirmations := NewConfirmationRegistry()
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.tools, s.confirmTools, confirmations)
 
-	// teardown closes the writer sink once (under sendMu, so an in-flight send can't race
-	// the close), waits for the writer to drain, and closes the socket.
+	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
+	// writer sink once (under sendMu, so an in-flight send can't race the close), waits
+	// for the writer to drain, and closes the socket. Order matters: a turn parked on a
+	// write-confirmation must unpark (reject — fail closed, a write is never
+	// auto-approved on disconnect) and every in-flight spawned turn must finish (so its
+	// eventual_response is enqueued) BEFORE we close the sink, preserving the
+	// graceful-drain "in-flight turn finishes" contract now that turns run as goroutines
+	// rather than inline.
 	teardown := func(status websocket.StatusCode, reason string) {
+		confirmations.RejectAll()
+		dispatcher.WaitForTurns()
 		sendMu.Lock()
 		if !sinkClosed {
 			sinkClosed = true
@@ -223,14 +249,14 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 		}()
 
 		// Check drain FIRST: Go's select is random on a tie, so when the server is
-		// draining we prefer to stop rather than process another frame. No turn is
-		// in-flight at this point (dispatch below is awaited inline before we loop back),
-		// so stopping here finishes the drain cleanly.
+		// draining we prefer to stop reading rather than process another frame.
 		select {
 		case <-s.drainCtx.Done():
-			// Server draining → stop accepting frames. Any turn dispatched on a prior
-			// iteration already completed (Dispatch is awaited), and its events have been
-			// queued to the still-open writer; teardown flushes them before closing.
+			// Server draining → stop accepting frames. A send_message turn dispatched on a
+			// prior iteration may still be in-flight (turns now run as goroutines so the
+			// read loop stays free to receive a confirm_tool_action while a turn is
+			// parked); teardown rejects any parked confirmation and waits for every
+			// in-flight turn to flush its eventual_response before closing the writer.
 			teardown(websocket.StatusGoingAway, "server draining")
 			return
 		case r := <-next:
@@ -243,10 +269,12 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 				send(errorEvent("", "VALIDATION_ERROR", "binary frames are not supported; send JSON text frames"))
 				continue
 			}
-			// Dispatch the turn INLINE (awaited) with ioCtx — NOT the drain ctx — so a
-			// drain that fires mid-turn doesn't abort it: a streaming send_message turn
-			// fires many events through send and only returns once the terminal
-			// eventual_response is emitted, so an in-flight turn always finishes.
+			// Dispatch with ioCtx — NOT the drain ctx — so a drain that fires mid-turn
+			// doesn't abort it. send_message spawns its turn as a goroutine (so a parked
+			// turn doesn't block the reader from receiving its confirm_tool_action) and
+			// Dispatch returns immediately; the turn streams its events through send and
+			// is awaited at teardown. Other actions are handled synchronously inside
+			// Dispatch.
 			dispatcher.Dispatch(ioCtx, r.data, send)
 		}
 	}

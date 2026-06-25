@@ -38,9 +38,14 @@ type scenario struct {
 }
 
 // scenarioServer is the optional `server` directive: deployment-time config the runner
-// applies when starting the server. Currently just the tools the agent may call.
+// applies when starting the server — the tools the agent may call, and the subset gated
+// behind write-confirmation HITL.
 type scenarioServer struct {
 	Tools []toolSpec `json:"tools"`
+	// ConfirmTools are tool-name substrings gated behind write-confirmation HITL — a
+	// turn that calls a matching tool parks and emits write_confirmation_required until
+	// the client replies with confirm_tool_action.
+	ConfirmTools []string `json:"confirmTools"`
 }
 
 // toolSpec is one deterministic test tool a scenario registers via `server.tools`. The
@@ -256,6 +261,7 @@ func runScenario(t *testing.T, path string) {
 		WithLocalAddr("127.0.0.1:0"),
 		WithLocalChatClient(mock),
 		WithLocalServerOption(WithTools(tools)),
+		WithLocalServerOption(WithConfirmTools(sc.Server.ConfirmTools)),
 	)
 	if err != nil {
 		t.Fatalf("spawn: %v", err)

@@ -101,6 +101,30 @@ func eventualResponse(requestID string, status int, messageID string, response m
 	}
 }
 
+// writeConfirmationRequired is emitted mid-turn when the agent calls a
+// state-mutating tool that requires explicit human approval before it runs. The
+// turn is PARKED (the engine's HumanGate awaits the verdict) until the client
+// replies with a confirm_tool_action action carrying the same requestId and an
+// approved boolean.
+//
+// Wire shape matches spec/events/write-confirmation-required.schema.json and the
+// Rust reference's write_confirmation_required byte-for-byte: the requestId echoes
+// the originating send_message, and the prompt detail is double-nested under
+// data.data.{toolId, actionDescription}. toolId is an opaque correlation handle
+// (the tool name — a turn parks one tool at a time); actionDescription is the
+// human-readable prompt the client renders.
+func writeConfirmationRequired(requestID, toolID, actionDescription string) map[string]any {
+	return map[string]any{
+		"type":      "write_confirmation_required",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data":      map[string]any{"toolId": toolID, "actionDescription": actionDescription},
+		},
+		"timestamp": nowMs(),
+	}
+}
+
 // errorEvent reports a handler/validation failure without dropping the connection.
 //
 // The {code, message} descriptor is duplicated at the envelope top level (`error`)
