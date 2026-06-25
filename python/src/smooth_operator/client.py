@@ -210,12 +210,18 @@ class SmoothAgentClient:
         self,
         url: str,
         *,
+        token: str | None = None,
         transport: Transport | None = None,
         generate_request_id: Callable[[], str] | None = None,
         request_timeout: float = 30.0,
         turn_timeout: float = 120.0,
     ) -> None:
-        self._transport = transport if transport is not None else WebSocketTransport(url)
+        # ``token`` authenticates against a token-gated (local-flavor) server: it is
+        # folded into the connection URL's ``?token=`` slot on the default transport.
+        # A custom ``transport`` is used as-is (apply the token to its own URL there).
+        self._transport = (
+            transport if transport is not None else WebSocketTransport(url, token=token)
+        )
         self._request_timeout = request_timeout
         # Overall timeout (seconds) for a streaming send_message turn. 0 disables it.
         self._turn_timeout = turn_timeout
