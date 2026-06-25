@@ -58,6 +58,43 @@ function stampRustCargoToml(text) {
         .join('\n');
 }
 
+/**
+ * Stamp the anchor version onto every WORKSPACE-MEMBER entry in `rust/Cargo.lock`.
+ *
+ * `changeset version` + the Cargo.toml stamps below bump each member's `[package]`
+ * version, but the lockfile still pins the OLD versions — so `cargo build --locked`
+ * (kind-deploy-smoke, and every release `cargo publish`) refuses to build until the
+ * lock is re-synced. Rather than shell out to `cargo update` (which can't re-resolve
+ * on a CI runner where the sibling `smooth-operator-core` path dep is absent), we
+ * string-stamp the lock the same way we stamp the manifests: bump the `version` of
+ * each `[[package]]` whose `name` is one of the lockstep-stamped published members
+ * (`publishedRustCrates` — NOT `-core`, which ships on its own 0.14 cadence, and NOT
+ * non-published crates like the lambda/examples that stay at 0.1.0). Workspace
+ * members are referenced by name-only in the lock (unique versions, no checksums),
+ * so the version line is the only change — exactly what `cargo update --workspace`
+ * would produce.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function stampRustCargoLock(text) {
+    const lines = text.split('\n');
+    let currentName = null;
+    return lines
+        .map((line) => {
+            const nameMatch = line.match(/^name = "([^"]*)"$/);
+            if (nameMatch) {
+                currentName = nameMatch[1];
+                return line;
+            }
+            if (currentName && publishedRustCrates.has(currentName) && /^version = "[^"]*"\s*$/.test(line)) {
+                return line.replace(/^version = "[^"]*"/, `version = "${version}"`);
+            }
+            return line;
+        })
+        .join('\n');
+}
+
 /** Publishable Rust members whose `[package]` version + ref-lib dep reqs are lockstep-stamped. */
 const rustMembers = [
     'rust/smooth-operator/Cargo.toml',
@@ -69,6 +106,24 @@ const rustMembers = [
     'rust/adapters/backplane-nats/Cargo.toml',
     'rust/smooth-operator-server/Cargo.toml',
 ];
+
+/**
+ * The exact `[package] name`s of the lockstep-stamped published members (read from
+ * their Cargo.toml). The lock stamp keys off THIS set rather than a broad
+ * `smooai-smooth-operator*` name match, so it never bumps non-published workspace
+ * crates (e.g. `smooai-smooth-operator-lambda`, the dev-support examples) that stay
+ * at their own `0.1.0` — bumping those would make the lock mismatch their unstamped
+ * Cargo.toml and break `--locked` exactly the way we're trying to prevent.
+ */
+const publishedRustCrates = new Set(
+    rustMembers
+        .map((rel) => {
+            const text = readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+            const m = text.match(/^name = "([^"]*)"/m);
+            return m ? m[1] : null;
+        })
+        .filter(Boolean),
+);
 
 /** @type {{ name: string, url: URL, apply: (text: string) => string }[]} */
 const targets = [
@@ -112,6 +167,13 @@ const targets = [
         url: new URL(`../${rel}`, import.meta.url),
         apply: stampRustCargoToml,
     })),
+    // The lockfile MUST be re-synced after the [package] bumps above, or
+    // `cargo build --locked` (kind-deploy-smoke + every `cargo publish`) fails.
+    {
+        name: 'rust/Cargo.lock',
+        url: new URL('../rust/Cargo.lock', import.meta.url),
+        apply: stampRustCargoLock,
+    },
 ];
 
 let changed = 0;
