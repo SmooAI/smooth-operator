@@ -63,7 +63,8 @@ use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use smooth_operator::auth::NoAuthVerifier;
+use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
+use smooth_operator::tool_provider::ToolProvider;
 
 use crate::config::{ServerConfig, StorageBackend};
 use crate::server::{build_state, router};
@@ -81,11 +82,29 @@ pub const DEFAULT_LOCAL_ADDR: &str = "127.0.0.1:8787";
 /// All knobs are optional — `LocalServer::builder().spawn().await` boots the
 /// default flavor (in-memory everything, loopback `:8787`, no auth, no seed).
 /// Construct with [`LocalServer::builder`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalServerBuilder {
     addr: SocketAddr,
     seed_kb: bool,
     config: Option<ServerConfig>,
+    auth: Option<Arc<dyn AuthVerifier>>,
+    tool_provider: Option<Arc<dyn ToolProvider>>,
+    serve_widget: bool,
+    widget_token: Option<String>,
+}
+
+impl std::fmt::Debug for LocalServerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalServerBuilder")
+            .field("addr", &self.addr)
+            .field("seed_kb", &self.seed_kb)
+            .field("config", &self.config)
+            // Never print the verifier's secrets — just its mode label.
+            .field("auth", &self.auth.as_ref().map(|a| a.mode()))
+            .field("tool_provider", &self.tool_provider.is_some())
+            .field("serve_widget", &self.serve_widget)
+            .finish()
+    }
 }
 
 impl Default for LocalServerBuilder {
@@ -96,6 +115,10 @@ impl Default for LocalServerBuilder {
                 .expect("DEFAULT_LOCAL_ADDR is a valid SocketAddr"),
             seed_kb: false,
             config: None,
+            auth: None,
+            tool_provider: None,
+            serve_widget: false,
+            widget_token: None,
         }
     }
 }
@@ -116,6 +139,42 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn seed_kb(mut self, seed: bool) -> Self {
         self.seed_kb = seed;
+        self
+    }
+
+    /// Install a custom [`AuthVerifier`] for the local flavor.
+    ///
+    /// Without this, the local flavor runs auth-off ([`NoAuthVerifier`]) — fine
+    /// for pure loopback. Pass a
+    /// [`LocalTokenVerifier`](smooth_operator::auth::LocalTokenVerifier) to gate
+    /// stray local processes with a shared secret (recommended when binding
+    /// beyond loopback, e.g. over a tailnet).
+    #[must_use]
+    pub fn auth(mut self, auth: Arc<dyn AuthVerifier>) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Install a host [`ToolProvider`] so the runner merges its per-turn tools
+    /// into every turn alongside the built-ins (the `#68` injection seam). The
+    /// local flavor uses this to add an OS-sandboxed shell + egress-routed tools
+    /// — the isolation the cloud flavor gets from its container/network sandbox
+    /// instead.
+    #[must_use]
+    pub fn tools(mut self, provider: Arc<dyn ToolProvider>) -> Self {
+        self.tool_provider = Some(provider);
+        self
+    }
+
+    /// Serve the official `@smooai/smooth-operator` widget from this server: a
+    /// host page at `/` and the bundle at `/chat-widget.iife.js`. `token` is
+    /// injected into the page so the widget connects to this server's
+    /// `/ws?token=…` (pair it with a matching [`auth`](Self::auth) verifier);
+    /// pass `None` for a no-auth local server.
+    #[must_use]
+    pub fn serve_widget(mut self, token: Option<String>) -> Self {
+        self.serve_widget = true;
+        self.widget_token = token;
         self
     }
 
@@ -146,9 +205,21 @@ impl LocalServerBuilder {
         config.seed_kb = self.seed_kb;
 
         // `build_state` gives in-memory storage + in-memory backplane + permissive
-        // widget auth. Install the no-op verifier explicitly so the admin API is
-        // reachable in-process without an `AUTH_MODE=none` env handshake.
-        build_state(config).with_auth(Arc::new(NoAuthVerifier::default()))
+        // widget auth. Install the caller's verifier, or default to the no-op one
+        // so the admin API is reachable in-process without an `AUTH_MODE=none`
+        // env handshake.
+        let auth = self
+            .auth
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoAuthVerifier::default()) as Arc<dyn AuthVerifier>);
+        let mut state = build_state(config).with_auth(auth);
+        if let Some(provider) = &self.tool_provider {
+            state = state.with_tools(Arc::clone(provider));
+        }
+        if self.serve_widget {
+            state = state.with_widget(self.widget_token.clone());
+        }
+        state
     }
 
     /// Bind and spawn the server in a background task, returning a [`LocalServer`]
@@ -327,5 +398,58 @@ mod tests {
         assert_eq!(state.config.storage, StorageBackend::Memory);
         // The no-op verifier is installed (admin reachable in-process).
         assert_eq!(state.auth.mode(), "none");
+    }
+
+    #[test]
+    fn auth_seam_installs_a_custom_verifier() {
+        use smooth_operator::auth::LocalTokenVerifier;
+        let state = LocalServerBuilder::default()
+            .auth(Arc::new(LocalTokenVerifier::new("s3cret")))
+            .build();
+        assert_eq!(
+            state.auth.mode(),
+            "local-token",
+            "custom verifier overrides the default"
+        );
+    }
+
+    #[test]
+    fn tools_seam_installs_a_provider() {
+        use async_trait::async_trait;
+        use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
+        use smooth_operator_core::Tool;
+
+        struct EmptyProvider;
+        #[async_trait]
+        impl ToolProvider for EmptyProvider {
+            async fn tools_for(&self, _ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
+                Vec::new()
+            }
+        }
+        let state = LocalServerBuilder::default()
+            .tools(Arc::new(EmptyProvider))
+            .build();
+        assert!(state.tool_provider.is_some(), "host ToolProvider installed");
+    }
+
+    #[test]
+    fn serve_widget_opts_into_the_widget_routes_with_token() {
+        let state = LocalServerBuilder::default()
+            .serve_widget(Some("tok-123".into()))
+            .build();
+        assert!(state.serve_widget, "widget routes opted in");
+        assert_eq!(state.widget_token.as_deref(), Some("tok-123"));
+        // Building the router with serve_widget set mounts `/` + the bundle route.
+        let _ = crate::server::router(state);
+    }
+
+    #[test]
+    fn no_widget_by_default() {
+        let state = LocalServerBuilder::default().build();
+        assert!(
+            !state.serve_widget,
+            "widget off by default (K8s/Lambda never serve it)"
+        );
+        assert_eq!(state.widget_token, None);
     }
 }

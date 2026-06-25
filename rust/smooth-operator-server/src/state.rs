@@ -119,6 +119,15 @@ pub struct AppState {
     /// session has at most one outstanding confirmation; an empty map means no
     /// turn is parked (the default, byte-for-byte unchanged from before HITL).
     pending_confirmations: Arc<RwLock<HashMap<String, UnboundedSender<HumanResponse>>>>,
+    /// When `true`, the router mounts the embedded widget host page at `/` and
+    /// the widget bundle at `/chat-widget.iife.js`. Off by default (the
+    /// K8s/Lambda flavors never serve the widget); the local flavor opts in via
+    /// [`with_widget`](Self::with_widget).
+    pub serve_widget: bool,
+    /// The auth token injected into the served widget host page (same-origin), so
+    /// the embedded widget connects to this server's `/ws?token=…`. `None` ⇒ no
+    /// token injected (a no-auth local server).
+    pub widget_token: Option<String>,
 }
 
 /// Namespace a connector name by org for the [`IndexingStore`] key, so two orgs
@@ -165,6 +174,8 @@ impl AppState {
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
+            serve_widget: false,
+            widget_token: None,
         }
     }
 
@@ -203,6 +214,17 @@ impl AppState {
     #[must_use]
     pub fn with_tools(mut self, provider: Arc<dyn ToolProvider>) -> Self {
         self.tool_provider = Some(provider);
+        self
+    }
+
+    /// Serve the embedded official widget (host page at `/`, bundle at
+    /// `/chat-widget.iife.js`), injecting `token` into the page so the widget
+    /// connects to this server's `/ws?token=…` (builder). The local deployment
+    /// flavor opts in; other flavors never mount the widget routes.
+    #[must_use]
+    pub fn with_widget(mut self, token: Option<String>) -> Self {
+        self.serve_widget = true;
+        self.widget_token = token;
         self
     }
 
