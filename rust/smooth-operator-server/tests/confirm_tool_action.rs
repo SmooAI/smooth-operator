@@ -340,6 +340,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         &AccessContext::anonymous(),
         "conn-1",
         None,
+        None,
         &frame,
         &ctrl_tx,
     )
@@ -366,6 +367,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         &state,
         &AccessContext::anonymous(),
         "conn-1",
+        None,
         None,
         &frame,
         &dup_tx,

@@ -41,6 +41,15 @@ pub struct AgentWidgetAuth {
     /// the agent does not support `authContext` (any supplied one is rejected).
     #[serde(default)]
     pub public_key: Option<String>,
+    /// The organization this agent belongs to, when the host policy service
+    /// knows it. A multi-tenant host (whose `Conversation`/`Participant` rows
+    /// carry an org FK) populates this so a widget visitor's session is created
+    /// under the agent's real org — visitors authenticate via origin +
+    /// `authContext`, not a JWT, so the org cannot come from a bearer token.
+    /// `None` (the default, and the OSS/dev case) leaves org derivation to the
+    /// connection's JWT principal, then the server's seed org.
+    #[serde(default)]
+    pub organization_id: Option<String>,
 }
 
 /// Hook for resolving an agent's [`AgentWidgetAuth`] policy.

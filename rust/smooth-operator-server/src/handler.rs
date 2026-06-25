@@ -33,6 +33,7 @@ pub async fn handle_frame(
     access: &AccessContext,
     conn_id: &str,
     origin: Option<&str>,
+    auth_org: Option<&str>,
     raw: &str,
     sink: &UnboundedSender<Value>,
 ) {
@@ -56,7 +57,8 @@ pub async fn handle_frame(
             let _ = sink.send(protocol::pong(request_id));
         }
         Some("create_conversation_session") => {
-            handle_create_session(state, conn_id, origin, &parsed, request_id, sink).await;
+            handle_create_session(state, conn_id, origin, auth_org, &parsed, request_id, sink)
+                .await;
         }
         Some("get_session") => {
             handle_get_session(state, &parsed, request_id, sink);
@@ -87,8 +89,21 @@ pub async fn handle_frame(
     }
 }
 
+/// Outcome of widget-auth enforcement: whether to proceed, and (when an agent
+/// policy resolved) the org that policy attributes the agent to.
+enum WidgetAuthOutcome {
+    /// Auth denied — an `error` event was already emitted; the caller must stop.
+    Denied,
+    /// Auth passed. `org_id` is `Some` when the resolved policy carried an
+    /// `organization_id` (a multi-tenant host that knows the agent's org), else
+    /// `None` (no policy, or a policy without an org — org derivation falls
+    /// through to the JWT principal, then the seed org).
+    Allowed { org_id: Option<String> },
+}
+
 /// Enforce an agent's embeddable-widget policy (origin allowlist + `authContext`)
-/// before a session is created. Returns `true` to proceed, or `false` after
+/// before a session is created. Returns [`WidgetAuthOutcome::Allowed`] to proceed
+/// (carrying the policy's org when known), or [`WidgetAuthOutcome::Denied`] after
 /// emitting a protocol `error` (the caller must then stop). Agents with no policy
 /// proceed — unless `WIDGET_AUTH_STRICT` is set, in which case an unknown agent is
 /// rejected (fail closed).
@@ -99,7 +114,7 @@ async fn enforce_widget_auth(
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
-) -> bool {
+) -> WidgetAuthOutcome {
     let Some(policy) = state.widget_auth.agent_widget_auth(agent_id).await else {
         if state.config.widget_auth_strict {
             let _ = sink.send(protocol::error(
@@ -107,9 +122,9 @@ async fn enforce_widget_auth(
                 "AGENT_NOT_AUTHORIZED",
                 "this agent is not registered for embedding",
             ));
-            return false;
+            return WidgetAuthOutcome::Denied;
         }
-        return true;
+        return WidgetAuthOutcome::Allowed { org_id: None };
     };
 
     // Origin allowlist — fail closed: a missing or disallowed `Origin` is rejected.
@@ -122,7 +137,7 @@ async fn enforce_widget_auth(
             "ORIGIN_NOT_ALLOWED",
             "this origin is not allowed to embed this agent",
         ));
-        return false;
+        return WidgetAuthOutcome::Denied;
     }
 
     // Pre-auth `authContext` (optional): when present it must verify.
@@ -133,10 +148,12 @@ async fn enforce_widget_auth(
                 "AUTH_CONTEXT_INVALID",
                 "authContext signature failed verification",
             ));
-            return false;
+            return WidgetAuthOutcome::Denied;
         }
     }
-    true
+    WidgetAuthOutcome::Allowed {
+        org_id: policy.organization_id,
+    }
 }
 
 /// Verify a JSON `authContext` (`{userId, signature, timestamp}`) against the
@@ -162,6 +179,7 @@ async fn handle_create_session(
     state: &AppState,
     conn_id: &str,
     origin: Option<&str>,
+    auth_org: Option<&str>,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -174,10 +192,13 @@ async fn handle_create_session(
 
     // Embeddable-widget auth: enforce the agent's origin allowlist + authContext
     // before creating any session. No-op for agents without a policy (unless
-    // WIDGET_AUTH_STRICT). On denial, an error is emitted and we stop here.
-    if !enforce_widget_auth(state, origin, &agent_id, parsed, request_id, sink).await {
-        return;
-    }
+    // WIDGET_AUTH_STRICT). On denial, an error is emitted and we stop here. A
+    // resolved policy may also carry the agent's org (multi-tenant host).
+    let widget_org =
+        match enforce_widget_auth(state, origin, &agent_id, parsed, request_id, sink).await {
+            WidgetAuthOutcome::Denied => return,
+            WidgetAuthOutcome::Allowed { org_id } => org_id,
+        };
 
     let user_name = parsed
         .get("userName")
@@ -194,10 +215,20 @@ async fn handle_create_session(
         .map(str::to_string);
 
     let now = chrono::Utc::now();
-    // The reference server is single-org; conversations belong to the seed org so
-    // the admin API's org-scoping (document sets, indexing runs) lines up with
-    // the seeded knowledge. A multi-tenant deployment derives this from auth.
-    let org_id = crate::server::SEED_ORG_ID.to_string();
+    // Derive the org this session (conversation + participants) belongs to, in
+    // priority order:
+    //   1. the widget policy's `organization_id` — a multi-tenant host that knows
+    //      the agent's org (widget visitors authenticate via origin/authContext,
+    //      not a JWT, so their org rides on the agent's policy);
+    //   2. the connection's authenticated JWT principal org (`auth_org`) — a
+    //      dashboard user / authed client;
+    //   3. the server's seed org — the single-org reference/dev case, so the
+    //      admin API's org-scoping (document sets, indexing runs) still lines up
+    //      with the seeded knowledge. This keeps the no-auth/local flavor
+    //      behavior unchanged.
+    let org_id = widget_org
+        .or_else(|| auth_org.map(str::to_string))
+        .unwrap_or_else(|| crate::server::SEED_ORG_ID.to_string());
 
     let conversation_id = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();

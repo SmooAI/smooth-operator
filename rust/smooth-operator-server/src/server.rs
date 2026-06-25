@@ -555,7 +555,18 @@ struct WsQuery {
 /// groups), so it can read documents scoped to it. Verification failures are
 /// logged (never the token) and degrade to anonymous rather than dropping the
 /// connection, so the dev/no-auth case still serves org-public knowledge.
-fn resolve_ws_access(state: &AppState, query: &WsQuery) -> AccessContext {
+/// The connection's resolved auth identity: its document-level
+/// [`AccessContext`] (used to filter retrieval) plus, when the token verified to
+/// a JWT principal, that principal's `org_id` (used to create sessions under the
+/// authenticated org). `org_id` is `None` for the anonymous/dev/no-auth case, so
+/// create-session falls through to the agent's widget-policy org, then the seed
+/// org — leaving the no-auth flavor unchanged.
+struct ConnectionAuth {
+    access: AccessContext,
+    org_id: Option<String>,
+}
+
+fn resolve_ws_access(state: &AppState, query: &WsQuery) -> ConnectionAuth {
     let Some(token) = query
         .token
         .as_deref()
@@ -564,10 +575,16 @@ fn resolve_ws_access(state: &AppState, query: &WsQuery) -> AccessContext {
     else {
         // No token → anonymous (org-public only). Keeps the dev/no-auth `/ws`
         // path working while failing closed for ACL'd content.
-        return AccessContext::anonymous();
+        return ConnectionAuth {
+            access: AccessContext::anonymous(),
+            org_id: None,
+        };
     };
     match state.auth.verify(token) {
-        Ok(principal) => principal.access_context(),
+        Ok(principal) => ConnectionAuth {
+            access: principal.access_context(),
+            org_id: Some(principal.org_id),
+        },
         Err(e) => {
             // Don't leak the token; log only the mode + a generic reason.
             tracing::warn!(
@@ -575,7 +592,10 @@ fn resolve_ws_access(state: &AppState, query: &WsQuery) -> AccessContext {
                 error = %e,
                 "ws token failed verification; serving org-public knowledge only (anonymous)"
             );
-            AccessContext::anonymous()
+            ConnectionAuth {
+                access: AccessContext::anonymous(),
+                org_id: None,
+            }
         }
     }
 }
@@ -590,7 +610,7 @@ async fn ws_upgrade(
     Query(query): Query<WsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let access = resolve_ws_access(&state, &query);
+    let ConnectionAuth { access, org_id } = resolve_ws_access(&state, &query);
     // Capture the browser's `Origin` at the handshake (browsers always send it,
     // and can't be made to forge another site's). It's enforced per-agent at
     // session creation against the agent's embed allowlist (widget_auth).
@@ -598,17 +618,20 @@ async fn ws_upgrade(
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    ws.on_upgrade(move |socket| connection_loop(socket, state, access, origin))
+    ws.on_upgrade(move |socket| connection_loop(socket, state, access, org_id, origin))
 }
 
 /// Drive one WebSocket connection: split into reader + writer, joined by an
 /// outbound event sink. `access` is the connection's resolved document-level
-/// entitlement, threaded into every `send_message` turn. `origin` is the
-/// handshake `Origin` header, enforced against an agent's embed allowlist.
+/// entitlement, threaded into every `send_message` turn. `auth_org` is the
+/// authenticated JWT principal's org (when the token verified), used to create
+/// sessions under the authenticated org. `origin` is the handshake `Origin`
+/// header, enforced against an agent's embed allowlist.
 async fn connection_loop(
     socket: WebSocket,
     state: AppState,
     access: AccessContext,
+    auth_org: Option<String>,
     origin: Option<String>,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -671,6 +694,7 @@ async fn connection_loop(
                             &access,
                             &conn_id,
                             origin.as_deref(),
+                            auth_org.as_deref(),
                             text.as_str(),
                             &sink_tx,
                         )

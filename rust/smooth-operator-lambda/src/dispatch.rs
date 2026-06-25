@@ -81,7 +81,7 @@ pub async fn handle_frame(
             poster.post(&protocol::pong(request_id)).await?;
         }
         Some("create_conversation_session") => {
-            create_session(storage, config, poster, &parsed, request_id).await?;
+            create_session(storage, config, auth, poster, &parsed, request_id).await?;
         }
         Some("get_session") => {
             get_session(storage, poster, &parsed, request_id).await?;
@@ -117,6 +117,7 @@ pub async fn handle_frame(
 async fn create_session(
     storage: &Arc<dyn StorageAdapter>,
     config: &LambdaConfig,
+    auth: &Arc<dyn AuthVerifier>,
     poster: &ConnectionPoster,
     parsed: &Value,
     request_id: Option<&str>,
@@ -142,7 +143,12 @@ async fn create_session(
         .map(str::to_string);
 
     let now = chrono::Utc::now();
-    let org_id = config.org_id.clone();
+    // Derive the session's org from the frame's authenticated JWT principal when
+    // present; otherwise fall back to the lambda's configured org. The lambda
+    // transport has no persistent socket, so the bearer token rides on the frame
+    // (same as `send_message`). A missing/unverifiable token leaves the
+    // configured-org behavior unchanged.
+    let org_id = resolve_frame_org(auth, parsed).unwrap_or_else(|| config.org_id.clone());
 
     let conversation_id = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -355,6 +361,31 @@ async fn get_session(
 /// document. A valid token yields the principal's full entitlement (user id +
 /// groups). Verification failures are logged (never the token) and degrade to
 /// anonymous so the no-auth/dev case still serves org-public knowledge.
+/// Resolve the authenticated org from the frame's bearer `token`, when present
+/// and valid. Returns `Some(org_id)` only for a token that verifies to a JWT
+/// principal; `None` for no token, an unconfigured/disabled verifier, or a token
+/// that fails to verify — so the caller falls back to the configured org and the
+/// no-auth/dev behavior is unchanged. Verification failures are logged (never the
+/// token).
+fn resolve_frame_org(auth: &Arc<dyn AuthVerifier>, parsed: &Value) -> Option<String> {
+    let token = parsed
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())?;
+    match auth.verify(token) {
+        Ok(principal) => Some(principal.org_id),
+        Err(e) => {
+            tracing::warn!(
+                auth_mode = auth.mode(),
+                error = %e,
+                "create_session token failed verification; using configured org"
+            );
+            None
+        }
+    }
+}
+
 fn resolve_frame_access(auth: &Arc<dyn AuthVerifier>, parsed: &Value) -> AccessContext {
     let Some(token) = parsed
         .get("token")
