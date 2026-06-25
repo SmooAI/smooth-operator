@@ -21,10 +21,11 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
-import { MockLlmProvider } from '@smooai/smooth-operator-core';
-import type { Tool } from '@smooai/smooth-operator-core';
+import { InMemoryKnowledge, MockLlmProvider } from '@smooai/smooth-operator-core';
+import type { Knowledge, Tool } from '@smooai/smooth-operator-core';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import type { AccessKnowledge } from '../src/frameDispatcher.js';
 import { serve, type RunningServer } from '../src/server.js';
 import { TestClient } from './wsClient.js';
 
@@ -67,18 +68,30 @@ interface ToolSpec {
     result: string;
 }
 
+/** A knowledge doc to seed into the server's in-memory KB before a grounded turn. */
+interface KnowledgeDoc {
+    source: string;
+    content: string;
+}
+
 interface Scenario {
     name: string;
     description?: string;
     mockLlmScript?: MockScriptEntry[];
-    server?: { tools?: ToolSpec[]; confirmTools?: string[] };
+    server?: { tools?: ToolSpec[]; confirmTools?: string[]; knowledge?: KnowledgeDoc[] };
     steps: Step[];
 }
 
-/** Resolve a dotted path (`data.data.response.responseParts`) into a nested object. */
+/**
+ * Resolve a dotted path (`data.data.response.responseParts`) into a nested object.
+ * A numeric path segment indexes a list/array (`data.data.citations.0.id`) — JS
+ * string-keys arrays, so the same lookup works for objects and arrays, and a `null`
+ * intermediate short-circuits to `undefined` instead of throwing.
+ */
 function dot(obj: Record<string, unknown>, path: string): unknown {
     let cur: unknown = obj;
     for (const part of path.split('.')) {
+        if (cur === null || cur === undefined) return undefined;
         cur = (cur as Record<string, unknown>)[part];
     }
     return cur;
@@ -112,6 +125,24 @@ function buildTools(specs: ToolSpec[]): Tool[] {
         parameters: spec.parameters ?? { type: 'object', properties: {} },
         execute: async (_args: Record<string, unknown>): Promise<string> => spec.result,
     }));
+}
+
+/**
+ * Seed an in-memory knowledge base from a scenario's `server.knowledge` directive —
+ * the TS analog of the Rust/Python runner's KB seeding for the citations dimension.
+ * Each doc is ingested into the engine's {@link InMemoryKnowledge}; the resulting
+ * retriever is exposed (unscoped — every access sees the same KB) via the server's
+ * {@link AccessKnowledge} seam, so a grounded turn carries `data.data.citations`.
+ * Returns `undefined` when no docs are declared (behavior unchanged for every
+ * existing scenario).
+ */
+function buildKnowledge(docs: KnowledgeDoc[]): AccessKnowledge | undefined {
+    if (docs.length === 0) return undefined;
+    const kb = new InMemoryKnowledge();
+    for (const doc of docs) {
+        kb.ingest(doc.content, doc.source);
+    }
+    return { forAccess: (): Knowledge => kb };
 }
 
 /** Replace `{{name}}` placeholders in string fields from captured vars. */
@@ -183,6 +214,9 @@ describe('scenario parity — TS server runs the shared conformance corpus', () 
         it(scenario.name, async () => {
             server = await serve({
                 chatClient: buildMock(scenario.mockLlmScript ?? []),
+                // Seed the in-memory KB when the scenario declares `server.knowledge`,
+                // so a grounded turn carries `data.data.citations`. Absent → no KB.
+                knowledge: buildKnowledge(scenario.server?.knowledge ?? []),
                 tools: buildTools(scenario.server?.tools ?? []),
                 // A tool listed in `server.confirmTools` is gated behind write-confirmation
                 // HITL: the turn parks and emits `write_confirmation_required` until the
