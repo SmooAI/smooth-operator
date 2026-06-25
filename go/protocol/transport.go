@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"errors"
+	"net/url"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -40,8 +41,9 @@ var ErrTransportClosed = errors.New("smooth-agent: transport closed")
 // (a small, dependency-light, context-aware WebSocket library). It dials lazily in
 // Connect and pumps inbound text frames onto Receive's channel.
 type WebSocketTransport struct {
-	url  string
-	opts *websocket.DialOptions
+	url   string
+	token string
+	opts  *websocket.DialOptions
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -65,6 +67,49 @@ func NewWebSocketTransport(url string, opts *websocket.DialOptions) *WebSocketTr
 	}
 }
 
+// WebSocketOptions configures a WebSocketTransport built with
+// NewWebSocketTransportWithOptions.
+type WebSocketOptions struct {
+	// DialOptions customises the underlying dial (headers, subprotocols, …); nil is
+	// fine for defaults.
+	DialOptions *websocket.DialOptions
+	// Token, when non-empty, is appended to the connection URL as a `token` query
+	// parameter (`?token=<url-escaped>`) so the transport can authenticate to a
+	// token-gated server. It is merged with any query already present on the URL;
+	// an empty Token leaves the URL unchanged.
+	Token string
+}
+
+// NewWebSocketTransportWithOptions builds a default WebSocket transport for the
+// given URL with the supplied options. Use this (rather than NewWebSocketTransport)
+// when you need to pass a connection Token for a token-gated server.
+func NewWebSocketTransportWithOptions(url string, opts WebSocketOptions) *WebSocketTransport {
+	return &WebSocketTransport{
+		url:   url,
+		token: opts.Token,
+		opts:  opts.DialOptions,
+		recv:  make(chan []byte, 64),
+	}
+}
+
+// dialURL returns the URL to dial, with the connection token merged into the query
+// string when one is configured. The existing query is preserved; only the `token`
+// parameter is added/overwritten. A parse failure falls back to the raw URL so the
+// dial surfaces the real error rather than a swallowed one.
+func (t *WebSocketTransport) dialURL() string {
+	if t.token == "" {
+		return t.url
+	}
+	u, err := url.Parse(t.url)
+	if err != nil {
+		return t.url
+	}
+	q := u.Query()
+	q.Set("token", t.token)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // Connect dials the WebSocket and starts the read loop. The provided ctx bounds the
 // dial; the transport keeps an internal context for the connection lifetime.
 func (t *WebSocketTransport) Connect(ctx context.Context) error {
@@ -75,7 +120,7 @@ func (t *WebSocketTransport) Connect(ctx context.Context) error {
 	}
 	t.mu.Unlock()
 
-	conn, _, err := websocket.Dial(ctx, t.url, t.opts)
+	conn, _, err := websocket.Dial(ctx, t.dialURL(), t.opts)
 	if err != nil {
 		return err
 	}
