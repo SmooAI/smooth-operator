@@ -75,9 +75,22 @@ impl PgKnowledgeBase {
     /// stored `acl` column). Used by
     /// [`PostgresAdapter::knowledge_for_access`](crate::PostgresAdapter) on the
     /// chat retrieval path.
+    ///
+    /// When the context carries an [`organization_id`](AccessContext::organization_id)
+    /// (a multi-tenant host threads the turn's org through), it **overrides** the
+    /// adapter's construction-time org for this query — so one adapter instance can
+    /// serve per-turn tenants instead of being pinned to a single static org. The
+    /// org is still a cheap SQL pre-filter (`organization_id = $1`). A context with
+    /// no org leaves the construction-time org unchanged, so the single-tenant
+    /// default is behavior-preserving.
     #[must_use]
     pub fn with_access(&self, access: AccessContext) -> Self {
+        let organization_id = access
+            .organization_id
+            .clone()
+            .or_else(|| self.organization_id.clone());
         Self {
+            organization_id,
             access: Some(access),
             ..self.clone()
         }

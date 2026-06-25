@@ -508,8 +508,20 @@ async fn send_message(
     let drain = tokio::spawn(forward_events(rx, poster_for_drain));
 
     // Resolve the requester's entitlement from the frame's bearer token, then
-    // run the turn through the ACL-enforcing knowledge path.
-    let access = resolve_frame_access(auth, parsed);
+    // run the turn through the ACL-enforcing knowledge path. Carry the turn's org
+    // on the AccessContext so a multi-tenant host adapter's `knowledge_for_access`
+    // can scope RAG to this tenant: the authed-token path already stamps its own
+    // org, so only fall back to the session's persisted org for an anonymous /
+    // no-org frame. Behavior-preserving for the single-tenant default (the
+    // built-in ACL ignores the org).
+    let access = {
+        let resolved = resolve_frame_access(auth, parsed);
+        if resolved.organization_id.is_some() {
+            resolved
+        } else {
+            resolved.with_organization_id(session.organization_id.clone())
+        }
+    };
 
     let result = runner::run_streaming_turn(
         TurnRequest {

@@ -39,12 +39,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
+use smooth_operator_adapter_memory::InMemoryStorageAdapter;
 use smooth_operator_core::llm_provider::{tool_call_response, MockLlmClient};
-use smooth_operator_core::{StreamEvent, Tool, ToolSchema};
+use smooth_operator_core::{Document, DocumentType, StreamEvent, Tool, ToolSchema};
 
 use smooth_operator_server::config::{ServerConfig, StorageBackend};
 use smooth_operator_server::server::build_state;
+use smooth_operator_server::state::AppState;
 
 /// A deterministic test tool: it ignores its arguments and returns a fixed
 /// `result` string, so a tool-call turn is fully reproducible. The Rust analogue
@@ -130,6 +133,67 @@ fn confirm_tools(scenario: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Read a scenario's `server.knowledge` directive — the docs to seed into the
+/// server's knowledge base BEFORE the turn runs, so a grounded turn produces
+/// `eventual_response` citations mirroring those docs (the **citations** parity
+/// dimension). Each entry is `{ source, content }`; empty / absent when the
+/// scenario seeds no knowledge (then the runner behaves exactly as before).
+///
+/// The reference server's `id` for a citation is the document id, `title` is the
+/// document `source`. To make BOTH deterministic across runs we set the seeded
+/// `Document.id` to the directive's `source` (the default `Document::new` id is a
+/// random UUID, which a scenario could not assert). A scenario therefore asserts
+/// the seeded `source` for both `citations.N.id` and `citations.N.title`.
+fn knowledge_docs(scenario: &Value) -> Vec<Document> {
+    scenario
+        .get("server")
+        .and_then(|s| s.get("knowledge"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|spec| {
+                    let source = spec
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .expect("server.knowledge entry needs a 'source'")
+                        .to_string();
+                    let content = spec
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .expect("server.knowledge entry needs 'content'")
+                        .to_string();
+                    let mut doc =
+                        Document::new(content, source.clone(), DocumentType::Documentation);
+                    // Pin the id to the source so the emitted citation `id` is
+                    // deterministic (else it's a random UUID a scenario can't assert).
+                    doc.id = source;
+                    doc
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Boot config + a seeded in-memory storage as an [`AppState`] for one scenario.
+///
+/// When the scenario has no `server.knowledge`, this is exactly the `build_state`
+/// path the runner has always used (an empty in-memory KB). When it DOES, we
+/// build the storage explicitly, ingest each seeded [`Document`], then `AppState`
+/// over it — mirroring how `confirm_tool_action.rs` / `acl_*` tests construct a
+/// seeded storage and pass it into `AppState::new`. Either way the chat provider,
+/// tool provider, and confirm-tool config are layered on identically afterward.
+fn build_state_with_knowledge(config: ServerConfig, docs: &[Document]) -> AppState {
+    if docs.is_empty() {
+        return build_state(config);
+    }
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let kb = storage.knowledge();
+    for doc in docs {
+        kb.ingest(doc.clone()).expect("ingest server.knowledge doc");
+    }
+    AppState::new(storage, config)
 }
 
 /// Resolve the conformance scenarios directory relative to THIS crate, so the
@@ -236,11 +300,14 @@ fn build_mock(script: &[Value]) -> MockLlmClient {
     mock
 }
 
-/// A keyless local config for the parity turn — in-memory storage, NO seeded KB
-/// (so the deterministic mock reply is the only thing that grounds the
-/// `eventual_response`; the corpus doesn't exercise knowledge), no gateway key
-/// (the injected mock replaces the live client). `widget_auth_strict` off so a
-/// fresh agent id can open a session.
+/// A keyless local config for the parity turn — in-memory storage, no gateway
+/// key (the injected mock replaces the live client). `widget_auth_strict` off so
+/// a fresh agent id can open a session.
+///
+/// `seed_kb` is off: the built-in `policies` demo docs are never seeded here. A
+/// scenario that exercises citations seeds its OWN docs via the `server.knowledge`
+/// directive (`build_state_with_knowledge`), so the seeded set is exactly the
+/// scenario's — no built-in noise the citation asserts would have to account for.
 fn parity_config() -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1".into(),
@@ -405,7 +472,10 @@ async fn run_scenario(path: &Path) {
     // gates the named tools behind the HITL write-confirmation seam (#66).
     let mut config = parity_config();
     config.confirm_tools = confirm_tools(&scenario);
-    let mut state = build_state(config).with_chat_provider(Arc::new(mock));
+    // `server.knowledge` (the citations dimension) seeds the KB before boot so a
+    // grounded turn's `eventual_response` carries citations mirroring the docs.
+    let docs = knowledge_docs(&scenario);
+    let mut state = build_state_with_knowledge(config, &docs).with_chat_provider(Arc::new(mock));
     if let Some(provider) = build_tool_provider(&scenario) {
         state = state.with_tools(provider);
     }
