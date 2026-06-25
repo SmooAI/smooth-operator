@@ -61,9 +61,15 @@ public static class SmoothOperatorWebSocketExtensions
     private static FrameDispatcher BuildDispatcher(HttpContext context)
     {
         var services = context.RequestServices;
-        var resolver = services.GetService<TokenAccessResolver>();
+        // Resolve through the configured auth-verifier seam (IAuthVerifier): a host that registered a
+        // verifier (NoAuthVerifier / LocalTokenVerifier / a TokenAccessResolver, which also implements
+        // IAuthVerifier) drives resolution; absent one, default to NoAuthVerifier — every connection
+        // anonymous (org-public), the unchanged default. Fail-closed to anonymous on any token problem.
+        var verifier = services.GetService<IAuthVerifier>()
+            ?? (IAuthVerifier?)services.GetService<TokenAccessResolver>()
+            ?? NoAuthVerifier.Instance;
         var token = context.Request.Query["token"].FirstOrDefault();
-        var access = resolver?.Resolve(token) ?? AccessContext.Anonymous;
+        var access = verifier.Resolve(token);
 
         return new FrameDispatcher(
             services.GetRequiredService<ISessionStore>(),

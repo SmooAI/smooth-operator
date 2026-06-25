@@ -96,6 +96,73 @@ public class AuthAclTests
         Assert.True(resolver.Resolve("!!!not-base64-or-json!!!").IsAnonymous);
     }
 
+    // ─────────────────────── auth-verifier seam (parity) ───────────────────────
+    // The IAuthVerifier seam mirrors the Go/Python/Rust/(now) C# verifier seam:
+    // NoAuthVerifier → always anonymous; LocalTokenVerifier → authenticated on a good
+    // local token, fail-closed to anonymous on a bad/missing one.
+
+    [Fact]
+    public void NoAuthVerifier_AlwaysResolvesAnonymous()
+    {
+        IAuthVerifier verifier = NoAuthVerifier.Instance;
+        Assert.Equal("none", verifier.Mode);
+        Assert.True(verifier.Resolve(null).IsAnonymous);
+        Assert.True(verifier.Resolve("").IsAnonymous);
+        // Even a real-looking token is anonymous under the permissive default.
+        Assert.True(verifier.Resolve(Hs256Jwt(new { sub = "u1", role = "admin" }, "s")).IsAnonymous);
+    }
+
+    [Fact]
+    public void LocalTokenVerifier_GoodToken_ResolvesAuthenticated()
+    {
+        const string secret = "local-shared-secret";
+        IAuthVerifier verifier = new LocalTokenVerifier(secret);
+        Assert.Equal("local", verifier.Mode);
+
+        var access = verifier.Resolve(Hs256Jwt(new { sub = "u1", org = "acme", role = "basic", groups = new[] { "eng" } }, secret));
+
+        Assert.False(access.IsAnonymous);
+        Assert.Equal("u1", access.Principal.Sub);
+        Assert.Equal("acme", access.Principal.Org);
+        Assert.Contains("eng", access.Groups);
+    }
+
+    [Fact]
+    public void LocalTokenVerifier_MissingToken_FailsClosedToAnonymous()
+    {
+        IAuthVerifier verifier = new LocalTokenVerifier("local-shared-secret");
+        Assert.True(verifier.Resolve(null).IsAnonymous);
+        Assert.True(verifier.Resolve("").IsAnonymous);
+    }
+
+    [Fact]
+    public void LocalTokenVerifier_BadToken_FailsClosedToAnonymous()
+    {
+        IAuthVerifier verifier = new LocalTokenVerifier("the-real-secret");
+        // Forged signature, malformed, and expired all degrade to anonymous — never a rejection.
+        Assert.True(verifier.Resolve(Hs256Jwt(new { sub = "attacker", role = "admin" }, "wrong-secret")).IsAnonymous);
+        Assert.True(verifier.Resolve("not.a.jwt").IsAnonymous);
+        Assert.True(verifier.Resolve(Hs256Jwt(new { sub = "u1", exp = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds() }, "the-real-secret")).IsAnonymous);
+    }
+
+    [Fact]
+    public void LocalTokenVerifier_RequiresNonEmptySecret()
+    {
+        Assert.Throws<ArgumentException>(() => new LocalTokenVerifier(""));
+        Assert.Throws<ArgumentException>(() => new LocalTokenVerifier(null!));
+    }
+
+    [Fact]
+    public void TokenAccessResolver_ImplementsVerifierSeam()
+    {
+        // The existing resolver composes through the same seam (so a host can register it as the
+        // IAuthVerifier), and reports a mode label derived from its AuthMode.
+        IAuthVerifier verifier = new TokenAccessResolver(new AuthOptions { Mode = AuthMode.None });
+        Assert.Equal("none", verifier.Mode);
+        Assert.True(verifier.Resolve("anything").IsAnonymous);
+        Assert.Equal("jwt", new TokenAccessResolver(new AuthOptions { Mode = AuthMode.Jwt, Hs256Secret = "s" }).Mode);
+    }
+
     // ───────────────────────────── ACL enforcement ─────────────────────────────
 
     private static AclKnowledgeStore SeededStore()
