@@ -11,6 +11,18 @@ using SmooAI.SmoothOperator.Core;
 namespace SmooAI.SmoothOperator.Server.AspNetCore;
 
 /// <summary>
+/// DI carrier for the write-confirmation HITL tool-name patterns — the C# analog of Python's
+/// <c>ServerState.confirm_tools</c>. Register one (<c>AddSingleton(new ConfirmTools("delete_record"))</c>)
+/// to gate matching tools behind a <c>confirm_tool_action</c> round-trip. Absent ⇒ HITL off.
+/// A distinct wrapper type (not a bare <c>IReadOnlyList&lt;string&gt;</c>) so it can't collide with
+/// other string lists in the container.
+/// </summary>
+public sealed record ConfirmTools(IReadOnlyList<string> Patterns)
+{
+    public ConfirmTools(params string[] patterns) : this((IReadOnlyList<string>)patterns) { }
+}
+
+/// <summary>
 /// Maps the smooth-operator protocol onto a WebSocket endpoint — the deployable surface of the
 /// C# service, and the analog of the Rust server's axum <c>/ws</c> upgrade + connection loop.
 /// </summary>
@@ -59,7 +71,11 @@ public static class SmoothOperatorWebSocketExtensions
             services.GetService<IAccessKnowledge>(),
             access,
             reranker: services.GetService<IReranker>(), // null unless the host registered one (rerank is opt-in)
-            tools: services.GetService<IReadOnlyList<AITool>>()); // the tools the agent may call (default none — the DI analog of Python's ServerState.tools)
+            tools: services.GetService<IReadOnlyList<AITool>>(), // the tools the agent may call (default none — the DI analog of Python's ServerState.tools)
+            // Tool-name patterns gated behind write-confirmation HITL (default none — the DI analog of
+            // Python's ServerState.confirm_tools). Each connection gets its own ConfirmationRegistry
+            // (a confirm_tool_action frame and the parked turn it resumes are always on the same one).
+            confirmTools: services.GetService<ConfirmTools>()?.Patterns);
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
@@ -103,6 +119,15 @@ public static class SmoothOperatorWebSocketExtensions
         }
         finally
         {
+            // Any turn parked on a write-confirmation must unpark before we can finish: reject
+            // outstanding confirmations (fail closed — a write is never auto-approved on disconnect),
+            // then await every in-flight spawned turn so its eventual_response is enqueued before the
+            // writer stops (preserves the graceful-drain "in-flight turn finishes" contract now that
+            // turns run as background tasks rather than inline). No-op when HITL is off and no turn
+            // is in flight.
+            dispatcher.RejectPendingConfirmations();
+            await dispatcher.WaitForTurnsAsync().ConfigureAwait(false);
+
             channel.Writer.TryComplete();
             try
             {

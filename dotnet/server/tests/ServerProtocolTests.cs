@@ -66,6 +66,9 @@ public class ServerProtocolTests
 
         var sendFrame = $$"""{"action":"send_message","requestId":"r2","sessionId":"{{sessionId}}","message":"How long can I return?","stream":true}""";
         await dispatcher.DispatchAsync(sendFrame, events.Add);
+        // send_message now runs its turn as a background task (so the read loop stays free to receive a
+        // confirm_tool_action while a turn is parked) — await it so the terminal events are present.
+        await dispatcher.WaitForTurnsAsync();
 
         // Sequence: immediate_response(202) → stream_token(s) → eventual_response(200).
         Assert.Equal("immediate_response", events[0]["type"]!.GetValue<string>());
@@ -99,6 +102,8 @@ public class ServerProtocolTests
 
         var sendFrame = $$"""{"action":"send_message","requestId":"r2","sessionId":"{{sessionId}}","message":"How long is the return window?"}""";
         await dispatcher.DispatchAsync(sendFrame, events.Add);
+        // send_message now runs its turn as a background task — await it so the terminal event is present.
+        await dispatcher.WaitForTurnsAsync();
 
         var terminal = events[^1];
         var citations = terminal["data"]!["data"]!["citations"]!.AsArray();

@@ -89,6 +89,17 @@ builder.Services.AddSingleton(sp =>
     return new RepoIngestionService(repos, knowledge, spec => new GitHubConnector(spec.Owner, spec.Repo, http, spec.GitRef));
 });
 
+// ── Write-confirmation HITL: SMOOTH_AGENT_CONFIRM_TOOLS (comma-separated tool-name substrings).
+//    A turn that calls a matching tool parks and emits write_confirmation_required; the client
+//    resumes it with confirm_tool_action. Unset (the default) ⇒ no tool ever requires confirmation
+//    (behavior unchanged). Mirrors the Rust host's SMOOTH_AGENT_CONFIRM_TOOLS env var. ──
+var confirmTools = Get("SMOOTH_AGENT_CONFIRM_TOOLS")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+if (confirmTools.Length > 0)
+{
+    builder.Services.AddSingleton(new ConfirmTools(confirmTools));
+}
+
 builder.Services.AddSmoothOperatorServer();
 
 var app = builder.Build();

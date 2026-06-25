@@ -89,6 +89,31 @@ public static class ProtocolEvents
         };
     }
 
+    /// <summary>
+    /// <c>write_confirmation_required</c> — emitted mid-turn when the agent calls a state-mutating
+    /// tool that requires explicit human approval before it runs. The turn is <b>parked</b> (the
+    /// engine's <c>IHumanGate</c> awaits the verdict) until the client replies with a
+    /// <c>confirm_tool_action</c> action carrying the same <c>requestId</c> and an <c>approved</c>
+    /// boolean.
+    ///
+    /// Wire shape matches <c>spec/events/write-confirmation-required.schema.json</c> and the Rust
+    /// reference byte-for-byte: the <c>requestId</c> echoes the originating <c>send_message</c>, and
+    /// the prompt detail is double-nested under <c>data.data.{toolId, actionDescription}</c>.
+    /// <c>toolId</c> is an opaque correlation handle (the tool name — a turn parks one tool at a
+    /// time); <c>actionDescription</c> is the human-readable prompt the client renders.
+    /// </summary>
+    public static JsonObject WriteConfirmationRequired(string requestId, string toolId, string actionDescription) => new()
+    {
+        ["type"] = "write_confirmation_required",
+        ["requestId"] = requestId,
+        ["data"] = new JsonObject
+        {
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject { ["toolId"] = toolId, ["actionDescription"] = actionDescription },
+        },
+        ["timestamp"] = NowMs(),
+    };
+
     public static JsonObject Error(string? requestId, string code, string message)
     {
         // The {code, message} descriptor is duplicated at the envelope top level (`error`) and nested
