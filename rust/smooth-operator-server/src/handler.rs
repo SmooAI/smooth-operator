@@ -615,7 +615,20 @@ async fn handle_send_message(
     let tool_provider = state.tool_provider.clone();
 
     let state_for_turn = state.clone();
-    let access_owned = access.clone();
+    // Carry the turn's org on the AccessContext so a multi-tenant host adapter's
+    // `knowledge_for_access` can scope RAG to this tenant. The authed-principal
+    // path already stamps its own org (`Principal::access_context`); a widget /
+    // anonymous connection does not, so fall back to the session's persisted org
+    // (every session carries `organization_id` since the create-session path
+    // derives it). The operator's built-in single-tenant ACL ignores the org, so
+    // this is behavior-preserving for the reference flavor.
+    let access_owned = if access.organization_id.is_some() {
+        access.clone()
+    } else {
+        access
+            .clone()
+            .with_organization_id(session.organization_id.clone())
+    };
     let sink_owned = sink.clone();
     let request_id_owned = request_id.to_string();
     let conversation_id = session.conversation_id.clone();

@@ -173,6 +173,20 @@ impl DocAcl {
 /// Built from the authenticated user and the groups they belong to (resolved
 /// upstream from the auth context). Passed into the knowledge-retrieval path so
 /// results can be filtered by [`AccessContext::can_access`].
+///
+/// ## Org scoping ([`organization_id`](Self::organization_id))
+///
+/// The within-org user/group ACL ([`can_access`](Self::can_access)) is the
+/// operator's single-tenant default and does **not** consult the org. A
+/// **multi-tenant relational host** (e.g. SmooAI), however, needs the turn's org
+/// to scope RAG to that tenant's documents — its
+/// [`StorageAdapter::knowledge_for_access`](crate::adapter::StorageAdapter::knowledge_for_access)
+/// reads `access.organization_id` to pick the right tenant before any
+/// user/group filtering. So the org rides on the `AccessContext` purely to be
+/// **available** to a host adapter; the built-in ACL path ignores it (org
+/// isolation already happened upstream — every knowledge row carries an
+/// `organizationId` the backend filters on). `None` ⇒ "no org resolved", which a
+/// single-tenant adapter treats exactly as today.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccessContext {
     /// The requester's user id, if authenticated as a user. `None` for an
@@ -180,13 +194,25 @@ pub struct AccessContext {
     pub user_id: Option<String>,
     /// The groups the requester belongs to.
     pub groups: Vec<String>,
+    /// The organization this turn is scoped to, when resolved. Carried so a
+    /// multi-tenant host adapter's `knowledge_for_access` can scope retrieval to
+    /// the right tenant; the operator's built-in ACL ignores it (see the
+    /// type-level "Org scoping" note). `None` when no org is resolved (the
+    /// single-tenant / anonymous default).
+    pub organization_id: Option<String>,
 }
 
 impl AccessContext {
-    /// Build a context from an optional user id and a set of groups.
+    /// Build a context from an optional user id and a set of groups. The org is
+    /// left unset (`None`); use [`with_organization_id`](Self::with_organization_id)
+    /// to attach the turn's org for a multi-tenant host.
     #[must_use]
     pub fn new(user_id: Option<String>, groups: Vec<String>) -> Self {
-        Self { user_id, groups }
+        Self {
+            user_id,
+            groups,
+            organization_id: None,
+        }
     }
 
     /// A context for a specific user with no group memberships.
@@ -195,6 +221,7 @@ impl AccessContext {
         Self {
             user_id: Some(user_id.into()),
             groups: Vec::new(),
+            organization_id: None,
         }
     }
 
@@ -209,6 +236,18 @@ impl AccessContext {
     #[must_use]
     pub fn with_group(mut self, group: impl Into<String>) -> Self {
         self.groups.push(group.into());
+        self
+    }
+
+    /// Attach the turn's organization (builder). Carried so a multi-tenant host
+    /// adapter's
+    /// [`knowledge_for_access`](crate::adapter::StorageAdapter::knowledge_for_access)
+    /// can scope retrieval to that tenant. The operator's built-in ACL ignores
+    /// it (see the type-level "Org scoping" note), so this is behavior-preserving
+    /// for the single-tenant default.
+    #[must_use]
+    pub fn with_organization_id(mut self, organization_id: impl Into<String>) -> Self {
+        self.organization_id = Some(organization_id.into());
         self
     }
 
@@ -432,6 +471,30 @@ mod tests {
         assert!(!AccessContext::anonymous().can_access(&acl));
         let grouped = AccessContext::new(Some("x".into()), vec!["g".into()]);
         assert!(!grouped.can_access(&acl));
+    }
+
+    // ---- organization_id threading --------------------------------------
+
+    #[test]
+    fn organization_id_defaults_none_and_builder_sets_it() {
+        // Existing constructors leave the org unset (behavior-preserving).
+        assert_eq!(AccessContext::new(None, vec![]).organization_id, None);
+        assert_eq!(AccessContext::for_user("u").organization_id, None);
+        assert_eq!(AccessContext::anonymous().organization_id, None);
+        // The builder attaches the turn's org.
+        let ctx = AccessContext::for_user("u").with_organization_id("org-x");
+        assert_eq!(ctx.organization_id, Some("org-x".to_string()));
+    }
+
+    #[test]
+    fn organization_id_does_not_affect_can_access() {
+        // Org is for the host adapter's scoping, not the within-org ACL: it must
+        // not change the public/user/group decision.
+        let acl = DocAcl::for_users(["alice"]);
+        let with_org = AccessContext::for_user("alice").with_organization_id("org-x");
+        assert!(with_org.can_access(&acl));
+        let other_org = AccessContext::for_user("bob").with_organization_id("org-x");
+        assert!(!other_org.can_access(&acl));
     }
 
     #[test]
