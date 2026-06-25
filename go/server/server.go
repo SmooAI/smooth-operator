@@ -30,6 +30,12 @@ type Server struct {
 	// runner already maps its tool-call/tool-result stream events to stream_chunk frames.
 	tools []core.Tool
 
+	// knowledge is the retriever the agent grounds on (default nil → no grounding). The
+	// dispatcher threads it into the turn runner, which both passes it to the engine
+	// AgentOptions for grounding AND queries it to build the turn's auto-context
+	// citations carried on the terminal eventual_response.
+	knowledge core.Knowledge
+
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (default empty → no gating, behavior unchanged). When a turn calls a tool whose
 	// name contains one of these, the server parks the turn and emits
@@ -72,6 +78,11 @@ func WithSystemPrompt(p string) Option { return func(srv *Server) { srv.systemP 
 // WithTools registers the engine tools the agent may call during a turn (default none).
 // Threaded into every turn via the dispatcher → turn runner → engine AgentOptions.
 func WithTools(tools []core.Tool) Option { return func(srv *Server) { srv.tools = tools } }
+
+// WithKnowledge sets the retriever the agent grounds on (default none). Threaded into
+// every turn via the dispatcher → turn runner: it both grounds the engine AND sources
+// the turn's auto-context citations on the terminal eventual_response.
+func WithKnowledge(k core.Knowledge) Option { return func(srv *Server) { srv.knowledge = k } }
 
 // WithConfirmTools gates the named tools (matched by name substring) behind
 // write-confirmation HITL (default none → no gating). A turn that calls a matching tool
@@ -208,7 +219,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// the parked turn it resumes are always on the same connection (the session id keys
 	// within it), so the registry need not be server-wide.
 	confirmations := NewConfirmationRegistry()
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.tools, s.confirmTools, confirmations)
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations)
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits

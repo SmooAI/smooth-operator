@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,17 @@ type scenarioServer struct {
 	// turn that calls a matching tool parks and emits write_confirmation_required until
 	// the client replies with confirm_tool_action.
 	ConfirmTools []string `json:"confirmTools"`
+	// Knowledge seeds the server's knowledge base before booting — each doc grounds the
+	// agent AND sources the turn's auto-context citations, so a grounded turn's
+	// eventual_response carries data.data.citations.
+	Knowledge []knowledgeSpec `json:"knowledge"`
+}
+
+// knowledgeSpec is one document a scenario seeds via `server.knowledge`. source is the
+// citation id/title (and url when it's an http(s) link); content is the chunk text.
+type knowledgeSpec struct {
+	Source  string `json:"source"`
+	Content string `json:"content"`
 }
 
 // toolSpec is one deterministic test tool a scenario registers via `server.tools`. The
@@ -94,17 +106,28 @@ func scenariosDir(t *testing.T) string {
 	return filepath.Join(wd, "..", "..", "spec", "conformance", "scenarios")
 }
 
-// dot resolves a dotted path ("data.data.response.responseParts") into a nested value.
+// dot resolves a dotted path into a nested value. A path segment indexes a map by key
+// ("data.data.response") or, when it parses as a non-negative integer, an array by
+// position ("citations.0.id") — so a citation field can be asserted by index. Mirrors
+// the Python reference runner's array-aware dot helper.
 func dot(t *testing.T, obj map[string]any, path string) (any, bool) {
 	t.Helper()
 	var cur any = obj
 	for _, part := range strings.Split(path, ".") {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		cur, ok = m[part]
-		if !ok {
+		switch node := cur.(type) {
+		case map[string]any:
+			v, ok := node[part]
+			if !ok {
+				return nil, false
+			}
+			cur = v
+		case []any:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(node) {
+				return nil, false
+			}
+			cur = node[idx]
+		default:
 			return nil, false
 		}
 	}
@@ -157,6 +180,20 @@ func buildTools(specs []toolSpec) []core.Tool {
 		})
 	}
 	return tools
+}
+
+// buildKnowledge turns a scenario's `server.knowledge` directive into a seeded
+// InMemoryKnowledge the agent grounds on. Returns nil when no docs are declared, so a
+// scenario without knowledge boots a server with no retriever (citations stay empty).
+func buildKnowledge(specs []knowledgeSpec) core.Knowledge {
+	if len(specs) == 0 {
+		return nil
+	}
+	kb := &core.InMemoryKnowledge{}
+	for _, spec := range specs {
+		kb.Ingest(spec.Content, spec.Source)
+	}
+	return kb
 }
 
 // subst replaces "{{name}}" placeholders in string fields from captured vars. A whole
@@ -256,11 +293,13 @@ func runScenario(t *testing.T, path string) {
 
 	mock := buildMock(t, sc.MockLlmScript)
 	tools := buildTools(sc.Server.Tools)
+	knowledge := buildKnowledge(sc.Server.Knowledge)
 
 	ls, err := SpawnLocal(
 		WithLocalAddr("127.0.0.1:0"),
 		WithLocalChatClient(mock),
 		WithLocalServerOption(WithTools(tools)),
+		WithLocalServerOption(WithKnowledge(knowledge)),
 		WithLocalServerOption(WithConfirmTools(sc.Server.ConfirmTools)),
 	)
 	if err != nil {
