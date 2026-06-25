@@ -4,7 +4,7 @@
   "title": "Session",
   "description": "An AI conversation session. Ties together a conversation, an agent, the user and agent participants, and the smooth-operator workflow thread. Corresponds to a row in the `conversation_sessions` table. The `threadId` field is the smooth-operator thread identifier (stored as `langgraph_thread_id` in the DB for historical reasons; renamed to `threadId` in the protocol).",
   "type": "object",
-  "required": ["sessionId", "conversationId", "agentId", "agentName", "userParticipantId", "agentParticipantId", "threadId"],
+  "required": ["sessionId", "conversationId", "organizationId", "agentId", "agentName", "userParticipantId", "agentParticipantId", "threadId"],
   "additionalProperties": false,
   "properties": {
     "sessionId": {
@@ -16,6 +16,11 @@
       "type": "string",
       "format": "uuid",
       "description": "The conversation this session is attached to."
+    },
+    "organizationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The organization that owns this session. Mirrors `organizationId` on the conversation, participants, and messages so org-scoping is uniform across every domain type and storage backends can write the session's org directly."
     },
     "agentId": {
       "type": "string",

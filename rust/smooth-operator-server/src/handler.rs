@@ -274,6 +274,7 @@ async fn handle_create_session(
     let session = Session {
         session_id: session_id.clone(),
         conversation_id: conversation_id.clone(),
+        organization_id: org_id.clone(),
         agent_id: agent_id.clone(),
         agent_name: AGENT_NAME.to_string(),
         user_participant_id: user_participant_id.clone(),

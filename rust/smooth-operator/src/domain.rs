@@ -207,6 +207,11 @@ pub enum SessionStatus {
 pub struct Session {
     pub session_id: String,
     pub conversation_id: String,
+    /// Owning organization. Mirrors `organization_id` on `Conversation`,
+    /// `Participant`, and `Message` so org-scoping is uniform across every
+    /// core domain type — storage backends can write the session's org
+    /// directly instead of re-deriving it from the conversation.
+    pub organization_id: String,
     pub agent_id: String,
     pub agent_name: String,
     pub user_participant_id: String,
@@ -424,6 +429,7 @@ mod tests {
         let s = Session {
             session_id: "s1".into(),
             conversation_id: "c1".into(),
+            organization_id: "org1".into(),
             agent_id: "a1".into(),
             agent_name: "Smantha".into(),
             user_participant_id: "pu".into(),

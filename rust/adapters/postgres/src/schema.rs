@@ -76,6 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
 CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id           TEXT PRIMARY KEY,
     conversation_id      TEXT NOT NULL,
+    organization_id      TEXT NOT NULL DEFAULT '',
     agent_id             TEXT NOT NULL,
     agent_name           TEXT NOT NULL,
     user_participant_id  TEXT NOT NULL,
@@ -92,6 +93,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_conversation
     ON conversation_sessions (conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_organization
+    ON conversation_sessions (organization_id, created_at);
 "#;
 
 /// The admin-store tables (Phase 12 follow-up): the three management-console
