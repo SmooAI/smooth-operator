@@ -103,6 +103,32 @@ export function eventualResponse(
  * conformance corpus) pattern-match on; `data.error` is kept for wire
  * backward-compatibility.
  */
+/**
+ * `write_confirmation_required` — emitted mid-turn when the agent calls a
+ * state-mutating tool that requires explicit human approval before it runs. The turn
+ * is **parked** (the engine's `HumanGate` awaits the verdict) until the client replies
+ * with a `confirm_tool_action` action carrying the same `requestId` and an `approved`
+ * boolean.
+ *
+ * Wire shape matches `spec/events/write-confirmation-required.schema.json` and the
+ * Rust/Python reference servers byte-for-byte: the `requestId` echoes the originating
+ * `send_message`, and the prompt detail is double-nested under
+ * `data.data.{toolId, actionDescription}`. `toolId` is an opaque correlation handle
+ * (the tool name — a turn parks one tool at a time); `actionDescription` is the
+ * human-readable prompt the client renders.
+ */
+export function writeConfirmationRequired(requestId: string, toolId: string, actionDescription: string): Frame {
+    return {
+        type: 'write_confirmation_required',
+        requestId,
+        data: {
+            requestId,
+            data: { toolId, actionDescription },
+        },
+        timestamp: nowMs(),
+    };
+}
+
 export function error(requestId: string | undefined, code: string, message: string): Frame {
     const descriptor = { code, message };
     const data: Record<string, unknown> = { error: descriptor };

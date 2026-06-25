@@ -14,6 +14,7 @@ import type { ChatClientLike, Knowledge, Tool } from '@smooai/smooth-operator-co
 import { randomUUID } from 'node:crypto';
 
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
+import { ConfirmationRegistry } from './confirmation.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
@@ -38,6 +39,19 @@ export interface FrameDispatcherOptions {
     systemPrompt?: string;
     /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
     tools?: Tool[];
+    /**
+     * Tool-name patterns gated behind write-confirmation HITL (default empty → no
+     * gating, behavior unchanged). When a turn calls a tool whose name contains one of
+     * these, the dispatcher parks the turn and emits `write_confirmation_required`
+     * until the client replies with `confirm_tool_action`.
+     */
+    confirmTools?: string[];
+    /**
+     * The session-keyed pending-confirmation registry. One per connection (a
+     * `confirm_tool_action` frame and the parked turn it resumes are always on the same
+     * connection). Created on demand if not supplied.
+     */
+    confirmations?: ConfirmationRegistry;
 }
 
 export class FrameDispatcher {
@@ -47,6 +61,10 @@ export class FrameDispatcher {
     private readonly access: AccessContext;
     private readonly systemPrompt?: string;
     private readonly tools: Tool[];
+    private readonly confirmTools: string[];
+    private readonly confirmations: ConfirmationRegistry;
+    /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
+    private readonly turns = new Set<Promise<void>>();
 
     constructor(options: FrameDispatcherOptions) {
         this.store = options.store;
@@ -55,6 +73,29 @@ export class FrameDispatcher {
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
         this.tools = options.tools ?? [];
+        this.confirmTools = options.confirmTools ?? [];
+        this.confirmations = options.confirmations ?? new ConfirmationRegistry();
+    }
+
+    /**
+     * Await every in-flight spawned `send_message` turn to completion.
+     *
+     * `send_message` runs its turn as a background task (so the read loop stays free to
+     * receive a `confirm_tool_action` while a turn is parked). The connection loop calls
+     * this in its teardown so an in-flight turn finishes — and its `eventual_response`
+     * is flushed — before the writer stops (preserves the graceful-drain contract).
+     */
+    async waitForTurns(): Promise<void> {
+        if (this.turns.size > 0) await Promise.allSettled([...this.turns]);
+    }
+
+    /**
+     * Reject every outstanding write-confirmation (fail closed — a write is never
+     * auto-approved on disconnect), unparking any turn waiting on one so it can finish.
+     * Called by the connection loop before {@link waitForTurns} on teardown.
+     */
+    rejectPendingConfirmations(): void {
+        this.confirmations.rejectAll();
     }
 
     /**
@@ -92,6 +133,9 @@ export class FrameDispatcher {
                     break;
                 case 'send_message':
                     await this.handleSendMessage(frame, requestId, sink, signal);
+                    break;
+                case 'confirm_tool_action':
+                    this.handleConfirmToolAction(frame, requestId, sink);
                     break;
                 case undefined:
                     sink(protocol.error(requestId, 'VALIDATION_ERROR', "Missing 'action'"));
@@ -166,12 +210,71 @@ export class FrameDispatcher {
             knowledge: scopedKnowledge,
             systemPrompt: this.systemPrompt,
             tools: this.tools,
+            confirmTools: this.confirmTools,
+            confirmations: this.confirmations,
+            sessionId,
         });
-        const result = await runner.run(session.conversationId, reqId, message, sink, signal);
 
-        // 3. Terminal eventual_response.
+        // Run the turn as a background task, NOT awaited inline. A turn that calls a
+        // confirmation-gated tool **parks** awaiting a later `confirm_tool_action`
+        // frame; the connection's read loop dispatches that frame, so awaiting the turn
+        // here would block the reader and deadlock (the confirm could never be read).
+        // Spawning frees the reader to receive the confirmation while the turn streams
+        // its events through the sink. Mirrors the Python `asyncio.ensure_future` /
+        // Rust `tokio::spawn`. The 202 ack above is already enqueued; the terminal
+        // `eventual_response` is emitted from the task on completion. The connection
+        // loop awaits all tracked turns on teardown ({@link waitForTurns}) so an
+        // in-flight turn finishes before the writer stops (graceful drain).
+        const turn = (async (): Promise<void> => {
+            try {
+                const result = await runner.run(session.conversationId, reqId, message, sink, signal);
+                sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
+            } catch {
+                // Mirror the dispatcher's outer guard: a turn failure surfaces a clean
+                // error and keeps the connection alive (detail stays server-side).
+                sink(protocol.error(reqId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
+            }
+        })();
+        this.turns.add(turn);
+        void turn.finally(() => this.turns.delete(turn));
+    }
+
+    /**
+     * `confirm_tool_action` — resume a turn parked on a write-tool confirmation.
+     *
+     * Per `spec/actions/confirm-tool-action.schema.json` the client replies with
+     * `{action, sessionId, requestId, approved}` to a `write_confirmation_required`
+     * event. We resolve the session's pending confirmation with the verdict: the parked
+     * `HumanGate` returns and the turn resumes (runs the tool on approve, skips it with
+     * a rejection result on deny). There is no dedicated response event — continuation
+     * is signalled by the resumed streaming sequence; we ack with an
+     * `immediate_response`. Resolving takes the deferred out, so a duplicate confirm is
+     * a clean `NO_PENDING_CONFIRMATION` no-op. Fails closed: a missing `sessionId` or
+     * non-bool `approved` is rejected (never silently approve).
+     */
+    private handleConfirmToolAction(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): void {
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
+        if (!sessionId) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "confirm_tool_action requires a 'sessionId'"));
+            return;
+        }
+
+        if (typeof frame.approved !== 'boolean') {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "confirm_tool_action requires a boolean 'approved'"));
+            return;
+        }
+        const approved = frame.approved;
+
+        if (!this.confirmations.resolve(sessionId, approved)) {
+            sink(protocol.error(requestId, 'NO_PENDING_CONFIRMATION', `no tool action is awaiting confirmation for session '${sessionId}'`));
+            return;
+        }
+
         sink(
-            protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations),
+            protocol.immediateResponse(requestId, 200, approved ? 'Tool action approved' : 'Tool action rejected', {
+                sessionId,
+                approved,
+            }),
         );
     }
 }
