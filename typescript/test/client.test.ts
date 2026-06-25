@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SmoothAgentClient, ProtocolError, type MessageTurn } from '../src/client.js';
 import type { Transport, TransportState } from '../src/transport.js';
+import type { WebSocketLike } from '../src/transport.js';
 import type { ServerEvent } from '../src/types.js';
 
 /** In-memory transport: captures sent frames, lets the test inject server events. */
@@ -277,5 +278,62 @@ describe('SmoothAgentClient request correlation', () => {
         const promise = client.getSession({ sessionId: 's' });
         transport.close();
         await expect(promise).rejects.toBeInstanceOf(Error);
+    });
+});
+
+describe('SmoothAgentClient connection token (?token=)', () => {
+    /** A no-op WebSocket stub good enough for the default transport to dial. */
+    function stubSocket(): WebSocketLike {
+        return {
+            readyState: 0,
+            send: () => {},
+            close: () => {},
+            addEventListener: () => {},
+        } as unknown as WebSocketLike;
+    }
+
+    /** Capture the URL the default transport hands to its WebSocket factory. */
+    function urlForOptions(opts: { url: string; token?: string }): string {
+        let dialed = '';
+        // The factory is only invoked on connect(); constructing the client wires it up.
+        const client = new SmoothAgentClient({
+            ...opts,
+            webSocketFactory: (u: string) => {
+                dialed = u;
+                return stubSocket();
+            },
+        });
+        // Kick the transport so the factory runs and records the URL. The stub never
+        // reaches OPEN, so connect() won't resolve — we don't await it, we only need
+        // the synchronous factory call it triggers.
+        void client.connect();
+        return dialed;
+    }
+
+    it('appends token to a URL with no existing query string', () => {
+        const dialed = urlForOptions({ url: 'wss://local.smooth-agent.dev/ws', token: 'secret123' });
+        expect(new URL(dialed).searchParams.get('token')).toBe('secret123');
+        expect(dialed).toContain('token=secret123');
+    });
+
+    it('preserves an existing query string and appends token after it', () => {
+        const dialed = urlForOptions({ url: 'wss://local.smooth-agent.dev/ws?foo=bar', token: 'secret123' });
+        const parsed = new URL(dialed);
+        expect(parsed.searchParams.get('foo')).toBe('bar');
+        expect(parsed.searchParams.get('token')).toBe('secret123');
+        expect(dialed).toBe('wss://local.smooth-agent.dev/ws?foo=bar&token=secret123');
+    });
+
+    it('percent-encodes a token with reserved characters', () => {
+        const dialed = urlForOptions({ url: 'wss://local.smooth-agent.dev/ws', token: 'a b&c=d' });
+        // Round-trips back to the raw token, and the reserved `&`/`=` are encoded so
+        // they don't spawn phantom query params.
+        expect(new URL(dialed).searchParams.get('token')).toBe('a b&c=d');
+        expect(dialed).toContain('token=a+b%26c%3Dd');
+    });
+
+    it('leaves the URL byte-for-byte unchanged when no token is given', () => {
+        const url = 'wss://local.smooth-agent.dev/ws?foo=bar';
+        expect(urlForOptions({ url })).toBe(url);
     });
 });
