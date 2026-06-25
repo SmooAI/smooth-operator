@@ -1,0 +1,17 @@
+{
+    "name": "hitl-write-confirmation-denied",
+    "description": "HITL deny path: when the human REJECTS a gated tool (confirm_tool_action approved=false), the tool is BLOCKED (never runs), the model sees a rejection result instead, and the turn still completes cleanly (no hang). The deny complement of hitl-write-confirmation. Canonical order verified against the Rust reference.",
+    "server": {
+        "tools": [ { "name": "delete_record", "description": "Delete a record by id (a state-mutating write).", "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "result": "Record 42 deleted." } ],
+        "confirmTools": ["delete_record"]
+    },
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "delete_record", "arguments": "{\"id\": \"42\"}" },
+        { "kind": "text", "text": "Understood — I won't delete the record." }
+    ],
+    "steps": [
+        { "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com" }, "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ] },
+        { "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "delete record 42", "stream": true }, "expect": [ { "type": "immediate_response", "status": 202 }, { "type": "write_confirmation_required", "assert": { "requestId": "r-msg", "data.data.toolId": "delete_record" } }, { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "delete_record" } } ] },
+        { "send": { "action": "confirm_tool_action", "requestId": "r-confirm", "sessionId": "{{sessionId}}", "approved": false }, "expect": [ { "type": "immediate_response", "status": 200, "assert": { "data.approved": false } }, { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "delete_record", "data.state.rawResponse.toolResult.isError": true } }, { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Understood — I won't delete the record." }, { "type": "eventual_response", "status": 200 } ] }
+    ]
+}
