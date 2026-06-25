@@ -1,10 +1,17 @@
 # Vendored widget assets (local deployment flavor)
 
-`chat-widget.iife.js` is the prebuilt standalone widget bundle from the
-published **`@smooai/smooth-operator`** npm package (the `<smooth-agent-chat>`
-web component, `dist/widget/chat-widget.iife.js`). It is vendored here so the
-local deployment flavor can serve the official widget **offline**, with no Node
-build step.
+`chat-widget.iife.js` is the prebuilt standalone bundle of the **`@smooai/chat-widget`**
+npm package — the canonical public **Aurora Glass** widget (the `<smooth-agent-chat>`
+web component, `dist/chat-widget.global.js`, with the smooth-operator protocol client
+inlined). It is vendored here so the local deployment flavor can serve the official
+widget **offline**, with no Node build step.
+
+> Why `@smooai/chat-widget` and not `@smooai/smooth-operator/widget`: `@smooai/chat-widget`
+> is the single canonical public widget (Aurora Glass redesign + OTP/HITL UI). The
+> `@smooai/smooth-operator` SDK previously shipped a parallel copy of the same web
+> component; we consume the published Aurora Glass package directly so there is one
+> widget, not two. Same `<smooth-agent-chat>` element + `endpoint`/`agent-id` attributes,
+> so it's a drop-in.
 
 `widget-index.html` is the host page the local flavor serves at `/`; it loads
 the bundle and points a `<smooth-agent-chat>` at this server's own `/ws`, with
@@ -16,12 +23,12 @@ widget routes.
 
 ## Keeping it current
 
-Pinned to `@smooai/smooth-operator@1.2.0`. To refresh after a widget release:
+Pinned to `@smooai/chat-widget@0.5.0`. To refresh after a widget release:
 
 ```sh
-npm pack @smooai/smooth-operator
-tar xzf smooai-smooth-operator-*.tgz -C /tmp package/dist/widget/chat-widget.iife.js
-cp /tmp/package/dist/widget/chat-widget.iife.js chat-widget.iife.js
+npm pack @smooai/chat-widget
+tar xzf smooai-chat-widget-*.tgz -C /tmp package/dist/chat-widget.global.js
+cp /tmp/package/dist/chat-widget.global.js chat-widget.iife.js
 ```
 
-(A CI step that does this on widget release would keep the two in lockstep.)
+(A CI step that does this on `@smooai/chat-widget` release would keep the two in lockstep.)
