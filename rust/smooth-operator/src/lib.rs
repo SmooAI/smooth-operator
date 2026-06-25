@@ -39,8 +39,8 @@ pub mod widget_auth;
 pub use access_control::{AccessContext, AclKnowledgeStore, DocAcl};
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
 pub use auth::{
-    AuthConfig, AuthError, AuthVerifier, JwtVerifier, NoAuthVerifier, Principal, Role,
-    SmooIdentityVerifier,
+    AuthConfig, AuthError, AuthVerifier, JwtVerifier, LocalTokenVerifier, NoAuthVerifier,
+    Principal, Role, SmooIdentityVerifier,
 };
 pub use connector_config::{
     ConnectorConfig, ConnectorConfigStore, ConnectorKind, InMemoryConnectorConfigStore,

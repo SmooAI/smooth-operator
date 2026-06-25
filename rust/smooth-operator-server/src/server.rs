@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::response::Response;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
@@ -39,7 +39,7 @@ use crate::state::AppState;
 /// can boot the server in-process. Serves the WebSocket `/ws` endpoint plus the
 /// auth-gated admin HTTP API under `/admin` (see [`crate::admin`]).
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/ws", get(ws_upgrade))
         // Unauthenticated liveness/readiness probe. A WebSocket `/ws` upgrade is
         // not a plain GET, so HTTP load balancers (AWS ALB / nginx ingress) need a
@@ -47,8 +47,38 @@ pub fn router(state: AppState) -> Router {
         // and dependency-free — it does not touch storage/LLM, so it stays Ready
         // even when an optional backend (gateway key, DB) is degraded.
         .route("/health", get(health))
-        .merge(crate::admin::router())
-        .with_state(state)
+        .merge(crate::admin::router());
+    // The local deployment flavor opts into serving the official widget; other
+    // flavors never mount these routes.
+    if state.serve_widget {
+        router = router
+            .route("/", get(widget_index))
+            .route("/chat-widget.iife.js", get(widget_bundle));
+    }
+    router.with_state(state)
+}
+
+/// Serve the local-flavor widget host page at `/`, injecting the auth token
+/// (same-origin, loopback) so the embedded `<smooth-agent-chat>` connects to
+/// this server's own `/ws?token=…`. The token is JSON-encoded into the page so
+/// quoting is always safe.
+async fn widget_index(State(state): State<AppState>) -> Html<String> {
+    let token_json = serde_json::to_string(state.widget_token.as_deref().unwrap_or(""))
+        .unwrap_or_else(|_| "\"\"".to_string());
+    let html =
+        include_str!("../assets/widget-index.html").replace("__SMOOTH_LOCAL_TOKEN__", &token_json);
+    Html(html)
+}
+
+/// Serve the vendored official widget IIFE bundle.
+async fn widget_bundle() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../assets/chat-widget.iife.js"),
+    )
 }
 
 /// `GET /health` → `200 OK`. The minimal HTTP health endpoint for container

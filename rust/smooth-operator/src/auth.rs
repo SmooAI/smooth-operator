@@ -488,6 +488,69 @@ impl AuthVerifier for NoAuthVerifier {
     }
 }
 
+/// **Local single-user** verifier — the auth for the *local deployment flavor*.
+///
+/// Holds one shared secret (the local daemon auto-provisions it). The presented
+/// token must equal the secret, compared in **constant time**; on match the
+/// connection runs as a fixed local `Admin` principal, and on mismatch/empty it
+/// **fails closed**. This gates stray local processes from connecting to the
+/// loopback/tailnet server without dragging in the multi-tenant JWT/IdP
+/// machinery — exactly the posture a single-user always-on daemon wants.
+///
+/// The token rides in the **same slot** a JWT would: the `/ws` `?token=` query
+/// param (reference server) or the `send_message` `token` field (Lambda), so all
+/// existing transport plumbing is reused.
+pub struct LocalTokenVerifier {
+    secret: String,
+    principal: Principal,
+}
+
+impl LocalTokenVerifier {
+    /// A verifier over `secret`; matched connections run as a local `Admin`.
+    #[must_use]
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self {
+            secret: secret.into(),
+            principal: Principal::new(
+                "local",
+                "local",
+                Role::Admin,
+                Some("Local user".to_string()),
+            ),
+        }
+    }
+}
+
+impl AuthVerifier for LocalTokenVerifier {
+    fn verify(&self, bearer_token: &str) -> Result<Principal, AuthError> {
+        if bearer_token.is_empty() {
+            return Err(AuthError::Unauthenticated);
+        }
+        if local_token_eq(bearer_token.as_bytes(), self.secret.as_bytes()) {
+            Ok(self.principal.clone())
+        } else {
+            Err(AuthError::InvalidToken("local token mismatch".to_string()))
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        "local-token"
+    }
+}
+
+/// Length-aware constant-time byte comparison, so the local-token check leaks
+/// neither length nor content through timing.
+fn local_token_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// **Tokenless trusted-upstream** verifier — `AUTH_MODE=trusted`.
 ///
 /// For the **proxied-integration** deployment shape: an existing application's
@@ -996,6 +1059,29 @@ mod tests {
         assert_eq!(p.role, Role::Admin);
         assert_eq!(p.org_id, "dev-org");
         assert_eq!(verifier.mode(), "none");
+    }
+
+    // ---- LocalTokenVerifier ----------------------------------------------
+
+    #[test]
+    fn local_token_accepts_exact_secret_as_local_admin() {
+        let v = LocalTokenVerifier::new("s3cret-local");
+        let p = v.verify("s3cret-local").expect("matching token");
+        assert_eq!(p.role, Role::Admin);
+        assert_eq!(p.user_id, "local");
+        assert_eq!(p.org_id, "local");
+        assert_eq!(v.mode(), "local-token");
+    }
+
+    #[test]
+    fn local_token_fails_closed_on_wrong_or_empty() {
+        let v = LocalTokenVerifier::new("s3cret-local");
+        assert!(matches!(v.verify(""), Err(AuthError::Unauthenticated)));
+        assert!(matches!(v.verify("nope"), Err(AuthError::InvalidToken(_))));
+        assert!(matches!(
+            v.verify("s3cret"),
+            Err(AuthError::InvalidToken(_))
+        ));
     }
 
     // ---- AuthConfig::from_env — secure by default ------------------------
