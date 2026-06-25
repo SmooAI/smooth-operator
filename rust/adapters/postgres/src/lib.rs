@@ -444,6 +444,7 @@ fn row_to_session(row: &tokio_postgres::Row) -> Result<Session> {
     Ok(Session {
         session_id: row.get("session_id"),
         conversation_id: row.get("conversation_id"),
+        organization_id: row.get("organization_id"),
         agent_id: row.get("agent_id"),
         agent_name: row.get("agent_name"),
         user_participant_id: row.get("user_participant_id"),
@@ -783,13 +784,14 @@ impl StorageAdapter for PostgresAdapter {
         client
             .execute(
                 "INSERT INTO conversation_sessions
-                    (session_id, conversation_id, agent_id, agent_name, user_participant_id,
-                     agent_participant_id, thread_id, status, token_count, message_count,
-                     metadata, created_at, updated_at, ended_at, last_activity_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                    (session_id, conversation_id, organization_id, agent_id, agent_name,
+                     user_participant_id, agent_participant_id, thread_id, status, token_count,
+                     message_count, metadata, created_at, updated_at, ended_at, last_activity_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
                 &[
                     &session.session_id,
                     &session.conversation_id,
+                    &session.organization_id,
                     &session.agent_id,
                     &session.agent_name,
                     &session.user_participant_id,

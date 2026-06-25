@@ -225,6 +225,7 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
     let session = Session {
         session_id: "sess-1".into(),
         conversation_id: "conv-1".into(),
+        organization_id: "org-1".into(),
         agent_id: "agent-uuid".into(),
         agent_name: "Smantha".into(),
         user_participant_id: "part-user".into(),
