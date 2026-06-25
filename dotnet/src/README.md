@@ -81,6 +81,20 @@ Console.WriteLine($"\nmessageId: {final.Data.Payload.MessageId}");
 
 (Point `Url` at your own [`smooth-operator-server`](https://github.com/SmooAI/smooth-operator/blob/main/rust/README.md), or at the hosted endpoint.)
 
+### Authenticating to a token-gated server
+
+A token-gated (local-flavor) server reads the connection token from the `?token=` query slot of the WebSocket URL (browsers can't set handshake headers). Set `Token` on the options and the default transport merges it into the connect URL, preserving any existing query:
+
+```csharp
+await using var client = new SmoothAgentClient(new SmoothAgentClientOptions
+{
+    Url   = "ws://127.0.0.1:8787/ws",
+    Token = "secret123",          // → ws://127.0.0.1:8787/ws?token=secret123
+});
+```
+
+The token value is percent-encoded. `Token` is ignored when you inject a custom `Transport`; in that case build the URL yourself (e.g. with `SmoothAgentClient.WithToken(url, token)`).
+
 ---
 
 ## The `IChatClient` facade (MEAI)

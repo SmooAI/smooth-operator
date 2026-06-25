@@ -51,6 +51,15 @@ public sealed class SmoothAgentClientOptions
     /// <summary>WebSocket URL, e.g. <c>wss://realtime.prod.smooth-agent.dev</c>.</summary>
     public string Url { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Optional connection auth token. When set, the default transport's connect URL
+    /// carries it in the <c>?token=</c> query slot (browsers can't set WebSocket
+    /// handshake headers), which a token-gated (local-flavor) server reads to
+    /// authenticate the connection. Merged with any existing query on <see cref="Url"/>.
+    /// Ignored when a custom <see cref="Transport"/> is supplied.
+    /// </summary>
+    public string? Token { get; set; }
+
     /// <summary>Inject a transport (for tests / custom sockets). Defaults to a WebSocket transport over <see cref="Url"/>.</summary>
     public ITransport? Transport { get; set; }
 
@@ -161,7 +170,7 @@ public sealed class SmoothAgentClient : IAsyncDisposable
 
     public SmoothAgentClient(SmoothAgentClientOptions options)
     {
-        _transport = options.Transport ?? new WebSocketTransport(options.Url);
+        _transport = options.Transport ?? new WebSocketTransport(WithToken(options.Url, options.Token));
         _requestTimeout = options.RequestTimeout;
         _generateRequestId = options.GenerateRequestId ?? (() => $"req-{Guid.NewGuid():N}");
         _json = options.JsonOptions ?? new JsonSerializerOptions(JsonSerializerDefaults.Web)
@@ -191,6 +200,23 @@ public sealed class SmoothAgentClient : IAsyncDisposable
         _transport.Message -= HandleFrame;
         _transport.Closed -= OnTransportClosed;
         await _transport.CloseAsync(1000, reason).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Merge a connection <paramref name="token"/> into <paramref name="url"/>'s
+    /// <c>?token=</c> query slot, preserving any existing query parameters. Returns
+    /// <paramref name="url"/> unchanged when the token is null/empty. The token value is
+    /// percent-encoded; a pre-existing <c>token</c> param is replaced.
+    /// </summary>
+    public static string WithToken(string url, string? token)
+    {
+        if (string.IsNullOrEmpty(token)) return url;
+
+        var builder = new UriBuilder(url);
+        var query = System.Web.HttpUtility.ParseQueryString(builder.Query);
+        query.Set("token", token);
+        builder.Query = query.ToString();
+        return builder.Uri.ToString();
     }
 
     // ───────────────────────────── Actions ─────────────────────────────────

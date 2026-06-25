@@ -231,4 +231,40 @@ public sealed class ClientTests
 
         await Assert.ThrowsAnyAsync<Exception>(() => task);
     }
+
+    [Fact]
+    public void TokenOption_AddsTokenQueryToConnectUri()
+    {
+        var merged = SmoothAgentClient.WithToken("wss://realtime.test/ws", "secret123");
+
+        Assert.Contains("token=secret123", new Uri(merged).Query);
+    }
+
+    [Fact]
+    public void TokenOption_PreservesExistingQuery()
+    {
+        var merged = SmoothAgentClient.WithToken("wss://realtime.test/ws?foo=bar", "secret123");
+
+        var query = System.Web.HttpUtility.ParseQueryString(new Uri(merged).Query);
+        Assert.Equal("bar", query["foo"]);
+        Assert.Equal("secret123", query["token"]);
+    }
+
+    [Fact]
+    public void TokenOption_PercentEncodesTokenValue()
+    {
+        var merged = SmoothAgentClient.WithToken("wss://realtime.test/ws", "a b/c+d");
+
+        // The raw query is percent-encoded; decoding round-trips to the original value.
+        Assert.DoesNotContain("a b/c+d", new Uri(merged).Query);
+        var query = System.Web.HttpUtility.ParseQueryString(new Uri(merged).Query);
+        Assert.Equal("a b/c+d", query["token"]);
+    }
+
+    [Fact]
+    public void TokenOption_NoToken_LeavesUrlUnchanged()
+    {
+        Assert.Equal("wss://realtime.test/ws", SmoothAgentClient.WithToken("wss://realtime.test/ws", null));
+        Assert.Equal("wss://realtime.test/ws", SmoothAgentClient.WithToken("wss://realtime.test/ws", ""));
+    }
 }
