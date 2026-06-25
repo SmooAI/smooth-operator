@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import websockets
-from smooth_operator_core import FunctionTool, MockLlmProvider
+from smooth_operator_core import FunctionTool, InMemoryKnowledge, Knowledge, MockLlmProvider
 
 from smooth_operator_server import ServerState, serve
 from smooth_operator_server.session_store import InMemorySessionStore
@@ -26,11 +26,12 @@ SCENARIOS_DIR = Path(__file__).resolve().parents[3] / "spec" / "conformance" / "
 SCENARIOS = sorted(SCENARIOS_DIR.glob("*.json"))
 
 
-def _dot(obj: dict, path: str):
-    """Resolve a dotted path (``data.data.response.responseParts``) into a nested dict."""
+def _dot(obj, path: str):
+    """Resolve a dotted path (``data.data.response.responseParts``) into a nested
+    structure. A numeric segment indexes a list (``citations.0.id``)."""
     cur = obj
     for part in path.split("."):
-        cur = cur[part]
+        cur = cur[int(part)] if isinstance(cur, list) else cur[part]
     return cur
 
 
@@ -68,6 +69,18 @@ def _build_tools(specs: list[dict]) -> list[FunctionTool]:
     return tools
 
 
+def _build_knowledge(docs: list[dict]) -> Knowledge | None:
+    """Build an ``InMemoryKnowledge`` from a scenario's ``server.knowledge`` directive
+    (a list of ``{source, content}`` docs), so a knowledge-grounded turn emits the
+    same auto-context citations across every server. Absent/empty → no knowledge."""
+    if not docs:
+        return None
+    knowledge = InMemoryKnowledge()
+    for doc in docs:
+        knowledge.ingest(doc["content"], doc["source"])
+    return knowledge
+
+
 def _subst(value, vars_: dict):
     """Replace ``{{name}}`` placeholders in string fields from captured vars."""
     if isinstance(value, str) and value.startswith("{{") and value.endswith("}}"):
@@ -88,7 +101,10 @@ async def test_scenario_parity(path: Path) -> None:
     # calls one parks and emits `write_confirmation_required` until the client sends
     # `confirm_tool_action`. Empty/absent → no gating (every existing scenario).
     confirm_tools = server_spec.get("confirmTools", [])
-    server, _ = await _start(chat_client=mock, tools=tools, confirm_tools=confirm_tools)
+    # `server.knowledge` seeds the knowledge base so a grounded turn surfaces
+    # auto-context citations. Absent → no knowledge (every pre-citation scenario).
+    knowledge = _build_knowledge(server_spec.get("knowledge", []))
+    server, _ = await _start(chat_client=mock, tools=tools, confirm_tools=confirm_tools, knowledge=knowledge)
     vars_: dict = {}
     try:
         async with websockets.connect(server.ws_url()) as ws:
@@ -99,12 +115,13 @@ async def test_scenario_parity(path: Path) -> None:
         await server.shutdown()
 
 
-async def _start(chat_client=None, tools=None, confirm_tools=None):
+async def _start(chat_client=None, tools=None, confirm_tools=None, knowledge=None):
     state = ServerState(
         store=InMemorySessionStore(),
         chat_client=chat_client,
         tools=tools or [],
         confirm_tools=confirm_tools or [],
+        knowledge=knowledge,
     )
     server = await serve(state, "127.0.0.1", 0)
     return server, state

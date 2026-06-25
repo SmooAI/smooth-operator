@@ -36,6 +36,14 @@ from .session_store import MessageDirection, SessionStore
 #: Max prior turns replayed into the thread for memory (bounds context growth).
 MAX_PRIOR_MESSAGES = 50
 
+#: Top-K knowledge hits surfaced as auto-context citations (what grounded the
+#: answer). Matches the engine's auto-context injection and the TS/C#/Rust servers.
+AUTO_CONTEXT_LIMIT = 3
+
+#: Max chars of a hit's content carried in a citation snippet (matches the TS
+#: ``CITATION_SNIPPET_MAX_CHARS`` / the Rust/C# truncation).
+CITATION_SNIPPET_MAX_CHARS = 280
+
 #: Default system prompt — ground answers in the knowledge base. Mirrors the
 #: C#/Rust runner prompts.
 DEFAULT_SYSTEM_PROMPT = (
@@ -99,6 +107,13 @@ class TurnRunner:
         sink: Sink,
         session_id: str | None = None,
     ) -> TurnResult:
+        # 0. Auto-context citations (what grounded the answer). Mirrors the TS
+        #    server's citation build / the Rust auto_sources / the C# citation build.
+        #    The engine's `query` is the same retriever the agent injects from, so the
+        #    citations match the grounding the model actually saw. Built BEFORE the
+        #    agent runs (the query is independent of generation).
+        citations = self._build_citations(user_message)
+
         # 1. Build the agent. The knowledge base (when present) auto-injects the
         #    top hits into the system prompt — the engine handles retrieval + rerank
         #    internally, mirroring the C# `new SmoothAgent(..., Knowledge = ...)`.
@@ -204,7 +219,32 @@ class TurnRunner:
 
         # 5. Persist the outbound reply and return.
         outbound = await self._store.append_message(conversation_id, MessageDirection.OUTBOUND, reply)
-        return TurnResult(reply=reply, message_id=outbound.id, citations=[])
+        return TurnResult(reply=reply, message_id=outbound.id, citations=citations)
+
+    def _build_citations(self, user_message: str) -> list[dict[str, Any]]:
+        """Build the auto-context citations for ``user_message`` from the knowledge
+        base — one per top hit, matching the TS server's field names. ``url`` is set
+        only when the source is an http(s) URL (omitted otherwise). Empty when no
+        knowledge is wired (the eventual_response then omits the array entirely)."""
+        if self._knowledge is None:
+            return []
+        citations: list[dict[str, Any]] = []
+        for hit in self._knowledge.query(user_message, AUTO_CONTEXT_LIMIT):
+            citation: dict[str, Any] = {
+                "id": hit.source,
+                "title": hit.source,
+                "snippet": _truncate(hit.content, CITATION_SNIPPET_MAX_CHARS),
+                "score": hit.score,
+            }
+            if hit.source.startswith("http://") or hit.source.startswith("https://"):
+                citation["url"] = hit.source
+            citations.append(citation)
+        return citations
+
+
+def _truncate(value: str, max_chars: int) -> str:
+    """Cap ``value`` at ``max_chars`` (matches the TS server's ``truncate``)."""
+    return value if len(value) <= max_chars else value[:max_chars]
 
 
 def _tool_call_state(event: ToolCallEvent) -> dict[str, Any]:
