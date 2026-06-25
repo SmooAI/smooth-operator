@@ -111,3 +111,5 @@ Both paths are first-class and tested. The storage adapter is the seam that make
 ## 7. Polyglot strategy
 
 `.NET` is a first-class target and the agent core is async + streaming-heavy. FFI codegen for .NET/Go is immature for async streaming (uniffi-bindgen-cs is young; csbindgen has no async; UniFFI has open async-trait bugs). So the spine is **protocol-first**: [`spec/`](../../spec) defines the wire protocol once, and each language ships an idiomatic native client. In-process FFI (napi-rs for TS, PyO3/uniffi for Python) is layered on **only where embedding the engine in-process pays off** — never as the only way to use a language. See [smooth-operator's bindings strategy](https://github.com/SmooAI/smooth-operator-core) and [[Roadmap]] Phase 5.
+
+All five languages now ship a native **server** (not just a client), held to identical wire behavior by a shared, deterministic conformance corpus. See [[Polyglot Server Parity]].
