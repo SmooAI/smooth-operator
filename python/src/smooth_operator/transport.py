@@ -16,6 +16,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Literal
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 TransportState = Literal["connecting", "open", "closing", "closed"]
 
@@ -23,6 +24,31 @@ CloseInfo = dict  # {"code": int | None, "reason": str | None}
 MessageHandler = Callable[[str], None]
 CloseHandler = Callable[[CloseInfo], None]
 ErrorHandler = Callable[[object], None]
+
+
+def apply_connection_token(url: str, token: str | None) -> str:
+    """Return ``url`` with a ``token`` query parameter for a token-gated server.
+
+    Token-gated (local-flavor) servers read the connection token from the
+    ``?token=`` query slot of the WS URL. The token is merged into any existing
+    query string via :func:`urllib.parse.urlsplit` / :func:`urlencode` (never a
+    naive concat), so an existing ``?foo=bar`` is preserved. ``None`` returns the
+    URL unchanged so the default (no-token) behavior is untouched.
+    """
+    if token is None:
+        return url
+    parts = urlsplit(url)
+    # parse_qsl drops the token if it's already present; rebuild deterministically.
+    query = [(k, v) for k, v in _parse_query(parts.query) if k != "token"]
+    query.append(("token", token))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def _parse_query(query: str) -> list[tuple[str, str]]:
+    from urllib.parse import parse_qsl  # noqa: PLC0415
+
+    # keep_blank_values so a bare ``?foo=`` round-trips instead of vanishing.
+    return parse_qsl(query, keep_blank_values=True)
 
 
 class Transport(ABC):
@@ -98,9 +124,11 @@ class WebSocketTransport(_HandlerMixin, Transport):
     `websockets` to your environment); if it is missing, :meth:`connect` raises.
     """
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, token: str | None = None) -> None:
         super().__init__()
-        self._url = url
+        # When a connection token is supplied, fold it into the URL's ``?token=``
+        # slot up front so :meth:`connect` opens the token-gated URL.
+        self._url = apply_connection_token(url, token)
         self._ws: object | None = None
         self._state: TransportState = "closed"
         self._reader_task: asyncio.Task | None = None
