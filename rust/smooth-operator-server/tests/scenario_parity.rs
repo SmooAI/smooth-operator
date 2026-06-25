@@ -113,6 +113,25 @@ fn build_tool_provider(scenario: &Value) -> Option<Arc<dyn ToolProvider>> {
     Some(Arc::new(CorpusToolProvider { tools }))
 }
 
+/// Read a scenario's `server.confirmTools` directive — the list of tool names
+/// the server gates behind a human-in-the-loop write confirmation. Empty when the
+/// scenario installs no confirm-gated tools. The reference server already serves
+/// the `write_confirmation_required` event + `confirm_tool_action` frame (#66);
+/// this just feeds the names into the boot config's `confirm_tools`.
+fn confirm_tools(scenario: &Value) -> Vec<String> {
+    scenario
+        .get("server")
+        .and_then(|s| s.get("confirmTools"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Resolve the conformance scenarios directory relative to THIS crate, so the
 /// test works regardless of the cwd the harness runs it from. From
 /// `rust/smooth-operator-server` the corpus is at `../../spec/conformance/scenarios`.
@@ -382,8 +401,11 @@ async fn run_scenario(path: &Path) {
     // Boot the reference server with the injected mock — the exact analogue of
     // the Python reference's `ServerState(chat_client=mock)`. A scenario's
     // `server.tools` directive installs deterministic tools via the host
-    // `ToolProvider` seam so tool-calling turns run offline.
-    let mut state = build_state(parity_config()).with_chat_provider(Arc::new(mock));
+    // `ToolProvider` seam so tool-calling turns run offline; `server.confirmTools`
+    // gates the named tools behind the HITL write-confirmation seam (#66).
+    let mut config = parity_config();
+    config.confirm_tools = confirm_tools(&scenario);
+    let mut state = build_state(config).with_chat_provider(Arc::new(mock));
     if let Some(provider) = build_tool_provider(&scenario) {
         state = state.with_tools(provider);
     }
