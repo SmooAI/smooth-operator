@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using SmooAI.SmoothOperator.Core;
 using SmooAI.SmoothOperator.Server.AspNetCore;
 
 namespace SmooAI.SmoothOperator.Server.IntegrationTests;
@@ -42,8 +43,9 @@ public class ScenarioParityTests
         var serverDirective = scenario["server"]?.AsObject();
         var tools = BuildTools(serverDirective?["tools"]?.AsArray());
         var confirmTools = BuildConfirmTools(serverDirective?["confirmTools"]?.AsArray());
+        var knowledge = BuildKnowledge(serverDirective?["knowledge"]?.AsArray());
 
-        await using var app = BuildApp(chat, tools, confirmTools);
+        await using var app = BuildApp(chat, tools, confirmTools, knowledge);
         await app.StartAsync();
         using var socket = await ConnectAsync(app.GetTestServer());
 
@@ -131,6 +133,99 @@ public class ScenarioParityTests
         }
 
         return patterns.Select(p => p!.GetValue<string>()).ToArray();
+    }
+
+    /// <summary>
+    /// Build an in-memory knowledge base from a scenario's <c>server.knowledge</c> directive — an array
+    /// of <c>{ source, content }</c> docs — and wrap it as the (ACL-free) <see cref="IAccessKnowledge"/>
+    /// the server retrieves grounding from. Seeding the KB lets the citations dimension run: the server
+    /// already populates citations from retrieval (see TurnRunner), so this is purely the runner-side
+    /// seed, the analog of the other servers' scenario-knowledge wiring.
+    ///
+    /// The seeded doc's id is set to its <c>source</c> so the citation is deterministic: the server emits
+    /// a citation of <c>(id = DocumentId, title = Source)</c>, so id == title == source makes the
+    /// canonical scenario's <c>citations.0.id</c>/<c>.title</c> both resolve to the source — exactly how
+    /// the Rust reference made it deterministic.
+    ///
+    /// Retrieval uses the <see cref="ScenarioKnowledgeBase"/> below rather than the engine's
+    /// <c>InMemoryKnowledgeBase</c>: the engine's lexical scorer is EXACT whole-token overlap with no
+    /// fallback, whereas the Rust reference scores by SUBSTRING containment ("return" ⊂ "returns") and
+    /// the Python reference falls back to the first docs when nothing overlaps — so a canonical scenario
+    /// whose user message doesn't share a whole token with the content (e.g. "what is the return policy?"
+    /// vs "...returns are accepted...") grounds on Rust/Python but retrieves nothing on the engine's
+    /// in-memory base. Matching the reference retrieval keeps the shared corpus at parity.
+    /// </summary>
+    private static IAccessKnowledge? BuildKnowledge(JsonArray? docs)
+    {
+        if (docs is null)
+        {
+            return null;
+        }
+
+        var kb = new ScenarioKnowledgeBase();
+        foreach (var docNode in docs)
+        {
+            var doc = docNode!.AsObject();
+            var source = doc["source"]!.GetValue<string>();
+            var content = doc["content"]!.GetValue<string>();
+            // id == source so the citation's id and title both equal the source (deterministic).
+            kb.Ingest(source, content);
+        }
+
+        return new StaticAccessKnowledge(kb);
+    }
+
+    /// <summary>
+    /// The runner's seeded knowledge base — a faithful port of the reference servers' in-memory
+    /// retrieval so the shared corpus stays at parity across languages. Scores a doc by how many
+    /// whitespace-split query words are a SUBSTRING of any of its content words (the Rust reference's
+    /// <c>cw.contains(qw)</c> — "return" matches "returns"); when nothing matches it falls back to the
+    /// first <c>limit</c> docs scored 0 (the Python reference's no-overlap fallback). Either way a
+    /// seeded doc grounds the turn, so the engine populates the <c>citations</c> the scenario asserts.
+    /// </summary>
+    private sealed class ScenarioKnowledgeBase : IKnowledgeBase
+    {
+        private readonly List<KnowledgeDocument> _docs = new();
+
+        public void Ingest(string source, string content)
+        {
+            // id == source so the emitted citation's id and title both equal the source.
+            _docs.Add(new KnowledgeDocument(source, content, source));
+        }
+
+        public Task IngestAsync(KnowledgeDocument document, CancellationToken cancellationToken = default)
+        {
+            _docs.Add(document);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<KnowledgeResult>> QueryAsync(string query, int limit, CancellationToken cancellationToken = default)
+        {
+            var queryWords = query.ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+
+            var scored = _docs
+                .Select(doc =>
+                {
+                    var contentWords = doc.Content.ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                    // Substring containment, matching the Rust reference (cw.contains(qw)).
+                    var matching = queryWords.Count(qw => contentWords.Any(cw => cw.Contains(qw, StringComparison.Ordinal)));
+                    var score = contentWords.Length == 0 ? 0.0 : (double)matching / contentWords.Length;
+                    return (doc, matching, score);
+                })
+                .Where(x => x.matching > 0)
+                .OrderByDescending(x => x.score)
+                .Take(limit)
+                .Select(x => new KnowledgeResult(x.doc.Id, x.doc.Content, x.score, x.doc.Source))
+                .ToList();
+
+            // No overlap → hand back the first docs (score 0), mirroring the Python reference's fallback
+            // so a seeded turn always grounds rather than retrieving nothing.
+            IReadOnlyList<KnowledgeResult> hits = scored.Count > 0
+                ? scored
+                : _docs.Take(limit).Select(doc => new KnowledgeResult(doc.Id, doc.Content, 0.0, doc.Source)).ToList();
+
+            return Task.FromResult(hits);
+        }
     }
 
     /// <summary>
@@ -244,13 +339,19 @@ public class ScenarioParityTests
         }
     }
 
-    /// <summary>Resolve a dotted path (<c>data.data.response.responseParts</c>) into a nested node.</summary>
+    /// <summary>
+    /// Resolve a dotted path (<c>data.data.response.responseParts</c>) into a nested node. A numeric
+    /// segment indexes into an array (<c>citations.0.id</c>), so array-element assertions work; a
+    /// non-numeric segment indexes into an object.
+    /// </summary>
     private static JsonNode? Dot(JsonObject root, string path)
     {
         JsonNode? cur = root;
         foreach (var part in path.Split('.'))
         {
-            cur = cur!.AsObject()[part];
+            cur = cur is JsonArray array && int.TryParse(part, out var index)
+                ? array[index]
+                : cur!.AsObject()[part];
         }
 
         return cur;
@@ -292,11 +393,17 @@ public class ScenarioParityTests
         return JsonNode.DeepEquals(a, b);
     }
 
-    private static WebApplication BuildApp(IChatClient chat, IReadOnlyList<AITool> tools, IReadOnlyList<string> confirmTools)
+    private static WebApplication BuildApp(IChatClient chat, IReadOnlyList<AITool> tools, IReadOnlyList<string> confirmTools, IAccessKnowledge? knowledge)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(chat);
+        if (knowledge is not null)
+        {
+            // Register the scenario's seeded knowledge base so retrieval grounds the turn and the server
+            // populates citations (the analog of seeding the other servers' scenario knowledge).
+            builder.Services.AddSingleton(knowledge);
+        }
         if (tools.Count > 0)
         {
             // Register the scenario's tools as the DI-resolved tool set the WebSocket host threads into
