@@ -159,13 +159,17 @@ impl Principal {
     }
 
     /// Map this principal to the document-level [`AccessContext`] used by the
-    /// knowledge-retrieval ACL layer. Both the user id **and** the principal's
-    /// groups carry through, so a retrieval as this principal can match a
-    /// document scoped to the user *or* to any group the principal belongs to
-    /// (the JWT `groups` claim — see [`Claims`]).
+    /// knowledge-retrieval ACL layer. The user id **and** the principal's groups
+    /// carry through, so a retrieval as this principal can match a document
+    /// scoped to the user *or* to any group the principal belongs to (the JWT
+    /// `groups` claim — see [`Claims`]). The principal's [`org_id`](Self::org_id)
+    /// is also carried as the context's `organization_id`, so a multi-tenant
+    /// host adapter's `knowledge_for_access` can scope retrieval to this
+    /// principal's tenant (the built-in single-tenant ACL ignores it).
     #[must_use]
     pub fn access_context(&self) -> AccessContext {
         AccessContext::new(Some(self.user_id.clone()), self.groups.clone())
+            .with_organization_id(self.org_id.clone())
     }
 }
 
@@ -822,6 +826,9 @@ mod tests {
         let ctx = p.access_context();
         assert_eq!(ctx.user_id.as_deref(), Some("user-7"));
         assert!(ctx.groups.contains(&"github:acme/secret".to_string()));
+        // The principal's org is carried so a multi-tenant host adapter can scope
+        // RAG to this tenant.
+        assert_eq!(ctx.organization_id.as_deref(), Some("org-x"));
         // And it can read a doc scoped to one of its groups.
         let acl = crate::access_control::DocAcl::for_groups(["github:acme/secret"]);
         assert!(ctx.can_access(&acl), "group-scoped doc must be accessible");
