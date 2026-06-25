@@ -39,6 +39,16 @@ import { isServerEvent } from './types.js';
 export interface SmoothAgentClientOptions {
     /** WebSocket URL, e.g. `wss://realtime.prod.smooth-agent.dev`. */
     url: string;
+    /**
+     * Optional connection auth token for token-gated servers (e.g. the local-flavor
+     * server). When set, the token is appended to the connection URL as a `?token=`
+     * query parameter — browsers can't set custom headers on a WebSocket handshake,
+     * so the token rides the query string, which is where the server reads it from.
+     * Any existing query string on `url` is preserved. This applies to the default
+     * transport only; if a custom {@link transport} is injected, supply the token to
+     * that transport yourself.
+     */
+    token?: string;
     /** Inject a transport (for tests / non-browser runtimes). Defaults to a WebSocket transport. */
     transport?: Transport;
     /** Inject a WebSocket factory used by the default transport (e.g. the `ws` package on Node). */
@@ -254,7 +264,9 @@ export class SmoothAgentClient {
     private unsubscribe: Array<() => void> = [];
 
     constructor(options: SmoothAgentClientOptions) {
-        this.transport = options.transport ?? new WebSocketTransport(options.url, options.webSocketFactory);
+        this.transport =
+            options.transport ??
+            new WebSocketTransport(withConnectionToken(options.url, options.token), options.webSocketFactory);
         this.requestTimeout = options.requestTimeout ?? 30_000;
         this.turnTimeout = options.turnTimeout ?? 120_000;
         this.generateRequestId =
@@ -422,6 +434,28 @@ export class SmoothAgentClient {
         this.pending.clear();
         for (const [, turn] of this.turns) turn.abort(err);
         this.turns.clear();
+    }
+}
+
+/**
+ * Merge a connection auth `token` into a WebSocket URL as a `?token=` query param,
+ * preserving any existing query string. Returns `url` unchanged when no token is
+ * given, so the no-token path is byte-for-byte identical to before. Uses `URL` /
+ * `URLSearchParams` so an existing `?foo=bar` becomes `?foo=bar&token=…` (and the
+ * value is properly percent-encoded) rather than a naive `?`/`&` string-concat.
+ *
+ * Falls back to manual concatenation if `url` is not absolute (so `URL` can't parse
+ * it) — e.g. a relative or mock URL used in tests.
+ */
+function withConnectionToken(url: string, token?: string): string {
+    if (!token) return url;
+    try {
+        const parsed = new URL(url);
+        parsed.searchParams.set('token', token);
+        return parsed.toString();
+    } catch {
+        const separator = url.includes('?') ? '&' : '?';
+        return `${url}${separator}token=${encodeURIComponent(token)}`;
     }
 }
 
