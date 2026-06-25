@@ -16,6 +16,12 @@ const (
 	maxPriorMessages       = 50
 	defaultSystemPrompt    = "You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don't know."
 	citationSnippetMaxChar = 280
+	// autoContextLimit is the top-K the runner queries the knowledge base with to
+	// build the turn's auto-context citations — the same query the engine runs to
+	// auto-inject grounding (`query(message, 3)`), so the citations mirror the sources
+	// the model was actually grounded on. Matches the Rust AUTO_CONTEXT_LIMIT and the
+	// TS server's AUTO_CONTEXT_LIMIT.
+	autoContextLimit = 3
 )
 
 // TurnResult is what a completed turn produced — the Go analog of the C# TurnResult
@@ -34,13 +40,18 @@ type EventSink func(event map[string]any)
 // TurnRunner drives one send_message turn: load prior history into a thread, build the
 // engine agent, consume RunStream, emit a stream_token per text delta and a
 // stream_chunk per tool call / tool result, persist the reply, and return the
-// citations. The Go analog of the C# TurnRunner / Rust run_streaming_turn. (ACL-
-// filtered retrieval + rerank arrive with the knowledge seam in a later phase.)
+// citations. The Go analog of the C# TurnRunner / Rust run_streaming_turn.
 type TurnRunner struct {
 	client       core.ChatClient
 	store        SessionStore
 	systemPrompt string
 	tools        []core.Tool
+	// knowledge is the retriever (already SCOPED to the connection's access) the agent
+	// grounds on. When set, the runner also queries it with the user message (top
+	// autoContextLimit) to build the turn's auto-context citations — the sources the
+	// engine's grounding query surfaced. nil → no grounding, citations empty (parity
+	// with a turn that retrieves nothing).
+	knowledge core.Knowledge
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (empty → HITL off, behavior unchanged). When a turn calls a tool whose name
 	// contains one of these, the runner parks the turn and emits
@@ -55,8 +66,10 @@ type TurnRunner struct {
 // NewTurnRunner builds a runner over the engine chat client + session store. An empty
 // systemPrompt falls back to the default support-agent prompt. tools (default none) are
 // passed straight to the engine AgentOptions so the agent can call them mid-turn.
-// confirmTools + confirmations wire write-confirmation HITL; pass nil/empty to disable.
-func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *TurnRunner {
+// knowledge (default nil) grounds the agent AND sources the turn's auto-context
+// citations. confirmTools + confirmations wire write-confirmation HITL; pass nil/empty
+// to disable.
+func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *TurnRunner {
 	if systemPrompt == "" {
 		systemPrompt = defaultSystemPrompt
 	}
@@ -64,6 +77,7 @@ func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt stri
 		client:        client,
 		store:         store,
 		systemPrompt:  systemPrompt,
+		knowledge:     knowledge,
 		tools:         tools,
 		confirmTools:  confirmTools,
 		confirmations: confirmations,
@@ -98,9 +112,33 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		return TurnResult{}, errNoEngine
 	}
 
-	// 1. Build the agent + replay prior history into a thread (before persisting this
-	//    turn's inbound message, so the thread doesn't double-count it).
-	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools}
+	// 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources
+	//    / TS citation build: query the same retriever the engine grounds on with the user
+	//    message (top autoContextLimit), so the citations match the sources the model
+	//    actually saw. Built BEFORE the stream so the terminal eventual_response carries
+	//    them. nil knowledge → no citations (parity with a turn that retrieves nothing).
+	var citations []Citation
+	if r.knowledge != nil {
+		for _, hit := range r.knowledge.Query(userMessage, autoContextLimit) {
+			isURL := strings.HasPrefix(hit.Source, "http://") || strings.HasPrefix(hit.Source, "https://")
+			c := Citation{
+				ID:      hit.Source,
+				Title:   hit.Source,
+				Snippet: truncate(hit.Content, citationSnippetMaxChar),
+				Score:   hit.Score,
+			}
+			if isURL {
+				c.URL = hit.Source
+			}
+			citations = append(citations, c)
+		}
+	}
+
+	// 2. Build the agent + replay prior history into a thread (before persisting this
+	//    turn's inbound message, so the thread doesn't double-count it). The same
+	//    knowledge feeds the engine's grounding so its auto-injected context matches the
+	//    citations built above.
+	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge}
 
 	// Write-confirmation HITL: when configured with tool patterns AND a registry is
 	// present, install a HumanGate that parks the turn before a gated tool runs (emit
@@ -159,12 +197,12 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		thread.Add(core.ChatMessage{Role: role, Content: m.Text})
 	}
 
-	// 2. Persist the inbound user message.
+	// 3. Persist the inbound user message.
 	if _, err := r.store.AppendMessage(ctx, conversationID, Inbound, userMessage); err != nil {
 		return TurnResult{}, err
 	}
 
-	// 3. Stream the turn: a stream_token per text delta, a stream_chunk per tool call /
+	// 4. Stream the turn: a stream_token per text delta, a stream_chunk per tool call /
 	//    tool result (mirrors the Rust runner translating StreamToolCall/StreamToolResult
 	//    events and the C# RunStreamingAsync loop).
 	stream, err := agent.RunStream(ctx, userMessage, thread)
@@ -206,12 +244,22 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		return TurnResult{}, err
 	}
 
-	// 4. Persist the outbound reply and return.
+	// 5. Persist the outbound reply and return.
 	outbound, err := r.store.AppendMessage(ctx, conversationID, Outbound, reply.String())
 	if err != nil {
 		return TurnResult{}, err
 	}
-	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: nil}, nil
+	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations}, nil
+}
+
+// truncate caps a citation snippet at max characters (a plain prefix slice, matching
+// the TS server's truncate). The seeded chunks are short, so this is a no-op for the
+// conformance corpus; it bounds the wire size for real documents.
+func truncate(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
 }
 
 // toolCallState builds the stream_chunk state for a requested tool call, matching the

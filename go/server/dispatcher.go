@@ -20,7 +20,11 @@ type FrameDispatcher struct {
 	client  core.ChatClient
 	access  AccessContext
 	systemP string
-	tools   []core.Tool
+	// knowledge is the retriever the agent grounds on (nil → no grounding). Threaded
+	// into every turn the runner builds; it both grounds the engine and sources the
+	// turn's auto-context citations.
+	knowledge core.Knowledge
+	tools     []core.Tool
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (empty → HITL off). Threaded into every turn the runner builds.
 	confirmTools []string
@@ -36,9 +40,10 @@ type FrameDispatcher struct {
 }
 
 // NewFrameDispatcher binds a dispatcher to a connection's stores + access context. The
-// tools (default none) are threaded into every turn the runner builds. confirmTools +
-// confirmations wire write-confirmation HITL; pass nil/empty + a registry to disable.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *FrameDispatcher {
+// knowledge retriever (default nil) and tools (default none) are threaded into every
+// turn the runner builds. confirmTools + confirmations wire write-confirmation HITL;
+// pass nil/empty + a registry to disable.
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *FrameDispatcher {
 	if confirmations == nil {
 		confirmations = NewConfirmationRegistry()
 	}
@@ -47,6 +52,7 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 		client:        client,
 		access:        access,
 		systemP:       systemPrompt,
+		knowledge:     knowledge,
 		tools:         tools,
 		confirmTools:  confirmTools,
 		confirmations: confirmations,
@@ -175,7 +181,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	d.turns.Add(1)
 	go func() {
 		defer d.turns.Done()
-		runner := NewTurnRunner(d.client, d.store, d.systemP, d.tools, d.confirmTools, d.confirmations)
+		runner := NewTurnRunner(d.client, d.store, d.systemP, d.knowledge, d.tools, d.confirmTools, d.confirmations)
 		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean
