@@ -39,8 +39,12 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::str::FromStr;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::jwk::{Jwk, JwkSet};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::access_control::AccessContext;
@@ -292,13 +296,32 @@ enum VerifyKey {
     Rs256(Box<DecodingKey>),
 }
 
+/// How a [`JwtVerifier`] resolves the verification key for a token.
+///
+/// - [`Static`](JwtBackend::Static) — a single fixed key (HS256 secret or RS256
+///   PEM) with a pre-built [`Validation`]. The original BYO path, unchanged.
+/// - [`Jwks`](JwtBackend::Jwks) — keys are pulled (and cached) from the issuer's
+///   published JWKS, selected per-token by `kid`. Supports **any** JWS algorithm
+///   the JWKS advertises (ES256/ES384/RS256/PS256/EdDSA/…), which is what lets
+///   `auth.smoo.ai`'s **ES256** tokens validate. See [`JwksVerifier`].
+enum JwtBackend {
+    Static {
+        key: VerifyKey,
+        validation: Validation,
+    },
+    Jwks(JwksVerifier),
+}
+
 /// Validates a JWT and extracts a [`Principal`]. The **BYO** path: SST OpenAuth
 /// (or any OIDC IdP) issues the token; this verifies signature + standard claims
 /// and maps `sub`→`user_id`, `org`/`org_id`→`org_id`, `role`→[`Role`],
 /// `name`→`display_name`.
+///
+/// Two backends (see [`JwtBackend`]): a **static** key (HS256/RS256) or a
+/// **JWKS**-backed multi-algorithm verifier that fetches + caches the issuer's
+/// keys and selects one per-token by `kid`.
 pub struct JwtVerifier {
-    key: VerifyKey,
-    validation: Validation,
+    backend: JwtBackend,
 }
 
 impl JwtVerifier {
@@ -308,14 +331,16 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::HS256);
         configure_validation(&mut validation, issuer, audience);
         Self {
-            key: VerifyKey::Hs256(Box::new(DecodingKey::from_secret(secret))),
-            validation,
+            backend: JwtBackend::Static {
+                key: VerifyKey::Hs256(Box::new(DecodingKey::from_secret(secret))),
+                validation,
+            },
         }
     }
 
     /// An RS256 verifier over a PEM-encoded public key. Optionally constrains
-    /// `iss`/`aud`. (Structural RS256 support — a JWKS-url variant would fetch +
-    /// cache keys; see [`AuthConfig`].)
+    /// `iss`/`aud`. The static BYO path; for issuers that publish a JWKS (and
+    /// possibly rotate keys or sign with ES256) use [`JwtVerifier::jwks`].
     ///
     /// # Errors
     /// Returns [`AuthError::Misconfigured`] if the PEM can't be parsed.
@@ -329,23 +354,59 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::RS256);
         configure_validation(&mut validation, issuer, audience);
         Ok(Self {
-            key: VerifyKey::Rs256(Box::new(key)),
-            validation,
+            backend: JwtBackend::Static {
+                key: VerifyKey::Rs256(Box::new(key)),
+                validation,
+            },
         })
+    }
+
+    /// A JWKS-backed verifier: keys are fetched + cached from `jwks_url` and
+    /// selected per-token by `kid`, so **any** advertised algorithm
+    /// (ES256/RS256/…) and key rotation work without a redeploy. Optionally
+    /// constrains `iss`/`aud`.
+    #[must_use]
+    pub fn jwks(
+        jwks_url: impl Into<String>,
+        issuer: Option<String>,
+        audience: Option<String>,
+    ) -> Self {
+        Self {
+            backend: JwtBackend::Jwks(JwksVerifier::from_url(jwks_url, issuer, audience)),
+        }
+    }
+
+    /// A JWKS-backed verifier over a caller-supplied [`JwksFetcher`] (lets tests
+    /// inject an in-memory [`JwkSet`] with no network). Optionally constrains
+    /// `iss`/`aud`.
+    #[must_use]
+    pub fn jwks_with_fetcher(
+        fetcher: Arc<dyn JwksFetcher>,
+        issuer: Option<String>,
+        audience: Option<String>,
+    ) -> Self {
+        Self {
+            backend: JwtBackend::Jwks(JwksVerifier::with_fetcher(fetcher, issuer, audience)),
+        }
     }
 
     /// Decode + validate, returning the [`Principal`]. Shared by
     /// [`SmooIdentityVerifier`].
     fn decode_principal(&self, token: &str) -> Result<Principal, AuthError> {
-        if token.trim().is_empty() {
-            return Err(AuthError::Unauthenticated);
+        match &self.backend {
+            JwtBackend::Static { key, validation } => {
+                if token.trim().is_empty() {
+                    return Err(AuthError::Unauthenticated);
+                }
+                let key = match key {
+                    VerifyKey::Hs256(k) | VerifyKey::Rs256(k) => k.as_ref(),
+                };
+                let data = decode::<Claims>(token, key, validation)
+                    .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
+                data.claims.into_principal()
+            }
+            JwtBackend::Jwks(v) => v.decode_principal(token),
         }
-        let key = match &self.key {
-            VerifyKey::Hs256(k) | VerifyKey::Rs256(k) => k.as_ref(),
-        };
-        let data = decode::<Claims>(token, key, &self.validation)
-            .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
-        data.claims.into_principal()
     }
 }
 
@@ -369,6 +430,337 @@ fn configure_validation(
     }
     if let Some(iss) = issuer {
         validation.iss = Some(HashSet::from([iss]));
+    }
+}
+
+// ---- JWKS-backed verification ------------------------------------------------
+
+/// How long a fetched [`JwkSet`] is served from cache before a refresh. Reads on
+/// the hot path are local-memory; the network round-trip happens at most once
+/// per this interval (plus on an unknown `kid` — see [`JwksKeyStore`]).
+const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(300);
+/// Floor between JWKS network fetches, so a stream of tokens carrying an unknown
+/// `kid` (or a malformed token) can't turn into a fetch-per-request storm.
+const DEFAULT_JWKS_MIN_REFRESH: Duration = Duration::from_secs(30);
+/// Timeout for the JWKS HTTP fetch — a hung issuer must not stall auth forever.
+const JWKS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fetches a [`JwkSet`]. The seam that lets [`JwksKeyStore`] pull keys from an
+/// HTTP issuer in production ([`HttpJwksFetcher`]) and from an in-memory set in
+/// tests ([`StaticJwksFetcher`]) — so the verification logic is exercised with
+/// **no network**.
+///
+/// `fetch` is synchronous so [`AuthVerifier::verify`] can stay synchronous (no
+/// per-request `await`): the real HTTP impl runs its blocking call on a
+/// dedicated thread, and the result is cached, so the common path is a local
+/// read.
+pub trait JwksFetcher: Send + Sync {
+    /// Fetch the current [`JwkSet`] from the source.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::InvalidToken`] on a network / parse failure (treated
+    /// like an unverifiable token) or [`AuthError::Misconfigured`] for a client
+    /// build error.
+    fn fetch(&self) -> Result<JwkSet, AuthError>;
+}
+
+/// An in-memory [`JwksFetcher`] — returns a fixed [`JwkSet`]. Used by tests (and
+/// any caller that already holds the keys) to drive the JWKS path offline.
+pub struct StaticJwksFetcher {
+    set: JwkSet,
+}
+
+impl StaticJwksFetcher {
+    /// Wrap an already-parsed [`JwkSet`].
+    #[must_use]
+    pub fn new(set: JwkSet) -> Self {
+        Self { set }
+    }
+
+    /// Parse a JWKS JSON document (`{"keys":[…]}`) into a fetcher.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::InvalidToken`] if the JSON isn't a valid JWKS.
+    pub fn from_json(json: &str) -> Result<Self, AuthError> {
+        Ok(Self {
+            set: parse_jwks(json)?,
+        })
+    }
+}
+
+impl JwksFetcher for StaticJwksFetcher {
+    fn fetch(&self) -> Result<JwkSet, AuthError> {
+        Ok(self.set.clone())
+    }
+}
+
+/// The production [`JwksFetcher`]: an HTTP GET of the issuer's JWKS endpoint.
+///
+/// The blocking fetch runs on a freshly-spawned OS thread so it is safe to call
+/// from **anywhere** — including from inside a Tokio worker (where building a
+/// blocking reqwest client would otherwise panic) and from the synchronous
+/// [`AuthVerifier::verify`]. It only runs on a cache miss / TTL refresh, so it is
+/// off the hot path.
+struct HttpJwksFetcher {
+    url: String,
+    timeout: Duration,
+}
+
+impl HttpJwksFetcher {
+    fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            timeout: JWKS_HTTP_TIMEOUT,
+        }
+    }
+}
+
+impl JwksFetcher for HttpJwksFetcher {
+    fn fetch(&self) -> Result<JwkSet, AuthError> {
+        let url = self.url.clone();
+        let timeout = self.timeout;
+        // A fresh OS thread has no ambient Tokio runtime, so constructing the
+        // blocking reqwest client here can never panic, regardless of the
+        // caller's context.
+        std::thread::spawn(move || -> Result<JwkSet, AuthError> {
+            install_ring_crypto_provider();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(|e| AuthError::Misconfigured(format!("JWKS HTTP client build: {e}")))?;
+            let resp = client
+                .get(&url)
+                .send()
+                .map_err(|e| AuthError::InvalidToken(format!("JWKS fetch ({url}) failed: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(AuthError::InvalidToken(format!(
+                    "JWKS fetch ({url}) returned HTTP {}",
+                    resp.status()
+                )));
+            }
+            let body = resp
+                .text()
+                .map_err(|e| AuthError::InvalidToken(format!("JWKS read ({url}) failed: {e}")))?;
+            parse_jwks(&body)
+        })
+        .join()
+        .map_err(|_| AuthError::Misconfigured("JWKS fetch thread panicked".to_string()))?
+    }
+}
+
+/// Parse a JWKS JSON document into a [`JwkSet`].
+fn parse_jwks(body: &str) -> Result<JwkSet, AuthError> {
+    serde_json::from_str::<JwkSet>(body)
+        .map_err(|e| AuthError::InvalidToken(format!("invalid JWKS JSON: {e}")))
+}
+
+/// Install the `ring` rustls [`CryptoProvider`](rustls::crypto::CryptoProvider)
+/// as the process default, once. The workspace graph carries both `ring` and
+/// `aws-lc-rs`, so rustls 0.23 can't auto-pick a provider; the JWKS HTTPS fetch
+/// needs one installed before its first TLS handshake. Idempotent + cheap.
+fn install_ring_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// The cached keyset + when it was last fetched.
+struct CachedJwks {
+    set: Arc<JwkSet>,
+    fetched_at: Option<Instant>,
+}
+
+/// A TTL-cached, rotation-aware [`JwkSet`] behind a [`JwksFetcher`].
+///
+/// - **Cache**: the parsed keyset is held in an [`RwLock`]; the hot path is a
+///   read lock + a `kid` lookup — no network, no `await`.
+/// - **TTL refresh**: when the cache is older than [`ttl`](Self::ttl) the next
+///   lookup refetches.
+/// - **Rotation (refresh-on-unknown-`kid`)**: a token whose `kid` isn't in the
+///   cache triggers a refetch, so a key the issuer just rotated in is picked up
+///   **without a redeploy**. A [`min_refresh`](Self::min_refresh) floor keeps a
+///   bad/unknown `kid` from turning into a fetch storm.
+struct JwksKeyStore {
+    fetcher: Arc<dyn JwksFetcher>,
+    cached: RwLock<CachedJwks>,
+    ttl: Duration,
+    min_refresh: Duration,
+}
+
+impl JwksKeyStore {
+    fn new(fetcher: Arc<dyn JwksFetcher>, ttl: Duration, min_refresh: Duration) -> Self {
+        Self {
+            fetcher,
+            cached: RwLock::new(CachedJwks {
+                set: Arc::new(JwkSet { keys: Vec::new() }),
+                fetched_at: None,
+            }),
+            ttl,
+            min_refresh,
+        }
+    }
+
+    /// Resolve the [`Jwk`] for `kid`, refreshing the cache on a stale TTL or an
+    /// unknown `kid` (rotation). With no `kid`, a single-key JWKS resolves to its
+    /// one key; an ambiguous (multi-key) JWKS requires a `kid`.
+    fn key_for(&self, kid: Option<&str>) -> Result<Jwk, AuthError> {
+        // Hot path: a fresh cache that already has the key.
+        {
+            let r = self.read_cache();
+            if r.fetched_at.is_some_and(|t| t.elapsed() < self.ttl) {
+                if let Some(jwk) = find_jwk(&r.set, kid) {
+                    return Ok(jwk);
+                }
+            }
+        }
+        // Stale TTL, never-fetched, or unknown kid → (rate-limited) refresh.
+        self.maybe_refresh()?;
+        let r = self.read_cache();
+        find_jwk(&r.set, kid).ok_or_else(|| match kid {
+            Some(k) => AuthError::InvalidToken(format!("no JWK matching kid '{k}' in issuer JWKS")),
+            None => AuthError::InvalidToken(
+                "token has no 'kid' and the issuer JWKS does not have exactly one key".to_string(),
+            ),
+        })
+    }
+
+    /// Refetch the JWKS unless the last fetch is more recent than `min_refresh`
+    /// (the storm guard). A `None` `fetched_at` (never fetched) always fetches.
+    fn maybe_refresh(&self) -> Result<(), AuthError> {
+        if let Some(t) = self.read_cache().fetched_at {
+            if t.elapsed() < self.min_refresh {
+                return Ok(());
+            }
+        }
+        let set = self.fetcher.fetch()?;
+        let mut w = self
+            .cached
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        w.set = Arc::new(set);
+        w.fetched_at = Some(Instant::now());
+        Ok(())
+    }
+
+    fn read_cache(&self) -> std::sync::RwLockReadGuard<'_, CachedJwks> {
+        self.cached
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Find the [`Jwk`] for `kid` in a [`JwkSet`] (or the sole key when `kid` is
+/// `None`).
+fn find_jwk(set: &JwkSet, kid: Option<&str>) -> Option<Jwk> {
+    match kid {
+        Some(k) => set.find(k).cloned(),
+        None if set.keys.len() == 1 => set.keys.first().cloned(),
+        None => None,
+    }
+}
+
+/// Resolve the algorithm to validate with: the **JWK-declared** `alg` when the
+/// key carries one (pins verification to the issuer's intended algorithm,
+/// closing the JWS algorithm-confusion gap), otherwise the token header's `alg`
+/// (still constrained to the selected key's type by `DecodingKey::from_jwk`).
+fn resolve_jwk_alg(jwk: &Jwk, header_alg: Algorithm) -> Result<Algorithm, AuthError> {
+    match jwk.common.key_algorithm {
+        Some(ka) => Algorithm::from_str(&ka.to_string())
+            .map_err(|_| AuthError::InvalidToken(format!("unsupported JWK algorithm '{ka}'"))),
+        None => Ok(header_alg),
+    }
+}
+
+/// Validates a JWT against the issuer's **published JWKS** — fetched, cached, and
+/// rotation-aware (see [`JwksKeyStore`]). Selects the signing key per-token by
+/// `kid`, builds a [`DecodingKey`] from the matching [`Jwk`], and validates with
+/// the key's algorithm — so **any** JWS algorithm the issuer advertises works
+/// (ES256/ES384/RS256/PS256/EdDSA/…), not just a static RS256 PEM.
+///
+/// This is what makes `auth.smoo.ai` (the `smoo` issuer, **ES256**) verifiable.
+/// `verify` stays synchronous: the keyset is read from cache; the network fetch
+/// happens at most once per TTL (plus on a never-seen `kid`).
+pub struct JwksVerifier {
+    store: JwksKeyStore,
+    issuer: Option<String>,
+    audience: Option<String>,
+}
+
+impl JwksVerifier {
+    /// A verifier that pulls keys from `jwks_url` over HTTP (cached, TTL +
+    /// rotation refresh). Optionally constrains `iss`/`aud`.
+    #[must_use]
+    pub fn from_url(
+        jwks_url: impl Into<String>,
+        issuer: Option<String>,
+        audience: Option<String>,
+    ) -> Self {
+        Self::with_fetcher(Arc::new(HttpJwksFetcher::new(jwks_url)), issuer, audience)
+    }
+
+    /// A verifier over a caller-supplied [`JwksFetcher`] (tests inject an
+    /// in-memory [`JwkSet`]). Optionally constrains `iss`/`aud`.
+    #[must_use]
+    pub fn with_fetcher(
+        fetcher: Arc<dyn JwksFetcher>,
+        issuer: Option<String>,
+        audience: Option<String>,
+    ) -> Self {
+        Self::with_policy(
+            fetcher,
+            issuer,
+            audience,
+            DEFAULT_JWKS_TTL,
+            DEFAULT_JWKS_MIN_REFRESH,
+        )
+    }
+
+    /// Full constructor exposing the cache `ttl` + `min_refresh` floor (tests
+    /// drive rotation timing through this).
+    #[must_use]
+    pub fn with_policy(
+        fetcher: Arc<dyn JwksFetcher>,
+        issuer: Option<String>,
+        audience: Option<String>,
+        ttl: Duration,
+        min_refresh: Duration,
+    ) -> Self {
+        Self {
+            store: JwksKeyStore::new(fetcher, ttl, min_refresh),
+            issuer,
+            audience,
+        }
+    }
+
+    /// Decode + validate `token` against the cached JWKS, returning the
+    /// [`Principal`].
+    fn decode_principal(&self, token: &str) -> Result<Principal, AuthError> {
+        if token.trim().is_empty() {
+            return Err(AuthError::Unauthenticated);
+        }
+        let header = decode_header(token)
+            .map_err(|e| AuthError::InvalidToken(format!("bad JWT header: {e}")))?;
+        let jwk = self.store.key_for(header.kid.as_deref())?;
+        let alg = resolve_jwk_alg(&jwk, header.alg)?;
+        let key = DecodingKey::from_jwk(&jwk)
+            .map_err(|e| AuthError::InvalidToken(format!("unusable JWK: {e}")))?;
+        let mut validation = Validation::new(alg);
+        configure_validation(&mut validation, self.issuer.clone(), self.audience.clone());
+        let data = decode::<Claims>(token, &key, &validation)
+            .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
+        data.claims.into_principal()
+    }
+}
+
+impl AuthVerifier for JwksVerifier {
+    fn verify(&self, bearer_token: &str) -> Result<Principal, AuthError> {
+        self.decode_principal(bearer_token)
+    }
+
+    fn mode(&self) -> &'static str {
+        "jwks"
     }
 }
 
@@ -423,6 +815,33 @@ impl SmooIdentityVerifier {
         Ok(Self {
             inner: JwtVerifier::rs256(public_key_pem, Some(issuer), audience)?,
         })
+    }
+
+    /// A Smoo-identity verifier backed by Smoo's **published JWKS** — the path
+    /// that makes real `auth.smoo.ai` tokens (signed **ES256**, `kty: EC`)
+    /// verifiable. Keys are fetched + cached from `jwks_url` (typically
+    /// `{issuer}/.well-known/jwks.json`) and selected per-token by `kid`, so key
+    /// rotation needs no redeploy and any advertised algorithm works. Keyed to
+    /// Smoo's issuer + audience.
+    #[must_use]
+    pub fn jwks(jwks_url: impl Into<String>, issuer: String, audience: Option<String>) -> Self {
+        Self {
+            inner: JwtVerifier::jwks(jwks_url, Some(issuer), audience),
+        }
+    }
+
+    /// A Smoo-identity verifier over a caller-supplied [`JwksFetcher`] (tests
+    /// inject an in-memory [`JwkSet`]; no network). Keyed to Smoo's issuer +
+    /// audience.
+    #[must_use]
+    pub fn jwks_with_fetcher(
+        fetcher: Arc<dyn JwksFetcher>,
+        issuer: String,
+        audience: Option<String>,
+    ) -> Self {
+        Self {
+            inner: JwtVerifier::jwks_with_fetcher(fetcher, Some(issuer), audience),
+        }
     }
 
     /// Live token introspection (RFC 7662) against Smoo's auth server.
@@ -654,16 +1073,31 @@ impl AuthVerifier for TrustedIdentityVerifier {
 /// | --- | --- | --- |
 /// | `AUTH_MODE` | `jwt` | `jwt` (BYO) \| `smoo` (hosted) \| `trusted` (proxied, tokenless — see below) \| `none` (dev only). |
 /// | `AUTH_JWT_HS256_SECRET` | — | HS256 shared secret. |
-/// | `AUTH_JWT_RS256_PUBLIC_KEY` | — | RS256 PEM public key (takes precedence over HS256). |
-/// | `AUTH_JWT_ISSUER` | — | Required `iss` (optional). |
+/// | `AUTH_JWT_RS256_PUBLIC_KEY` | — | Static RS256 PEM public key. |
+/// | `AUTH_JWT_JWKS_URL` | — | JWKS endpoint to fetch signing keys from (any algorithm — ES256/RS256/…). |
+/// | `AUTH_JWT_ISSUER` | — | Required `iss` (optional). Also the JWKS auto-derivation root (`{issuer}/.well-known/jwks.json`). |
 /// | `AUTH_JWT_AUDIENCE` | — | Required `aud` (optional). |
 /// | `AUTH_DEV_ORG_ID` | `dev-org` | Org id for the `none`-mode admin principal. |
 ///
-/// **Explicitly** setting `AUTH_MODE=jwt`/`smoo` with **no** key is a hard
-/// [`AuthError::Misconfigured`] error — not a silent fall-through to no-auth.
-/// Leaving `AUTH_MODE` **unset** with no key boots the server with the admin API
-/// **disabled** ([`AdminDisabledVerifier`]) so `/ws` serves without forcing auth
-/// config; `/admin` then returns 401 until configured (or `AUTH_MODE=none` for dev).
+/// ## Key-source precedence (`jwt` and `smoo`)
+///
+/// 1. **Static `AUTH_JWT_RS256_PUBLIC_KEY`** (RS256 PEM) — the BYO path, unchanged.
+/// 2. **Static `AUTH_JWT_HS256_SECRET`** (HS256 shared secret).
+/// 3. **JWKS** — `AUTH_JWT_JWKS_URL` if set, else derived from the issuer as
+///    `{AUTH_JWT_ISSUER}/.well-known/jwks.json`. This is the **ES256-capable**
+///    path: keys are fetched + cached and selected per-token by `kid`, so
+///    `auth.smoo.ai`'s ES256 tokens verify and key rotation needs no redeploy.
+///
+/// So `AUTH_MODE=smoo` now needs only `AUTH_JWT_ISSUER` (+ optionally
+/// `AUTH_JWT_AUDIENCE`) — no static public key required.
+///
+/// **Explicitly** setting `AUTH_MODE=jwt`/`smoo` with **no** usable key source
+/// (no static key, no JWKS URL, and — for `jwt` — no issuer to derive one) is a
+/// hard [`AuthError::Misconfigured`] error — not a silent fall-through to no-auth.
+/// Leaving `AUTH_MODE` **unset** with no key source boots the server with the
+/// admin API **disabled** ([`AdminDisabledVerifier`]) so `/ws` serves without
+/// forcing auth config; `/admin` then returns 401 until configured (or
+/// `AUTH_MODE=none` for dev).
 ///
 /// A verifier that rejects every request. The default when neither `AUTH_MODE`
 /// nor a key is configured: the server still boots (so `/ws` serves) but the
@@ -754,10 +1188,13 @@ impl AuthConfig {
                         audience,
                     )))
                 } else {
-                    Err(AuthError::Misconfigured(
-                        "AUTH_MODE=smoo requires AUTH_JWT_RS256_PUBLIC_KEY or AUTH_JWT_HS256_SECRET"
-                            .to_string(),
-                    ))
+                    // No static key: verify against Smoo's published JWKS. Smoo
+                    // (`auth.smoo.ai`) signs with ES256 (`kty: EC`), which a
+                    // static RS256 PEM can't validate — JWKS is the working path.
+                    // The issuer is always present here (required above), so the
+                    // JWKS URL is always derivable.
+                    let url = jwks_source(Some(&iss)).expect("issuer is present for smoo mode");
+                    Ok(Box::new(SmooIdentityVerifier::jwks(url, iss, audience)))
                 }
             }
             other => Err(AuthError::Misconfigured(format!(
@@ -766,7 +1203,9 @@ impl AuthConfig {
         }
     }
 
-    /// Build a [`JwtVerifier`] from env, preferring RS256 (PEM) over HS256.
+    /// Build a [`JwtVerifier`] from env. Key-source precedence: static RS256 PEM
+    /// → static HS256 secret → JWKS (`AUTH_JWT_JWKS_URL`, else
+    /// `{AUTH_JWT_ISSUER}/.well-known/jwks.json`).
     fn build_jwt(
         issuer: Option<String>,
         audience: Option<String>,
@@ -775,14 +1214,29 @@ impl AuthConfig {
             JwtVerifier::rs256(pem.as_bytes(), issuer, audience)
         } else if let Some(secret) = env_nonempty("AUTH_JWT_HS256_SECRET") {
             Ok(JwtVerifier::hs256(secret.as_bytes(), issuer, audience))
+        } else if let Some(url) = jwks_source(issuer.as_deref()) {
+            // Any OIDC issuer that publishes a JWKS works (ES256/RS256/…), with
+            // no static key in env.
+            Ok(JwtVerifier::jwks(url, issuer, audience))
         } else {
             Err(AuthError::Misconfigured(
-                "AUTH_MODE=jwt requires AUTH_JWT_RS256_PUBLIC_KEY or AUTH_JWT_HS256_SECRET \
+                "AUTH_MODE=jwt requires AUTH_JWT_RS256_PUBLIC_KEY, AUTH_JWT_HS256_SECRET, \
+                 AUTH_JWT_JWKS_URL, or AUTH_JWT_ISSUER (to derive the JWKS URL) \
                  (refusing to fall back to no-auth)"
                     .to_string(),
             ))
         }
     }
+}
+
+/// Resolve the JWKS endpoint: an explicit `AUTH_JWT_JWKS_URL` wins, otherwise
+/// derive `{issuer}/.well-known/jwks.json` from the configured issuer (the
+/// standard OIDC location `auth.smoo.ai` serves). `None` when neither is set.
+fn jwks_source(issuer: Option<&str>) -> Option<String> {
+    if let Some(url) = env_nonempty("AUTH_JWT_JWKS_URL") {
+        return Some(url);
+    }
+    issuer.map(|iss| format!("{}/.well-known/jwks.json", iss.trim_end_matches('/')))
 }
 
 /// Read an env var, returning `None` when absent or empty/whitespace.
@@ -814,6 +1268,286 @@ mod tests {
     /// A far-future expiry so tokens are valid.
     fn future_exp() -> i64 {
         (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp()
+    }
+
+    // ---- JWKS / ES256 fixtures -------------------------------------------
+    //
+    // A locally-generated EC P-256 (ES256) keypair + the matching public JWK,
+    // and an RSA-2048 keypair for the static-RS256 regression. All offline: the
+    // JWKS path is driven through an injected `JwksFetcher`, never the network.
+
+    /// PKCS#8 EC P-256 private key (test-only; generated with openssl).
+    const EC_PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgS73a4tqPSek9+32c\n\
+x0FaP0T8bhMiC5yIvyBGW9qk68ehRANCAAQ7175zcp6KZfPVpFG4a8RI0dtVKNtr\n\
+YIF2/Pl3nm1Pb1imLIy4WnLa+vr0nqcC0612yaRg4KWjYj6XdDO9gP+Y\n\
+-----END PRIVATE KEY-----\n";
+    /// `kid` advertised for the EC public key in the test JWKS.
+    const EC_KID: &str = "test-ec-1";
+    /// base64url EC public point coords matching `EC_PRIV_PEM`.
+    const EC_X: &str = "O9e-c3KeimXz1aRRuGvESNHbVSjba2CBdvz5d55tT28";
+    const EC_Y: &str = "WKYsjLhactr6-vSepwLTrXbJpGDgpaNiPpd0M72A_5g";
+
+    /// RSA-2048 keypair for the static-RS256 regression (test-only).
+    const RSA_PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAw0MeIERxU2bLpDNQaSis\n\
+nz93wtxbYL3aTVEiHSGCyDysrpIAFQxD8IjXn0lLnf/OlR0IWjBH/6ARsXucXemG\n\
+jzZBCpHbna0PAnNXUOOPM88gev/XN9p+MxWPDHnyd1ZtyxAHc5xo0a596Gq3HE9C\n\
+QL53nMIYEOBOP5VeUQS68G7DGo+dTQgXrFb98fsqYS3xqeLoYWI+tHYEkzY4DFxb\n\
+jdvBvBN65N84pYnk7Pd/vbITvVaDC7pev1E5wvh4Iu/zZy0LBnQPgcMEumcc5cZQ\n\
+6Filt8q83ReOIWpmQfNryxgdz7okUvOZSzkYLJscwjkdyBDOcaKxT5O323dd1xm8\n\
+6QIDAQAB\n\
+-----END PUBLIC KEY-----\n";
+    const RSA_PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDDQx4gRHFTZsuk\n\
+M1BpKKyfP3fC3FtgvdpNUSIdIYLIPKyukgAVDEPwiNefSUud/86VHQhaMEf/oBGx\n\
+e5xd6YaPNkEKkdudrQ8Cc1dQ448zzyB6/9c32n4zFY8MefJ3Vm3LEAdznGjRrn3o\n\
+arccT0JAvnecwhgQ4E4/lV5RBLrwbsMaj51NCBesVv3x+yphLfGp4uhhYj60dgST\n\
+NjgMXFuN28G8E3rk3zilieTs93+9shO9VoMLul6/UTnC+Hgi7/NnLQsGdA+BwwS6\n\
+ZxzlxlDoWKW3yrzdF44hamZB82vLGB3PuiRS85lLORgsmxzCOR3IEM5xorFPk7fb\n\
+d13XGbzpAgMBAAECggEACKe7+SAvicvfsPqZUN/9rt1oWJnd7w7bU1wKUBJBMtEF\n\
+soNEP6qYhFv8etIL6QgCxzdPPHgxaNJWlnBtQPht/4EfJvHKM1YNeUVVlH9RxLEk\n\
+tm8Kwi4MNAV7nsj1B3csTLj8K5K+TrUWXawFS9rzi90lfixYVr8qmMTtNlgoVSnv\n\
+vNsIbEIoqNu4SwIAAmuXTsVoaUcgo8L+UDtTn3LXl4X5Daz6Z54whloMr+YjdoxL\n\
+exLSN9Z4sirhoDpUMl9ckmu57stObY2IHsJeMNzmhg8u535GrlyPs+JHYs6lIzWX\n\
+O4UT8VOwnkOcudCTL3l8sITJmArzkjSMqSzsiPb65QKBgQD+pLZHfYwfR72aQnLE\n\
+Ypwo1SNZBWy2SDeszSgnzTr9u8kPChIgUTmRam7f6++hPe49S0n/BwTm3SXxKZQ+\n\
+yySyW9ikmR4qzNhMywL8ViKNcGtuKSrad+KA3Ur4Oq3RzmVDYPMoJ0yiaQW19Yfy\n\
+R+L5Y0x9drUWH4vqYqk4FJKg2wKBgQDETWuYq74omGHyNMAXWdAcsW+HA+A21HA2\n\
+4jK8X1e8Qdo/ddBZjgr7satzhBYdAa5VOS6unL//Al8eYNHmnvLqLFmReUye7Mp+\n\
+c+LxIUzta0M6q4Nnq69ctvMq9WFG/Lj7pUxzuBDk6Q3X/8tu25DoBzmv/iQDP4eY\n\
+F9FB4ZcSiwKBgH2GUFx5ZQNeZ/aM3uoz+eqe9mfBps9MVjWWhD7qijPdx8TkH/9S\n\
+SuCF6NX1BhEj6DbK0FUo7p+nUDbLWkqB9Tr+z5KD8D0E8XMZeAVPqIS0cCDDpl4/\n\
+TqZbb8NhmaGc7ooCVprqlHpS7v+9YyBpk1eAPYpzY9zd/Ci0Ldp5ObaVAoGAOVFh\n\
+2XJMVA4qi05byHWxDq/AoOvAzEG7gksKBXbRZ2bTEzSTYZLYIiX+qfwneNDE1p2b\n\
+w+CBLzTCEVyz7WL8CuRoQtHoTX9WoRW1bjMLA0gOmVL7S4oV6jyBREnh3Zhtaw0Z\n\
+BbD5Pd3O7QMDo5r49McnUPwkB87FCOPrdhEoy4ECgYBCBhrsUic64os42vqIdNc9\n\
+y7LwxQbJgj1EELIx1ErXtbWkhqSCYJ4dOOuRn2koc0SXk0Q0fnbQck+8bc4R6FXp\n\
+dbzmuAQrASyqJ4cWmKhJyKgZzMfelJVVTnM/5H+mFMSZweNWNN5jn1VbWJNgrZpj\n\
+fabZgkSUBnZ7xCln6zeeWQ==\n\
+-----END PRIVATE KEY-----\n";
+
+    /// A JWKS JSON document carrying the EC public key (`kid = test-ec-1`).
+    fn ec_jwks_json() -> String {
+        format!(
+            r#"{{"keys":[{{"kty":"EC","crv":"P-256","x":"{EC_X}","y":"{EC_Y}","alg":"ES256","use":"sig","kid":"{EC_KID}"}}]}}"#
+        )
+    }
+
+    /// Sign an ES256 token with `EC_PRIV_PEM`, stamping the given `kid` header.
+    fn sign_es256(claims: serde_json::Value, kid: &str) -> String {
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some(kid.to_string());
+        let key = EncodingKey::from_ec_pem(EC_PRIV_PEM.as_bytes()).expect("ec encoding key");
+        encode(&header, &claims, &key).expect("sign es256")
+    }
+
+    /// Sign an RS256 token with `RSA_PRIV_PEM`.
+    fn sign_rs256(claims: serde_json::Value) -> String {
+        let key = EncodingKey::from_rsa_pem(RSA_PRIV_PEM.as_bytes()).expect("rsa encoding key");
+        encode(&Header::new(Algorithm::RS256), &claims, &key).expect("sign rs256")
+    }
+
+    // (a) An ES256 token verifies against a JWKS holding its EC public key.
+    #[test]
+    fn jwks_verifier_validates_es256_token() {
+        let fetcher = Arc::new(StaticJwksFetcher::from_json(&ec_jwks_json()).expect("jwks"));
+        let v = JwksVerifier::with_fetcher(
+            fetcher,
+            Some("https://auth.smoo.ai".to_string()),
+            Some("smoo-api".to_string()),
+        );
+        let token = sign_es256(
+            json!({
+                "sub": "user-es",
+                "org": "org-es",
+                "role": "admin",
+                "name": "EC User",
+                "iss": "https://auth.smoo.ai",
+                "aud": "smoo-api",
+                "exp": future_exp(),
+            }),
+            EC_KID,
+        );
+        let p = v.verify(&token).expect("verify es256");
+        assert_eq!(p.user_id, "user-es");
+        assert_eq!(p.org_id, "org-es");
+        assert_eq!(p.role, Role::Admin);
+        assert_eq!(p.display_name.as_deref(), Some("EC User"));
+        assert_eq!(v.mode(), "jwks");
+    }
+
+    // (a') The SmooIdentityVerifier (AUTH_MODE=smoo) validates real-shaped ES256
+    // tokens through the JWKS path — the actual auth.smoo.ai scenario.
+    #[test]
+    fn smoo_identity_verifier_validates_es256_via_jwks() {
+        let fetcher = Arc::new(StaticJwksFetcher::from_json(&ec_jwks_json()).expect("jwks"));
+        let v = SmooIdentityVerifier::jwks_with_fetcher(
+            fetcher,
+            "https://auth.smoo.ai".to_string(),
+            Some("smoo-api".to_string()),
+        );
+        let token = sign_es256(
+            json!({
+                "sub": "smoo-user",
+                "org": "smoo-org",
+                "role": "curator",
+                "iss": "https://auth.smoo.ai",
+                "aud": "smoo-api",
+                "exp": future_exp(),
+            }),
+            EC_KID,
+        );
+        let p = v.verify(&token).expect("smoo verify es256");
+        assert_eq!(p.user_id, "smoo-user");
+        assert_eq!(p.role, Role::Curator);
+        assert_eq!(v.mode(), "smoo");
+    }
+
+    // (b) The existing static-RS256 path still verifies — behavior-preserving.
+    #[test]
+    fn static_rs256_path_still_verifies() {
+        let v = JwtVerifier::rs256(RSA_PUB_PEM.as_bytes(), None, None).expect("rs256 verifier");
+        let token = sign_rs256(json!({
+            "sub": "rsa-user",
+            "org": "rsa-org",
+            "role": "basic",
+            "exp": future_exp(),
+        }));
+        let p = v.verify(&token).expect("verify rs256");
+        assert_eq!(p.user_id, "rsa-user");
+        assert_eq!(p.role, Role::Basic);
+        assert_eq!(v.mode(), "jwt");
+    }
+
+    // (c) An unknown `kid` triggers a JWKS refresh — a key the issuer rotates in
+    // is picked up without a redeploy (and an absent key fails cleanly).
+    #[test]
+    fn unknown_kid_triggers_jwks_refresh() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFetcher {
+            set: Mutex<JwkSet>,
+            calls: AtomicUsize,
+        }
+        impl JwksFetcher for CountingFetcher {
+            fn fetch(&self) -> Result<JwkSet, AuthError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.set.lock().unwrap().clone())
+            }
+        }
+
+        // Start with an empty JWKS (the key has not been published yet).
+        let fetcher = Arc::new(CountingFetcher {
+            set: Mutex::new(JwkSet { keys: Vec::new() }),
+            calls: AtomicUsize::new(0),
+        });
+        // min_refresh = 0 so the unknown-kid path refreshes immediately in-test.
+        let v = JwksVerifier::with_policy(
+            fetcher.clone(),
+            Some("iss-rot".to_string()),
+            None,
+            Duration::from_secs(3600),
+            Duration::ZERO,
+        );
+        let token = sign_es256(
+            json!({
+                "sub": "rot-user",
+                "org": "rot-org",
+                "role": "basic",
+                "iss": "iss-rot",
+                "exp": future_exp(),
+            }),
+            EC_KID,
+        );
+
+        // First attempt: the key isn't in the JWKS yet → fails cleanly, but a
+        // fetch was attempted.
+        assert!(v.verify(&token).is_err());
+        let after_first = fetcher.calls.load(Ordering::SeqCst);
+        assert!(after_first >= 1, "an initial fetch must have happened");
+
+        // The issuer rotates the EC key in.
+        *fetcher.set.lock().unwrap() = parse_jwks(&ec_jwks_json()).expect("jwks");
+
+        // Next verify: the unknown-kid cache miss forces a refresh → the rotated
+        // key is found → the token verifies.
+        let p = v.verify(&token).expect("verify after rotation");
+        assert_eq!(p.user_id, "rot-user");
+        assert!(
+            fetcher.calls.load(Ordering::SeqCst) > after_first,
+            "rotation must have triggered a refetch"
+        );
+    }
+
+    // (d) Wrong issuer / audience are rejected even with a valid signature.
+    #[test]
+    fn jwks_rejects_wrong_issuer() {
+        let fetcher = Arc::new(StaticJwksFetcher::from_json(&ec_jwks_json()).expect("jwks"));
+        let v = JwksVerifier::with_fetcher(
+            fetcher,
+            Some("https://auth.smoo.ai".to_string()),
+            Some("smoo-api".to_string()),
+        );
+        let token = sign_es256(
+            json!({
+                "sub": "u", "org": "o", "role": "basic",
+                "iss": "https://evil.example", "aud": "smoo-api", "exp": future_exp(),
+            }),
+            EC_KID,
+        );
+        assert!(matches!(v.verify(&token), Err(AuthError::InvalidToken(_))));
+    }
+
+    #[test]
+    fn jwks_rejects_wrong_audience() {
+        let fetcher = Arc::new(StaticJwksFetcher::from_json(&ec_jwks_json()).expect("jwks"));
+        let v = JwksVerifier::with_fetcher(
+            fetcher,
+            Some("https://auth.smoo.ai".to_string()),
+            Some("smoo-api".to_string()),
+        );
+        let token = sign_es256(
+            json!({
+                "sub": "u", "org": "o", "role": "basic",
+                "iss": "https://auth.smoo.ai", "aud": "wrong-api", "exp": future_exp(),
+            }),
+            EC_KID,
+        );
+        assert!(matches!(v.verify(&token), Err(AuthError::InvalidToken(_))));
+    }
+
+    // The JWKS source derivation: explicit URL wins; else issuer-derived.
+    #[test]
+    fn jwks_source_precedence() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        // No URL set → derive from issuer.
+        assert_eq!(
+            jwks_source(Some("https://auth.smoo.ai")),
+            Some("https://auth.smoo.ai/.well-known/jwks.json".to_string())
+        );
+        assert_eq!(jwks_source(None), None);
+        // Explicit URL wins over the issuer derivation.
+        std::env::set_var("AUTH_JWT_JWKS_URL", "https://keys.example/jwks");
+        assert_eq!(
+            jwks_source(Some("https://auth.smoo.ai")),
+            Some("https://keys.example/jwks".to_string())
+        );
+        clear_auth_env();
+    }
+
+    // AUTH_MODE=smoo with only an issuer (no static key) builds the JWKS-backed
+    // verifier — the chart can drop AUTH_JWT_RS256_PUBLIC_KEY.
+    #[test]
+    fn from_env_smoo_with_issuer_only_builds_jwks() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        std::env::set_var("AUTH_MODE", "smoo");
+        std::env::set_var("AUTH_JWT_ISSUER", "https://auth.smoo.ai");
+        let v = AuthConfig::from_env().expect("smoo builds from issuer alone");
+        assert_eq!(v.mode(), "smoo");
+        clear_auth_env();
     }
 
     // ---- Role ordering ---------------------------------------------------
@@ -1104,6 +1838,7 @@ mod tests {
             "AUTH_MODE",
             "AUTH_JWT_HS256_SECRET",
             "AUTH_JWT_RS256_PUBLIC_KEY",
+            "AUTH_JWT_JWKS_URL",
             "AUTH_JWT_ISSUER",
             "AUTH_JWT_AUDIENCE",
             "AUTH_DEV_ORG_ID",
@@ -1322,23 +2057,24 @@ mod tests {
     }
 
     #[test]
-    fn from_env_smoo_requires_issuer_and_key() {
+    fn from_env_smoo_requires_issuer() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_auth_env();
         std::env::set_var("AUTH_MODE", "smoo");
-        // No issuer → misconfig.
+        // No issuer → misconfig (there is nothing to key the JWKS or validate
+        // `iss` against).
         assert!(matches!(
             AuthConfig::from_env(),
             Err(AuthError::Misconfigured(_))
         ));
+        // Issuer alone now builds the JWKS-backed verifier (no static key
+        // required — this is the ES256 path for auth.smoo.ai).
         std::env::set_var("AUTH_JWT_ISSUER", "https://auth.smoo.ai");
-        // Issuer but no key → misconfig.
-        assert!(matches!(
-            AuthConfig::from_env(),
-            Err(AuthError::Misconfigured(_))
-        ));
+        let v = AuthConfig::from_env().expect("smoo builds from issuer (JWKS)");
+        assert_eq!(v.mode(), "smoo");
+        // A static key still works and takes precedence over JWKS.
         std::env::set_var("AUTH_JWT_HS256_SECRET", "shhh");
-        let v = AuthConfig::from_env().expect("smoo builds");
+        let v = AuthConfig::from_env().expect("smoo builds with static key");
         assert_eq!(v.mode(), "smoo");
         clear_auth_env();
     }
