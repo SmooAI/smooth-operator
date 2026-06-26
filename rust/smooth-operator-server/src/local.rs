@@ -91,6 +91,7 @@ pub struct LocalServerBuilder {
     tool_provider: Option<Arc<dyn ToolProvider>>,
     serve_widget: bool,
     widget_token: Option<String>,
+    strict_auth: bool,
 }
 
 impl std::fmt::Debug for LocalServerBuilder {
@@ -119,6 +120,7 @@ impl Default for LocalServerBuilder {
             tool_provider: None,
             serve_widget: false,
             widget_token: None,
+            strict_auth: false,
         }
     }
 }
@@ -178,6 +180,17 @@ impl LocalServerBuilder {
         self
     }
 
+    /// Enable **strict auth**: reject `/ws` connections with a missing/invalid
+    /// token (HTTP 401) instead of degrading to an anonymous connection. Pair
+    /// with [`auth`](Self::auth) — recommended whenever the server is reachable
+    /// beyond loopback (e.g. a tailnet), so a tokenless peer can't drive the
+    /// agent. Off by default.
+    #[must_use]
+    pub fn strict_auth(mut self, strict: bool) -> Self {
+        self.strict_auth = strict;
+        self
+    }
+
     /// Override the full [`ServerConfig`] (e.g. to point at a gateway / model).
     ///
     /// The local flavor still **forces** in-memory storage and the caller's bind
@@ -218,6 +231,9 @@ impl LocalServerBuilder {
         }
         if self.serve_widget {
             state = state.with_widget(self.widget_token.clone());
+        }
+        if self.strict_auth {
+            state = state.with_strict_auth(true);
         }
         state
     }
@@ -451,5 +467,20 @@ mod tests {
             "widget off by default (K8s/Lambda never serve it)"
         );
         assert_eq!(state.widget_token, None);
+    }
+
+    #[test]
+    fn strict_auth_off_by_default_and_opt_in() {
+        assert!(
+            !LocalServerBuilder::default().build().strict_auth,
+            "lenient/anonymous by default"
+        );
+        assert!(
+            LocalServerBuilder::default()
+                .strict_auth(true)
+                .build()
+                .strict_auth,
+            "opt-in threads to AppState"
+        );
     }
 }

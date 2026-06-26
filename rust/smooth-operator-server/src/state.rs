@@ -128,6 +128,13 @@ pub struct AppState {
     /// the embedded widget connects to this server's `/ws?token=…`. `None` ⇒ no
     /// token injected (a no-auth local server).
     pub widget_token: Option<String>,
+    /// **Strict auth.** When `true`, the `/ws` connect path **rejects** a
+    /// missing/invalid token (HTTP 401) instead of degrading to an anonymous
+    /// connection. Off by default (K8s/widget anonymous flows unchanged); a
+    /// single-tenant local/tailnet deployment opts in via
+    /// [`with_strict_auth`](Self::with_strict_auth) so a tokenless peer can't
+    /// drive the agent.
+    pub strict_auth: bool,
 }
 
 /// Namespace a connector name by org for the [`IndexingStore`] key, so two orgs
@@ -176,6 +183,7 @@ impl AppState {
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
             serve_widget: false,
             widget_token: None,
+            strict_auth: false,
         }
     }
 
@@ -214,6 +222,15 @@ impl AppState {
     #[must_use]
     pub fn with_tools(mut self, provider: Arc<dyn ToolProvider>) -> Self {
         self.tool_provider = Some(provider);
+        self
+    }
+
+    /// Enable **strict auth** (builder): reject `/ws` connections with a
+    /// missing/invalid token (HTTP 401) instead of degrading to anonymous. Pair
+    /// with a real [`with_auth`](Self::with_auth) verifier. Off by default.
+    #[must_use]
+    pub fn with_strict_auth(mut self, strict: bool) -> Self {
+        self.strict_auth = strict;
         self
     }
 
