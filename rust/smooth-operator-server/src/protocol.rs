@@ -64,6 +64,22 @@ pub fn stream_token(request_id: &str, token: &str) -> Value {
     })
 }
 
+/// `stream_reasoning` — a single streamed *reasoning* token from a reasoning
+/// model's separate thinking channel. Shaped exactly like `stream_token`, but
+/// on a distinct `type` so clients render it as "thinking" and never fold it
+/// into the answer. Clients that don't know the type simply ignore it (the
+/// answer still streams via `stream_token`).
+#[must_use]
+pub fn stream_reasoning(request_id: &str, token: &str) -> Value {
+    json!({
+        "type": "stream_reasoning",
+        "requestId": request_id,
+        "token": token,
+        "data": { "requestId": request_id, "token": token },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `stream_chunk` — a per-node state snapshot. `node` is mirrored at the
 /// envelope level and inside `data` (per `stream-chunk.schema.json`). `state`
 /// only carries safe-to-expose fields.
@@ -195,6 +211,17 @@ mod tests {
         assert_eq!(ev["type"], "stream_token");
         assert_eq!(ev["token"], "Hel");
         assert_eq!(ev["data"]["token"], "Hel");
+        assert_eq!(ev["data"]["requestId"], "r1");
+    }
+
+    #[test]
+    fn stream_reasoning_is_distinct_type_but_mirrors_token() {
+        let ev = stream_reasoning("r1", "let me think");
+        // Distinct type so clients never fold it into the answer…
+        assert_eq!(ev["type"], "stream_reasoning");
+        // …but shaped exactly like stream_token so they render it the same way.
+        assert_eq!(ev["token"], "let me think");
+        assert_eq!(ev["data"]["token"], "let me think");
         assert_eq!(ev["data"]["requestId"], "r1");
     }
 

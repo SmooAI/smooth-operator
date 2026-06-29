@@ -365,6 +365,16 @@ pub async fn run_streaming_turn(
                             .send(crate::protocol::stream_token(&request_id_owned, &content));
                     }
                 }
+                AgentEvent::ReasoningDelta { content } => {
+                    // Reasoning rides its own protocol message so the client shows
+                    // it as "thinking", never as the answer (th-4d8682).
+                    if !content.is_empty() {
+                        let _ = sink_clone.send(crate::protocol::stream_reasoning(
+                            &request_id_owned,
+                            &content,
+                        ));
+                    }
+                }
                 AgentEvent::ToolCallStart {
                     tool_name,
                     arguments,
