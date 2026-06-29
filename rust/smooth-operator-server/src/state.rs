@@ -135,6 +135,15 @@ pub struct AppState {
     /// [`with_strict_auth`](Self::with_strict_auth) so a tokenless peer can't
     /// drive the agent.
     pub strict_auth: bool,
+    /// **Default agent persona / system prompt.** When `Some`, it is used as the
+    /// turn's system prompt whenever the per-org [`AgentSettings::persona`] is
+    /// `None` — i.e. a host-supplied default that replaces the built-in
+    /// customer-support [`KNOWLEDGE_CHAT_SYSTEM_PROMPT`](crate::runner) when no
+    /// per-org override exists. The single-tenant local daemon installs its
+    /// "Big Smooth" personal-assistant persona here via
+    /// [`with_default_persona`](Self::with_default_persona). `None` (the default)
+    /// keeps the const prompt, so the cloud flavor is byte-for-byte unchanged.
+    pub default_persona: Option<String>,
 }
 
 /// Namespace a connector name by org for the [`IndexingStore`] key, so two orgs
@@ -184,6 +193,7 @@ impl AppState {
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
+            default_persona: None,
         }
     }
 
@@ -243,6 +253,23 @@ impl AppState {
     #[must_use]
     pub fn with_strict_auth(mut self, strict: bool) -> Self {
         self.strict_auth = strict;
+        self
+    }
+
+    /// Install a **default agent persona** (builder): the system prompt used for
+    /// a turn when the per-org [`AgentSettings::persona`] is unset. A single-tenant
+    /// host (the local daemon) installs its own personality here so every turn
+    /// runs as that agent rather than the built-in customer-support prompt. `None`
+    /// (the default) keeps the const prompt, so the cloud flavor is unchanged. An
+    /// empty/whitespace-only string is treated as no default.
+    #[must_use]
+    pub fn with_default_persona(mut self, persona: impl Into<String>) -> Self {
+        let persona = persona.into();
+        self.default_persona = if persona.trim().is_empty() {
+            None
+        } else {
+            Some(persona)
+        };
         self
     }
 
@@ -439,6 +466,28 @@ mod tests {
 
     fn state_with(config: ServerConfig) -> AppState {
         AppState::new(Arc::new(InMemoryStorageAdapter::new()), config)
+    }
+
+    #[test]
+    fn default_persona_unset_by_default() {
+        let state = state_with(config_with_env_key(None));
+        assert_eq!(
+            state.default_persona, None,
+            "no default persona unless a host installs one"
+        );
+    }
+
+    #[test]
+    fn with_default_persona_installs_and_trims_empty() {
+        let state =
+            state_with(config_with_env_key(None)).with_default_persona("You are Big Smooth.");
+        assert_eq!(
+            state.default_persona.as_deref(),
+            Some("You are Big Smooth.")
+        );
+        // An empty / whitespace-only persona is treated as "no default".
+        let blank = state_with(config_with_env_key(None)).with_default_persona("   ");
+        assert_eq!(blank.default_persona, None, "blank persona is ignored");
     }
 
     /// Per-org resolver covering exactly one org; `None` (→ env fallback) for any

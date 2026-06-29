@@ -87,6 +87,37 @@ pub fn router() -> Router<AppState> {
         // target over the WebSocket fleet. The plug point for non-AI publishers
         // (job status, ingestion progress, notifications). Admin-gated.
         .route("/admin/publish", post(publish_event))
+        // CORS for the `/admin` surface only (NOT `/ws` — a WebSocket handshake
+        // isn't subject to the CORS preflight). The local-flavor daemon serves its
+        // smooth-web SPA same-origin, but in dev the SPA runs on the Vite origin
+        // (http://localhost:3100) and does a best-effort cross-origin
+        // `GET /admin/me` to populate the live model/identity in its header — which
+        // the browser blocks without these headers. The local flavor is
+        // loopback/tailnet-only and every `/admin` route is token-authed
+        // ([`require_role`]), so a permissive CORS here doesn't widen the trust
+        // boundary: a cross-origin caller still needs a valid bearer token.
+        .layer(admin_cors())
+}
+
+/// The permissive [`CorsLayer`](tower_http::cors::CorsLayer) applied to `/admin`.
+///
+/// Allows any origin with the verbs the admin API exposes (GET/POST/PUT/DELETE,
+/// plus the implicit `OPTIONS` preflight) and the only request headers the SPA
+/// sends (`authorization` for the bearer token, `content-type` for JSON bodies).
+/// Auth is unaffected — every route still runs [`require_role`], so this only
+/// relaxes the browser's same-origin policy, not the server's authorization.
+fn admin_cors() -> tower_http::cors::CorsLayer {
+    use axum::http::{header, Method};
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 
 // ---------------------------------------------------------------------------

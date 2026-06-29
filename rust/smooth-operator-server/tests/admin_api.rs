@@ -151,6 +151,82 @@ async fn health_is_unauthenticated() {
 }
 
 #[tokio::test]
+async fn admin_response_carries_cors_header() {
+    // A real cross-origin GET /admin/me must carry `access-control-allow-origin`
+    // so the daemon's smooth-web SPA (running on the Vite dev origin) can read the
+    // model/identity. Auth is unchanged — the request still needs a valid token.
+    let state = state_with_auth(false, Arc::new(InMemoryIndexingStore::new()));
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/me")
+                .header("Origin", "http://localhost:3100")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", token("alice", "admin")),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("*"),
+        "the /admin response must carry a permissive CORS allow-origin header"
+    );
+}
+
+#[tokio::test]
+async fn admin_cors_preflight_allows_authorization_header() {
+    // The browser preflights GET /admin/me (it carries an Authorization header)
+    // with an OPTIONS request; the response must allow the `authorization` request
+    // header, else the real request is blocked.
+    let state = state_with_auth(false, Arc::new(InMemoryIndexingStore::new()));
+    let app = router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/admin/me")
+                .header("Origin", "http://localhost:3100")
+                .header("Access-Control-Request-Method", "GET")
+                .header("Access-Control-Request-Headers", "authorization")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+    // tower-http answers the preflight directly (200/204) with the allow headers.
+    assert!(
+        resp.status().is_success(),
+        "CORS preflight should succeed, got {}",
+        resp.status()
+    );
+    let allow_headers = resp
+        .headers()
+        .get("access-control-allow-headers")
+        .map(|v| v.to_str().unwrap().to_ascii_lowercase())
+        .unwrap_or_default();
+    assert!(
+        allow_headers.contains("authorization"),
+        "preflight must allow the authorization header, got: {allow_headers:?}"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("*"),
+        "preflight must echo a permissive allow-origin"
+    );
+}
+
+#[tokio::test]
 async fn me_returns_principal() {
     let state = state_with_auth(false, Arc::new(InMemoryIndexingStore::new()));
     let app = router(state);

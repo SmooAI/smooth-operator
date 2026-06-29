@@ -94,6 +94,8 @@ pub struct LocalServerBuilder {
     widget_token: Option<String>,
     strict_auth: bool,
     storage: Option<Arc<dyn StorageAdapter>>,
+    persona: Option<String>,
+    spa_router: Option<axum::Router>,
 }
 
 impl std::fmt::Debug for LocalServerBuilder {
@@ -124,6 +126,8 @@ impl Default for LocalServerBuilder {
             widget_token: None,
             strict_auth: false,
             storage: None,
+            persona: None,
+            spa_router: None,
         }
     }
 }
@@ -180,6 +184,31 @@ impl LocalServerBuilder {
     pub fn serve_widget(mut self, token: Option<String>) -> Self {
         self.serve_widget = true;
         self.widget_token = token;
+        self
+    }
+
+    /// Set the **default agent persona** (system prompt) for every turn that has
+    /// no per-org override. A single-tenant host (the local daemon) uses this to
+    /// give the agent its own personality instead of the built-in customer-support
+    /// prompt. Threads to [`AppState::default_persona`](crate::state::AppState::default_persona).
+    /// Unset → the built-in const prompt (unchanged).
+    #[must_use]
+    pub fn persona(mut self, persona: impl Into<String>) -> Self {
+        self.persona = Some(persona.into());
+        self
+    }
+
+    /// Serve a **host-supplied SPA** (e.g. the smooth-web dashboard) at this
+    /// server's own origin, as the router fallback. The operator's explicit routes
+    /// (`/ws`, `/health`, `/admin/*`) still win; everything else (`/`, hashed
+    /// asset paths, SPA client routes) is served by `spa`. Use this INSTEAD of
+    /// [`serve_widget`](Self::serve_widget) when the host wants its own UI at `/`
+    /// — the endpoint is then simply `http://<addr>/` with no `?api`/`?token`
+    /// query string (the host injects the token into the SPA's `index.html`
+    /// itself, so the operator-server stays agnostic to the SPA's auth wiring).
+    #[must_use]
+    pub fn serve_spa(mut self, spa: axum::Router) -> Self {
+        self.spa_router = Some(spa);
         self
     }
 
@@ -254,7 +283,27 @@ impl LocalServerBuilder {
         if self.strict_auth {
             state = state.with_strict_auth(true);
         }
+        if let Some(persona) = &self.persona {
+            state = state.with_default_persona(persona.clone());
+        }
         state
+    }
+
+    /// Assemble the full axum [`Router`](axum::Router): the operator's routes
+    /// (`/ws`, `/health`, `/admin/*`, and optionally the widget) plus, when a host
+    /// SPA was installed via [`serve_spa`](Self::serve_spa), that SPA as the
+    /// router fallback (so the explicit operator routes still win). Factored out of
+    /// [`spawn`](Self::spawn) so a test can drive it with `tower::ServiceExt::oneshot`.
+    fn build_app(&self) -> axum::Router {
+        let mut app = router(self.build());
+        // A host SPA (smooth-web) is mounted as the router fallback so the
+        // operator's explicit routes (`/ws`, `/health`, `/admin/*`) still win and
+        // everything else — `/`, hashed assets, SPA client routes — is served by
+        // the SPA at this server's own origin.
+        if let Some(spa) = self.spa_router.clone() {
+            app = app.fallback_service(spa);
+        }
+        app
     }
 
     /// Bind and spawn the server in a background task, returning a [`LocalServer`]
@@ -271,7 +320,7 @@ impl LocalServerBuilder {
             .with_context(|| format!("binding local smooth-operator server on {}", self.addr))?;
         let addr = listener.local_addr().context("local addr")?;
 
-        let app = router(self.build());
+        let app = self.build_app();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let join = tokio::spawn(async move {
@@ -441,8 +490,13 @@ mod tests {
         // Any StorageAdapter stands in for a durable one; assert the builder
         // installs the *injected* adapter, not the hardcoded in-memory default.
         let injected: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
-        let state = LocalServerBuilder::default().storage(Arc::clone(&injected)).build();
-        assert!(Arc::ptr_eq(&state.storage, &injected), "the injected storage adapter must be installed");
+        let state = LocalServerBuilder::default()
+            .storage(Arc::clone(&injected))
+            .build();
+        assert!(
+            Arc::ptr_eq(&state.storage, &injected),
+            "the injected storage adapter must be installed"
+        );
         // Default (no override) → a distinct in-memory adapter.
         let default_state = LocalServerBuilder::default().build();
         assert!(!Arc::ptr_eq(&default_state.storage, &injected));
@@ -499,6 +553,82 @@ mod tests {
             "widget off by default (K8s/Lambda never serve it)"
         );
         assert_eq!(state.widget_token, None);
+    }
+
+    #[test]
+    fn persona_seam_installs_default_persona() {
+        // No persona → no default (built-in const prompt, unchanged behavior).
+        assert_eq!(
+            LocalServerBuilder::default().build().default_persona,
+            None,
+            "no default persona unless set"
+        );
+        // `.persona(..)` threads through to AppState::default_persona.
+        let state = LocalServerBuilder::default()
+            .persona("You are Big Smooth.")
+            .build();
+        assert_eq!(
+            state.default_persona.as_deref(),
+            Some("You are Big Smooth.")
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_spa_mounts_host_router_as_fallback() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // A trivial host SPA: any unmatched path returns a sentinel. The
+        // operator's `/health` must still win (an explicit route beats the SPA
+        // fallback).
+        let spa = axum::Router::new().fallback(axum::routing::get(|| async { "SPA-ROOT" }));
+        let app = LocalServerBuilder::default().serve_spa(spa).build_app();
+
+        // `/` (and any non-operator path) routes to the SPA.
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            b"SPA-ROOT",
+            "the host SPA is served as the fallback"
+        );
+
+        // The operator's explicit `/health` route still wins over the SPA fallback.
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            b"ok",
+            "explicit operator routes win over the SPA"
+        );
+    }
+
+    #[test]
+    fn no_spa_by_default() {
+        // Without `serve_spa`, an unknown path is a 404 (no fallback service).
+        assert!(
+            LocalServerBuilder::default().spa_router.is_none(),
+            "no SPA mounted unless the host installs one"
+        );
     }
 
     #[test]

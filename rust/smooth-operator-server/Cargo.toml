@@ -66,6 +66,13 @@ tokio = { workspace = true }
 tokio-util = "0.7"
 
 axum = { version = "0.8", features = ["ws"] }
+# CORS for the `/admin` HTTP API: the local-flavor daemon's smooth-web SPA does a
+# best-effort cross-origin `GET /admin/me` from the Vite dev origin
+# (http://localhost:3100) to show the live model/identity in its header. The local
+# flavor is loopback/tailnet-only + token-authed, so a permissive CORS on `/admin`
+# is acceptable. (`/ws` needs no CORS — a WebSocket handshake isn't subject to the
+# CORS preflight.)
+tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

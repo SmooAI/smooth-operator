@@ -638,10 +638,16 @@ async fn handle_send_message(
     // auth. Used to (a) resolve the org's persona override (SEAM 2) and (b)
     // scope the host's tool provider (SEAM 1).
     let org_id = crate::server::SEED_ORG_ID.to_string();
-    // SEAM 2 — resolve the per-org persona. With the default in-memory settings
-    // store the override is `None`, so the runner stays on its const prompt and
-    // behavior is unchanged.
-    let system_prompt = state.settings.get(&org_id).persona;
+    // SEAM 2 — resolve the per-org persona, falling back to the host's installed
+    // default persona ([`AppState::default_persona`], e.g. the local daemon's
+    // "Big Smooth" personal-assistant prompt). With the default in-memory settings
+    // store AND no default persona installed, both are `None`, so the runner stays
+    // on its const prompt and behavior is byte-for-byte unchanged.
+    let system_prompt = state
+        .settings
+        .get(&org_id)
+        .persona
+        .or_else(|| state.default_persona.clone());
     // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
     let tool_provider = state.tool_provider.clone();
 
