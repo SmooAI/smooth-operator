@@ -194,6 +194,18 @@ impl AppState {
         self
     }
 
+    /// Replace the storage adapter (builder).
+    ///
+    /// Lets an embedder (e.g. the local-flavor daemon) swap the default
+    /// in-memory store for a **durable local adapter** — the seam an always-on,
+    /// self-hosted deployment needs so conversations/sessions/checkpoints
+    /// survive a restart without standing up Postgres.
+    #[must_use]
+    pub fn with_storage(mut self, storage: Arc<dyn StorageAdapter>) -> Self {
+        self.storage = storage;
+        self
+    }
+
     /// Install the indexing store (builder).
     #[must_use]
     pub fn with_indexing(mut self, indexing: Arc<dyn IndexingStore>) -> Self {

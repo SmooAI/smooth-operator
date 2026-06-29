@@ -63,6 +63,7 @@ use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::tool_provider::ToolProvider;
 
@@ -92,6 +93,7 @@ pub struct LocalServerBuilder {
     serve_widget: bool,
     widget_token: Option<String>,
     strict_auth: bool,
+    storage: Option<Arc<dyn StorageAdapter>>,
 }
 
 impl std::fmt::Debug for LocalServerBuilder {
@@ -121,6 +123,7 @@ impl Default for LocalServerBuilder {
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
+            storage: None,
         }
     }
 }
@@ -191,6 +194,17 @@ impl LocalServerBuilder {
         self
     }
 
+    /// Install a **durable** storage adapter, replacing the default in-memory
+    /// store. This is the seam an always-on, self-hosted deployment (the local
+    /// daemon) uses to persist conversations/sessions/checkpoints across
+    /// restarts without standing up Postgres — the embedder supplies any
+    /// [`StorageAdapter`] (e.g. a local sqlite/dolt one). Unset → in-memory.
+    #[must_use]
+    pub fn storage(mut self, storage: Arc<dyn StorageAdapter>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
     /// Override the full [`ServerConfig`] (e.g. to point at a gateway / model).
     ///
     /// The local flavor still **forces** in-memory storage and the caller's bind
@@ -226,6 +240,11 @@ impl LocalServerBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(NoAuthVerifier::default()) as Arc<dyn AuthVerifier>);
         let mut state = build_state(config).with_auth(auth);
+        // A durable adapter, when supplied, replaces the in-memory default — the
+        // local flavor stays "no external services" but can now persist.
+        if let Some(storage) = &self.storage {
+            state = state.with_storage(Arc::clone(storage));
+        }
         if let Some(provider) = &self.tool_provider {
             state = state.with_tools(Arc::clone(provider));
         }
@@ -414,6 +433,19 @@ mod tests {
         assert_eq!(state.config.storage, StorageBackend::Memory);
         // The no-op verifier is installed (admin reachable in-process).
         assert_eq!(state.auth.mode(), "none");
+    }
+
+    #[test]
+    fn storage_seam_installs_a_durable_adapter() {
+        use smooth_operator_adapter_memory::InMemoryStorageAdapter;
+        // Any StorageAdapter stands in for a durable one; assert the builder
+        // installs the *injected* adapter, not the hardcoded in-memory default.
+        let injected: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
+        let state = LocalServerBuilder::default().storage(Arc::clone(&injected)).build();
+        assert!(Arc::ptr_eq(&state.storage, &injected), "the injected storage adapter must be installed");
+        // Default (no override) → a distinct in-memory adapter.
+        let default_state = LocalServerBuilder::default().build();
+        assert!(!Arc::ptr_eq(&default_state.storage, &injected));
     }
 
     #[test]
