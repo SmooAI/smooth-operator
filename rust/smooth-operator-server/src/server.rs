@@ -596,36 +596,52 @@ struct ConnectionAuth {
     org_id: Option<String>,
 }
 
-fn resolve_ws_access(state: &AppState, query: &WsQuery) -> ConnectionAuth {
+/// Resolve the connection's access from `?token=`.
+///
+/// **Lenient (default):** a missing/invalid token degrades to
+/// [`AccessContext::anonymous`] (org-public only) — keeps the dev/no-auth `/ws`
+/// path and the embeddable widget's anonymous flow working while failing closed
+/// for ACL'd content. **Strict ([`AppState::strict_auth`]):** a missing/invalid
+/// token is **rejected** (the connection is refused, not degraded) — what a
+/// single-tenant local/tailnet deployment wants so a tokenless peer can't drive
+/// the agent. Returns `Err(())` to signal "reject the upgrade".
+fn resolve_ws_access(state: &AppState, query: &WsQuery) -> Result<ConnectionAuth, ()> {
     let Some(token) = query
         .token
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty())
     else {
-        // No token → anonymous (org-public only). Keeps the dev/no-auth `/ws`
-        // path working while failing closed for ACL'd content.
-        return ConnectionAuth {
+        if state.strict_auth {
+            tracing::warn!("strict auth: rejecting tokenless /ws connection");
+            return Err(());
+        }
+        // No token → anonymous (org-public only).
+        return Ok(ConnectionAuth {
             access: AccessContext::anonymous(),
             org_id: None,
-        };
+        });
     };
     match state.auth.verify(token) {
-        Ok(principal) => ConnectionAuth {
+        Ok(principal) => Ok(ConnectionAuth {
             access: principal.access_context(),
             org_id: Some(principal.org_id),
-        },
+        }),
         Err(e) => {
             // Don't leak the token; log only the mode + a generic reason.
             tracing::warn!(
                 auth_mode = state.auth.mode(),
                 error = %e,
-                "ws token failed verification; serving org-public knowledge only (anonymous)"
+                strict = state.strict_auth,
+                "ws token failed verification"
             );
-            ConnectionAuth {
+            if state.strict_auth {
+                return Err(());
+            }
+            Ok(ConnectionAuth {
                 access: AccessContext::anonymous(),
                 org_id: None,
-            }
+            })
         }
     }
 }
@@ -640,7 +656,11 @@ async fn ws_upgrade(
     Query(query): Query<WsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let ConnectionAuth { access, org_id } = resolve_ws_access(&state, &query);
+    let ConnectionAuth { access, org_id } = match resolve_ws_access(&state, &query) {
+        Ok(auth) => auth,
+        // Strict auth refused the connection (missing/invalid token).
+        Err(()) => return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+    };
     // Capture the browser's `Origin` at the handshake (browsers always send it,
     // and can't be made to forge another site's). It's enforced per-agent at
     // session creation against the agent's embed allowlist (widget_auth).

@@ -64,6 +64,22 @@ pub fn stream_token(request_id: &str, token: &str) -> Value {
     })
 }
 
+/// `stream_reasoning` — a single streamed *reasoning* token from a reasoning
+/// model's separate thinking channel. Shaped exactly like `stream_token`, but
+/// on a distinct `type` so clients render it as "thinking" and never fold it
+/// into the answer. Clients that don't know the type simply ignore it (the
+/// answer still streams via `stream_token`).
+#[must_use]
+pub fn stream_reasoning(request_id: &str, token: &str) -> Value {
+    json!({
+        "type": "stream_reasoning",
+        "requestId": request_id,
+        "token": token,
+        "data": { "requestId": request_id, "token": token },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `stream_chunk` — a per-node state snapshot. `node` is mirrored at the
 /// envelope level and inside `data` (per `stream-chunk.schema.json`). `state`
 /// only carries safe-to-expose fields.
@@ -78,12 +94,33 @@ pub fn stream_chunk(request_id: &str, node: &str, state: Value) -> Value {
     })
 }
 
+/// Per-turn token-accounting + cost, captured from the engine's terminal
+/// [`AgentEvent::Completed`](smooth_operator_core::AgentEvent::Completed) and
+/// surfaced on the `eventual_response` so clients can accumulate a live session
+/// cost. All fields are accumulated across every LLM call in the turn. `Copy` so
+/// it threads through the runner → handler → protocol by value.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TurnUsage {
+    /// Accumulated cost in USD for this turn (gateway-priced).
+    pub cost_usd: f64,
+    /// Accumulated prompt (input) tokens for this turn.
+    pub prompt_tokens: u64,
+    /// Accumulated completion (output) tokens for this turn.
+    pub completion_tokens: u64,
+}
+
 /// `eventual_response` — the terminal event of a streaming turn. The payload is
 /// double-nested (`data.data`) per `eventual-response.schema.json`.
 ///
 /// `citations` are the sources that grounded the answer. They're attached to
 /// the inner `data.data.citations` array only when non-empty — absent otherwise,
 /// keeping the event back-compatible with clients that predate citations.
+///
+/// `usage`, when `Some`, attaches the turn's token-accounting + cost as a sibling
+/// `data.data.usage` object (`{ costUsd, promptTokens, completionTokens }`) so a
+/// client can accumulate live session cost. Absent when the engine reported no
+/// usage (e.g. an offline mock turn), keeping the event back-compatible with
+/// clients that predate cost reporting.
 #[must_use]
 pub fn eventual_response(
     request_id: &str,
@@ -92,6 +129,7 @@ pub fn eventual_response(
     response: Value,
     needs_escalation: bool,
     citations: &[smooth_operator::domain::Citation],
+    usage: Option<TurnUsage>,
 ) -> Value {
     let mut inner = json!({
         "messageId": message_id,
@@ -101,6 +139,14 @@ pub fn eventual_response(
     // Optional + back-compat: only emit `citations` when the turn had sources.
     if !citations.is_empty() {
         inner["citations"] = serde_json::to_value(citations).unwrap_or(Value::Null);
+    }
+    // Optional + back-compat: only emit `usage` when the engine reported it.
+    if let Some(usage) = usage {
+        inner["usage"] = json!({
+            "costUsd": usage.cost_usd,
+            "promptTokens": usage.prompt_tokens,
+            "completionTokens": usage.completion_tokens,
+        });
     }
     json!({
         "type": "eventual_response",
@@ -199,6 +245,17 @@ mod tests {
     }
 
     #[test]
+    fn stream_reasoning_is_distinct_type_but_mirrors_token() {
+        let ev = stream_reasoning("r1", "let me think");
+        // Distinct type so clients never fold it into the answer…
+        assert_eq!(ev["type"], "stream_reasoning");
+        // …but shaped exactly like stream_token so they render it the same way.
+        assert_eq!(ev["token"], "let me think");
+        assert_eq!(ev["data"]["token"], "let me think");
+        assert_eq!(ev["data"]["requestId"], "r1");
+    }
+
+    #[test]
     fn stream_chunk_mirrors_node() {
         let ev = stream_chunk("r1", "knowledge_search", json!({ "rawResponse": "x" }));
         assert_eq!(ev["type"], "stream_chunk");
@@ -216,6 +273,7 @@ mod tests {
             json!({"responseParts": ["hi"]}),
             false,
             &[],
+            None,
         );
         assert_eq!(ev["type"], "eventual_response");
         assert_eq!(ev["status"], 200);
@@ -234,11 +292,57 @@ mod tests {
             json!({"responseParts": ["hi"]}),
             false,
             &[],
+            None,
         );
         assert!(
             ev["data"]["data"].get("citations").is_none(),
             "citations must be absent when empty for back-compat"
         );
+    }
+
+    #[test]
+    fn eventual_response_omits_usage_when_none() {
+        // Back-compat: no `usage` key at all when the engine reported no cost.
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+            None,
+        );
+        assert!(
+            ev["data"]["data"].get("usage").is_none(),
+            "usage must be absent when None for back-compat"
+        );
+    }
+
+    #[test]
+    fn eventual_response_attaches_usage_when_present() {
+        let usage = TurnUsage {
+            cost_usd: 0.0123,
+            prompt_tokens: 1500,
+            completion_tokens: 42,
+        };
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+            Some(usage),
+        );
+        let u = &ev["data"]["data"]["usage"];
+        assert!(
+            u.is_object(),
+            "usage should be a sibling object under data.data"
+        );
+        let cost = u["costUsd"].as_f64().expect("costUsd is a number");
+        assert!((cost - 0.0123).abs() < 1e-9, "costUsd should round-trip");
+        assert_eq!(u["promptTokens"], 1500);
+        assert_eq!(u["completionTokens"], 42);
     }
 
     #[test]
@@ -266,6 +370,7 @@ mod tests {
             json!({"responseParts": ["hi"]}),
             false,
             &citations,
+            None,
         );
         let cites = &ev["data"]["data"]["citations"];
         assert!(cites.is_array(), "citations should be an array");

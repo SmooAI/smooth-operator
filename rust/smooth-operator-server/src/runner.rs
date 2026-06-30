@@ -120,6 +120,11 @@ pub struct TurnResult {
     /// `knowledge_search` result), deduped by id and capped. Carried onto the
     /// `eventual_response`'s `citations`. Empty when nothing was retrieved.
     pub citations: Vec<Citation>,
+    /// The turn's token-accounting + cost, captured from the engine's terminal
+    /// [`AgentEvent::Completed`]. Carried onto the `eventual_response`'s `usage`
+    /// object so clients accumulate live session cost. `None` when the engine
+    /// reported no `Completed` event (e.g. an offline mock turn).
+    pub usage: Option<crate::protocol::TurnUsage>,
 }
 
 /// Everything one streaming turn needs. Bundled into a struct so the call sites
@@ -357,12 +362,25 @@ pub async fn run_streaming_turn(
     // time while the agent loop runs concurrently.
     let translator = tokio::spawn(async move {
         let mut invoked_knowledge_search = false;
+        // The terminal `Completed` event carries the turn's accumulated cost +
+        // token counts; capture them to surface on the `eventual_response`.
+        let mut usage: Option<crate::protocol::TurnUsage> = None;
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::TokenDelta { content } => {
                     if !content.is_empty() {
                         let _ = sink_clone
                             .send(crate::protocol::stream_token(&request_id_owned, &content));
+                    }
+                }
+                AgentEvent::ReasoningDelta { content } => {
+                    // Reasoning rides its own protocol message so the client shows
+                    // it as "thinking", never as the answer (th-4d8682).
+                    if !content.is_empty() {
+                        let _ = sink_clone.send(crate::protocol::stream_reasoning(
+                            &request_id_owned,
+                            &content,
+                        ));
                     }
                 }
                 AgentEvent::ToolCallStart {
@@ -404,13 +422,29 @@ pub async fn run_streaming_turn(
                         json!({}),
                     ));
                 }
-                // Started / Completed / token-accounting events are terminal or
+                // The terminal `Completed` event is NOT re-emitted as a stream
+                // event (the protocol carries the turn outcome on the
+                // `eventual_response`), but we capture its accumulated cost +
+                // token counts to attach to that terminal event's `usage`.
+                AgentEvent::Completed {
+                    cost_usd,
+                    prompt_tokens,
+                    completion_tokens,
+                    ..
+                } => {
+                    usage = Some(crate::protocol::TurnUsage {
+                        cost_usd,
+                        prompt_tokens,
+                        completion_tokens,
+                    });
+                }
+                // Other Started / token-accounting events are terminal or
                 // structural; the protocol carries those via immediate/eventual
                 // responses, so they're intentionally not re-emitted here.
                 _ => {}
             }
         }
-        invoked_knowledge_search
+        (invoked_knowledge_search, usage)
     });
 
     // Drive the agent loop. `run_with_channel` consumes `tx`; when it returns,
@@ -429,7 +463,7 @@ pub async fn run_streaming_turn(
         (cfg.clear)(&cfg.session_id);
     }
 
-    let invoked_knowledge_search = translator.await.unwrap_or(false);
+    let (invoked_knowledge_search, usage) = translator.await.unwrap_or((false, None));
 
     let reply = conversation
         .last_assistant_content()
@@ -466,6 +500,7 @@ pub async fn run_streaming_turn(
         message_id,
         invoked_knowledge_search,
         citations,
+        usage,
     })
 }
 
