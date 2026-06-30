@@ -4,7 +4,7 @@ Language-neutral JSON Schemas for the smooth-operator WebSocket protocol. Every 
 
 - `envelope.schema.json` — the action/event envelope
 - `actions/` — client→server messages (`send_message`, `create_conversation_session`, …)
-- `events/` — server→client messages (`stream_chunk`, `eventual_response`, …)
+- `events/` — server→client messages (`stream_token`, `stream_reasoning`, `stream_chunk`, `eventual_response`, …)
 - `domain/` — `conversation`, `participant`, `message`, `session`, `checkpoint`
 - `codegen/` — per-language generator config (TS, Go, .NET, Python)
 

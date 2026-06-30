@@ -56,6 +56,25 @@
               "type": "string",
               "description": "Human-readable escalation reason when `needsEscalation` is true."
             },
+            "usage": {
+              "type": "object",
+              "description": "Per-turn token accounting and cost, captured from the engine's terminal completion event. Lets a client accumulate live session cost. Optional and back-compatible: absent when the engine reported no usage for the turn (e.g. an offline/mock turn).",
+              "additionalProperties": false,
+              "properties": {
+                "costUsd": {
+                  "type": "number",
+                  "description": "Accumulated cost in USD across every LLM call in this turn (gateway-priced)."
+                },
+                "promptTokens": {
+                  "type": "integer",
+                  "description": "Accumulated prompt (input) tokens across every LLM call in this turn."
+                },
+                "completionTokens": {
+                  "type": "integer",
+                  "description": "Accumulated completion (output) tokens across every LLM call in this turn."
+                }
+              }
+            },
             "citations": {
               "type": "array",
               "description": "The sources that grounded this answer, when any were retrieved. Collected by the runtime from the documents that actually grounded the turn — the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results — deduplicated by source id and capped. Optional and back-compatible: absent when the turn used no knowledge sources. Each item is a `Citation` (see `domain/citation.schema.json`).",

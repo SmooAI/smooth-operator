@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/events/stream-reasoning.schema.json",
+  "title": "StreamReasoning",
+  "description": "Event: `stream_reasoning`. A single *reasoning* token from a reasoning-model's separate thinking channel (`reasoning_content`/`reasoning` deltas — e.g. DeepSeek, gpt-oss/harmony, MiniMax, GLM), forwarded to the client in real time. Corresponds to smooth-operator's `AgentEvent::ReasoningDelta`. Shaped identically to `stream_token` so clients can render it the same way, but on a distinct `type` so reasoning is shown as collapsible \"thinking\" and is NEVER folded into the answer. The final response (carried by `eventual_response`) already excludes reasoning. Clients that do not recognize this event MUST ignore it — the answer still streams via `stream_token`, so reasoning simply isn't shown.",
+  "type": "object",
+  "required": ["type", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "stream_reasoning",
+      "description": "Event type discriminator."
+    },
+    "requestId": {
+      "type": "string",
+      "description": "Echoes the `requestId` from the originating `send_message` action."
+    },
+    "token": {
+      "type": "string",
+      "description": "The raw reasoning token text. Also present inside `data.token` for consumers that only inspect `data`."
+    },
+    "data": {
+      "type": "object",
+      "description": "Reasoning token event payload.",
+      "required": ["requestId", "token"],
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "The request ID this reasoning token belongs to."
+        },
+        "token": {
+          "type": "string",
+          "description": "The raw reasoning token text."
+        }
+      }
+    },
+    "timestamp": {
+      "type": "integer",
+      "description": "Unix epoch milliseconds when the event was emitted."
+    }
+  }
+}
