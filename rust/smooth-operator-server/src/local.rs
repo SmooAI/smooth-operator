@@ -96,6 +96,7 @@ pub struct LocalServerBuilder {
     storage: Option<Arc<dyn StorageAdapter>>,
     persona: Option<String>,
     spa_router: Option<axum::Router>,
+    extra_routes: Option<axum::Router>,
 }
 
 impl std::fmt::Debug for LocalServerBuilder {
@@ -128,6 +129,7 @@ impl Default for LocalServerBuilder {
             storage: None,
             persona: None,
             spa_router: None,
+            extra_routes: None,
         }
     }
 }
@@ -209,6 +211,25 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn serve_spa(mut self, spa: axum::Router) -> Self {
         self.spa_router = Some(spa);
+        self
+    }
+
+    /// Merge **host-supplied real routes** into the operator's own router, so they
+    /// sit alongside `/ws`, `/health`, and `/admin/*` as first-class routes (NOT a
+    /// fallback like [`serve_spa`](Self::serve_spa)). The daemon uses this to add
+    /// its own endpoints — e.g. the `@`-mention `GET /search` the web composer
+    /// calls — to the operator origin without the operator-server knowing about
+    /// them.
+    ///
+    /// The supplied routes get the **same permissive CORS as `/admin`** so the
+    /// cross-origin dev SPA (the Vite origin `http://localhost:3100`) can call them
+    /// in the browser. The host is responsible for any auth on these routes; the
+    /// operator merges them verbatim. A route here MUST NOT collide with an
+    /// existing operator path (`/ws`, `/health`, `/admin/*`) — axum panics on a
+    /// duplicate route at merge time.
+    #[must_use]
+    pub fn serve_routes(mut self, routes: axum::Router) -> Self {
+        self.extra_routes = Some(routes);
         self
     }
 
@@ -296,6 +317,12 @@ impl LocalServerBuilder {
     /// [`spawn`](Self::spawn) so a test can drive it with `tower::ServiceExt::oneshot`.
     fn build_app(&self) -> axum::Router {
         let mut app = router(self.build());
+        // Host-supplied real routes (e.g. the daemon's `/search`) are merged so
+        // they sit alongside the operator's own routes. They carry the same
+        // permissive CORS as `/admin` so the cross-origin dev SPA can call them.
+        if let Some(routes) = self.extra_routes.clone() {
+            app = app.merge(routes.layer(crate::admin::admin_cors()));
+        }
         // A host SPA (smooth-web) is mounted as the router fallback so the
         // operator's explicit routes (`/ws`, `/health`, `/admin/*`) still win and
         // everything else — `/`, hashed assets, SPA client routes — is served by
@@ -628,6 +655,57 @@ mod tests {
         assert!(
             LocalServerBuilder::default().spa_router.is_none(),
             "no SPA mounted unless the host installs one"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_routes_merges_host_routes_alongside_operator_routes() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // A host route that must respond as a real route (not a fallback), while
+        // the operator's own `/health` keeps working.
+        let routes =
+            axum::Router::new().route("/search", axum::routing::get(|| async { "SEARCH-OK" }));
+        let app = LocalServerBuilder::default()
+            .serve_routes(routes)
+            .build_app();
+
+        // The merged host route responds.
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/search?q=foo")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"SEARCH-OK", "merged host route responds");
+
+        // The operator's own `/health` still works alongside the merged routes.
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok", "operator routes survive the merge");
+    }
+
+    #[test]
+    fn no_extra_routes_by_default() {
+        assert!(
+            LocalServerBuilder::default().extra_routes.is_none(),
+            "no host routes merged unless the host installs them"
         );
     }
 

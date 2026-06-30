@@ -111,7 +111,7 @@ pub fn router() -> Router<AppState> {
 /// sends (`authorization` for the bearer token, `content-type` for JSON bodies).
 /// Auth is unaffected — every route still runs [`require_role`], so this only
 /// relaxes the browser's same-origin policy, not the server's authorization.
-fn admin_cors() -> tower_http::cors::CorsLayer {
+pub(crate) fn admin_cors() -> tower_http::cors::CorsLayer {
     use axum::http::{header, Method};
     tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
