@@ -3354,6 +3354,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.15",
@@ -3973,7 +3974,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4005,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-backplane-nats"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4021,7 +4022,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-backplane-redis"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4037,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-dynamodb"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4058,7 +4059,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4071,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-postgres"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4157,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4204,7 +4205,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
