@@ -36,6 +36,10 @@
           "type": "boolean",
           "default": true,
           "description": "Whether to receive incremental `stream_chunk` and `stream_token` events. Defaults to `true`. Set to `false` to receive only the final `eventual_response`."
+        },
+        "model": {
+          "type": "string",
+          "description": "Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model."
         }
       }
     },
