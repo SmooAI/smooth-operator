@@ -1,6 +1,7 @@
 using System.ClientModel;
 using System.Net.Http.Headers;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.FileProviders;
 using OpenAI;
 using SmooAI.SmoothOperator.Server;
 using SmooAI.SmoothOperator.Server.AspNetCore;
@@ -70,6 +71,16 @@ builder.Services.AddSingleton(new TokenAccessResolver(new AuthOptions
     Hs256Secret = Get("SMOOTH_JWT_HS256_SECRET"),
 }));
 
+// ── Local-flavor token (Big Smooth): when SMOOTH_LOCAL_TOKEN is set, /ws + admin verify the
+//    ?token= slot against it — the same token injected into the SPA below — so a same-origin browser
+//    drives the agent without a JWT. Registering an IAuthVerifier wins over the TokenAccessResolver
+//    seam. Mirrors the Rust host's LocalTokenVerifier + strict_auth. ──
+var localToken = Get("SMOOTH_LOCAL_TOKEN");
+if (!string.IsNullOrEmpty(localToken))
+{
+    builder.Services.AddSingleton<IAuthVerifier>(new LocalTokenVerifier(localToken));
+}
+
 // ── Repo ingestion service: parses SMOOTH_GITHUB_REPOS into RepoSpecs, ingests each into the
 //    ACL-aware store stamped with its github:owner/repo group. Registered so it serves both the
 //    startup ingest AND the POST /admin/reindex endpoint (re-index without a restart). ──
@@ -104,9 +115,32 @@ builder.Services.AddSmoothOperatorServer();
 
 var app = builder.Build();
 
+// ── Local flavor (Big Smooth): serve a prebuilt SPA (smooth-web) same-origin from SMOOTH_WEB_DIR,
+//    with the local token injected into index.html as window.__SMOOTH_TOKEN__ so the browser connects
+//    to /ws?token=… with no query string. Static assets are served from the dir; every other GET
+//    (the SPA's client routes) falls back to the injected index.html. Mirrors the Rust host's
+//    serve_spa(web_router_with_token). No-op when SMOOTH_WEB_DIR is unset/missing. ──
+var webDir = Get("SMOOTH_WEB_DIR");
+string? injectedIndex = null;
+if (!string.IsNullOrEmpty(webDir) && Directory.Exists(webDir))
+{
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = new PhysicalFileProvider(Path.GetFullPath(webDir)),
+    });
+    injectedIndex = BuildIndexHtml(Path.Combine(webDir, "index.html"), localToken);
+}
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok", model, auth = authMode.ToString().ToLowerInvariant() }));
 app.MapSmoothOperatorWebSocket("/ws");
 app.MapSmoothOperatorAdmin();
+
+// SPA fallback: any unmatched GET serves the (token-injected) index.html — lowest-priority endpoint,
+// so /health, /ws, /admin, and real static assets always win first.
+if (injectedIndex is not null)
+{
+    app.MapFallback(() => Results.Content(injectedIndex, "text/html; charset=utf-8"));
+}
 
 // ── Startup ingestion of configured repos (background — doesn't block readiness). The same
 //    service backs POST /admin/reindex, so docs can be re-indexed later without a restart. ──
@@ -117,6 +151,18 @@ if (repos.Length > 0)
 }
 
 app.Run();
+
+// Read the SPA's index.html and, when a token is set, inject window.__SMOOTH_TOKEN__ into <head>
+// (before the app bundle) so the same-origin SPA reads it instead of a ?token= query string. JSON-
+// encoding the token keeps quoting safe. Mirrors the Rust host's inject_token.
+static string BuildIndexHtml(string indexPath, string token)
+{
+    var html = File.Exists(indexPath) ? File.ReadAllText(indexPath) : "<!doctype html><title>Big Smooth</title>";
+    if (string.IsNullOrEmpty(token)) return html;
+    var script = $"<script>window.__SMOOTH_TOKEN__={System.Text.Json.JsonSerializer.Serialize(token)}</script>";
+    var head = html.IndexOf("<head>", StringComparison.OrdinalIgnoreCase);
+    return head >= 0 ? html.Insert(head + "<head>".Length, script) : script + html;
+}
 
 static HttpClient EmbeddingHttpClient(string gatewayUrl, string key)
 {
