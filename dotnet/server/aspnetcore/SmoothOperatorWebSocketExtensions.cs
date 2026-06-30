@@ -71,11 +71,16 @@ public static class SmoothOperatorWebSocketExtensions
         var token = context.Request.Query["token"].FirstOrDefault();
         var access = verifier.Resolve(token);
 
+        // Big Smooth persona: SMOOTH_PERSONA overrides the stock system prompt so every backend (any
+        // language) runs as the user's personal operator. Unset ⇒ the server's default persona.
+        var persona = Environment.GetEnvironmentVariable("SMOOTH_PERSONA");
+
         return new FrameDispatcher(
             services.GetRequiredService<ISessionStore>(),
             services.GetRequiredService<IChatClient>(),
             services.GetService<IAccessKnowledge>(),
             access,
+            systemPrompt: string.IsNullOrEmpty(persona) ? null : persona,
             reranker: services.GetService<IReranker>(), // null unless the host registered one (rerank is opt-in)
             tools: services.GetService<IReadOnlyList<AITool>>(), // the tools the agent may call (default none — the DI analog of Python's ServerState.tools)
             // Tool-name patterns gated behind write-confirmation HITL (default none — the DI analog of
