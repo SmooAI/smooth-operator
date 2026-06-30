@@ -16,6 +16,7 @@ use smooth_operator::access_control::AccessContext;
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
 };
+use smooth_operator_core::LlmConfig;
 
 use crate::protocol;
 use crate::runner;
@@ -604,6 +605,12 @@ async fn handle_send_message(
         }
     };
 
+    // Per-turn model override (Smooth Modes / `/smooth-mode` preset): when the
+    // send_message body carries a non-empty `model`, run THIS turn on it,
+    // overriding the server's configured default model. Absent or blank ⇒ the
+    // config default is kept, so behavior is unchanged when the field is unused.
+    let llm = apply_model_override(llm, parsed);
+
     // Ack: processing started.
     let _ = sink.send(protocol::immediate_response(
         Some(request_id),
@@ -716,6 +723,7 @@ async fn handle_send_message(
                     response,
                     false,
                     &turn.citations,
+                    turn.usage,
                 ));
             }
             Err(e) => {
@@ -808,4 +816,75 @@ fn handle_confirm_tool_action(
         },
         json!({ "sessionId": session_id, "approved": approved }),
     ));
+}
+
+/// Apply an optional per-turn `model` override (from a `send_message` body) to a
+/// resolved [`LlmConfig`]. When the body carries a non-empty `model` string, this
+/// turn runs on that gateway model id (a Smooth Modes / `/smooth-mode` preset),
+/// overriding the server's configured default; an absent, non-string, or
+/// blank/whitespace-only `model` leaves the config's default model unchanged
+/// (byte-for-byte the prior behavior). Every other field (url, key, limits)
+/// stays as resolved — only the model id changes.
+fn apply_model_override(mut llm: LlmConfig, body: &Value) -> LlmConfig {
+    if let Some(model) = body.get("model").and_then(Value::as_str) {
+        let model = model.trim();
+        if !model.is_empty() {
+            llm.model = model.to_string();
+        }
+    }
+    llm
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smooth_operator_core::llm::{ApiFormat, RetryPolicy};
+
+    /// A baseline config whose `model` is the server default, so each override
+    /// test asserts against a known starting model.
+    fn base_llm() -> LlmConfig {
+        LlmConfig {
+            api_url: "https://llm.smoo.ai/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "claude-haiku-4-5".to_string(),
+            max_tokens: 512,
+            temperature: 0.0,
+            retry_policy: RetryPolicy::default(),
+            api_format: ApiFormat::OpenAiCompat,
+        }
+    }
+
+    #[test]
+    fn model_override_present_replaces_model() {
+        let body = json!({ "action": "send_message", "model": "claude-opus-4-8" });
+        let llm = apply_model_override(base_llm(), &body);
+        assert_eq!(llm.model, "claude-opus-4-8");
+        // Only the model id changes — every other field is preserved.
+        assert_eq!(llm.api_url, "https://llm.smoo.ai/v1");
+        assert_eq!(llm.api_key, "sk-test");
+        assert_eq!(llm.max_tokens, 512);
+    }
+
+    #[test]
+    fn model_override_absent_keeps_default() {
+        let body = json!({ "action": "send_message", "message": "hi" });
+        let llm = apply_model_override(base_llm(), &body);
+        assert_eq!(llm.model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn model_override_blank_or_non_string_keeps_default() {
+        // Whitespace-only is treated as absent.
+        let blank = json!({ "model": "   " });
+        assert_eq!(
+            apply_model_override(base_llm(), &blank).model,
+            "claude-haiku-4-5"
+        );
+        // A non-string `model` is ignored (no panic, default kept).
+        let wrong_type = json!({ "model": 42 });
+        assert_eq!(
+            apply_model_override(base_llm(), &wrong_type).model,
+            "claude-haiku-4-5"
+        );
+    }
 }

@@ -144,6 +144,13 @@ pub struct AppState {
     /// [`with_default_persona`](Self::with_default_persona). `None` (the default)
     /// keeps the const prompt, so the cloud flavor is byte-for-byte unchanged.
     pub default_persona: Option<String>,
+    /// **Model-pricing cache** for `GET /admin/model-costs`. The gateway's
+    /// `/v1/model/info` pricing is stable, so it's fetched at most once per
+    /// process and reused for every subsequent request (the admin handler sets
+    /// this on the first successful fetch; a gateway error is NOT cached, so a
+    /// transient failure is retried on the next request). Shared across clones so
+    /// every connection/request sees the same cached map.
+    pub model_costs_cache: Arc<tokio::sync::OnceCell<serde_json::Value>>,
 }
 
 /// Namespace a connector name by org for the [`IndexingStore`] key, so two orgs
@@ -194,6 +201,7 @@ impl AppState {
             widget_token: None,
             strict_auth: false,
             default_persona: None,
+            model_costs_cache: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 

@@ -4215,6 +4215,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "jsonwebtoken",
+ "reqwest",
  "serde",
  "serde_json",
  "smooai-smooth-operator",

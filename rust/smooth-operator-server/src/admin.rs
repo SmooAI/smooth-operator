@@ -68,6 +68,11 @@ pub fn router() -> Router<AppState> {
         )
         .route("/admin/indexing/runs", get(indexing_runs))
         .route("/admin/document-sets", get(document_sets))
+        // Per-model pricing for cost badges (Smooth Modes). Intentionally
+        // UNGATED (like `/admin/health`): gateway pricing is not org-sensitive,
+        // and the UI must be able to render badges even on a tokenless local
+        // connection. Degrades to an empty object on any gateway error.
+        .route("/admin/model-costs", get(model_costs))
         // Write API (Phase 12, increment 3) — connector CRUD, index trigger,
         // settings. RBAC: list/get are Curator; create/update/delete are Admin;
         // index trigger is Curator; settings read is Curator, write is Admin.
@@ -444,6 +449,107 @@ async fn document_sets(
         })
         .collect();
     Json(serde_json::json!({ "documentSets": sets }))
+}
+
+// ---------------------------------------------------------------------------
+// Model costs — `GET /admin/model-costs`
+// ---------------------------------------------------------------------------
+
+/// `GET /admin/model-costs` — per-model gateway pricing, keyed by gateway model
+/// id, for the UI's per-mode cost badges (Smooth Modes). Shape:
+///
+/// ```json
+/// { "<modelId>": { "inputCostPerToken": <number|null>,
+///                  "outputCostPerToken": <number|null>,
+///                  "tier": "<model_tier|null>",
+///                  "useCases": [<string>] } }
+/// ```
+///
+/// Ungated (see the route registration): pricing isn't org-sensitive and the
+/// badge must render even on a tokenless local connection. The gateway's
+/// `/v1/model/info` is fetched at most once per process (cached in
+/// [`AppState::model_costs_cache`]); on **any** gateway error this returns an
+/// empty object with status 200 — never a 500 — so the UI degrades to no-badge.
+async fn model_costs(State(state): State<AppState>) -> Json<Value> {
+    // Reuse the cached pricing if a prior request already fetched it.
+    if let Some(cached) = state.model_costs_cache.get() {
+        return Json(cached.clone());
+    }
+    match fetch_model_costs(&state.config).await {
+        Ok(map) => {
+            // Cache the first success; a lost race (another request set it first)
+            // is harmless — both computed the same stable pricing.
+            let _ = state.model_costs_cache.set(map.clone());
+            Json(map)
+        }
+        // Degrade to no-badge on any gateway/transport error — never surface a
+        // 500. NOT cached, so the next request retries.
+        Err(_) => Json(serde_json::json!({})),
+    }
+}
+
+/// Fetch the gateway's `/v1/model/info` (using the server's configured gateway
+/// base url + key — the same creds the turns use) and map it to the
+/// `/admin/model-costs` response shape via [`map_model_info`].
+///
+/// # Errors
+/// Returns an error on any transport / non-2xx / decode failure; the caller maps
+/// that to an empty object (UI degrades gracefully).
+async fn fetch_model_costs(config: &crate::config::ServerConfig) -> anyhow::Result<Value> {
+    // `gateway_url` already ends in `/v1` (e.g. `https://llm.smoo.ai/v1`), so the
+    // model-info endpoint is `{gateway_url}/model/info`.
+    let url = format!("{}/model/info", config.gateway_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    if let Some(key) = config.gateway_key.as_deref() {
+        req = req.bearer_auth(key);
+    }
+    let payload: Value = req.send().await?.error_for_status()?.json().await?;
+    Ok(map_model_info(&payload))
+}
+
+/// Map the gateway's `/v1/model/info` payload
+/// (`{ data: [{ model_name, model_info: { input_cost_per_token,
+/// output_cost_per_token, model_tier, use_cases } }] }`) to the
+/// `/admin/model-costs` response object, keyed by `model_name`. Missing numeric
+/// fields become `null`, a missing tier becomes `null`, and a missing
+/// `use_cases` becomes `[]`. Entries without a `model_name` are skipped. Pure +
+/// network-free so it's unit-testable on a sample payload.
+fn map_model_info(payload: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let Some(entries) = payload.get("data").and_then(Value::as_array) else {
+        return Value::Object(out);
+    };
+    for entry in entries {
+        let Some(name) = entry.get("model_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let info = entry.get("model_info");
+        let input = info
+            .and_then(|i| i.get("input_cost_per_token"))
+            .and_then(Value::as_f64);
+        let output = info
+            .and_then(|i| i.get("output_cost_per_token"))
+            .and_then(Value::as_f64);
+        let tier = info
+            .and_then(|i| i.get("model_tier"))
+            .and_then(Value::as_str);
+        let use_cases = info
+            .and_then(|i| i.get("use_cases"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        out.insert(
+            name.to_string(),
+            serde_json::json!({
+                "inputCostPerToken": input,
+                "outputCostPerToken": output,
+                "tier": tier,
+                "useCases": use_cases,
+            }),
+        );
+    }
+    Value::Object(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -961,4 +1067,80 @@ async fn publish_event(
         .publish(body.target.into(), body.event)
         .await;
     Json(PublishResponse { delivered })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_model_info_maps_sample_payload() {
+        // A representative `/v1/model/info` payload from the LiteLLM gateway.
+        let payload = serde_json::json!({
+            "data": [
+                {
+                    "model_name": "claude-opus-4-8",
+                    "model_info": {
+                        "input_cost_per_token": 0.000015,
+                        "output_cost_per_token": 0.000075,
+                        "model_tier": "frontier",
+                        "use_cases": ["reasoning", "coding"]
+                    }
+                },
+                {
+                    "model_name": "claude-haiku-4-5",
+                    "model_info": {
+                        "input_cost_per_token": 0.0000008,
+                        "output_cost_per_token": 0.000004,
+                        "model_tier": "fast",
+                        "use_cases": ["chat"]
+                    }
+                }
+            ]
+        });
+
+        let out = map_model_info(&payload);
+        let opus = &out["claude-opus-4-8"];
+        assert!((opus["inputCostPerToken"].as_f64().unwrap() - 0.000015).abs() < 1e-12);
+        assert!((opus["outputCostPerToken"].as_f64().unwrap() - 0.000075).abs() < 1e-12);
+        assert_eq!(opus["tier"], "frontier");
+        assert_eq!(opus["useCases"], serde_json::json!(["reasoning", "coding"]));
+
+        let haiku = &out["claude-haiku-4-5"];
+        assert_eq!(haiku["tier"], "fast");
+        assert_eq!(haiku["useCases"], serde_json::json!(["chat"]));
+    }
+
+    #[test]
+    fn map_model_info_tolerates_missing_fields() {
+        // Missing model_info / cost / tier / use_cases → nulls + empty array,
+        // and an entry with no model_name is skipped.
+        let payload = serde_json::json!({
+            "data": [
+                { "model_name": "bare", "model_info": {} },
+                { "model_info": { "model_tier": "x" } }
+            ]
+        });
+        let out = map_model_info(&payload);
+        let obj = out.as_object().unwrap();
+        assert_eq!(obj.len(), 1, "the model_name-less entry is skipped");
+        let bare = &out["bare"];
+        assert!(bare["inputCostPerToken"].is_null());
+        assert!(bare["outputCostPerToken"].is_null());
+        assert!(bare["tier"].is_null());
+        assert_eq!(bare["useCases"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn map_model_info_empty_on_missing_data() {
+        // A payload with no `data` array maps to an empty object (UI no-badge).
+        assert_eq!(
+            map_model_info(&serde_json::json!({})),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            map_model_info(&serde_json::json!({ "data": "nope" })),
+            serde_json::json!({})
+        );
+    }
 }
