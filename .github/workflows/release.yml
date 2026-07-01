@@ -128,7 +128,7 @@ jobs:
                   # resolve smooai-smooth-operator-core from crates.io — the
                   # `version` is the authoritative requirement. Publish-time only;
                   # not committed.
-                  sed -i -E 's#smooai-smooth-operator-core = \{ path = "[^"]*", version = "0.14" \}#smooai-smooth-operator-core = "0.14"#' rust/Cargo.toml
+                  sed -i -E 's#smooai-smooth-operator-core = \{ path = "[^"]*", version = "0.15" }#smooai-smooth-operator-core = "0.15"#' rust/Cargo.toml
                   publish_crate() {
                       local crate="$1"
                       local attempt=1
