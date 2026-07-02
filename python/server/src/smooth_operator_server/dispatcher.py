@@ -18,7 +18,14 @@ from typing import Any
 from smooth_operator_core import Knowledge
 
 from . import protocol
-from .agent_config import AgentConfigResolver, StaticAgentConfigResolver, filter_tools
+from .agent_config import (
+    AgentConfigResolver,
+    NoSessionAuthenticator,
+    SessionAuthenticator,
+    StaticAgentConfigResolver,
+    filter_tools,
+    gate_tools,
+)
 from .auth import AccessContext
 from .confirmation import ConfirmationRegistry
 from .session_store import SessionStore
@@ -40,6 +47,8 @@ class FrameDispatcher:
         confirm_tools: list[str] | None = None,
         confirmations: ConfirmationRegistry | None = None,
         agent_config_resolver: AgentConfigResolver | None = None,
+        session_authenticator: SessionAuthenticator | None = None,
+        judge_model: str | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -58,6 +67,10 @@ class FrameDispatcher:
         #: agent; the default (empty static resolver) returns None → the server-wide
         #: default prompt drives every turn.
         self._agent_config_resolver = agent_config_resolver or StaticAgentConfigResolver()
+        #: Identity-verification seam gating end_user auth-level tools (fail-closed).
+        self._session_authenticator = session_authenticator or NoSessionAuthenticator()
+        #: Fast model for the post-turn workflow judge (None → runner's default).
+        self._judge_model = judge_model
         #: Spawned turn tasks kept alive (the event loop only holds weak refs to
         #: tasks); cleared as each completes so they don't accumulate.
         self._turn_tasks: set[asyncio.Task[Any]] = set()
@@ -183,8 +196,10 @@ class FrameDispatcher:
         #    Resolve the session's per-agent config (SMOODEV-590); None → the
         #    server-wide default prompt drives the turn (behavior unchanged).
         agent_config = await self._agent_config_resolver.resolve(session.agent_id)
-        # Restrict the tool set to the agent's allow-list (empty/None → full set).
+        # Restrict the tool set to the agent's allow-list (empty/None → full set), then
+        # wrap survivors to enforce per-tool authLevel + deliver per-tool config.
         agent_tools = filter_tools(self._tools, agent_config)
+        agent_tools = gate_tools(agent_tools, agent_config, self._session_authenticator, session.conversation_id)
         runner = TurnRunner(
             self._chat_client,
             self._store,
@@ -195,6 +210,7 @@ class FrameDispatcher:
             confirm_tools=self._confirm_tools,
             confirmations=self._confirmations,
             agent_config=agent_config,
+            judge_model=self._judge_model,
         )
 
         # Run the turn as a background task, NOT awaited inline. A turn that calls a

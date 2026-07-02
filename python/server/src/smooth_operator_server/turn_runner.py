@@ -33,7 +33,13 @@ from . import protocol
 from .agent_config import AgentConfig
 from .confirmation import ConfirmationRegistry
 from .session_store import MessageDirection, SessionStore
-from .workflow import judge_workflow_step, next_step, render_workflow_prompt_section, resolve_current_step
+from .workflow import (
+    WORKFLOW_JUDGE_MODEL,
+    judge_workflow_step,
+    next_step,
+    render_workflow_prompt_section,
+    resolve_current_step,
+)
 
 #: Max prior turns replayed into the thread for memory (bounds context growth).
 MAX_PRIOR_MESSAGES = 50
@@ -82,6 +88,7 @@ class TurnRunner:
         confirm_tools: list[str] | None = None,
         confirmations: ConfirmationRegistry | None = None,
         agent_config: AgentConfig | None = None,
+        judge_model: str | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
@@ -90,6 +97,8 @@ class TurnRunner:
         #: Resolved per-agent config (instructions / workflow / persona). ``None`` →
         #: the server-wide default prompt drives the turn (behavior unchanged).
         self._agent_config = agent_config
+        #: Fast/cheap model for the post-turn workflow judge (default haiku-tier).
+        self._judge_model = judge_model or WORKFLOW_JUDGE_MODEL
         self._model = model
         self._tools = tools or []
         #: Tool-name substrings that require human approval before they run (empty →
@@ -291,7 +300,9 @@ class TurnRunner:
         current = resolve_current_step(workflow, current_step_id)
         if current is None:
             return
-        verdict = await judge_workflow_step(self._chat_client, workflow, current, user_message, reply)
+        verdict = await judge_workflow_step(
+            self._chat_client, workflow, current, user_message, reply, model=self._judge_model
+        )
         if verdict == "yes":
             advance = next_step(workflow, current)
             resolved = advance.id if advance is not None else current.id

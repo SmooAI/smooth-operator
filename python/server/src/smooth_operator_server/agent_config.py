@@ -74,6 +74,10 @@ class AgentConfig:
     #: turns are restricted to the ``enabled=true`` entries' ``tool_id`` (empty → the
     #: full server tool set).
     enabled_tools: list[EnabledTool] = field(default_factory=list)
+    #: Agent visibility — ``"public"`` (embeddable widget, no auth session) or
+    #: ``"internal"`` (authenticated dashboard). Gates admin-level tools and decides
+    #: whether ``end_user`` auth is auto-satisfied. Defaults to ``"public"``.
+    visibility: str = "public"
 
     @property
     def is_empty(self) -> bool:
@@ -151,12 +155,14 @@ def parse_agent_config(raw: Any) -> AgentConfig | None:
     else:
         instructions = _clean_str(instructions_raw)
 
+    visibility = "internal" if raw.get("visibility") == "internal" else "public"
     config = AgentConfig(
         instructions=instructions,
         personality=_clean_str(raw.get("personality")),
         greeting=_clean_str(raw.get("greeting")),
         conversation_workflow=parse_workflow(raw.get("conversation_workflow")),
         enabled_tools=_parse_enabled_tools(raw.get("tool_config")),
+        visibility=visibility,
     )
     return None if config.is_empty else config
 
@@ -200,6 +206,85 @@ def filter_tools(tools: list[Any], config: AgentConfig | None) -> list[Any]:
         return tools
     allowed = {e.tool_id for e in config.enabled_tools if e.enabled}
     return [t for t in tools if t.name in allowed]
+
+
+#: Reserved key under which a tool's per-agent ``config`` dict is delivered inside the
+#: execution ``arguments`` (the reference server hands pre-built tools, so config rides
+#: with the call rather than being baked in at tool creation like the monorepo registry).
+CONFIG_ARG_KEY = "__tool_config__"
+
+
+class SessionAuthenticator(ABC):
+    """Decides whether a conversation's user has verified their identity — the seam a
+    host wires OTP/JWT verification behind. Fail-closed by default: an unwired server
+    treats every session as unauthenticated, so ``end_user`` tools on public agents
+    stay gated until a host proves identity."""
+
+    @abstractmethod
+    async def is_authenticated(self, conversation_id: str) -> bool: ...
+
+
+class NoSessionAuthenticator(SessionAuthenticator):
+    """The default: no identity is ever verified (fail-closed)."""
+
+    async def is_authenticated(self, conversation_id: str) -> bool:
+        return False
+
+
+class _GatedTool:
+    """Wraps a :class:`Tool`, enforcing the per-agent ``authLevel`` at execution and
+    delivering the entry's ``config`` to the inner tool. Structurally a ``Tool``
+    (delegates name/description/parameters). Mirrors ``tool-execution.ts``."""
+
+    def __init__(
+        self, inner: Any, entry: EnabledTool, visibility: str, authenticator: SessionAuthenticator, conversation_id: str
+    ) -> None:
+        self.inner = inner
+        self.name = inner.name
+        self.description = inner.description
+        self.parameters = inner.parameters
+        self._entry = entry
+        self._visibility = visibility
+        self._authenticator = authenticator
+        self._conversation_id = conversation_id
+
+    async def execute(self, arguments: dict[str, Any]) -> str:
+        auth_level = self._entry.auth_level
+        # Gate only when a non-trivial auth level is set AND the tool opts in via
+        # `supports_auth_requirement` (default False) — faithful to the reference.
+        if auth_level != "none" and getattr(self.inner, "supports_auth_requirement", False):
+            if auth_level == "admin" and self._visibility == "public":
+                return f"Tool '{self.name}' requires admin authentication and is not available on public-facing agents."
+            # Internal agents auto-satisfy end_user/admin (the session is already authed).
+            # Public agents must verify identity for end_user before the tool runs.
+            if self._visibility != "internal" and not await self._authenticator.is_authenticated(self._conversation_id):
+                return f"Tool '{self.name}' requires identity verification before it can run. Ask the user to verify their identity with a one-time code."
+        # Deliver the per-tool config (only when set → behavior unchanged otherwise).
+        if self._entry.config:
+            arguments = {**arguments, CONFIG_ARG_KEY: self._entry.config}
+        return await self.inner.execute(arguments)
+
+
+def gate_tools(
+    tools: list[Any],
+    config: AgentConfig | None,
+    authenticator: SessionAuthenticator,
+    conversation_id: str,
+) -> list[Any]:
+    """Wrap each tool that has an ``authLevel`` to enforce or per-tool ``config`` to
+    deliver. Tools with neither pass through untouched, so an un-configured agent's
+    tools are unchanged."""
+    if config is None or not config.enabled_tools:
+        return tools
+    by_id = {e.tool_id: e for e in config.enabled_tools}
+    out: list[Any] = []
+    for tool in tools:
+        entry = by_id.get(tool.name)
+        if entry is None or (entry.auth_level == "none" and not entry.config):
+            out.append(tool)
+        else:
+            out.append(_GatedTool(tool, entry, config.visibility, authenticator, conversation_id))
+    return out
 
 
 class AgentConfigResolver(ABC):

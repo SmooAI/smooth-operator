@@ -83,7 +83,19 @@ per turn from the session's agent, it lets each agent override the server-wide
 - **`tool_config.enabledTools`** — a tool allow-list (`[{ toolId, enabled,
   authLevel, config }]`). When non-empty, the agent's turns are restricted to the
   `enabled=true` entries' `toolId` (empty/absent → full server tool set; unknown
-  toolIds ignored). `authLevel`/`config` are preserved for downstream hosts.
+  toolIds ignored).
+- **`authLevel` enforcement** (+ agent `visibility`) — at tool-execution time, a
+  tool whose entry has `authLevel != "none"` **and** that declares
+  `supports_auth_requirement = True` is gated: `admin` on a `public` agent is
+  refused; `internal` agents auto-satisfy; a `public` agent's `end_user` tool
+  consults `ServerState.session_authenticator` (`SessionAuthenticator.is_authenticated`,
+  fail-closed) and is refused until identity is verified. OTP itself is host wiring
+  behind the seam.
+- Each entry's **`config`** dict is delivered to the tool at execution (under the
+  reserved `__tool_config__` argument key).
+
+`ServerState.judge_model` sets the fast/cheap model for the post-turn workflow
+judge (haiku-tier default).
 
 Config is parsed tolerantly (malformed → server default, never crashes a
 session) and the judge is failure-tolerant (any error → stay on the current

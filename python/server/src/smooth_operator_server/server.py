@@ -29,12 +29,13 @@ from urllib.parse import parse_qs, urlsplit
 import websockets
 from smooth_operator_core import Knowledge
 
-from .agent_config import AgentConfigResolver, StaticAgentConfigResolver
+from .agent_config import AgentConfigResolver, NoSessionAuthenticator, SessionAuthenticator, StaticAgentConfigResolver
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
 from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
 from .session_store import InMemorySessionStore, SessionStore
+from .workflow import WORKFLOW_JUDGE_MODEL
 
 #: Default loopback bind, matching the Rust local flavor's canonical WS port.
 DEFAULT_HOST = "127.0.0.1"
@@ -69,6 +70,11 @@ class ServerState:
     #: for every agent, so behavior is unchanged. A multi-tenant host swaps in a
     #: resolver backed by the `agents` table.
     agent_config_resolver: AgentConfigResolver = field(default_factory=StaticAgentConfigResolver)
+    #: Seam deciding whether a conversation's user is identity-verified — gates
+    #: ``end_user`` auth-level tools on public agents. Default fails closed.
+    session_authenticator: SessionAuthenticator = field(default_factory=NoSessionAuthenticator)
+    #: Fast/cheap model for the post-turn workflow judge (default haiku-tier).
+    judge_model: str = WORKFLOW_JUDGE_MODEL
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -127,6 +133,8 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         confirm_tools=state.confirm_tools,
         confirmations=confirmations,
         agent_config_resolver=state.agent_config_resolver,
+        session_authenticator=state.session_authenticator,
+        judge_model=state.judge_model,
     )
 
     cancel_wait = asyncio.ensure_future(state.cancel.wait())
