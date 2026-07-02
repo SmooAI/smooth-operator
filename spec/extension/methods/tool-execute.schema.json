@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/tool-execute.schema.json",
+  "title": "ToolExecute",
+  "description": "Method `tool/execute` (host → ext, request). Runs a tool the extension registered at handshake. While it runs the extension may stream `tool/update` notifications keyed by the same `call_id`, and the host may cancel it with `$/cancel`. The result mirrors the engine's ToolResult: LLM-facing `content`, an `is_error` flag, and optional structured `details` for UI rendering.",
+
+  "$defs": {
+    "Params": {
+      "title": "ToolExecuteParams",
+      "type": "object",
+      "required": ["call_id", "tool", "arguments", "context"],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "type": "string", "description": "Correlates this execution with its `tool/update` progress notifications and any `$/cancel`." },
+        "tool": { "type": "string", "description": "Bare tool name (no `<extension>.` prefix)." },
+        "arguments": { "type": "object", "description": "Tool arguments, validated by the tool's registered `parameters` schema." },
+        "context": {
+          "type": "object",
+          "required": ["token", "tier"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "type": "string" },
+            "tier": { "type": "string", "enum": ["event", "command"] }
+          }
+        }
+      }
+    },
+
+    "Result": {
+      "title": "ToolExecuteResult",
+      "type": "object",
+      "required": ["content"],
+      "additionalProperties": false,
+      "properties": {
+        "content": { "type": "string", "description": "Text result for the LLM to reason about." },
+        "is_error": { "type": "boolean", "default": false, "description": "True if the tool failed; the host surfaces it as an error tool-result." },
+        "details": { "description": "Optional structured data for UI rendering (diffs, tables, …).", "type": ["object", "array", "string", "number", "boolean", "null"] }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

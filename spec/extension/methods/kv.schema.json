@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/kv.schema.json",
+  "title": "Kv",
+  "description": "The `kv/*` methods (ext → host, requests): `kv/get`, `kv/set`, `kv/delete`, `kv/list` — a host-pluggable key/value store (Dolt-backed on the daemon, a JSON file on the CLI). Keys are extension-namespaced by the host; values round-trip as opaque JSON.",
+
+  "$defs": {
+    "GetParams": {
+      "title": "KvGetParams",
+      "type": "object",
+      "required": ["key"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" }
+      }
+    },
+    "GetResult": {
+      "title": "KvGetResult",
+      "type": "object",
+      "required": ["value"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "description": "The stored value, or `null` if the key is unset.", "type": ["object", "array", "string", "number", "boolean", "null"] }
+      }
+    },
+
+    "SetParams": {
+      "title": "KvSetParams",
+      "type": "object",
+      "required": ["key", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "description": "Any JSON value to store." }
+      }
+    },
+    "SetResult": {
+      "title": "KvSetResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "DeleteParams": {
+      "title": "KvDeleteParams",
+      "type": "object",
+      "required": ["key"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" }
+      }
+    },
+    "DeleteResult": {
+      "title": "KvDeleteResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "ListParams": {
+      "title": "KvListParams",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefix": { "type": "string", "description": "Only list keys starting with this prefix; omitted lists all keys." }
+      }
+    },
+    "ListResult": {
+      "title": "KvListResult",
+      "type": "object",
+      "required": ["keys"],
+      "additionalProperties": false,
+      "properties": {
+        "keys": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/GetParams" },
+    { "$ref": "#/$defs/GetResult" },
+    { "$ref": "#/$defs/SetParams" },
+    { "$ref": "#/$defs/SetResult" },
+    { "$ref": "#/$defs/DeleteParams" },
+    { "$ref": "#/$defs/DeleteResult" },
+    { "$ref": "#/$defs/ListParams" },
+    { "$ref": "#/$defs/ListResult" }
+  ]
+}

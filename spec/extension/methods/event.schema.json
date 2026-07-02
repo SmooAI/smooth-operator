@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/event.schema.json",
+  "title": "Event",
+  "description": "Method `event` (host → ext, notification). Fire-and-forget observe: a lifecycle/turn/session event the extension subscribed to. Delivery is filtered by the extension's `subscriptions` — unsubscribed events are never sent. The host's outbound queue is bounded (1024); when it overflows the oldest observe events are shed and an `events_lost` marker event is delivered.",
+
+  "$defs": {
+    "Params": {
+      "title": "EventParams",
+      "type": "object",
+      "required": ["event", "context"],
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "type": "string",
+          "description": "Event name, e.g. `turn_start`, `turn_end`, `message_end`, `tool_call_update`, `session_start`, `events_lost`."
+        },
+        "context": {
+          "type": "object",
+          "required": ["token", "tier"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "type": "string" },
+            "tier": { "type": "string", "enum": ["event", "command"] }
+          }
+        },
+        "payload": { "type": "object", "description": "Event-specific data; extensions read what they understand." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}

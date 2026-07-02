@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/initialize.schema.json",
+  "title": "Initialize",
+  "description": "Method `initialize` (host → ext, request). The handshake: the host announces its `protocol_version`, identity, workspace + trust, session, frontend `mode`/UI capabilities, and which capability groups are enabled; the extension replies with the negotiated `protocol_version`, its identity, and its registrations (tools, commands, flags, event subscriptions). Both sides ignore unknown fields; the effective protocol version is `min(host, ext)`.",
+
+  "$defs": {
+    "Params": {
+      "title": "InitializeParams",
+      "type": "object",
+      "required": ["protocol_version", "host", "workspace", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": { "type": "integer", "minimum": 1, "description": "Highest SEP version the host speaks." },
+        "host": {
+          "type": "object",
+          "required": ["name", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "description": "Host engine name, e.g. `smooth-operator-core`." },
+            "version": { "type": "string", "description": "Host engine semver." }
+          }
+        },
+        "workspace": {
+          "type": "object",
+          "required": ["root", "trusted"],
+          "additionalProperties": false,
+          "properties": {
+            "root": { "type": "string", "description": "Absolute path to the active workspace root." },
+            "trusted": { "type": "boolean", "description": "Whether the workspace is trusted. Project extensions load only when true." }
+          }
+        },
+        "session": {
+          "type": "object",
+          "description": "Present when the host has a session concept (daemon/CLI); absent for the bare engine.",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "description": "Opaque session id." }
+          }
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["tui", "web", "widget", "cli", "headless"],
+          "description": "Frontend rendering mode; drives which `ui/request` kinds are answerable."
+        },
+        "ui_capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "UI request kinds the frontend can render, e.g. `select`, `confirm`, `input`, `notify`, `set_status`, `set_widget`, `set_title`. Empty ⇒ headless."
+        },
+        "capabilities_enabled": {
+          "type": "object",
+          "description": "Which host capability groups the extension may call. A method in a disabled group is rejected with -32004 CapabilityDisabled.",
+          "additionalProperties": { "type": "boolean" },
+          "properties": {
+            "tools": { "type": "boolean" },
+            "commands": { "type": "boolean" },
+            "ui": { "type": "boolean" },
+            "exec": { "type": "boolean" },
+            "kv": { "type": "boolean" },
+            "bus": { "type": "boolean" },
+            "session": { "type": "boolean" }
+          }
+        }
+      }
+    },
+
+    "Result": {
+      "title": "InitializeResult",
+      "type": "object",
+      "required": ["protocol_version", "extension"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": { "type": "integer", "minimum": 1, "description": "Highest SEP version the extension speaks. Effective version = min(host, ext)." },
+        "extension": {
+          "type": "object",
+          "required": ["name", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "description": "Extension name; namespaces its tools/commands (`<name>.<tool>`)." },
+            "version": { "type": "string" }
+          }
+        },
+        "registrations": { "$ref": "#/$defs/Registrations" }
+      }
+    },
+
+    "Registrations": {
+      "title": "SepRegistrations",
+      "description": "What the extension contributes. Also the payload of a later `registry/update` notification.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": { "type": "array", "items": { "$ref": "#/$defs/ToolRegistration" } },
+        "commands": { "type": "array", "items": { "$ref": "#/$defs/CommandRegistration" } },
+        "flags": { "type": "array", "items": { "type": "string" }, "description": "CLI/slash flags the extension owns." },
+        "subscriptions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Event names the extension wants delivered. Doubles as the host's dispatch filter — unsubscribed events are never sent."
+        }
+      }
+    },
+
+    "ToolRegistration": {
+      "title": "SepToolRegistration",
+      "type": "object",
+      "required": ["name", "description", "parameters"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Bare tool name; the host exposes it as `<extension>.<name>`." },
+        "description": { "type": "string" },
+        "parameters": { "type": "object", "description": "JSON Schema for the tool's arguments." },
+        "deferred": { "type": "boolean", "default": false, "description": "If true, register into the host's deferred (tool_search-promoted) tier instead of eager." }
+      }
+    },
+
+    "CommandRegistration": {
+      "title": "SepCommandRegistration",
+      "type": "object",
+      "required": ["name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Slash-command name, without the leading `/`." },
+        "description": { "type": "string" }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}
