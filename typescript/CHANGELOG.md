@@ -1,5 +1,40 @@
 # @smooai/smooth-operator
 
+## 1.9.0
+
+### Minor Changes
+
+- 0e29a9b: Per-agent behavior config: honor `instructions` + run `conversation_workflow` (SMOODEV-590).
+
+  The reference server resolved a turn's system prompt from **per-org** settings, so every agent in an org spoke with the same voice and `conversation_workflow` was never applied — a public chat agent ignored its own persona and behaved as the generic customer-support bot.
+
+  Config-delivery seam (matches the sibling Python/TS/C#/Go lanes): `AgentConfigResolver::resolve(agent_id)` — the ws protocol's `create_conversation_session` carries only an agent UUID, so config is resolved **server-side by id**. Default `StaticAgentConfigResolver` (empty ⇒ no-op, behavior unchanged); a `PgAgentConfigResolver` reads the monorepo `agents` table on the adapter's existing pool. The runner now:
+
+  - uses the agent's `instructions` (+ `personality.persona`) as the system prompt, overriding the org default;
+  - injects the agent's `greeting` into the prompt only on the first turn of a conversation;
+  - restricts the turn's tools to `tool_config.enabledTools` (`enabled == true` entries by snake_case `toolId`; empty/absent ⇒ full set; unknown ids ignored), and delivers each entry's `config` to the tool via `ToolProviderContext`;
+  - enforces per-tool `authLevel` at execution against the agent's `visibility` (a `ToolHook` gate: admin blocked on public agents; internal auto-satisfies; end_user on public requires an identity-verified session, fail-closed — the OTP flow is a host seam);
+  - when a `conversation_workflow` is set, injects the current step's intent/criteria and, after each turn, runs a cheap failure-tolerant judge on the configurable `judge_model` (haiku-tier default) to advance the step; the step id is tracked per session.
+
+  Per-agent isolation, malformed-jsonb tolerance (degrade to org default, never crash the turn), judge-failure tolerance (stay on the current step), and the authLevel branches (admin/end_user/internal, authed vs not) are covered by unit + integration tests.
+
+- 9db9007: C# server: honor per-agent config + implement conversation workflows. An agent's `instructions.prompt` now drives its system prompt (overriding the org/default persona), so agents in the same org behave as themselves rather than a generic customer-support persona. `conversation_workflow` (goal + intent/criteria steps) is now implemented as a stepped, judge-advanced guided-agency flow: the current step's intent + criteria are rendered into the system prompt, and a cheap post-turn judge decides whether the step's criteria were met to advance (explicit `next` or sequential), with the current step id persisted per conversation. Per-agent `greeting` is woven into the agent's first reply only (first-turn prompt seed), and `tool_config.enabledTools` restricts the server's tool set to the agent's enabled snake_case toolIds per turn (empty/absent ⇒ the full set, unchanged). At tool-execution time each entry's `authLevel` is enforced (admin blocked on public agents; `end_user` needs a verified session via the new `ISessionAuthenticator` seam, default fail-closed; internal agents auto-satisfied; only tools declaring `supportsAuthRequirement` are gated) and its per-tool `config` is delivered to the executing tool. The workflow judge model is the uniform `judgeModel` option. Per-agent config reaches the server through a new `IAgentConfigResolver` DI seam (`ResolveAsync(agentId)`, default dict-backed `StaticAgentConfigResolver`) — `create_conversation_session` carries only an agent UUID, so config is resolved server-side per turn from the session's agent (mirroring the TS / Python lanes' `AgentConfigResolver`). jsonb parsing is tolerant (malformed config degrades to the default persona, never crashes a session) and the judge is failure-tolerant (any error keeps the conversation on the current step). Mirrors the Rust server change and the monorepo SMOODEV-590 behavior.
+- a69a799: C# server local flavor: serve a prebuilt SPA same-origin from `SMOOTH_WEB_DIR` with the local token injected into `index.html` as `window.__SMOOTH_TOKEN__`, a `SMOOTH_LOCAL_TOKEN` → `LocalTokenVerifier` for same-origin `/ws` auth, and `SMOOTH_PERSONA` to set the agent's system prompt. Lets the .NET server be a drop-in "Big Smooth" backend behind the shared smooth-web Presence UI (validated end-to-end: SPA + WS + streamed persona reply).
+- a6fab4a: Go server: honor per-agent config + implement conversation workflows (SMOODEV-590).
+
+  Agents served by the Go operator now respect their own per-agent config instead of all sharing one generic org persona. A new `AgentConfigResolver` seam resolves a session's `agentId` into its `AgentConfig` (instructions, `Workflow`, greeting, personality, tool allow-list); resolution is server-side because the `create_conversation_session` payload carries only an `agentId`. An un-configured agent (no resolver, or resolver returns nil) falls back to the server/org default prompt + full tool set, so existing behavior is unchanged. Wire one in via `server.WithAgentConfigResolver`.
+
+  `conversationWorkflow` is implemented as a stepped, judge-advanced guided-agency flow: the current step's intent + criteria are rendered into the system prompt (`<ConversationWorkflow>` block), and after each turn a cheap failure-tolerant judge LLM call decides whether the criteria were met and advances the pointer (following `next` or array order), tracked as `CurrentStepID` on the session. Malformed config degrades to the default flow and never crashes a session. Mirrors the TS/Python server siblings and the Rust reference's `agent-config-instructions-workflow` design.
+
+- ebd2ad2: Python server: honor per-agent config + implement conversation workflows (SMOODEV-590).
+
+  Agents served by the Python server previously ignored their per-agent config and always used the generic server-wide "customer support agent" persona. Now:
+
+  - **Per-agent `instructions`** drive the system prompt for that agent's conversations, overriding the server-wide default (falling back to it when unset). Per-agent `personality` and first-turn `greeting` are plumbed into the prompt; `tool_config.enabledTools` (`[{ toolId, enabled, authLevel, config }]`, the monorepo `AgentToolConfig` shape) is a tool allow-list restricting the agent's turns to the `enabled=true` tools by `toolId` (empty/absent → full set; unknown toolIds ignored), matching the Go/TS lanes. Per-tool `authLevel` is enforced at execution against the agent's `visibility` and a `SessionAuthenticator` seam (admin blocked on public agents; internal auto-satisfies; end_user on public requires identity verification, fail-closed), and each entry's `config` is delivered to the tool at execution. The post-turn judge model is a `judge_model` server option (haiku-tier default).
+  - **`conversation_workflow`** is implemented as a stepped, judge-advanced guided flow: the current step's intent + criteria are rendered into the system prompt, and a cheap post-turn judge call decides whether the criteria were met and advances to the next step (explicit `next` → sequential → terminal). The current step id is tracked per conversation.
+
+  Config parsing is tolerant — a malformed workflow or config degrades to the server default and never crashes a session. The judge is failure-tolerant — any judge error leaves the conversation on the current step. Delivery seam: `ServerState.agent_config_resolver` (`AgentConfigResolver.resolve(agentId)`, default dict-backed `StaticAgentConfigResolver`) is resolved per turn from the session's agent — the ws protocol carries only an agent UUID, so config is looked up server-side. Empty resolver → behavior unchanged. Mirrors the Rust reference PR.
+
 ## 1.8.0
 
 ### Minor Changes
