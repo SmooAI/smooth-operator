@@ -6,9 +6,12 @@ a bad `agents` row can't crash a session.
 
 from __future__ import annotations
 
+import pytest
+
 from smooth_operator_server.agent_config import (
     MAX_STEPS,
     AgentConfig,
+    StaticAgentConfigResolver,
     parse_agent_config,
     parse_workflow,
 )
@@ -125,3 +128,13 @@ def test_agent_config_is_empty() -> None:
     assert AgentConfig().is_empty
     assert not AgentConfig(instructions="x").is_empty
     assert not AgentConfig(tool_config={"a": 1}).is_empty
+
+
+@pytest.mark.asyncio
+async def test_static_resolver() -> None:
+    config = AgentConfig(instructions="hi")
+    resolver = StaticAgentConfigResolver({"a": config})
+    assert await resolver.resolve("a") is config
+    assert await resolver.resolve("missing") is None
+    # Empty resolver is the no-op default.
+    assert await StaticAgentConfigResolver().resolve("a") is None

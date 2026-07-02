@@ -18,7 +18,7 @@ from typing import Any
 from smooth_operator_core import Knowledge
 
 from . import protocol
-from .agent_config import AgentConfig
+from .agent_config import AgentConfigResolver, StaticAgentConfigResolver
 from .auth import AccessContext
 from .confirmation import ConfirmationRegistry
 from .session_store import SessionStore
@@ -39,7 +39,7 @@ class FrameDispatcher:
         tools: list[Any] | None = None,
         confirm_tools: list[str] | None = None,
         confirmations: ConfirmationRegistry | None = None,
-        agent_configs: dict[str, AgentConfig] | None = None,
+        agent_config_resolver: AgentConfigResolver | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -54,9 +54,10 @@ class FrameDispatcher:
         #: `confirm_tool_action` frame resolves the future a parked turn awaits.
         #: Created on demand (one per connection) when HITL is enabled.
         self._confirmations = confirmations if confirmations is not None else ConfirmationRegistry()
-        #: Per-agent config keyed by agentId (SMOODEV-590). Resolved per turn from the
-        #: session's agent; empty → every turn uses the server-wide default prompt.
-        self._agent_configs = agent_configs or {}
+        #: Per-agent config resolver (SMOODEV-590). Resolved per turn from the session's
+        #: agent; the default (empty static resolver) returns None → the server-wide
+        #: default prompt drives every turn.
+        self._agent_config_resolver = agent_config_resolver or StaticAgentConfigResolver()
         #: Spawned turn tasks kept alive (the event loop only holds weak refs to
         #: tasks); cleared as each completes so they don't accumulate.
         self._turn_tasks: set[asyncio.Task[Any]] = set()
@@ -181,7 +182,7 @@ class FrameDispatcher:
         # 2. Stream the turn through a runner scoped to this connection's access.
         #    Resolve the session's per-agent config (SMOODEV-590); None → the
         #    server-wide default prompt drives the turn (behavior unchanged).
-        agent_config = self._agent_configs.get(session.agent_id)
+        agent_config = await self._agent_config_resolver.resolve(session.agent_id)
         runner = TurnRunner(
             self._chat_client,
             self._store,

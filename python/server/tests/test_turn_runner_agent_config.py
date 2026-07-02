@@ -12,6 +12,7 @@ from smooth_operator_server.agent_config import (
     AgentConfig,
     ConversationWorkflow,
     ConversationWorkflowStep,
+    StaticAgentConfigResolver,
 )
 from smooth_operator_server.dispatcher import FrameDispatcher
 from smooth_operator_server.session_store import InMemorySessionStore
@@ -192,10 +193,12 @@ async def test_dispatcher_isolates_config_per_agent() -> None:
     dispatcher = FrameDispatcher(
         store,
         mock,
-        agent_configs={
-            "agent-a": AgentConfig(instructions="I am agent A."),
-            "agent-b": AgentConfig(instructions="I am agent B."),
-        },
+        agent_config_resolver=StaticAgentConfigResolver(
+            {
+                "agent-a": AgentConfig(instructions="I am agent A."),
+                "agent-b": AgentConfig(instructions="I am agent B."),
+            }
+        ),
     )
 
     for sess, key in ((sess_a, "a"), (sess_b, "b")):

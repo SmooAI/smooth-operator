@@ -16,6 +16,7 @@ is byte-for-byte unchanged (the runner stays on its server-wide default prompt).
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -145,3 +146,29 @@ def parse_agent_config(raw: Any) -> AgentConfig | None:
         tool_config=tool_config if isinstance(tool_config, dict) else {},
     )
     return None if config.is_empty else config
+
+
+class AgentConfigResolver(ABC):
+    """Resolves an ``agentId`` to its :class:`AgentConfig`, server-side.
+
+    The config-delivery seam: the ws protocol's ``create_conversation_session``
+    carries only an agent UUID, so per-agent config is looked up here (mirrors the
+    Rust resolver + the TS ``AgentConfigResolver``, and sits alongside the auth
+    verifier seam). A multi-tenant host implements this against the `agents` table;
+    the reference server uses :class:`StaticAgentConfigResolver`."""
+
+    @abstractmethod
+    async def resolve(self, agent_id: str) -> AgentConfig | None:
+        """The agent's config, or ``None`` → the server-wide default drives the turn."""
+        ...
+
+
+class StaticAgentConfigResolver(AgentConfigResolver):
+    """Dict-backed resolver keyed by ``agentId``. The default (empty mapping) is the
+    no-op resolver — every lookup returns ``None`` so behavior is unchanged."""
+
+    def __init__(self, configs: dict[str, AgentConfig] | None = None) -> None:
+        self._configs = configs or {}
+
+    async def resolve(self, agent_id: str) -> AgentConfig | None:
+        return self._configs.get(agent_id)

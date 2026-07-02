@@ -63,8 +63,12 @@ left as a seam (`backplane.py`).
 
 ### Per-agent config + conversation workflows (SMOODEV-590)
 
-`ServerState.agent_configs` maps an `agentId` to an `AgentConfig`. Resolved per
-turn from the session's agent, it lets each agent override the server-wide
+`ServerState.agent_config_resolver` (an `AgentConfigResolver`) looks up an
+`AgentConfig` by `agentId`, server-side — the ws protocol's
+`create_conversation_session` carries only an agent UUID, so config can't ride
+the payload. The default `StaticAgentConfigResolver({...})` is dict-backed (empty
+= no-op); a multi-tenant host swaps in one backed by the `agents` table. Resolved
+per turn from the session's agent, it lets each agent override the server-wide
 `system_prompt`:
 
 - **`instructions`** — the agent's system-prompt body (falls back to
