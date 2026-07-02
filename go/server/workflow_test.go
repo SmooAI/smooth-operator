@@ -30,7 +30,7 @@ func TestParseAgentConfig(t *testing.T) {
 		wantPrompt   string
 		wantWorkflow bool
 		wantGreeting string
-		wantTools    []string
+		wantEnabled  []string // toolIds of entries with Enabled=true
 	}{
 		{name: "empty record -> nil", raw: ``, wantNil: true},
 		{name: "not an object -> nil", raw: `"just a string"`, wantNil: true},
@@ -44,10 +44,11 @@ func TestParseAgentConfig(t *testing.T) {
 		{name: "camelCase workflow key", raw: `{"conversationWorkflow":{"goal":"g","steps":[{"id":"a","intent":"i","criteria":"c"}]}}`, wantWorkflow: true},
 		{name: "broken workflow keeps valid instructions", raw: `{"instructions":"hi","conversation_workflow":{"goal":""}}`, wantPrompt: "hi", wantWorkflow: false},
 		{name: "greeting + personality", raw: `{"greeting":"Hi there","personality":"warm"}`, wantGreeting: "Hi there"},
-		{name: "tool_config allow-list", raw: `{"tool_config":["knowledge_search","fetch_url"]}`, wantTools: []string{"knowledge_search", "fetch_url"}},
-		{name: "allowedTools camel", raw: `{"allowedTools":["a"]}`, wantTools: []string{"a"}},
-		{name: "empty tool array -> nil field", raw: `{"tool_config":[]}`, wantNil: true},
-		{name: "everything", raw: `{"instructions":"You are Bob.",` + validWF + `,"greeting":"Hi","personality":"warm","tool_config":["a"]}`, wantPrompt: "You are Bob.", wantWorkflow: true, wantGreeting: "Hi", wantTools: []string{"a"}},
+		{name: "tool_config enabledTools", raw: `{"tool_config":{"enabledTools":[{"toolId":"knowledge_search"},{"toolId":"fetch_url","enabled":true}]}}`, wantEnabled: []string{"knowledge_search", "fetch_url"}},
+		{name: "tool_config disabled entry dropped from allow-list", raw: `{"tool_config":{"enabledTools":[{"toolId":"a","enabled":true},{"toolId":"b","enabled":false}]}}`, wantEnabled: []string{"a"}},
+		{name: "tool_config empty enabledTools -> nil field", raw: `{"tool_config":{"enabledTools":[]}}`, wantNil: true},
+		{name: "tool_config entry without toolId dropped", raw: `{"tool_config":{"enabledTools":[{"enabled":true}]}}`, wantNil: true},
+		{name: "everything", raw: `{"instructions":"You are Bob.",` + validWF + `,"greeting":"Hi","personality":"warm","tool_config":{"enabledTools":[{"toolId":"a"}]}}`, wantPrompt: "You are Bob.", wantWorkflow: true, wantGreeting: "Hi", wantEnabled: []string{"a"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -70,8 +71,14 @@ func TestParseAgentConfig(t *testing.T) {
 			if cfg.Greeting != tt.wantGreeting {
 				t.Errorf("Greeting = %q, want %q", cfg.Greeting, tt.wantGreeting)
 			}
-			if strings.Join(cfg.AllowedTools, ",") != strings.Join(tt.wantTools, ",") {
-				t.Errorf("AllowedTools = %v, want %v", cfg.AllowedTools, tt.wantTools)
+			var gotEnabled []string
+			for _, e := range cfg.EnabledTools {
+				if e.Enabled {
+					gotEnabled = append(gotEnabled, e.ToolID)
+				}
+			}
+			if strings.Join(gotEnabled, ",") != strings.Join(tt.wantEnabled, ",") {
+				t.Errorf("enabled toolIds = %v, want %v", gotEnabled, tt.wantEnabled)
 			}
 		})
 	}
@@ -233,18 +240,34 @@ func TestAssembleSystemPrompt(t *testing.T) {
 func TestFilterTools(t *testing.T) {
 	tools := []core.Tool{stubTool("knowledge_search"), stubTool("fetch_url"), stubTool("notify_humans")}
 
-	// nil config / empty allow-list -> unchanged.
+	// nil config / empty enabledTools -> unchanged (full set).
 	if got := filterTools(tools, nil); len(got) != 3 {
 		t.Errorf("nil config should keep all tools, got %d", len(got))
 	}
 	if got := filterTools(tools, &AgentConfig{}); len(got) != 3 {
-		t.Errorf("empty allow-list should keep all tools, got %d", len(got))
+		t.Errorf("empty enabledTools should keep all tools, got %d", len(got))
 	}
 
-	// Allow-list filters to the named tools.
-	got := filterTools(tools, &AgentConfig{AllowedTools: []string{"fetch_url", "unknown"}})
+	// Restricts to enabled entries; unknown toolIds ignored; disabled entry excluded.
+	got := filterTools(tools, &AgentConfig{EnabledTools: []EnabledTool{
+		{ToolID: "fetch_url", Enabled: true},
+		{ToolID: "notify_humans", Enabled: false},
+		{ToolID: "unknown", Enabled: true},
+	}})
 	if len(got) != 1 || got[0].Name() != "fetch_url" {
-		t.Errorf("allow-list filter = %v, want [fetch_url]", toolNames(got))
+		t.Errorf("filter = %v, want [fetch_url]", toolNames(got))
+	}
+}
+
+func TestParseToolConfigDefaults(t *testing.T) {
+	// enabled defaults to true, authLevel to "none", config preserved.
+	cfg := ParseAgentConfig(json.RawMessage(`{"tool_config":{"enabledTools":[{"toolId":"a","config":{"k":"v"}}]}}`))
+	if cfg == nil || len(cfg.EnabledTools) != 1 {
+		t.Fatalf("expected one enabled tool, got %+v", cfg)
+	}
+	e := cfg.EnabledTools[0]
+	if !e.Enabled || e.AuthLevel != "none" || e.Config["k"] != "v" {
+		t.Errorf("defaults/config not preserved: %+v", e)
 	}
 }
 

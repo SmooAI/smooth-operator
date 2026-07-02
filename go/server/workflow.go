@@ -69,9 +69,20 @@ type AgentConfig struct {
 	Greeting string
 	// Personality is an optional short descriptor folded into the persona section.
 	Personality string
-	// AllowedTools, when non-empty, is an allow-list restricting this agent to those
-	// tool names (by exact name); empty ⇒ all server tools available.
-	AllowedTools []string
+	// EnabledTools is the agent's tool_config.enabledTools (authoritative shape:
+	// packages/schemas AgentToolConfig). Empty ⇒ all server tools available; non-empty ⇒
+	// restrict to entries with Enabled=true, matched by ToolID. authLevel/config are
+	// preserved for hosts that gate on them (unused by the reference filter today).
+	EnabledTools []EnabledTool
+}
+
+// EnabledTool is one entry of tool_config.enabledTools. Mirrors the monorepo AgentToolConfig
+// entry shape.
+type EnabledTool struct {
+	ToolID    string
+	Enabled   bool
+	AuthLevel string
+	Config    map[string]any
 }
 
 // AgentConfigResolver resolves a session's agent id into its AgentConfig. A nil return
@@ -153,13 +164,9 @@ func ParseAgentConfig(raw json.RawMessage) *AgentConfig {
 		populated = true
 	}
 
-	// tool_config (snake) / allowedTools (camel) — a string array allow-list.
-	toolsRaw := obj["tool_config"]
-	if len(toolsRaw) == 0 {
-		toolsRaw = obj["allowedTools"]
-	}
-	if names := parseStringArray(toolsRaw); len(names) > 0 {
-		cfg.AllowedTools = names
+	// tool_config.enabledTools — per-agent tool allow-list (authoritative AgentToolConfig shape).
+	if enabled := parseToolConfig(obj["tool_config"]); len(enabled) > 0 {
+		cfg.EnabledTools = enabled
 		populated = true
 	}
 
@@ -199,21 +206,38 @@ func parseJSONString(raw json.RawMessage) string {
 	return strings.TrimSpace(s)
 }
 
-// parseStringArray decodes raw as a JSON array of non-empty strings; nil for anything
-// else (a non-array, or a mix — non-string elements are dropped).
-func parseStringArray(raw json.RawMessage) []string {
+// parseToolConfig decodes tool_config.enabledTools tolerantly (authoritative AgentToolConfig
+// shape). Each entry: toolId (required), enabled (default true), authLevel (default "none"),
+// config (optional). Entries without a toolId are dropped; nil for a non-object / no entries.
+func parseToolConfig(raw json.RawMessage) []EnabledTool {
 	if len(raw) == 0 {
 		return nil
 	}
-	var arr []string
-	if err := json.Unmarshal(raw, &arr); err != nil {
+	var tc struct {
+		EnabledTools []struct {
+			ToolID    string         `json:"toolId"`
+			Enabled   *bool          `json:"enabled"`
+			AuthLevel string         `json:"authLevel"`
+			Config    map[string]any `json:"config"`
+		} `json:"enabledTools"`
+	}
+	if err := json.Unmarshal(raw, &tc); err != nil {
 		return nil
 	}
-	out := make([]string, 0, len(arr))
-	for _, s := range arr {
-		if s != "" {
-			out = append(out, s)
+	out := make([]EnabledTool, 0, len(tc.EnabledTools))
+	for _, e := range tc.EnabledTools {
+		if strings.TrimSpace(e.ToolID) == "" {
+			continue
 		}
+		enabled := true // enabled defaults to true when the field is absent.
+		if e.Enabled != nil {
+			enabled = *e.Enabled
+		}
+		authLevel := e.AuthLevel
+		if authLevel == "" {
+			authLevel = "none"
+		}
+		out = append(out, EnabledTool{ToolID: e.ToolID, Enabled: enabled, AuthLevel: authLevel, Config: e.Config})
 	}
 	if len(out) == 0 {
 		return nil
@@ -377,16 +401,18 @@ func assembleSystemPrompt(base string, cfg *AgentConfig, currentStepID string, i
 	return strings.Join(sections, "\n\n")
 }
 
-// filterTools returns the subset of tools whose names are in the config's AllowedTools
-// allow-list. An empty allow-list (or nil config) returns tools unchanged, so an
-// un-configured agent keeps the full server tool set.
+// filterTools restricts tools to the agent's enabled tool_config entries: an empty
+// EnabledTools (or nil config) returns tools unchanged (full set); otherwise only tools
+// whose name matches an entry with Enabled=true survive (unknown toolIds are ignored).
 func filterTools(tools []core.Tool, cfg *AgentConfig) []core.Tool {
-	if cfg == nil || len(cfg.AllowedTools) == 0 {
+	if cfg == nil || len(cfg.EnabledTools) == 0 {
 		return tools
 	}
-	allowed := make(map[string]struct{}, len(cfg.AllowedTools))
-	for _, name := range cfg.AllowedTools {
-		allowed[name] = struct{}{}
+	allowed := make(map[string]struct{}, len(cfg.EnabledTools))
+	for _, e := range cfg.EnabledTools {
+		if e.Enabled {
+			allowed[e.ToolID] = struct{}{}
+		}
 	}
 	out := make([]core.Tool, 0, len(tools))
 	for _, t := range tools {
