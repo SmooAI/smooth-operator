@@ -26,6 +26,22 @@ export interface StoredSession {
      * next turn resumes on the right step.
      */
     currentStepId?: string;
+    /**
+     * The caller's email captured at create-session time, used as an OTP delivery
+     * contact for the `end_user` auth-gate flow. The reference create path captures
+     * only an email; a host store may also carry a phone. `undefined` → no channel to
+     * offer OTP on.
+     */
+    contactEmail?: string;
+    /** The caller's phone, if the store captured one — the SMS OTP delivery contact. */
+    contactPhone?: string;
+    /**
+     * Whether the caller has completed OTP identity verification (set by a successful
+     * `verify_otp`). Threaded into the `end_user` auth gate so a verified caller's
+     * gated tools run. `undefined`/`false` → unverified. The TS analog of the Rust
+     * reference server's `session.metadata.otpVerified`.
+     */
+    otpVerified?: boolean;
 }
 
 /** Whether a stored message came from the user (`inbound`) or the agent (`outbound`). */
@@ -50,6 +66,13 @@ export interface SessionStore {
      * that predate workflows still satisfy the interface.
      */
     setCurrentStep?(sessionId: string, currentStepId: string): Promise<void>;
+    /**
+     * Mark a session identity-verified (or clear it) — called after a successful
+     * `verify_otp`. A no-op for an unknown session. Optional so stores that predate
+     * the OTP seam still satisfy the interface; absent → verification can't persist
+     * (a verified caller's gated tools won't run, fail-closed).
+     */
+    setAuthenticated?(sessionId: string, verified: boolean): Promise<void>;
 }
 
 /** In-process {@link SessionStore}. The TS analog of the Rust in-memory adapter. */
@@ -57,7 +80,7 @@ export class InMemorySessionStore implements SessionStore {
     private readonly sessions = new Map<string, StoredSession>();
     private readonly messages = new Map<string, StoredMessage[]>();
 
-    async createSession(agentId: string, _userName?: string, _userEmail?: string): Promise<StoredSession> {
+    async createSession(agentId: string, _userName?: string, userEmail?: string): Promise<StoredSession> {
         const session: StoredSession = {
             sessionId: randomUUID(),
             conversationId: randomUUID(),
@@ -65,6 +88,9 @@ export class InMemorySessionStore implements SessionStore {
             agentName: 'smooth-agent',
             userParticipantId: randomUUID(),
             agentParticipantId: randomUUID(),
+            // Stash the caller's email as an OTP delivery contact for the end_user
+            // auth-gate flow (mirrors the Rust reference capturing contactEmail).
+            ...(userEmail ? { contactEmail: userEmail } : {}),
         };
         this.sessions.set(session.sessionId, session);
         this.messages.set(session.conversationId, []);
@@ -95,5 +121,10 @@ export class InMemorySessionStore implements SessionStore {
     async setCurrentStep(sessionId: string, currentStepId: string): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (session) session.currentStepId = currentStepId;
+    }
+
+    async setAuthenticated(sessionId: string, verified: boolean): Promise<void> {
+        const session = this.sessions.get(sessionId);
+        if (session) session.otpVerified = verified;
     }
 }

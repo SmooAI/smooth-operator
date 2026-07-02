@@ -17,6 +17,7 @@ import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js
 import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
+import { availableChannels, isContactEmpty, type OtpContact, type OtpRefusal, type OtpService } from './otp.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
@@ -57,6 +58,16 @@ export interface FrameDispatcherOptions {
      */
     sessionAuthenticator?: SessionAuthenticator;
     /**
+     * End-user OTP identity-verification seam. When set, a turn whose auth gate
+     * refuses an `end_user` tool on an unverified session (and the session has a
+     * contact) triggers the OTP flow: emit `otp_verification_required`, call
+     * {@link OtpService.sendOtp}, emit `otp_sent`; a later `verify_otp` action calls
+     * {@link OtpService.verifyOtp} and, on success, marks the session authenticated.
+     * Undefined → the fail-closed default (refuse, no OTP offered). The server never
+     * holds a code; the host owns generation/expiry.
+     */
+    otpService?: OtpService;
+    /**
      * Tool-name patterns gated behind write-confirmation HITL (default empty → no
      * gating, behavior unchanged). When a turn calls a tool whose name contains one of
      * these, the dispatcher parks the turn and emits `write_confirmation_required`
@@ -83,6 +94,7 @@ export class FrameDispatcher {
     private readonly agentConfig?: AgentConfigResolver;
     private readonly judgeModel?: string;
     private readonly sessionAuthenticator?: SessionAuthenticator;
+    private readonly otpService?: OtpService;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
 
@@ -98,6 +110,7 @@ export class FrameDispatcher {
         this.agentConfig = options.agentConfig;
         this.judgeModel = options.judgeModel;
         this.sessionAuthenticator = options.sessionAuthenticator;
+        this.otpService = options.otpService;
     }
 
     /**
@@ -159,6 +172,9 @@ export class FrameDispatcher {
                     break;
                 case 'confirm_tool_action':
                     this.handleConfirmToolAction(frame, requestId, sink);
+                    break;
+                case 'verify_otp':
+                    await this.handleVerifyOtp(frame, requestId, sink);
                     break;
                 case undefined:
                     sink(protocol.error(requestId, 'VALIDATION_ERROR', "Missing 'action'"));
@@ -249,7 +265,11 @@ export class FrameDispatcher {
             : this.tools;
         // Enforce authLevel + deliver per-tool config at execution (mirrors the
         // monorepo tool-execution gate). No-op for tools without a gated entry / config.
-        const effectiveTools = gateTools(filteredTools, agentConfig, session.conversationId, this.sessionAuthenticator);
+        // The session's own OTP-verified bit is threaded in so a verified caller's
+        // `end_user` tools run; `otpRefusal` records an unverified `end_user` refusal so
+        // we can offer OTP after the turn (the TS analog of the Rust auth-gate handle).
+        const otpRefusal: OtpRefusal = {};
+        const effectiveTools = gateTools(filteredTools, agentConfig, session.conversationId, this.sessionAuthenticator, session.otpVerified ?? false, otpRefusal);
 
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's
         //    access — so a user only ever sees documents their groups grant.
@@ -286,6 +306,20 @@ export class FrameDispatcher {
                 // freeform agents (nextStepId undefined) or a store without setCurrentStep.
                 if (result.nextStepId !== undefined && result.nextStepId !== session.currentStepId) {
                     await this.store.setCurrentStep?.(sessionId, result.nextStepId);
+                }
+                // If the auth gate refused an `end_user` tool for lack of a verified
+                // session this turn, and an OTP service is installed and the session has a
+                // contact to reach, offer the OTP flow BEFORE the terminal event (mirrors
+                // the Rust reference order: otp_verification_required → otp_sent →
+                // eventual_response). The client verifies via `verify_otp` and re-sends its
+                // message once authenticated — the server does not park/auto-resume.
+                if (otpRefusal.refusedTool !== undefined && this.otpService) {
+                    const contact: OtpContact = {};
+                    if (session.contactEmail !== undefined) contact.email = session.contactEmail;
+                    if (session.contactPhone !== undefined) contact.phone = session.contactPhone;
+                    if (!isContactEmpty(contact)) {
+                        await this.offerOtp(sessionId, otpRefusal.refusedTool, contact, reqId, sink);
+                    }
                 }
                 sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
             } catch (err) {
@@ -336,5 +370,79 @@ export class FrameDispatcher {
                 approved,
             }),
         );
+    }
+
+    /**
+     * Emit the OTP-offer sequence for a turn whose `end_user` tool was refused for
+     * lack of a verified session: `otp_verification_required` (prompt the client),
+     * then `sendOtp` on the host service, then `otp_sent` (ack delivery) — or an
+     * `error` event if delivery throws. The masked destination + channel come from
+     * the host; the server never sees the code. `authLevel` is fixed `end_user` (the
+     * only level this flow remedies).
+     */
+    private async offerOtp(sessionId: string, tool: string, contact: OtpContact, requestId: string, sink: Sink): Promise<void> {
+        const otp = this.otpService;
+        if (!otp) return;
+        sink(protocol.otpVerificationRequired(requestId, tool, `Verify your identity to continue using '${tool}'.`, availableChannels(contact), 'end_user'));
+        try {
+            const delivery = await otp.sendOtp(sessionId, contact);
+            sink(protocol.otpSent(requestId, delivery.channel, delivery.maskedDestination));
+        } catch (err) {
+            console.error('[frameDispatcher] otp send failed:', err);
+            sink(protocol.error(requestId, 'OTP_SEND_FAILED', 'failed to send verification code'));
+        }
+    }
+
+    /**
+     * `verify_otp` — validate a submitted OTP code and, on success, mark the session
+     * identity-verified. Per `spec/actions/verify-otp.schema.json` the client sends
+     * `{action, sessionId, requestId, code}` in reply to an `otp_verification_required`
+     * event. There is no dedicated response event: a correct code emits `otp_verified`
+     * (the client re-sends its message to run the gated tool — the server does not
+     * park/auto-resume the original turn), a rejected code emits `otp_invalid` carrying
+     * the host's remaining-attempt count. With no {@link OtpService} installed,
+     * verification is impossible, so we fail closed with `otp_invalid` (`NOT_FOUND`, 0
+     * attempts). Validation order mirrors the Rust reference: requestId, sessionId,
+     * code, session-exists, no-service.
+     */
+    private async handleVerifyOtp(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
+        // requestId is load-bearing (it echoes the originating otp_verification_required); require it.
+        if (requestId === undefined) {
+            sink(protocol.error(undefined, 'VALIDATION_ERROR', "verify_otp requires a 'requestId'"));
+            return;
+        }
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : undefined;
+        if (sessionId === undefined) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "verify_otp requires a 'sessionId'"));
+            return;
+        }
+        const code = typeof frame.code === 'string' ? frame.code : undefined;
+        if (code === undefined) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "verify_otp requires a 'code'"));
+            return;
+        }
+
+        // The session must exist (a code can't verify a session we don't track).
+        const session = await this.store.getSession(sessionId);
+        if (!session) {
+            sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
+            return;
+        }
+
+        // No host OTP service → verification is impossible. Fail closed on the documented
+        // otp_invalid path (a client shouldn't reach here without first receiving
+        // otp_verification_required, which only an installed service emits).
+        if (!this.otpService) {
+            sink(protocol.otpInvalid(requestId, 'NOT_FOUND', 0, 'No verification is in progress for this session.'));
+            return;
+        }
+
+        const outcome = await this.otpService.verifyOtp(sessionId, code);
+        if (outcome.verified) {
+            await this.store.setAuthenticated?.(sessionId, true);
+            sink(protocol.otpVerified(requestId, 'Identity verified successfully.'));
+        } else {
+            sink(protocol.otpInvalid(requestId, outcome.error, outcome.attemptsRemaining, outcome.message));
+        }
     }
 }

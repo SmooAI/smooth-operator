@@ -130,6 +130,47 @@ describe('protocol conformance', () => {
         expect(citations[0]!.score).toBe(0.91);
     });
 
+    it('otp event builders reproduce the OTP conformance fixtures', () => {
+        const required = fixture('otp_verification_required_event');
+        const reqInner = ((required.data as Record<string, unknown>).data as Record<string, unknown>);
+        const builtRequired = roundTrip(
+            protocol.otpVerificationRequired(
+                required.requestId as string,
+                reqInner.toolId as string,
+                reqInner.actionDescription as string,
+                reqInner.availableChannels as string[],
+                reqInner.authLevel as string,
+            ),
+        );
+        expect(builtRequired.type).toBe('otp_verification_required');
+        expect(((builtRequired.data as Record<string, unknown>).data as Record<string, unknown>)).toEqual(reqInner);
+
+        const sent = fixture('otp_sent_event');
+        const sentInner = ((sent.data as Record<string, unknown>).data as Record<string, unknown>);
+        const builtSent = roundTrip(protocol.otpSent(sent.requestId as string, sentInner.channel as string, sentInner.maskedDestination as string));
+        expect(((builtSent.data as Record<string, unknown>).data as Record<string, unknown>)).toEqual(sentInner);
+
+        const verified = fixture('otp_verified_event');
+        const verifiedInner = ((verified.data as Record<string, unknown>).data as Record<string, unknown>);
+        const builtVerified = roundTrip(protocol.otpVerified(verified.requestId as string, verifiedInner.message as string));
+        expect(((builtVerified.data as Record<string, unknown>).data as Record<string, unknown>)).toEqual(verifiedInner);
+
+        const invalid = fixture('otp_invalid_event');
+        const invalidInner = ((invalid.data as Record<string, unknown>).data as Record<string, unknown>);
+        const builtInvalid = roundTrip(
+            protocol.otpInvalid(invalid.requestId as string, invalidInner.error as string, invalidInner.attemptsRemaining as number, invalidInner.message as string),
+        );
+        expect(((builtInvalid.data as Record<string, unknown>).data as Record<string, unknown>)).toEqual(invalidInner);
+    });
+
+    it('verify_otp_request fixture carries the fields the dispatcher reads', () => {
+        const req = fixture('verify_otp_request');
+        expect(req.action).toBe('verify_otp');
+        expect(typeof req.requestId).toBe('string');
+        expect(typeof req.sessionId).toBe('string');
+        expect(typeof req.code).toBe('string');
+    });
+
     it('pong/error builders carry the discriminators a client matches on', () => {
         expect(protocol.pong('p1').type).toBe('pong');
         const err = protocol.error('e1', 'VALIDATION_ERROR', 'bad');
