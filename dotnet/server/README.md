@@ -64,9 +64,20 @@ advances the (per-conversation-persisted) pointer when the step's criteria are m
 is woven into the first reply only; and its `tool_config.enabledTools` restricts the server's tool set
 to the enabled snake_case toolIds (empty/absent ⇒ the full set, unchanged). At tool-execution time each
 entry's `authLevel` is enforced (admin tools blocked on public agents; `end_user` tools need a verified
-session via the `ISessionAuthenticator` seam — default fails closed; internal agents auto-satisfied;
-only tools that opt in with a `supportsAuthRequirement` registration flag are gated), and the entry's
+session via the `ISessionAuthenticator` seam — default is a store-backed authenticator that fails
+closed until a session completes OTP verification; internal agents auto-satisfied; only tools that
+opt in with a `supportsAuthRequirement` registration flag are gated), and the entry's
 `config` object is handed to the tool at invocation (via `AIFunctionArguments.Context["smooth.tool_config"]`).
+
+**End-user OTP identity flow.** A public agent's refused `end_user` tool can offer a one-time-code
+identity flow via the `IOtpService` host seam (`SendOtpAsync` / `VerifyOtpAsync`) — the server stays
+credential-free (it never generates, holds, or validates a code). When the gate refuses an `end_user`
+tool on an unverified session, an `IOtpService` is registered, and the session has a contact (email
+captured at create-session time), the server emits `otp_verification_required` → `otp_sent` after the
+turn. A `verify_otp` action marks the session identity-verified (`otp_verified`) so its gated tools run
+on the client's re-sent message, or emits `otp_invalid` with the host's remaining-attempt count. No
+service registered ⇒ no OTP offered and `verify_otp` fails closed (`otp_invalid` / `NOT_FOUND`); admin
+refusals are never offered OTP.
 The workflow judge model is the `judgeModel` option on `LlmWorkflowJudge` (default the cheap haiku-tier model).
 `create_conversation_session` carries only an agent UUID, so config is resolved server-side per
 turn from the session's agent (mirrors the TS / Python lanes' `AgentConfigResolver`). Config

@@ -24,6 +24,40 @@ public sealed class DenyAllSessionAuthenticator : ISessionAuthenticator
     public Task<bool> IsAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default) => Task.FromResult(false);
 }
 
+/// <summary>
+/// Captures the name of an <c>end_user</c> tool a turn's gate refused because the session wasn't yet
+/// identity-verified — the one refusal an OTP flow can remedy (an <c>admin</c> refusal never can). The
+/// C# analog of the Rust <c>AuthGateHook::otp_refused_tool</c> slot. One recorder is created per
+/// <c>send_message</c> turn and shared with that turn's <see cref="GatedTool"/>s; the dispatcher reads
+/// it after the turn to decide whether to offer OTP.
+/// </summary>
+public sealed class OtpRefusalRecorder
+{
+    private readonly object _gate = new();
+    private string? _refused;
+
+    /// <summary>Record the refused <c>end_user</c> tool (first one wins for the turn).</summary>
+    public void Record(string tool)
+    {
+        lock (_gate)
+        {
+            _refused ??= tool;
+        }
+    }
+
+    /// <summary>The refused <c>end_user</c> tool, or <c>null</c> if nothing OTP-remediable was blocked.</summary>
+    public string? Refused
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _refused;
+            }
+        }
+    }
+}
+
 /// <summary>The gate's verdict for a tool call (before consulting the authenticator).</summary>
 public enum ToolAuthOutcome
 {
@@ -83,7 +117,7 @@ public static class ToolAuthGate
     /// their config at invocation. A no-op (returns <paramref name="tools"/> unchanged) when the agent
     /// has no <c>enabledTools</c> or none of them need gating/config — so the default path is untouched.
     /// </summary>
-    public static IReadOnlyList<AITool> Apply(IReadOnlyList<AITool> tools, AgentConfig? config, ISessionAuthenticator authenticator, string conversationId)
+    public static IReadOnlyList<AITool> Apply(IReadOnlyList<AITool> tools, AgentConfig? config, ISessionAuthenticator authenticator, string conversationId, OtpRefusalRecorder? refusalRecorder = null)
     {
         if (config?.EnabledTools is not { Count: > 0 } entries || tools.Count == 0)
         {
@@ -102,7 +136,7 @@ public static class ToolAuthGate
             var gate = entry is not null && (entry.AuthLevel != "none" || entry.Config is not null);
             if (gate && tool is AIFunction fn)
             {
-                result.Add(new GatedTool(fn, entry!.AuthLevel, visibility, SupportsAuthRequirement(tool), entry.Config, authenticator, conversationId));
+                result.Add(new GatedTool(fn, entry!.AuthLevel, visibility, SupportsAuthRequirement(tool), entry.Config, authenticator, conversationId, refusalRecorder));
             }
             else
             {
@@ -133,8 +167,9 @@ internal sealed class GatedTool : AIFunction
     private readonly JsonObject? _config;
     private readonly ISessionAuthenticator _authenticator;
     private readonly string _conversationId;
+    private readonly OtpRefusalRecorder? _refusalRecorder;
 
-    public GatedTool(AIFunction inner, string authLevel, string visibility, bool supportsAuth, JsonObject? config, ISessionAuthenticator authenticator, string conversationId)
+    public GatedTool(AIFunction inner, string authLevel, string visibility, bool supportsAuth, JsonObject? config, ISessionAuthenticator authenticator, string conversationId, OtpRefusalRecorder? refusalRecorder = null)
     {
         _inner = inner;
         _authLevel = authLevel;
@@ -143,6 +178,7 @@ internal sealed class GatedTool : AIFunction
         _config = config;
         _authenticator = authenticator;
         _conversationId = conversationId;
+        _refusalRecorder = refusalRecorder;
     }
 
     public override string Name => _inner.Name;
@@ -163,6 +199,10 @@ internal sealed class GatedTool : AIFunction
                 var authed = await _authenticator.IsAuthenticatedAsync(_conversationId, cancellationToken).ConfigureAwait(false);
                 if (!authed)
                 {
+                    // OTP-remediable refusal (public agent, end_user tool, unverified session) — record
+                    // it so the dispatcher can offer the OTP flow after the turn. Admin blocks (handled
+                    // above) are never recorded: no OTP can satisfy them.
+                    _refusalRecorder?.Record(_inner.Name);
                     return ToolAuthGate.VerificationRequiredMessage(_inner.Name);
                 }
                 break;

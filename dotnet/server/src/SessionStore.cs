@@ -7,7 +7,8 @@ public sealed record StoredSession(
     string AgentId,
     string AgentName,
     string UserParticipantId,
-    string AgentParticipantId);
+    string AgentParticipantId,
+    string? UserEmail = null);
 
 public enum MessageDirection
 {
@@ -46,6 +47,34 @@ public interface ISessionStore
     /// <summary>Record the conversation's current workflow step (upsert). Called after the judge
     /// advances the pointer at the end of a turn.</summary>
     Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default);
+
+    /// <summary>Whether this conversation's caller is identity-verified (the persisted
+    /// <c>otpVerified</c> bit — the C# analog of the Rust session's <c>metadata.otpVerified</c>).
+    /// <c>false</c> for a fresh or unknown conversation. Threaded into the <c>end_user</c> auth gate
+    /// via <see cref="StoreSessionAuthenticator"/> so a verified caller's gated tools run.</summary>
+    Task<bool> GetSessionAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default);
+
+    /// <summary>Mark this conversation's caller identity-verified (or clear it). Called after a
+    /// successful <c>verify_otp</c>. Upsert; no-op semantics for an unknown conversation are fine
+    /// (the bit simply reads back on the next turn).</summary>
+    Task SetSessionAuthenticatedAsync(string conversationId, bool verified, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// An <see cref="ISessionAuthenticator"/> backed by the session store's persisted <c>otpVerified</c>
+/// bit — the default when a host wires no authenticator of its own. Fails closed for any conversation
+/// that never completed <c>verify_otp</c> (reads <c>false</c>), so an unwired server is unchanged; a
+/// verified session reads <c>true</c> and its <c>end_user</c> tools run. Mirrors the Rust reference
+/// threading <c>session_authenticated</c> (from session metadata) into <c>build_auth_gate</c>.
+/// </summary>
+public sealed class StoreSessionAuthenticator : ISessionAuthenticator
+{
+    private readonly ISessionStore _store;
+
+    public StoreSessionAuthenticator(ISessionStore store) => _store = store;
+
+    public Task<bool> IsAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default) =>
+        _store.GetSessionAuthenticatedAsync(conversationId, cancellationToken);
 }
 
 /// <summary>In-process <see cref="ISessionStore"/>. The C# analog of the Rust in-memory adapter.</summary>
@@ -55,6 +84,7 @@ public sealed class InMemorySessionStore : ISessionStore
     private readonly Dictionary<string, StoredSession> _sessions = new();
     private readonly Dictionary<string, List<StoredMessage>> _messages = new();
     private readonly Dictionary<string, string> _workflowSteps = new();
+    private readonly HashSet<string> _authenticated = new();
 
     public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default)
     {
@@ -64,7 +94,8 @@ public sealed class InMemorySessionStore : ISessionStore
             AgentId: string.IsNullOrEmpty(agentId) ? Guid.NewGuid().ToString() : agentId,
             AgentName: "smooth-agent",
             UserParticipantId: Guid.NewGuid().ToString(),
-            AgentParticipantId: Guid.NewGuid().ToString());
+            AgentParticipantId: Guid.NewGuid().ToString(),
+            UserEmail: string.IsNullOrEmpty(userEmail) ? null : userEmail);
 
         lock (_gate)
         {
@@ -121,6 +152,30 @@ public sealed class InMemorySessionStore : ISessionStore
         lock (_gate)
         {
             _workflowSteps[conversationId] = stepId;
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> GetSessionAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_authenticated.Contains(conversationId));
+        }
+    }
+
+    public Task SetSessionAuthenticatedAsync(string conversationId, bool verified, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            if (verified)
+            {
+                _authenticated.Add(conversationId);
+            }
+            else
+            {
+                _authenticated.Remove(conversationId);
+            }
         }
         return Task.CompletedTask;
     }
