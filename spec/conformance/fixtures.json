@@ -69,6 +69,87 @@
     }
   },
 
+  "verify_otp_request": {
+    "$schema_ref": "actions/verify-otp.schema.json#/$defs/Request",
+    "description": "A one-time code submitted in reply to an otp_verification_required event.",
+    "instance": {
+      "action": "verify_otp",
+      "requestId": "req-a1b2c3d4-0002",
+      "sessionId": "22222222-2222-2222-2222-222222222222",
+      "code": "123456"
+    }
+  },
+
+  "otp_verification_required_event": {
+    "$schema_ref": "events/otp-verification-required.schema.json",
+    "description": "Emitted when the auth gate refuses an end_user tool on an unverified session and a host OTP service is installed.",
+    "instance": {
+      "type": "otp_verification_required",
+      "requestId": "req-a1b2c3d4-0002",
+      "data": {
+        "requestId": "req-a1b2c3d4-0002",
+        "data": {
+          "toolId": "pay_invoice",
+          "actionDescription": "Verify your identity to continue using 'pay_invoice'.",
+          "availableChannels": ["email"],
+          "authLevel": "end_user"
+        }
+      },
+      "timestamp": 1749340801000
+    }
+  },
+
+  "otp_sent_event": {
+    "$schema_ref": "events/otp-sent.schema.json",
+    "description": "Acknowledgement that a code was dispatched to the caller's email.",
+    "instance": {
+      "type": "otp_sent",
+      "requestId": "req-a1b2c3d4-0002",
+      "data": {
+        "requestId": "req-a1b2c3d4-0002",
+        "data": {
+          "channel": "email",
+          "maskedDestination": "j***@example.com"
+        }
+      },
+      "timestamp": 1749340801500
+    }
+  },
+
+  "otp_verified_event": {
+    "$schema_ref": "events/otp-verified.schema.json",
+    "description": "Emitted when a verify_otp attempt succeeds; the session is now identity-verified.",
+    "instance": {
+      "type": "otp_verified",
+      "requestId": "req-a1b2c3d4-0002",
+      "data": {
+        "requestId": "req-a1b2c3d4-0002",
+        "data": {
+          "message": "Identity verified successfully."
+        }
+      },
+      "timestamp": 1749340802000
+    }
+  },
+
+  "otp_invalid_event": {
+    "$schema_ref": "events/otp-invalid.schema.json",
+    "description": "Emitted when a verify_otp attempt is rejected, carrying the remaining attempt count.",
+    "instance": {
+      "type": "otp_invalid",
+      "requestId": "req-a1b2c3d4-0002",
+      "data": {
+        "requestId": "req-a1b2c3d4-0002",
+        "data": {
+          "error": "INVALID_CODE",
+          "attemptsRemaining": 2,
+          "message": "Invalid code. 2 attempt(s) remaining."
+        }
+      },
+      "timestamp": 1749340802500
+    }
+  },
+
   "eventual_response_event": {
     "$schema_ref": "events/eventual-response.schema.json",
     "description": "Terminal response event for a completed send_message turn.",

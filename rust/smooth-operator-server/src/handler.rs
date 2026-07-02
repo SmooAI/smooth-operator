@@ -75,6 +75,9 @@ pub async fn handle_frame(
         Some("confirm_tool_action") => {
             handle_confirm_tool_action(state, &parsed, request_id, sink);
         }
+        Some("verify_otp") => {
+            handle_verify_otp(state, &parsed, request_id, sink).await;
+        }
         Some(other) => {
             let _ = sink.send(protocol::error(
                 request_id,
@@ -279,7 +282,7 @@ async fn handle_create_session(
         browser_fingerprint,
         browser_info: None,
         name: user_name,
-        email: user_email,
+        email: user_email.clone(),
         phone: None,
         crm_contact_id: None,
         metadata_json: None,
@@ -305,6 +308,17 @@ async fn handle_create_session(
         updated_at: now,
     };
 
+    // Stash the caller's OTP contact on the session so the end_user auth-gate
+    // flow can offer verification without a storage roundtrip (mirrors how the
+    // workflow step pointer lives in session metadata). The reference create path
+    // captures only an email; a host that also captures a phone would add
+    // `contactPhone` here for an SMS channel.
+    let session_metadata = user_email.as_ref().map(|email| {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("contactEmail".to_string(), Value::from(email.clone()));
+        meta
+    });
+
     let session = Session {
         session_id: session_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -319,7 +333,7 @@ async fn handle_create_session(
         status: Some(SessionStatus::Active),
         token_count: Some(0),
         message_count: Some(0),
-        metadata: None,
+        metadata: session_metadata,
         created_at: Some(now),
         updated_at: Some(now),
         ended_at: None,
@@ -682,9 +696,17 @@ async fn handle_send_message(
         .as_ref()
         .map(AgentBehaviorConfig::tool_configs)
         .filter(|m| !m.is_empty());
+    // The session's identity-verified bit (set by a prior successful verify_otp)
+    // is threaded into the gate so a verified caller's `end_user` tools run.
+    let session_authed = state.session_authenticated(session_id);
     let auth_gate = agent_cfg
         .as_ref()
-        .and_then(|cfg| build_auth_gate(state, cfg));
+        .and_then(|cfg| build_auth_gate(state, cfg, session_authed));
+    // Keep a handle to the gate's OTP-refusal flag so, after the turn, we can see
+    // whether an `end_user` tool was refused for lack of verification and (with an
+    // OtpService installed + a known contact) offer the OTP flow. `None` when
+    // there's no gate — the OTP flow can't trigger.
+    let otp_gate = auth_gate.clone();
 
     // The agent's conversation workflow (if any) + the step this session is on.
     let workflow = agent_cfg
@@ -782,6 +804,30 @@ async fn handle_send_message(
                 // workflow (`next_step_id` is `None`).
                 if let Some(step) = turn.next_step_id.as_deref() {
                     state_for_turn.set_session_current_step(&session_id_owned, Some(step));
+                }
+                // If the auth gate refused an `end_user` tool for lack of a
+                // verified session this turn, and a host OTP service is installed
+                // and the session has a contact to reach, offer the OTP flow
+                // (prompt → dispatch → ack). The reference server does not
+                // park/auto-resume; the client verifies via `verify_otp` and
+                // re-sends its message once the session is authenticated.
+                if let (Some(gate), Some(otp)) =
+                    (otp_gate.as_ref(), state_for_turn.otp_service.clone())
+                {
+                    if let Some(tool) = gate.otp_refused_tool() {
+                        let contact = state_for_turn.session_contact(&session_id_owned);
+                        if !contact.is_empty() {
+                            offer_otp(
+                                otp.as_ref(),
+                                &session_id_owned,
+                                &tool,
+                                &contact,
+                                &request_id_owned,
+                                &sink_owned,
+                            )
+                            .await;
+                        }
+                    }
                 }
                 let response = runner::general_agent_response(&turn.reply);
                 let _ = sink_owned.send(protocol::eventual_response(
@@ -911,10 +957,16 @@ const JUDGE_MAX_TOKENS: u32 = 16;
 ///
 /// The set of tools that "support auth requirements" (the operator analog of the
 /// TS `supportsAuthRequirement` flag) comes from `SMOOTH_AGENT_AUTH_TOOLS`
-/// (comma-separated); empty (the default) ⇒ nothing is gated. `session_authenticated`
-/// is fail-closed (`false`) — an OTP / identity-verification flow is host wiring
-/// behind this seam, not implemented by the reference server.
-fn build_auth_gate(state: &AppState, cfg: &AgentBehaviorConfig) -> Option<AuthGateHook> {
+/// (comma-separated); empty (the default) ⇒ nothing is gated.
+/// `session_authenticated` is the session's OTP-verified bit (from a prior
+/// successful `verify_otp`): `false` fail-closed-refuses `end_user` tools (and,
+/// with an OtpService installed, triggers the OTP-offer flow); `true` lets a
+/// verified caller's `end_user` tools run.
+fn build_auth_gate(
+    state: &AppState,
+    cfg: &AgentBehaviorConfig,
+    session_authenticated: bool,
+) -> Option<AuthGateHook> {
     let supporting: std::collections::HashSet<String> = std::env::var("SMOOTH_AGENT_AUTH_TOOLS")
         .ok()
         .into_iter()
@@ -935,8 +987,143 @@ fn build_auth_gate(state: &AppState, cfg: &AgentBehaviorConfig) -> Option<AuthGa
         .iter()
         .map(|t| (t.tool_id.clone(), AuthLevel::parse(&t.auth_level)))
         .collect();
-    let hook = AuthGateHook::new(levels, cfg.visibility, false, supporting);
+    let hook = AuthGateHook::new(levels, cfg.visibility, session_authenticated, supporting);
     hook.is_active().then_some(hook)
+}
+
+/// Emit the OTP-offer sequence for a turn whose `end_user` tool was refused for
+/// lack of a verified session: `otp_verification_required` (prompt the client),
+/// then `send_otp` on the host service, then `otp_sent` (ack delivery) — or an
+/// `error` event if delivery fails. The masked destination + channel come from
+/// the host; the server never sees the code. `auth_level` is fixed `end_user`
+/// (the only level this flow remedies).
+async fn offer_otp(
+    otp: &dyn smooth_operator::otp::OtpService,
+    session_id: &str,
+    tool: &str,
+    contact: &smooth_operator::otp::OtpContact,
+    request_id: &str,
+    sink: &UnboundedSender<Value>,
+) {
+    let channels: Vec<&str> = contact
+        .available_channels()
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+    let _ = sink.send(protocol::otp_verification_required(
+        request_id,
+        tool,
+        &format!("Verify your identity to continue using '{tool}'."),
+        &channels,
+        "end_user",
+    ));
+    match otp.send_otp(session_id, contact).await {
+        Ok(delivery) => {
+            let _ = sink.send(protocol::otp_sent(
+                request_id,
+                delivery.channel.as_str(),
+                &delivery.masked_destination,
+            ));
+        }
+        Err(e) => {
+            let _ = sink.send(protocol::error(
+                Some(request_id),
+                "OTP_SEND_FAILED",
+                &format!("failed to send verification code: {e}"),
+            ));
+        }
+    }
+}
+
+/// `verify_otp` — validate a submitted OTP code and, on success, mark the
+/// session identity-verified. Per `spec/actions/verify-otp.schema.json` the
+/// client sends `{ action, sessionId, requestId, code }` in reply to an
+/// `otp_verification_required` event. There is no dedicated response event: a
+/// correct code emits `otp_verified` (the client then re-sends its message to
+/// run the gated tool — the reference server does not park/auto-resume the
+/// original turn), a rejected code emits `otp_invalid` carrying the host's
+/// remaining-attempt count. With no [`OtpService`](smooth_operator::otp::OtpService)
+/// installed, verification is impossible, so we fail closed with an `otp_invalid`
+/// (`NOT_FOUND`, 0 attempts).
+async fn handle_verify_otp(
+    state: &AppState,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    // requestId is load-bearing (it echoes the originating
+    // otp_verification_required); require it.
+    let Some(request_id) = request_id else {
+        let _ = sink.send(protocol::error(
+            None,
+            "VALIDATION_ERROR",
+            "verify_otp requires a 'requestId'",
+        ));
+        return;
+    };
+
+    let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "VALIDATION_ERROR",
+            "verify_otp requires a 'sessionId'",
+        ));
+        return;
+    };
+
+    let Some(code) = parsed.get("code").and_then(Value::as_str) else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "VALIDATION_ERROR",
+            "verify_otp requires a 'code'",
+        ));
+        return;
+    };
+
+    // The session must exist (a code can't verify a session we don't track).
+    if state.get_session(session_id).is_none() {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "SESSION_NOT_FOUND",
+            &format!("session '{session_id}' not found"),
+        ));
+        return;
+    }
+
+    // No host OTP service → verification is impossible. Fail closed on the
+    // documented otp_invalid path (a client shouldn't reach here without first
+    // receiving otp_verification_required, which only an installed service emits).
+    let Some(otp) = state.otp_service.clone() else {
+        let _ = sink.send(protocol::otp_invalid(
+            request_id,
+            Some("NOT_FOUND"),
+            0,
+            "No verification is in progress for this session.",
+        ));
+        return;
+    };
+
+    match otp.verify_otp(session_id, code).await {
+        smooth_operator::otp::OtpVerifyOutcome::Verified => {
+            state.set_session_authenticated(session_id, true);
+            let _ = sink.send(protocol::otp_verified(
+                request_id,
+                "Identity verified successfully.",
+            ));
+        }
+        smooth_operator::otp::OtpVerifyOutcome::Invalid {
+            attempts_remaining,
+            error,
+            message,
+        } => {
+            let _ = sink.send(protocol::otp_invalid(
+                request_id,
+                error.map(smooth_operator::otp::OtpError::as_str),
+                attempts_remaining,
+                &message,
+            ));
+        }
+    }
 }
 
 /// Build the workflow judge's LLM surface. Prefers a test-injected chat provider

@@ -26,6 +26,7 @@
 //! `nodes/workflow-judge.ts`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -179,6 +180,12 @@ pub struct AuthGateHook {
     visibility: Visibility,
     session_authenticated: bool,
     auth_supporting_tools: HashSet<String>,
+    /// Captures the name of an `end_user` tool this hook refused because the
+    /// session was not yet identity-verified — the one refusal an OTP flow can
+    /// remedy (an `admin` refusal never can). The server reads it after the turn
+    /// to decide whether to offer OTP. `Arc<Mutex<…>>` because the hook is cloned
+    /// into the engine's tool path yet the server keeps a handle to observe it.
+    otp_refused_tool: Arc<Mutex<Option<String>>>,
 }
 
 impl AuthGateHook {
@@ -196,7 +203,17 @@ impl AuthGateHook {
             visibility,
             session_authenticated,
             auth_supporting_tools,
+            otp_refused_tool: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The name of an `end_user` tool this hook refused for lack of a verified
+    /// session during the turn, if any. `Some(tool)` is the server's signal to
+    /// offer OTP; `None` means nothing OTP-remediable was blocked. Cheap to poll
+    /// on a clone of the hook the server retained before installing it.
+    #[must_use]
+    pub fn otp_refused_tool(&self) -> Option<String> {
+        self.otp_refused_tool.lock().ok().and_then(|g| g.clone())
     }
 
     /// `true` when this hook could ever block something — i.e. some auth-supporting
@@ -227,7 +244,21 @@ impl ToolHook for AuthGateHook {
             self.visibility,
             self.session_authenticated,
         ) {
-            Some(message) => Err(anyhow::anyhow!(message)),
+            Some(message) => {
+                // Record the OTP-remediable refusal (public agent, `end_user`
+                // tool, session not yet verified) so the server can offer a
+                // verification flow after the turn. An `admin` refusal is not
+                // recorded — no OTP can satisfy it.
+                if level == AuthLevel::EndUser
+                    && self.visibility == Visibility::Public
+                    && !self.session_authenticated
+                {
+                    if let Ok(mut slot) = self.otp_refused_tool.lock() {
+                        *slot = Some(call.name.clone());
+                    }
+                }
+                Err(anyhow::anyhow!(message))
+            }
             None => Ok(()),
         }
     }
@@ -1017,6 +1048,63 @@ mod tests {
             arguments: serde_json::json!({}),
         };
         assert!(hook.pre_call(&ks).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn auth_gate_records_end_user_refusal_for_otp() {
+        // A public agent, an `end_user` tool, an unverified session → the refusal
+        // is OTP-remediable, so the hook records the tool name.
+        let levels: HashMap<String, AuthLevel> = [("pay".to_string(), AuthLevel::EndUser)]
+            .into_iter()
+            .collect();
+        let supporting: HashSet<String> = ["pay".to_string()].into_iter().collect();
+        let hook = AuthGateHook::new(levels, Visibility::Public, false, supporting);
+
+        assert_eq!(hook.otp_refused_tool(), None, "nothing refused yet");
+        let pay = ToolCall {
+            id: "1".into(),
+            name: "pay".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(hook.pre_call(&pay).await.is_err());
+        assert_eq!(hook.otp_refused_tool(), Some("pay".to_string()));
+    }
+
+    #[tokio::test]
+    async fn auth_gate_does_not_record_admin_refusal_for_otp() {
+        // An `admin` refusal on a public agent is not OTP-remediable, so it is
+        // NOT recorded — the server must not offer OTP for it.
+        let levels: HashMap<String, AuthLevel> = [("admin_tool".to_string(), AuthLevel::Admin)]
+            .into_iter()
+            .collect();
+        let supporting: HashSet<String> = ["admin_tool".to_string()].into_iter().collect();
+        let hook = AuthGateHook::new(levels, Visibility::Public, false, supporting);
+
+        let call = ToolCall {
+            id: "1".into(),
+            name: "admin_tool".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(hook.pre_call(&call).await.is_err());
+        assert_eq!(hook.otp_refused_tool(), None);
+    }
+
+    #[tokio::test]
+    async fn auth_gate_records_nothing_when_session_verified() {
+        // A verified session passes the `end_user` gate → no refusal recorded.
+        let levels: HashMap<String, AuthLevel> = [("pay".to_string(), AuthLevel::EndUser)]
+            .into_iter()
+            .collect();
+        let supporting: HashSet<String> = ["pay".to_string()].into_iter().collect();
+        let hook = AuthGateHook::new(levels, Visibility::Public, true, supporting);
+
+        let pay = ToolCall {
+            id: "1".into(),
+            name: "pay".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(hook.pre_call(&pay).await.is_ok());
+        assert_eq!(hook.otp_refused_tool(), None);
     }
 
     #[test]
