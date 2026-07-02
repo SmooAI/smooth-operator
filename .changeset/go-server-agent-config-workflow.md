@@ -1,5 +1,5 @@
 ---
-"@smooai/smooth-operator-server-go": minor
+"@smooai/smooth-operator": minor
 ---
 
 Go server: honor per-agent config + implement conversation workflows (SMOODEV-590).
