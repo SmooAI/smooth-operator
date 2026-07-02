@@ -25,6 +25,13 @@ Shipped:
   `eventual_response` (with a `citations` seam).
 - `AuthVerifier` seam — a default permissive verifier (anonymous / org-public) and a
   `LocalTokenVerifier` (HS256 JWT, fail-closed), chosen at connect from the `?token=` slot.
+- `AgentConfigResolver` seam (SMOODEV-590) — resolves a session's `agentId` into its
+  per-agent `AgentConfig` (instructions, conversation `Workflow`, greeting, personality,
+  tool allow-list), folded into the turn's system prompt + tools. `StaticAgentConfigResolver`
+  is the in-memory reference; install one via `WithAgentConfigResolver` (default none → the
+  server default prompt + full tool set). A configured `Workflow` runs a stepped,
+  judge-advanced guided-agency flow (`<ConversationWorkflow>` prompt section + a cheap
+  post-turn judge advancing `CurrentStepID`, failure-tolerant).
 - WebSocket transport (`github.com/coder/websocket`) — one `/ws` endpoint, a per-connection
   read loop and a single outbound writer goroutine fed by a channel.
 - **Graceful SIGTERM/SIGINT drain** — one shared drain context; each connection finishes its

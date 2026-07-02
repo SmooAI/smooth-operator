@@ -30,6 +30,10 @@ type TurnResult struct {
 	Reply     string
 	MessageID string
 	Citations []Citation
+	// NextStepID is the workflow step id this conversation should resume on next turn,
+	// after the post-turn judge. Non-empty only when a workflow was configured; the
+	// caller (dispatcher) persists it. "" for freeform agents. SMOODEV-590.
+	NextStepID string
 }
 
 // EventSink writes one built protocol event frame to the connection. Handlers/runners
@@ -61,6 +65,16 @@ type TurnRunner struct {
 	// the dispatcher so a confirm_tool_action frame resolves the verdict a parked
 	// turn awaits. nil → HITL off.
 	confirmations *ConfirmationRegistry
+	// workflow is the agent's structured conversation workflow (nil → freeform). When
+	// set, the runner judges the turn after it completes and returns the advanced step
+	// id in TurnResult.NextStepID. The current step is already rendered into systemPrompt
+	// by the caller (via assembleSystemPrompt). SMOODEV-590.
+	workflow *ConversationWorkflow
+	// currentStepID is the conversation's current workflow step id — the pointer the
+	// post-turn judge advances from.
+	currentStepID string
+	// judgeModel is the cheap model id the workflow judge uses ("" → DefaultJudgeModel).
+	judgeModel string
 }
 
 // NewTurnRunner builds a runner over the engine chat client + session store. An empty
@@ -69,7 +83,11 @@ type TurnRunner struct {
 // knowledge (default nil) grounds the agent AND sources the turn's auto-context
 // citations. confirmTools + confirmations wire write-confirmation HITL; pass nil/empty
 // to disable.
-func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *TurnRunner {
+// The systemPrompt is already assembled (base + per-agent config + current workflow step)
+// and tools already filtered by the caller. workflow/currentStepID/judgeModel (all
+// zero-valued by default) drive the post-turn workflow judge; a nil workflow disables it,
+// so behavior is unchanged for freeform agents. SMOODEV-590.
+func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, workflow *ConversationWorkflow, currentStepID, judgeModel string) *TurnRunner {
 	if systemPrompt == "" {
 		systemPrompt = defaultSystemPrompt
 	}
@@ -81,6 +99,9 @@ func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt stri
 		tools:         tools,
 		confirmTools:  confirmTools,
 		confirmations: confirmations,
+		workflow:      workflow,
+		currentStepID: currentStepID,
+		judgeModel:    judgeModel,
 	}
 }
 
@@ -137,7 +158,8 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	// 2. Build the agent + replay prior history into a thread (before persisting this
 	//    turn's inbound message, so the thread doesn't double-count it). The same
 	//    knowledge feeds the engine's grounding so its auto-injected context matches the
-	//    citations built above.
+	//    citations built above. r.systemPrompt is already assembled (base + per-agent
+	//    config + current workflow step) by the caller.
 	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge}
 
 	// Write-confirmation HITL: when configured with tool patterns AND a registry is
@@ -244,12 +266,25 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		return TurnResult{}, err
 	}
 
-	// 5. Persist the outbound reply and return.
+	// 5. Persist the outbound reply.
 	outbound, err := r.store.AppendMessage(ctx, conversationID, Outbound, reply.String())
 	if err != nil {
 		return TurnResult{}, err
 	}
-	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations}, nil
+
+	// 6. Post-turn workflow judge (SMOODEV-590). When the agent has a structured
+	//    workflow, a cheap judge call decides whether the current step's criteria were met
+	//    this turn and advances the pointer; the advanced step id is returned so the
+	//    caller persists it. Failure-tolerant: any judge error keeps the conversation on
+	//    the current step (never freezes / skips). No-op for freeform agents (NextStepID
+	//    stays "").
+	var nextStepID string
+	if r.workflow != nil {
+		verdict := judgeWorkflowStep(ctx, r.client, r.judgeModel, r.workflow, r.currentStepID, userMessage, reply.String())
+		nextStepID = advanceStep(r.workflow, r.currentStepID, verdict)
+	}
+
+	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations, NextStepID: nextStepID}, nil
 }
 
 // truncate caps a citation snippet at max characters (a plain prefix slice, matching

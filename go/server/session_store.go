@@ -26,6 +26,11 @@ type StoredSession struct {
 	AgentName          string
 	UserParticipantID  string
 	AgentParticipantID string
+	// CurrentStepID is the conversation's current step id within the agent's
+	// conversation workflow. "" means "not started" → the first step is rendered.
+	// Advanced by the post-turn workflow judge and persisted so the next turn resumes on
+	// the right step. SMOODEV-590.
+	CurrentStepID string
 }
 
 // StoredMessage is one persisted conversation message.
@@ -47,6 +52,10 @@ type SessionStore interface {
 	AppendMessage(ctx context.Context, conversationID string, direction MessageDirection, text string) (StoredMessage, error)
 	// ListMessages returns the most recent limit messages for a conversation, oldest first.
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]StoredMessage, error)
+	// SetCurrentStep persists a session's conversation-workflow step id (advanced by the
+	// post-turn judge), so the next turn resumes on the right step. A no-op for an unknown
+	// session. SMOODEV-590.
+	SetCurrentStep(ctx context.Context, sessionID, stepID string) error
 }
 
 // InMemorySessionStore is an in-process SessionStore. The Go analog of the Rust
@@ -123,4 +132,15 @@ func (s *InMemorySessionStore) ListMessages(_ context.Context, conversationID st
 	out := make([]StoredMessage, len(all))
 	copy(out, all)
 	return out, nil
+}
+
+// SetCurrentStep persists a session's workflow step id. A no-op for an unknown session.
+func (s *InMemorySessionStore) SetCurrentStep(_ context.Context, sessionID, stepID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session, ok := s.sessions[sessionID]; ok {
+		session.CurrentStepID = stepID
+		s.sessions[sessionID] = session
+	}
+	return nil
 }

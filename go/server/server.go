@@ -42,6 +42,21 @@ type Server struct {
 	// write_confirmation_required until the client replies with confirm_tool_action.
 	confirmTools []string
 
+	// agentConfigs resolves per-agent config (instructions, workflow, greeting,
+	// personality, tool allow-list) by the session's agent id (SMOODEV-590). Default nil →
+	// every turn uses the built-in default prompt + full tool set, no workflow (behavior
+	// unchanged). A host installs one via WithAgentConfigResolver to serve each agent its
+	// own persona + guided-agency flow.
+	agentConfigs AgentConfigResolver
+	// judgeModel is the cheap model the workflow judge uses ("" → DefaultJudgeModel).
+	judgeModel string
+	// authRequiringTools is the set of tool names that declare supportsAuthRequirement —
+	// only these are subject to the per-agent authLevel gate (default none → no gating).
+	authRequiringTools map[string]bool
+	// sessionAuth verifies end-user identity for end_user-gated tools on public agents
+	// (default nil → fail-closed unauthenticated; a host wires OTP behind it).
+	sessionAuth SessionAuthenticator
+
 	// drainCtx is the single shutdown source for the whole server (one source,
 	// default uncancelled). Each connection loop selects on its Done() so an
 	// in-flight turn can finish before the loop exits (graceful SIGTERM drain).
@@ -90,6 +105,40 @@ func WithKnowledge(k core.Knowledge) Option { return func(srv *Server) { srv.kno
 // confirm_tool_action. Empty preserves byte-for-byte behavior from before HITL.
 func WithConfirmTools(tools []string) Option {
 	return func(srv *Server) { srv.confirmTools = tools }
+}
+
+// WithAgentConfigResolver installs the per-agent config source (instructions, workflow,
+// greeting, personality, tool allow-list), keyed by the session's agent id (SMOODEV-590).
+// Default none → every turn uses the built-in default prompt + full tool set, no
+// workflow. Threaded into every turn via the dispatcher → turn runner.
+func WithAgentConfigResolver(resolver AgentConfigResolver) Option {
+	return func(srv *Server) { srv.agentConfigs = resolver }
+}
+
+// WithJudgeModel overrides the cheap model the workflow judge uses (default: empty →
+// DefaultJudgeModel). Only relevant for agents with a conversation workflow.
+func WithJudgeModel(model string) Option {
+	return func(srv *Server) { srv.judgeModel = model }
+}
+
+// WithAuthRequiringTools declares which tool names support the per-agent authLevel gate
+// (supportsAuthRequirement). Only these tools are gated when an agent's tool_config sets a
+// non-none authLevel; all others always execute (default none → no gating). SMOODEV-590.
+func WithAuthRequiringTools(names ...string) Option {
+	return func(srv *Server) {
+		set := make(map[string]bool, len(names))
+		for _, n := range names {
+			set[n] = true
+		}
+		srv.authRequiringTools = set
+	}
+}
+
+// WithSessionAuthenticator installs the end-user identity check for end_user-gated tools on
+// public agents (default nil → fail-closed: unauthenticated). OTP/verification wiring lives
+// behind this seam in the host. SMOODEV-590.
+func WithSessionAuthenticator(a SessionAuthenticator) Option {
+	return func(srv *Server) { srv.sessionAuth = a }
 }
 
 // New builds a Server with the given options, defaulting every collaborator to its
@@ -224,7 +273,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// the parked turn it resumes are always on the same connection (the session id keys
 	// within it), so the registry need not be server-wide.
 	confirmations := NewConfirmationRegistry()
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations)
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth)
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits
