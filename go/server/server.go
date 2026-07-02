@@ -50,6 +50,12 @@ type Server struct {
 	agentConfigs AgentConfigResolver
 	// judgeModel is the cheap model the workflow judge uses ("" → DefaultJudgeModel).
 	judgeModel string
+	// authRequiringTools is the set of tool names that declare supportsAuthRequirement —
+	// only these are subject to the per-agent authLevel gate (default none → no gating).
+	authRequiringTools map[string]bool
+	// sessionAuth verifies end-user identity for end_user-gated tools on public agents
+	// (default nil → fail-closed unauthenticated; a host wires OTP behind it).
+	sessionAuth SessionAuthenticator
 
 	// drainCtx is the single shutdown source for the whole server (one source,
 	// default uncancelled). Each connection loop selects on its Done() so an
@@ -113,6 +119,26 @@ func WithAgentConfigResolver(resolver AgentConfigResolver) Option {
 // DefaultJudgeModel). Only relevant for agents with a conversation workflow.
 func WithJudgeModel(model string) Option {
 	return func(srv *Server) { srv.judgeModel = model }
+}
+
+// WithAuthRequiringTools declares which tool names support the per-agent authLevel gate
+// (supportsAuthRequirement). Only these tools are gated when an agent's tool_config sets a
+// non-none authLevel; all others always execute (default none → no gating). SMOODEV-590.
+func WithAuthRequiringTools(names ...string) Option {
+	return func(srv *Server) {
+		set := make(map[string]bool, len(names))
+		for _, n := range names {
+			set[n] = true
+		}
+		srv.authRequiringTools = set
+	}
+}
+
+// WithSessionAuthenticator installs the end-user identity check for end_user-gated tools on
+// public agents (default nil → fail-closed: unauthenticated). OTP/verification wiring lives
+// behind this seam in the host. SMOODEV-590.
+func WithSessionAuthenticator(a SessionAuthenticator) Option {
+	return func(srv *Server) { srv.sessionAuth = a }
 }
 
 // New builds a Server with the given options, defaulting every collaborator to its
@@ -242,7 +268,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// the parked turn it resumes are always on the same connection (the session id keys
 	// within it), so the registry need not be server-wide.
 	confirmations := NewConfirmationRegistry()
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel)
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth)
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits

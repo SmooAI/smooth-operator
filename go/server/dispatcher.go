@@ -39,6 +39,10 @@ type FrameDispatcher struct {
 	// judgeModel is the cheap model the workflow judge uses ("" → DefaultJudgeModel),
 	// forwarded to every turn runner.
 	judgeModel string
+	// authRequiringTools is the set of tool names that support the per-agent authLevel gate.
+	authRequiringTools map[string]bool
+	// sessionAuth verifies end-user identity for end_user-gated tools (nil → fail-closed).
+	sessionAuth SessionAuthenticator
 	// turns tracks in-flight spawned send_message turns so the connection loop can wait
 	// for them to finish (and flush their eventual_response) on teardown — the
 	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
@@ -50,21 +54,23 @@ type FrameDispatcher struct {
 // knowledge retriever (default nil) and tools (default none) are threaded into every
 // turn the runner builds. confirmTools + confirmations wire write-confirmation HITL;
 // pass nil/empty + a registry to disable.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string) *FrameDispatcher {
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string, authRequiringTools map[string]bool, sessionAuth SessionAuthenticator) *FrameDispatcher {
 	if confirmations == nil {
 		confirmations = NewConfirmationRegistry()
 	}
 	return &FrameDispatcher{
-		store:         store,
-		client:        client,
-		access:        access,
-		systemP:       systemPrompt,
-		knowledge:     knowledge,
-		tools:         tools,
-		confirmTools:  confirmTools,
-		confirmations: confirmations,
-		agentConfigs:  agentConfigs,
-		judgeModel:    judgeModel,
+		store:              store,
+		client:             client,
+		access:             access,
+		systemP:            systemPrompt,
+		knowledge:          knowledge,
+		tools:              tools,
+		confirmTools:       confirmTools,
+		confirmations:      confirmations,
+		agentConfigs:       agentConfigs,
+		judgeModel:         judgeModel,
+		authRequiringTools: authRequiringTools,
+		sessionAuth:        sessionAuth,
 	}
 }
 
@@ -188,7 +194,9 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	prior, _ := d.store.ListMessages(ctx, session.ConversationID, 1)
 	isFirstTurn := len(prior) == 0
 	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID, isFirstTurn)
-	effectiveTools := filterTools(d.tools, agentConfig)
+	// Restrict to the agent's enabled tools, then wrap survivors with the per-agent auth
+	// gate + per-tool config delivery (enforced at execution).
+	effectiveTools := gateTools(filterTools(d.tools, agentConfig), agentConfig, d.authRequiringTools, d.sessionAuth, session.ConversationID)
 	var workflow *ConversationWorkflow
 	if agentConfig != nil {
 		workflow = agentConfig.Workflow

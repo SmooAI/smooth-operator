@@ -69,6 +69,10 @@ type AgentConfig struct {
 	Greeting string
 	// Personality is an optional short descriptor folded into the persona section.
 	Personality string
+	// Visibility is the agent's placement: "public" (default, embeddable widget — supports
+	// none/end_user auth) or "internal" (authenticated dashboard — end_user/admin
+	// auto-satisfied). Empty ⇒ treated as public. Gates admin/end_user tools at execution.
+	Visibility string
 	// EnabledTools is the agent's tool_config.enabledTools (authoritative shape:
 	// packages/schemas AgentToolConfig). Empty ⇒ all server tools available; non-empty ⇒
 	// restrict to entries with Enabled=true, matched by ToolID. authLevel/config are
@@ -161,6 +165,12 @@ func ParseAgentConfig(raw json.RawMessage) *AgentConfig {
 	}
 	if s := parseJSONString(obj["personality"]); s != "" {
 		cfg.Personality = s
+		populated = true
+	}
+	// visibility is only meaningful when "internal" (public is the default); an unknown
+	// value falls back to public.
+	if parseJSONString(obj["visibility"]) == "internal" {
+		cfg.Visibility = "internal"
 		populated = true
 	}
 
