@@ -92,6 +92,32 @@ func TestEmittedEventsValidateAgainstSpec(t *testing.T) {
 			schemaRef: "events/error.schema.json",
 			event:     errorEvent("req-4", "NOT_FOUND", "Session not found"),
 		},
+		{
+			name:      "otp_verification_required",
+			schemaRef: "events/otp-verification-required.schema.json",
+			event: otpVerificationRequired("req-5", "pay_invoice", "Verify your identity to continue using 'pay_invoice'.",
+				[]OtpChannel{OtpChannelEmail}, "end_user"),
+		},
+		{
+			name:      "otp_sent",
+			schemaRef: "events/otp-sent.schema.json",
+			event:     otpSent("req-5", OtpChannelEmail, "j***@example.com"),
+		},
+		{
+			name:      "otp_verified",
+			schemaRef: "events/otp-verified.schema.json",
+			event:     otpVerified("req-5", "Identity verified successfully."),
+		},
+		{
+			name:      "otp_invalid_with_error",
+			schemaRef: "events/otp-invalid.schema.json",
+			event:     otpInvalid("req-5", OtpErrorInvalidCode, 2, "Invalid code. 2 attempt(s) remaining."),
+		},
+		{
+			name:      "otp_invalid_without_error",
+			schemaRef: "events/otp-invalid.schema.json",
+			event:     otpInvalid("req-5", "", 0, "Verification failed."),
+		},
 	}
 
 	for _, tc := range cases {

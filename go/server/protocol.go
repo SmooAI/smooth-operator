@@ -125,6 +125,90 @@ func writeConfirmationRequired(requestID, toolID, actionDescription string) map[
 	}
 }
 
+// otpVerificationRequired is emitted after a turn's auth gate refused an end_user tool on
+// an unverified session and the host has an OtpService installed. It tells the client to
+// collect a one-time code. Wire shape matches spec/events/otp-verification-required.schema.json
+// and the Rust reference (double-nested data.data). availableChannels are the delivery
+// channels the server can offer given the session's known contacts ("email" / "sms").
+func otpVerificationRequired(requestID, toolID, actionDescription string, availableChannels []OtpChannel, authLevel string) map[string]any {
+	channels := make([]string, len(availableChannels))
+	for i, c := range availableChannels {
+		channels[i] = string(c)
+	}
+	return map[string]any{
+		"type":      "otp_verification_required",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data": map[string]any{
+				"toolId":            toolID,
+				"actionDescription": actionDescription,
+				"availableChannels": channels,
+				"authLevel":         authLevel,
+			},
+		},
+		"timestamp": nowMs(),
+	}
+}
+
+// otpSent acknowledges that a code was dispatched to the caller. Wire shape matches
+// spec/events/otp-sent.schema.json. maskedDestination is a partially masked address safe to
+// display (e.g. j***@example.com); the server never sees the code itself.
+func otpSent(requestID string, channel OtpChannel, maskedDestination string) map[string]any {
+	return map[string]any{
+		"type":      "otp_sent",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data": map[string]any{
+				"channel":           string(channel),
+				"maskedDestination": maskedDestination,
+			},
+		},
+		"timestamp": nowMs(),
+	}
+}
+
+// otpVerified is emitted when a verify_otp attempt succeeds. The session is now
+// identity-verified; the client re-sends its message to run the gated tool (the reference
+// server does not park/auto-resume the original turn). Wire shape matches
+// spec/events/otp-verified.schema.json.
+func otpVerified(requestID, message string) map[string]any {
+	return map[string]any{
+		"type":      "otp_verified",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data":      map[string]any{"message": message},
+		},
+		"timestamp": nowMs(),
+	}
+}
+
+// otpInvalid is emitted when a verify_otp attempt is rejected. errorCode is an optional
+// machine-readable reason ("" ⇒ the key is omitted, per spec); attemptsRemaining of 0 means the
+// code is locked and the client must restart the flow. Wire shape matches
+// spec/events/otp-invalid.schema.json.
+func otpInvalid(requestID string, errorCode OtpErrorCode, attemptsRemaining int, message string) map[string]any {
+	inner := map[string]any{
+		"attemptsRemaining": attemptsRemaining,
+		"message":           message,
+	}
+	// Optional per spec: only emit `error` when the host determined a cause.
+	if errorCode != "" {
+		inner["error"] = string(errorCode)
+	}
+	return map[string]any{
+		"type":      "otp_invalid",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data":      inner,
+		},
+		"timestamp": nowMs(),
+	}
+}
+
 // errorEvent reports a handler/validation failure without dropping the connection.
 //
 // The {code, message} descriptor is duplicated at the envelope top level (`error`)

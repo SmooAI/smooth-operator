@@ -43,6 +43,11 @@ type FrameDispatcher struct {
 	authRequiringTools map[string]bool
 	// sessionAuth verifies end-user identity for end_user-gated tools (nil → fail-closed).
 	sessionAuth SessionAuthenticator
+	// otpService is the host OTP identity-verification seam (nil → no OTP offered; a refused
+	// end_user tool stays refused, behavior unchanged). When installed, a turn that refuses an
+	// end_user tool on a session with a contact triggers the OTP-offer flow, and verify_otp
+	// validates codes through it. th-8078dd.
+	otpService OtpService
 	// turns tracks in-flight spawned send_message turns so the connection loop can wait
 	// for them to finish (and flush their eventual_response) on teardown — the
 	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
@@ -54,7 +59,7 @@ type FrameDispatcher struct {
 // knowledge retriever (default nil) and tools (default none) are threaded into every
 // turn the runner builds. confirmTools + confirmations wire write-confirmation HITL;
 // pass nil/empty + a registry to disable.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string, authRequiringTools map[string]bool, sessionAuth SessionAuthenticator) *FrameDispatcher {
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string, authRequiringTools map[string]bool, sessionAuth SessionAuthenticator, otpService OtpService) *FrameDispatcher {
 	if confirmations == nil {
 		confirmations = NewConfirmationRegistry()
 	}
@@ -71,6 +76,7 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 		judgeModel:         judgeModel,
 		authRequiringTools: authRequiringTools,
 		sessionAuth:        sessionAuth,
+		otpService:         otpService,
 	}
 }
 
@@ -95,6 +101,8 @@ type inboundFrame struct {
 	// confirm_tool_action — *bool so a missing verdict is distinguishable from
 	// false (fail closed: a missing/garbled approved must NOT silently approve).
 	Approved *bool `json:"approved"`
+	// verify_otp — the one-time code the user entered.
+	Code string `json:"code"`
 }
 
 // Dispatch parses one raw frame and routes it. A handler failure mid-turn emits a
@@ -118,6 +126,8 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 		d.handleSendMessage(ctx, frame, sink)
 	case "confirm_tool_action":
 		d.handleConfirmToolAction(frame, sink)
+	case "verify_otp":
+		d.handleVerifyOtp(ctx, frame, sink)
 	case "":
 		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'action'"))
 	default:
@@ -194,9 +204,20 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	prior, _ := d.store.ListMessages(ctx, session.ConversationID, 1)
 	isFirstTurn := len(prior) == 0
 	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID, isFirstTurn)
+	// Thread the session's OTP-verified bit (from a prior successful verify_otp) into the
+	// auth gate so a verified caller's end_user tools run — the Go analog of Rust threading
+	// metadata.otpVerified into build_auth_gate. A verified session short-circuits to
+	// authenticated; otherwise the host SessionAuthenticator seam (nil → fail-closed) decides.
+	effectiveAuth := d.sessionAuth
+	if session.OtpVerified {
+		effectiveAuth = authenticatedSession{}
+	}
+	// Per-turn recorder: the auth gate writes the end_user tool it refused for lack of a
+	// verified session, so after the turn we can offer OTP. th-8078dd.
+	refusal := &otpRefusal{}
 	// Restrict to the agent's enabled tools, then wrap survivors with the per-agent auth
 	// gate + per-tool config delivery (enforced at execution).
-	effectiveTools := gateTools(filterTools(d.tools, agentConfig), agentConfig, d.authRequiringTools, d.sessionAuth, session.ConversationID)
+	effectiveTools := gateTools(filterTools(d.tools, agentConfig), agentConfig, d.authRequiringTools, effectiveAuth, session.ConversationID, refusal)
 	var workflow *ConversationWorkflow
 	if agentConfig != nil {
 		workflow = agentConfig.Workflow
@@ -237,6 +258,17 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		if result.NextStepID != "" && result.NextStepID != session.CurrentStepID {
 			_ = d.store.SetCurrentStep(ctx, frame.SessionID, result.NextStepID)
 		}
+		// If the auth gate refused an end_user tool for lack of a verified session this turn,
+		// and a host OtpService is installed and the session has a contact to reach, offer the
+		// OTP flow (prompt → dispatch → ack) BEFORE the terminal response — mirroring the Rust
+		// reference ordering. The reference server does not park/auto-resume; the client
+		// verifies via verify_otp and re-sends its message once the session is authenticated.
+		if tool := refusal.refusedTool(); tool != "" && d.otpService != nil {
+			contact := OtpContact{Email: session.ContactEmail}
+			if !contact.IsEmpty() {
+				d.offerOtp(ctx, session.SessionID, tool, contact, requestID, sink)
+			}
+		}
 		// 3. Terminal eventual_response.
 		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations))
 	}()
@@ -276,4 +308,77 @@ func (d *FrameDispatcher) handleConfirmToolAction(frame inboundFrame, sink Event
 		"sessionId": frame.SessionID,
 		"approved":  approved,
 	}))
+}
+
+// offerOtp emits the OTP-offer sequence for a turn whose end_user tool was refused for lack
+// of a verified session: otp_verification_required (prompt the client), then SendOtp on the
+// host service, then otp_sent (ack delivery) — or an error event if delivery fails. The masked
+// destination + channel come from the host; the server never sees the code. authLevel is fixed
+// "end_user" (the only level this flow remedies). Mirrors the Rust offer_otp. th-8078dd.
+func (d *FrameDispatcher) offerOtp(ctx context.Context, sessionID, tool string, contact OtpContact, requestID string, sink EventSink) {
+	sink(otpVerificationRequired(
+		requestID,
+		tool,
+		"Verify your identity to continue using '"+tool+"'.",
+		contact.AvailableChannels(),
+		"end_user",
+	))
+	delivery, err := d.otpService.SendOtp(ctx, sessionID, contact)
+	if err != nil {
+		sink(errorEvent(requestID, "OTP_SEND_FAILED", "failed to send verification code"))
+		return
+	}
+	sink(otpSent(requestID, delivery.Channel, delivery.MaskedDestination))
+}
+
+// handleVerifyOtp validates a submitted OTP code and, on success, marks the session
+// identity-verified. Per spec/actions/verify-otp.schema.json the client sends
+// {action, sessionId, requestId, code} in reply to an otp_verification_required event. There is
+// no dedicated response event: a correct code emits otp_verified (the client then re-sends its
+// message to run the gated tool — the reference server does not park/auto-resume the original
+// turn), a rejected code emits otp_invalid carrying the host's remaining-attempt count. With no
+// OtpService installed, verification is impossible, so we fail closed with an otp_invalid
+// (NOT_FOUND, 0 attempts). Validation order mirrors the Rust reference:
+// requestId → sessionId → code → session-exists → no-service. th-8078dd.
+func (d *FrameDispatcher) handleVerifyOtp(ctx context.Context, frame inboundFrame, sink EventSink) {
+	// requestId is load-bearing (it echoes the originating otp_verification_required); require it.
+	if frame.RequestID == "" {
+		sink(errorEvent("", "VALIDATION_ERROR", "verify_otp requires a 'requestId'"))
+		return
+	}
+	if frame.SessionID == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "verify_otp requires a 'sessionId'"))
+		return
+	}
+	if frame.Code == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "verify_otp requires a 'code'"))
+		return
+	}
+
+	// The session must exist (a code can't verify a session we don't track).
+	session, err := d.store.GetSession(ctx, frame.SessionID)
+	if err != nil {
+		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		return
+	}
+	if session == nil {
+		sink(errorEvent(frame.RequestID, "SESSION_NOT_FOUND", "session '"+frame.SessionID+"' not found"))
+		return
+	}
+
+	// No host OTP service → verification is impossible. Fail closed on the documented
+	// otp_invalid path (a client shouldn't reach here without first receiving
+	// otp_verification_required, which only an installed service emits).
+	if d.otpService == nil {
+		sink(otpInvalid(frame.RequestID, OtpErrorNotFound, 0, "No verification is in progress for this session."))
+		return
+	}
+
+	outcome := d.otpService.VerifyOtp(ctx, frame.SessionID, frame.Code)
+	if outcome.OK {
+		_ = d.store.SetSessionAuthenticated(ctx, frame.SessionID, true)
+		sink(otpVerified(frame.RequestID, "Identity verified successfully."))
+		return
+	}
+	sink(otpInvalid(frame.RequestID, outcome.Error, outcome.AttemptsRemaining, outcome.Message))
 }

@@ -32,6 +32,15 @@ Shipped:
   server default prompt + full tool set). A configured `Workflow` runs a stepped,
   judge-advanced guided-agency flow (`<ConversationWorkflow>` prompt section + a cheap
   post-turn judge advancing `CurrentStepID`, failure-tolerant).
+- `OtpService` seam (th-8078dd) — end-user identity verification for `end_user`-gated tools.
+  When a turn's auth gate refuses an `end_user` tool on an unverified session and a service is
+  installed (`WithOtpService`, default none → no OTP offered), the server emits
+  `otp_verification_required`, calls `SendOtp`, and emits `otp_sent`; a `verify_otp` action
+  calls `VerifyOtp` and, on success, emits `otp_verified` and marks the session authenticated
+  (its `otpVerified` bit then lets the gate run the tool on re-send). The reference server never
+  generates, delivers, or holds a code — that is the host's, opaque behind the seam. `admin`
+  refusals are never offered OTP; with no service installed `verify_otp` fails closed
+  (`otp_invalid` / `NOT_FOUND`).
 - WebSocket transport (`github.com/coder/websocket`) — one `/ws` endpoint, a per-connection
   read loop and a single outbound writer goroutine fed by a channel.
 - **Graceful SIGTERM/SIGINT drain** — one shared drain context; each connection finishes its
