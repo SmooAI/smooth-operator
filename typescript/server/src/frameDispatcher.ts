@@ -13,13 +13,14 @@
 import type { ChatClientLike, Knowledge, Tool } from '@smooai/smooth-operator-core';
 import { randomUUID } from 'node:crypto';
 
+import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
 import type { Sink } from './turnRunner.js';
-import { TurnRunner } from './turnRunner.js';
+import { DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
 
 /**
  * A knowledge provider that yields a retriever SCOPED to a given access context —
@@ -39,6 +40,15 @@ export interface FrameDispatcherOptions {
     systemPrompt?: string;
     /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
     tools?: Tool[];
+    /**
+     * SMOODEV-590 — resolves a session's `agentId` into its per-agent config
+     * (instructions, conversationWorkflow, greeting, personality, tool allow-list).
+     * Undefined → every turn uses the server/org default prompt + tools (behavior
+     * unchanged).
+     */
+    agentConfig?: AgentConfigResolver;
+    /** The cheap model id the workflow judge uses (forwarded to the {@link TurnRunner}). */
+    judgeModel?: string;
     /**
      * Tool-name patterns gated behind write-confirmation HITL (default empty → no
      * gating, behavior unchanged). When a turn calls a tool whose name contains one of
@@ -63,6 +73,8 @@ export class FrameDispatcher {
     private readonly tools: Tool[];
     private readonly confirmTools: string[];
     private readonly confirmations: ConfirmationRegistry;
+    private readonly agentConfig?: AgentConfigResolver;
+    private readonly judgeModel?: string;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
 
@@ -75,6 +87,8 @@ export class FrameDispatcher {
         this.tools = options.tools ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations ?? new ConfirmationRegistry();
+        this.agentConfig = options.agentConfig;
+        this.judgeModel = options.judgeModel;
     }
 
     /**
@@ -202,6 +216,25 @@ export class FrameDispatcher {
         // 1. Immediate ack (202).
         sink(protocol.immediateResponse(reqId, 202, 'Processing your request...', {}));
 
+        // SMOODEV-590 — resolve this agent's per-agent config (instructions,
+        // conversationWorkflow, greeting, personality, tool allow-list) by the
+        // session's agentId, and fold it into the effective system prompt + tools for
+        // THIS turn. An un-configured agent (resolver undefined / returns undefined)
+        // falls back to the server/org default prompt + full tool set — behavior
+        // unchanged. Resolution never throws the turn: a resolver error degrades to
+        // the default.
+        let agentConfig;
+        try {
+            agentConfig = (await this.agentConfig?.resolve(session.agentId)) ?? undefined;
+        } catch {
+            agentConfig = undefined;
+        }
+        const baseSystemPrompt = this.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+        const effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId);
+        const effectiveTools = agentConfig?.allowedTools?.length
+            ? this.tools.filter((t) => agentConfig.allowedTools!.includes(t.name))
+            : this.tools;
+
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's
         //    access — so a user only ever sees documents their groups grant.
         const scopedKnowledge = this.knowledge?.forAccess(this.access);
@@ -209,11 +242,14 @@ export class FrameDispatcher {
             chatClient: this.chatClient,
             store: this.store,
             knowledge: scopedKnowledge,
-            systemPrompt: this.systemPrompt,
-            tools: this.tools,
+            systemPrompt: effectiveSystemPrompt,
+            tools: effectiveTools,
             confirmTools: this.confirmTools,
             confirmations: this.confirmations,
             sessionId,
+            workflow: agentConfig?.conversationWorkflow,
+            currentStepId: session.currentStepId,
+            judgeModel: this.judgeModel,
         });
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
@@ -229,6 +265,12 @@ export class FrameDispatcher {
         const turn = (async (): Promise<void> => {
             try {
                 const result = await runner.run(session.conversationId, reqId, message, sink, signal);
+                // SMOODEV-590 — persist the workflow pointer the judge advanced to, so the
+                // next turn on this conversation resumes on the right step. No-op for
+                // freeform agents (nextStepId undefined) or a store without setCurrentStep.
+                if (result.nextStepId !== undefined && result.nextStepId !== session.currentStepId) {
+                    await this.store.setCurrentStep?.(sessionId, result.nextStepId);
+                }
                 sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
             } catch (err) {
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean

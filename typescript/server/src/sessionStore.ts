@@ -19,6 +19,13 @@ export interface StoredSession {
     agentName: string;
     userParticipantId: string;
     agentParticipantId: string;
+    /**
+     * SMOODEV-590 — the conversation's current step id within the agent's
+     * `conversationWorkflow`. `undefined` means "not started" → the first step is
+     * rendered. Advanced by the post-turn workflow judge and persisted here so the
+     * next turn resumes on the right step.
+     */
+    currentStepId?: string;
 }
 
 /** Whether a stored message came from the user (`inbound`) or the agent (`outbound`). */
@@ -37,6 +44,12 @@ export interface SessionStore {
     appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage>;
     /** The most recent `limit` messages for a conversation, oldest first. */
     listMessages(conversationId: string, limit: number): Promise<StoredMessage[]>;
+    /**
+     * SMOODEV-590 — persist the conversation's current workflow step id (set by the
+     * post-turn judge). A no-op for an unknown session. Optional so existing stores
+     * that predate workflows still satisfy the interface.
+     */
+    setCurrentStep?(sessionId: string, currentStepId: string): Promise<void>;
 }
 
 /** In-process {@link SessionStore}. The TS analog of the Rust in-memory adapter. */
@@ -77,5 +90,10 @@ export class InMemorySessionStore implements SessionStore {
         const list = this.messages.get(conversationId);
         if (!list) return [];
         return limit >= list.length ? [...list] : list.slice(list.length - limit);
+    }
+
+    async setCurrentStep(sessionId: string, currentStepId: string): Promise<void> {
+        const session = this.sessions.get(sessionId);
+        if (session) session.currentStepId = currentStepId;
     }
 }
