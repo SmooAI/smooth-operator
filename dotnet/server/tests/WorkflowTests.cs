@@ -1,0 +1,446 @@
+using System.Runtime.CompilerServices;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.AI;
+
+namespace SmooAI.SmoothOperator.Server.Tests;
+
+/// <summary>
+/// Per-agent config + conversation-workflow behavior: tolerant jsonb parsing, pure step/prompt
+/// rendering, judge advancement paths, per-agent prompt assembly + isolation, and malformed-config
+/// tolerance. The C# mirror of the monorepo SMOODEV-590 workflow behavior.
+/// </summary>
+public class WorkflowTests
+{
+    // ── AgentConfig.ParseInstructions — tolerant ─────────────────────────────
+
+    [Fact]
+    public void ParseInstructions_Object_ExtractsPrompt()
+    {
+        Assert.Equal("Be terse.", AgentConfig.ParseInstructions("""{"prompt":"Be terse."}"""));
+    }
+
+    [Fact]
+    public void ParseInstructions_BareString_IsAccepted()
+    {
+        Assert.Equal("Be terse.", AgentConfig.ParseInstructions("\"Be terse.\""));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("{not json")]
+    [InlineData("""{"prompt":""}""")]
+    [InlineData("""{"other":"x"}""")]
+    [InlineData("42")]
+    public void ParseInstructions_MalformedOrEmpty_ReturnsNull(string? json)
+    {
+        Assert.Null(AgentConfig.ParseInstructions(json));
+    }
+
+    // ── AgentConfig.ParseWorkflow — tolerant, schema-bounded ─────────────────
+
+    [Fact]
+    public void ParseWorkflow_Valid_RoundTrips()
+    {
+        var workflow = AgentConfig.ParseWorkflow("""
+            {"goal":"Book a demo","steps":[
+              {"id":"greet","intent":"Greet","criteria":"Said hi","next":"qualify"},
+              {"id":"qualify","intent":"Qualify","criteria":"Got budget"}
+            ]}
+            """);
+        Assert.NotNull(workflow);
+        Assert.Equal("Book a demo", workflow!.Goal);
+        Assert.Equal(2, workflow.Steps.Count);
+        Assert.Equal("qualify", workflow.Steps[0].Next);
+        Assert.Null(workflow.Steps[1].Next);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("[]")] // not an object
+    [InlineData("""{"steps":[{"id":"a","intent":"i","criteria":"c"}]}""")] // missing goal
+    [InlineData("""{"goal":"g","steps":[]}""")] // empty steps
+    [InlineData("""{"goal":"g"}""")] // no steps
+    [InlineData("""{"goal":"g","steps":[{"id":"a","intent":"i"}]}""")] // step missing criteria
+    [InlineData("""{"goal":"g","steps":[{"intent":"i","criteria":"c"}]}""")] // step missing id
+    [InlineData("""{"goal":"g","steps":["nope"]}""")] // step not an object
+    public void ParseWorkflow_MalformedOrIncomplete_ReturnsNull(string? json)
+    {
+        Assert.Null(AgentConfig.ParseWorkflow(json));
+    }
+
+    [Fact]
+    public void ParseWorkflow_TooManySteps_ReturnsNull()
+    {
+        var steps = string.Join(",", Enumerable.Range(0, 21).Select(i => $$"""{"id":"s{{i}}","intent":"i","criteria":"c"}"""));
+        Assert.Null(AgentConfig.ParseWorkflow($$"""{"goal":"g","steps":[{{steps}}]}"""));
+    }
+
+    // ── Workflows.ResolveCurrentStep / NextStep ──────────────────────────────
+
+    private static ConversationWorkflow ThreeStep() => new(
+        "Goal",
+        new[]
+        {
+            new ConversationWorkflowStep("a", "ia", "ca", "c"), // explicit next skips b
+            new ConversationWorkflowStep("b", "ib", "cb", null),
+            new ConversationWorkflowStep("c", "ic", "cc", null),
+        });
+
+    [Fact]
+    public void ResolveCurrentStep_MatchesById()
+    {
+        Assert.Equal("b", Workflows.ResolveCurrentStep(ThreeStep(), "b")!.Id);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("unknown-step")]
+    public void ResolveCurrentStep_EmptyOrUnknown_ReturnsFirst(string? pointer)
+    {
+        Assert.Equal("a", Workflows.ResolveCurrentStep(ThreeStep(), pointer)!.Id);
+    }
+
+    [Fact]
+    public void ResolveCurrentStep_NoSteps_ReturnsNull()
+    {
+        Assert.Null(Workflows.ResolveCurrentStep(new ConversationWorkflow("g", Array.Empty<ConversationWorkflowStep>()), "a"));
+    }
+
+    [Fact]
+    public void NextStep_PrefersExplicitNext()
+    {
+        var wf = ThreeStep();
+        Assert.Equal("c", Workflows.NextStep(wf, wf.Steps[0])!.Id); // a.next = c, skipping b
+    }
+
+    [Fact]
+    public void NextStep_FallsThroughToSequential()
+    {
+        var wf = ThreeStep();
+        Assert.Equal("c", Workflows.NextStep(wf, wf.Steps[1])!.Id); // b has no next → sequential c
+    }
+
+    [Fact]
+    public void NextStep_TerminalStep_ReturnsNull()
+    {
+        var wf = ThreeStep();
+        Assert.Null(Workflows.NextStep(wf, wf.Steps[2])); // c is last
+    }
+
+    [Fact]
+    public void NextStep_UnknownExplicitNext_FallsThroughToSequential()
+    {
+        var wf = new ConversationWorkflow("g", new[]
+        {
+            new ConversationWorkflowStep("a", "i", "c", "does-not-exist"),
+            new ConversationWorkflowStep("b", "i", "c", null),
+        });
+        Assert.Equal("b", Workflows.NextStep(wf, wf.Steps[0])!.Id);
+    }
+
+    // ── Workflows.RenderPromptSection ────────────────────────────────────────
+
+    [Fact]
+    public void RenderPromptSection_RendersCurrentStep()
+    {
+        var section = Workflows.RenderPromptSection(ThreeStep(), "b");
+        Assert.Contains("<ConversationWorkflow>", section);
+        Assert.Contains("GOAL: Goal", section);
+        Assert.Contains("CURRENT STEP (2/3): b", section);
+        Assert.Contains("INTENT: ib", section);
+        Assert.Contains("CRITERIA: cb", section);
+    }
+
+    [Fact]
+    public void RenderPromptSection_NoWorkflow_ReturnsEmpty()
+    {
+        Assert.Equal(string.Empty, Workflows.RenderPromptSection(null, "b"));
+    }
+
+    // ── LlmWorkflowJudge.ParseVerdict ────────────────────────────────────────
+
+    [Theory]
+    [InlineData("""{"verdict":"yes"}""", WorkflowVerdict.Yes)]
+    [InlineData("""{"verdict":"no","reason":"x"}""", WorkflowVerdict.No)]
+    [InlineData("""{"verdict":"maybe"}""", WorkflowVerdict.Maybe)]
+    [InlineData("""Here you go: {"verdict":"yes"} done""", WorkflowVerdict.Yes)] // fenced/prefixed
+    [InlineData("""{"verdict":"YES"}""", WorkflowVerdict.Yes)] // case-insensitive
+    public void ParseVerdict_ValidShapes(string text, WorkflowVerdict expected)
+    {
+        Assert.Equal(expected, LlmWorkflowJudge.ParseVerdict(text));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("no json here")]
+    [InlineData("""{"verdict":"garbage"}""")]
+    [InlineData("{not json}")]
+    public void ParseVerdict_Unparseable_ReturnsSkipped(string? text)
+    {
+        Assert.Equal(WorkflowVerdict.Skipped, LlmWorkflowJudge.ParseVerdict(text));
+    }
+
+    // ── LlmWorkflowJudge — failure tolerance ─────────────────────────────────
+
+    [Fact]
+    public async Task Judge_EmptyReply_ReturnsSkipped_WithoutCallingModel()
+    {
+        var judge = new LlmWorkflowJudge(new ThrowingChatClient());
+        var wf = ThreeStep();
+        var verdict = await judge.JudgeAsync(wf, wf.Steps[0], "hi", "");
+        Assert.Equal(WorkflowVerdict.Skipped, verdict);
+    }
+
+    [Fact]
+    public async Task Judge_ModelThrows_ReturnsSkipped()
+    {
+        var judge = new LlmWorkflowJudge(new ThrowingChatClient());
+        var wf = ThreeStep();
+        var verdict = await judge.JudgeAsync(wf, wf.Steps[0], "hi", "some reply");
+        Assert.Equal(WorkflowVerdict.Skipped, verdict);
+    }
+
+    // ── StaticAgentConfigResolver — the delivery seam ───────────────────────
+
+    [Fact]
+    public async Task StaticResolver_ReturnsConfigForKnown_NullForUnknown()
+    {
+        var config = new AgentConfig(InstructionsPrompt: "hi");
+        var resolver = new StaticAgentConfigResolver().Set("a", config);
+
+        Assert.Same(config, await resolver.ResolveAsync("a"));
+        Assert.Null(await resolver.ResolveAsync("missing"));
+        // The empty resolver is the no-op default — every lookup is null (behavior unchanged).
+        Assert.Null(await new StaticAgentConfigResolver().ResolveAsync("a"));
+    }
+
+    // ── TurnRunner — per-agent prompt assembly + isolation ───────────────────
+
+    [Fact]
+    public async Task TurnRunner_UsesPerAgentInstructions_OverDefaultPersona()
+    {
+        var chat = new CapturingChatClient("Sure!");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(InstructionsPrompt: "You are Ziggy, a pirate concierge.");
+        var runner = new TurnRunner(chat, store, agentConfig: config);
+
+        await runner.RunAsync(session.ConversationId, "r1", "hello", _ => { });
+
+        Assert.Contains("Ziggy, a pirate concierge", chat.LastSystemPrompt);
+        Assert.DoesNotContain("helpful customer support agent", chat.LastSystemPrompt);
+    }
+
+    [Fact]
+    public async Task TurnRunner_NoConfig_KeepsDefaultPersona()
+    {
+        var chat = new CapturingChatClient("Sure!");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var runner = new TurnRunner(chat, store);
+
+        await runner.RunAsync(session.ConversationId, "r1", "hello", _ => { });
+
+        Assert.Contains("helpful customer support agent", chat.LastSystemPrompt);
+    }
+
+    [Fact]
+    public async Task TurnRunner_RendersWorkflowSectionForCurrentStep()
+    {
+        var chat = new CapturingChatClient("Hi there!");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(InstructionsPrompt: "Base.", Workflow: ThreeStep());
+        var runner = new TurnRunner(chat, store, agentConfig: config, judge: new StubJudge(WorkflowVerdict.No));
+
+        await runner.RunAsync(session.ConversationId, "r1", "hello", _ => { });
+
+        Assert.Contains("<ConversationWorkflow>", chat.LastSystemPrompt);
+        Assert.Contains("CURRENT STEP (1/3): a", chat.LastSystemPrompt);
+    }
+
+    [Fact]
+    public async Task TurnRunner_PerAgentIsolation_TwoAgentsDifferentPrompts()
+    {
+        var resolver = new StaticAgentConfigResolver()
+            .Set("agent-1", new AgentConfig(InstructionsPrompt: "I am agent ONE."))
+            .Set("agent-2", new AgentConfig(InstructionsPrompt: "I am agent TWO."));
+        var store = new InMemorySessionStore();
+
+        var chat1 = new CapturingChatClient("ok");
+        var s1 = await store.CreateSessionAsync("agent-1", null, null);
+        await new TurnRunner(chat1, store, agentConfig: await resolver.ResolveAsync("agent-1")).RunAsync(s1.ConversationId, "r", "hi", _ => { });
+
+        var chat2 = new CapturingChatClient("ok");
+        var s2 = await store.CreateSessionAsync("agent-2", null, null);
+        await new TurnRunner(chat2, store, agentConfig: await resolver.ResolveAsync("agent-2")).RunAsync(s2.ConversationId, "r", "hi", _ => { });
+
+        Assert.Contains("agent ONE", chat1.LastSystemPrompt);
+        Assert.DoesNotContain("agent TWO", chat1.LastSystemPrompt);
+        Assert.Contains("agent TWO", chat2.LastSystemPrompt);
+        Assert.DoesNotContain("agent ONE", chat2.LastSystemPrompt);
+    }
+
+    [Fact]
+    public async Task TurnRunner_MalformedWorkflowConfig_DegradesToDefault()
+    {
+        // A host store that parsed malformed jsonb returns a config with a null workflow.
+        var config = new AgentConfig(InstructionsPrompt: AgentConfig.ParseInstructions("{broken"), Workflow: AgentConfig.ParseWorkflow("{broken"));
+        Assert.True(config.IsEmpty);
+
+        var chat = new CapturingChatClient("ok");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var runner = new TurnRunner(chat, store, agentConfig: config, judge: new StubJudge(WorkflowVerdict.Yes));
+
+        await runner.RunAsync(session.ConversationId, "r1", "hi", _ => { });
+
+        // Falls back to the default persona, and no workflow step gets persisted.
+        Assert.Contains("helpful customer support agent", chat.LastSystemPrompt);
+        Assert.DoesNotContain("<ConversationWorkflow>", chat.LastSystemPrompt);
+        Assert.Null(await store.GetWorkflowStepAsync(session.ConversationId));
+    }
+
+    // ── TurnRunner — judge advancement paths ─────────────────────────────────
+
+    [Fact]
+    public async Task TurnRunner_JudgeYes_AdvancesAndPersistsStep()
+    {
+        var chat = new CapturingChatClient("reply");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(Workflow: ThreeStep());
+        var runner = new TurnRunner(chat, store, agentConfig: config, judge: new StubJudge(WorkflowVerdict.Yes));
+
+        await runner.RunAsync(session.ConversationId, "r1", "hi", _ => { });
+
+        // Started on "a" (first step); a.next = "c" (explicit, skipping b).
+        Assert.Equal("c", await store.GetWorkflowStepAsync(session.ConversationId));
+    }
+
+    [Theory]
+    [InlineData(WorkflowVerdict.No)]
+    [InlineData(WorkflowVerdict.Maybe)]
+    [InlineData(WorkflowVerdict.Skipped)]
+    public async Task TurnRunner_JudgeNotYes_StaysOnStep(WorkflowVerdict verdict)
+    {
+        var chat = new CapturingChatClient("reply");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(Workflow: ThreeStep());
+        var runner = new TurnRunner(chat, store, agentConfig: config, judge: new StubJudge(verdict));
+
+        await runner.RunAsync(session.ConversationId, "r1", "hi", _ => { });
+
+        Assert.Equal("a", await store.GetWorkflowStepAsync(session.ConversationId));
+    }
+
+    [Fact]
+    public async Task TurnRunner_WorkflowResumesFromPersistedStep_AndReachesTerminal()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(Workflow: ThreeStep());
+        var judge = new StubJudge(WorkflowVerdict.Yes);
+
+        // Turn 1: a → c (explicit next).
+        await new TurnRunner(new CapturingChatClient("x"), store, agentConfig: config, judge: judge)
+            .RunAsync(session.ConversationId, "r1", "hi", _ => { });
+        Assert.Equal("c", await store.GetWorkflowStepAsync(session.ConversationId));
+
+        // Turn 2: resumes on c (terminal) → stays on c even on "yes".
+        await new TurnRunner(new CapturingChatClient("y"), store, agentConfig: config, judge: judge)
+            .RunAsync(session.ConversationId, "r2", "next", _ => { });
+        Assert.Equal("c", await store.GetWorkflowStepAsync(session.ConversationId));
+    }
+
+    [Fact]
+    public async Task TurnRunner_WorkflowWithoutJudge_NeverAdvances()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(Workflow: ThreeStep());
+        var runner = new TurnRunner(new CapturingChatClient("x"), store, agentConfig: config, judge: null);
+
+        await runner.RunAsync(session.ConversationId, "r1", "hi", _ => { });
+
+        Assert.Null(await store.GetWorkflowStepAsync(session.ConversationId));
+    }
+
+    // ── Test doubles ─────────────────────────────────────────────────────────
+
+    /// <summary>Records the last system-role message it was asked to complete, and streams a fixed reply.</summary>
+    private sealed class CapturingChatClient : IChatClient
+    {
+        private readonly string _reply;
+
+        public CapturingChatClient(string reply) => _reply = reply;
+
+        public string LastSystemPrompt { get; private set; } = string.Empty;
+
+        private void Capture(IEnumerable<ChatMessage> messages)
+        {
+            var system = messages.LastOrDefault(m => m.Role == ChatRole.System);
+            if (system is not null)
+            {
+                LastSystemPrompt = system.Text;
+            }
+        }
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Capture(messages);
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)) { ModelId = "capture" });
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            Capture(messages);
+            foreach (var update in new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)).ToChatResponseUpdates())
+            {
+                await Task.Yield();
+                yield return update;
+            }
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /// <summary>An <see cref="IChatClient"/> that always throws — proves the judge's failure tolerance.</summary>
+    private sealed class ThrowingChatClient : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("model unavailable");
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("model unavailable");
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /// <summary>A judge that returns a fixed verdict — drives the advancement-path tests deterministically.</summary>
+    private sealed class StubJudge : IWorkflowJudge
+    {
+        private readonly WorkflowVerdict _verdict;
+
+        public StubJudge(WorkflowVerdict verdict) => _verdict = verdict;
+
+        public Task<WorkflowVerdict> JudgeAsync(ConversationWorkflow workflow, ConversationWorkflowStep step, string userMessage, string agentReply, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_verdict);
+    }
+}

@@ -56,6 +56,26 @@ builder.Services.AddSingleton<ISessionStore>(
 builder.Services.AddSmoothOperatorServer();   // uses the registered ISessionStore
 ```
 
+**Per-agent config + conversation workflows** (SMOODEV-590): register an `IAgentConfigResolver`
+and each agent's own `instructions.prompt` drives its system prompt (overriding the org/default
+persona), and its `conversation_workflow` (goal + intent/criteria steps) runs as a stepped,
+judge-advanced flow — the current step is rendered into the prompt and a cheap post-turn judge
+advances the (per-conversation-persisted) pointer when the step's criteria are met.
+`create_conversation_session` carries only an agent UUID, so config is resolved server-side per
+turn from the session's agent (mirrors the TS / Python lanes' `AgentConfigResolver`). Config
+parsing is tolerant (malformed jsonb degrades to the default persona) and the judge is
+failure-tolerant (any error stays on the current step). No resolver registered ⇒ behavior unchanged.
+
+```csharp
+builder.Services.AddSingleton<IAgentConfigResolver>(
+    new StaticAgentConfigResolver().Set(agentId, new AgentConfig(
+        InstructionsPrompt: "You are Ziggy, a pirate concierge.",
+        Workflow: AgentConfig.ParseWorkflow(conversationWorkflowJsonb))));
+// A multi-tenant host swaps in a resolver backed by the `agents` table. Registering a resolver
+// defaults the workflow judge to the LLM judge over your IChatClient; register your own
+// IWorkflowJudge (e.g. a distinct cheap model) to override.
+```
+
 **Next:** knowledge + checkpoint adapters on Postgres+pgvector, ingestion + connectors, ACL +
 auth, then a deployable container. See the
 [Server roadmap](../../docs/Architecture/Polyglot%20Cores.md#server-roadmap-c) in the

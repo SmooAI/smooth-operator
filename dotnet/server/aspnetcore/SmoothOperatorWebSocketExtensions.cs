@@ -75,6 +75,15 @@ public static class SmoothOperatorWebSocketExtensions
         // language) runs as the user's personal operator. Unset ⇒ the server's default persona.
         var persona = Environment.GetEnvironmentVariable("SMOOTH_PERSONA");
 
+        // Per-agent config seam: a host that registered an IAgentConfigResolver has per-agent
+        // instructions/workflow applied per turn. When a resolver is present, default the workflow
+        // judge to the LLM judge over the server's IChatClient (already the cheap default model) so
+        // wiring the resolver is enough to make workflows advance — a host can still register its own
+        // IWorkflowJudge to override.
+        var agentConfigResolver = services.GetService<IAgentConfigResolver>();
+        var judge = services.GetService<IWorkflowJudge>()
+            ?? (agentConfigResolver is not null ? new LlmWorkflowJudge(services.GetRequiredService<IChatClient>()) : null);
+
         return new FrameDispatcher(
             services.GetRequiredService<ISessionStore>(),
             services.GetRequiredService<IChatClient>(),
@@ -83,10 +92,11 @@ public static class SmoothOperatorWebSocketExtensions
             systemPrompt: string.IsNullOrEmpty(persona) ? null : persona,
             reranker: services.GetService<IReranker>(), // null unless the host registered one (rerank is opt-in)
             tools: services.GetService<IReadOnlyList<AITool>>(), // the tools the agent may call (default none — the DI analog of Python's ServerState.tools)
-            // Tool-name patterns gated behind write-confirmation HITL (default none — the DI analog of
-            // Python's ServerState.confirm_tools). Each connection gets its own ConfirmationRegistry
-            // (a confirm_tool_action frame and the parked turn it resumes are always on the same one).
-            confirmTools: services.GetService<ConfirmTools>()?.Patterns);
+                                                                 // Tool-name patterns gated behind write-confirmation HITL (default none). Each connection
+                                                                 // gets its own ConfirmationRegistry (see the ConfirmTools type doc).
+            confirmTools: services.GetService<ConfirmTools>()?.Patterns,
+            agentConfigResolver: agentConfigResolver,
+            judge: judge);
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)

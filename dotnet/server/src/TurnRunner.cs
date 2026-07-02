@@ -30,8 +30,10 @@ public sealed class TurnRunner
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry? _confirmations;
+    private readonly AgentConfig _agentConfig;
+    private readonly IWorkflowJudge? _judge;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -45,6 +47,38 @@ public sealed class TurnRunner
         _confirmTools = confirmTools ?? Array.Empty<string>();
         // The session-keyed pending-confirmation registry the gate parks on (null → HITL off).
         _confirmations = confirmations;
+        // Per-agent config: instructions.prompt overrides the default persona; conversation_workflow
+        // drives the guided-agency flow. Empty (the default) ⇒ the org/default persona, unchanged.
+        _agentConfig = agentConfig ?? AgentConfig.Empty;
+        // Post-turn workflow judge (null ⇒ no workflow advancement even if a workflow is configured;
+        // the current step is still rendered, it just never advances). Wired by the host.
+        _judge = judge;
+    }
+
+    /// <summary>
+    /// The system prompt for this turn: per-agent <c>instructions.prompt</c> when present (else the
+    /// org/default persona), with the personality line and the current workflow step's
+    /// <c>&lt;ConversationWorkflow&gt;</c> section appended. Mirrors the monorepo's prompt assembly
+    /// (agentInstructions + workflowSection). With an empty <see cref="AgentConfig"/> this returns the
+    /// default persona verbatim — behavior unchanged.
+    /// </summary>
+    private string BuildSystemPrompt(string? currentStepId)
+    {
+        var basePrompt = string.IsNullOrWhiteSpace(_agentConfig.InstructionsPrompt) ? _systemPrompt : _agentConfig.InstructionsPrompt!;
+        var builder = new StringBuilder(basePrompt);
+        if (!string.IsNullOrWhiteSpace(_agentConfig.Personality))
+        {
+            builder.Append("\n\nPERSONALITY: ").Append(_agentConfig.Personality);
+        }
+        if (_agentConfig.Workflow is not null)
+        {
+            var section = Workflows.RenderPromptSection(_agentConfig.Workflow, currentStepId);
+            if (section.Length > 0)
+            {
+                builder.Append("\n\n").Append(section);
+            }
+        }
+        return builder.ToString();
     }
 
     /// <summary>True when <paramref name="toolName"/> matches a confirmation-gated pattern (substring,
@@ -89,7 +123,15 @@ public sealed class TurnRunner
         //    Registered tools (default none) are passed straight to the engine's agentic loop; the
         //    streaming block below already translates the resulting tool-call/result events into
         //    stream_chunks, so enabling tools is purely a matter of supplying them here.
-        var options = new AgentOptions { Instructions = _systemPrompt, Knowledge = _knowledge };
+        //
+        //    The system prompt is assembled per-agent: instructions.prompt (when configured) plus the
+        //    current workflow step's <ConversationWorkflow> section. The step pointer is persisted per
+        //    conversation, so a multi-turn workflow resumes where it left off.
+        var currentStepId = _agentConfig.Workflow is null
+            ? null
+            : await _store.GetWorkflowStepAsync(conversationId, cancellationToken).ConfigureAwait(false);
+        var resolvedPrompt = BuildSystemPrompt(currentStepId);
+        var options = new AgentOptions { Instructions = resolvedPrompt, Knowledge = _knowledge };
         foreach (var tool in _tools)
         {
             options.Tools.Add(tool);
@@ -184,9 +226,52 @@ public sealed class TurnRunner
             _confirmations?.Clear(sessionId);
         }
 
-        // 5. Persist the outbound reply and return.
-        var outbound = await _store.AppendMessageAsync(conversationId, MessageDirection.Outbound, reply.ToString(), cancellationToken).ConfigureAwait(false);
-        return new TurnResult(reply.ToString(), outbound.Id, citations);
+        // 5. Persist the outbound reply.
+        var replyText = reply.ToString();
+        var outbound = await _store.AppendMessageAsync(conversationId, MessageDirection.Outbound, replyText, cancellationToken).ConfigureAwait(false);
+
+        // 6. Advance the conversation workflow. A cheap judge decides whether the current step's
+        //    criteria were met this turn; on "yes" the pointer moves to the next step (explicit `next`
+        //    or the following step in order), otherwise it stays put. Failure-tolerant: a judge that
+        //    errors / returns skipped never moves the pointer, so a bad judge call can't strand the
+        //    flow. No-op unless the agent has a workflow AND a judge is wired.
+        if (_agentConfig.Workflow is not null && _judge is not null)
+        {
+            await AdvanceWorkflowAsync(conversationId, currentStepId, userMessage, replyText, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new TurnResult(replyText, outbound.Id, citations);
+    }
+
+    /// <summary>
+    /// Run the post-turn judge and persist the (possibly advanced) workflow step. Only a
+    /// <see cref="WorkflowVerdict.Yes"/> advances the pointer — every other verdict (including a
+    /// failed/skipped judge) leaves the conversation on the current step so the flow never freezes or
+    /// jumps. Mirrors the monorepo's workflow-judge node.
+    /// </summary>
+    private async Task AdvanceWorkflowAsync(string conversationId, string? currentStepId, string userMessage, string replyText, CancellationToken cancellationToken)
+    {
+        var workflow = _agentConfig.Workflow!;
+        var current = Workflows.ResolveCurrentStep(workflow, currentStepId);
+        if (current is null)
+        {
+            return;
+        }
+
+        var verdict = await _judge!.JudgeAsync(workflow, current, userMessage, replyText, cancellationToken).ConfigureAwait(false);
+        var resolvedStepId = current.Id;
+        if (verdict == WorkflowVerdict.Yes)
+        {
+            var advance = Workflows.NextStep(workflow, current);
+            if (advance is not null)
+            {
+                resolvedStepId = advance.Id;
+            }
+        }
+
+        // Persist even when the pointer didn't move: a fresh conversation had no stored step, so this
+        // records the resolved starting step (mirrors the TS node writing currentStepId every turn).
+        await _store.SetWorkflowStepAsync(conversationId, resolvedStepId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The stream_chunk toolCall state built from a gated tool's name + already-parsed

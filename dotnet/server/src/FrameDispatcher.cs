@@ -25,6 +25,8 @@ public sealed class FrameDispatcher
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry _confirmations;
+    private readonly IAgentConfigResolver? _agentConfigResolver;
+    private readonly IWorkflowJudge? _judge;
 
     // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
     // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
@@ -41,7 +43,9 @@ public sealed class FrameDispatcher
         IReranker? reranker = null,
         IReadOnlyList<AITool>? tools = null,
         IReadOnlyList<string>? confirmTools = null,
-        ConfirmationRegistry? confirmations = null)
+        ConfirmationRegistry? confirmations = null,
+        IAgentConfigResolver? agentConfigResolver = null,
+        IWorkflowJudge? judge = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -57,6 +61,10 @@ public sealed class FrameDispatcher
         // Session-keyed pending-confirmation registry shared with each spawned turn so a
         // confirm_tool_action frame resolves the verdict a parked turn awaits. One per connection.
         _confirmations = confirmations ?? new ConfirmationRegistry();
+        // Per-agent config resolution (null ⇒ no per-agent instructions/workflow are applied; every
+        // agent uses the default persona, unchanged) and the post-turn workflow judge.
+        _agentConfigResolver = agentConfigResolver;
+        _judge = judge;
     }
 
     /// <summary>
@@ -205,10 +213,19 @@ public sealed class FrameDispatcher
         // 1. Immediate ack (202).
         sink(ProtocolEvents.ImmediateResponse(requestId, 202, "Processing your request...", new JsonObject()));
 
-        // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
+        // 2. Resolve this agent's per-agent config (instructions.prompt + conversation_workflow) by
+        //    the session's agentId. A missing/unknown/malformed config resolves to null → the turn
+        //    uses the org/default persona, unchanged. The lookup never throws (the store contract).
+        AgentConfig? agentConfig = null;
+        if (_agentConfigResolver is not null)
+        {
+            agentConfig = await _agentConfigResolver.ResolveAsync(session.AgentId, cancellationToken).ConfigureAwait(false);
+        }
+
+        // 3. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools, _confirmTools, _confirmations);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools, _confirmTools, _confirmations, agentConfig, _judge);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's
