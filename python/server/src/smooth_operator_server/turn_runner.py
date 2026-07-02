@@ -30,8 +30,10 @@ from smooth_operator_core import (
 )
 
 from . import protocol
+from .agent_config import AgentConfig
 from .confirmation import ConfirmationRegistry
 from .session_store import MessageDirection, SessionStore
+from .workflow import judge_workflow_step, next_step, render_workflow_prompt_section, resolve_current_step
 
 #: Max prior turns replayed into the thread for memory (bounds context growth).
 MAX_PRIOR_MESSAGES = 50
@@ -79,11 +81,15 @@ class TurnRunner:
         tools: list[Any] | None = None,
         confirm_tools: list[str] | None = None,
         confirmations: ConfirmationRegistry | None = None,
+        agent_config: AgentConfig | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
         self._knowledge = knowledge
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        #: Resolved per-agent config (instructions / workflow / persona). ``None`` →
+        #: the server-wide default prompt drives the turn (behavior unchanged).
+        self._agent_config = agent_config
         self._model = model
         self._tools = tools or []
         #: Tool-name substrings that require human approval before they run (empty →
@@ -114,11 +120,21 @@ class TurnRunner:
         #    agent runs (the query is independent of generation).
         citations = self._build_citations(user_message)
 
+        # 0b. Load prior history up front — it drives both the thread replay (memory)
+        #     and whether this is the first turn (greeting awareness).
+        prior_messages = await self._store.list_messages(conversation_id, MAX_PRIOR_MESSAGES)
+
+        # 0c. Resolve the workflow-step pointer for this conversation (SMOODEV-590).
+        #     The judge advances it after the turn; here it selects which step's
+        #     intent/criteria get rendered into the system prompt.
+        workflow = self._agent_config.conversation_workflow if self._agent_config else None
+        current_step_id = await self._store.get_current_step_id(conversation_id) if workflow else None
+
         # 1. Build the agent. The knowledge base (when present) auto-injects the
         #    top hits into the system prompt — the engine handles retrieval + rerank
         #    internally, mirroring the C# `new SmoothAgent(..., Knowledge = ...)`.
         options_kwargs: dict[str, Any] = {
-            "instructions": self._system_prompt,
+            "instructions": self._assemble_system_prompt(current_step_id, is_first_turn=not prior_messages),
             "knowledge": self._knowledge,
         }
         if self._tools:
@@ -175,7 +191,7 @@ class TurnRunner:
         #    inbound), so the model sees turn 1 when answering turn 2. Mirrors the
         #    Rust `load_prior_messages` + the C# thread replay.
         thread = SmoothAgentThread(id=conversation_id)
-        for message in await self._store.list_messages(conversation_id, MAX_PRIOR_MESSAGES):
+        for message in prior_messages:
             role = "assistant" if message.direction == MessageDirection.OUTBOUND else "user"
             thread.add({"role": role, "content": message.text})
 
@@ -217,9 +233,74 @@ class TurnRunner:
         # back to the concatenated streamed deltas if it's empty.
         reply = final_text if final_text else "".join(reply_parts)
 
-        # 5. Persist the outbound reply and return.
+        # 5. Persist the outbound reply.
         outbound = await self._store.append_message(conversation_id, MessageDirection.OUTBOUND, reply)
+
+        # 6. Post-turn workflow judge (SMOODEV-590): decide whether the current step's
+        #    criteria were met this turn and advance the conversation's pointer. No-op
+        #    when no workflow is configured. Failure-tolerant — the judge stays on the
+        #    current step on any error, so a judge outage never freezes the flow.
+        if workflow is not None:
+            await self._advance_workflow(conversation_id, workflow, current_step_id, user_message, reply)
+
         return TurnResult(reply=reply, message_id=outbound.id, citations=citations)
+
+    def _assemble_system_prompt(self, current_step_id: str | None, *, is_first_turn: bool) -> str:
+        """Assemble the turn's system prompt from the per-agent config, falling back
+        to the server-wide default.
+
+        Precedence for the base body: the agent's ``instructions`` prompt →
+        the server-wide ``system_prompt`` → :data:`DEFAULT_SYSTEM_PROMPT`. A
+        personality note and a first-turn greeting seed are appended when the agent
+        configured them, and the current workflow step (if any) is rendered last so
+        the model sees the active intent/criteria. With no agent config the result
+        is exactly the server-wide prompt (behavior unchanged)."""
+        config = self._agent_config
+        base = (config.instructions if config and config.instructions else None) or self._system_prompt
+
+        sections = [base]
+        if config is not None:
+            if config.personality:
+                sections.append(f"<Personality>\n{config.personality}\n</Personality>")
+            if is_first_turn and config.greeting:
+                sections.append(
+                    "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, "
+                    f'brief variant of: "{config.greeting}" — then address the user\'s message in the same reply. '
+                    "Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>"
+                )
+            workflow_section = render_workflow_prompt_section(config.conversation_workflow, current_step_id)
+            if workflow_section:
+                sections.append(workflow_section)
+
+        return "\n\n".join(sections)
+
+    async def _advance_workflow(
+        self,
+        conversation_id: str,
+        workflow: Any,
+        current_step_id: str | None,
+        user_message: str,
+        reply: str,
+    ) -> None:
+        """Judge the current step and persist the advanced pointer.
+
+        On a ``yes`` verdict the pointer moves to :func:`next_step` (explicit ``next``
+        → sequential → terminal). Any other verdict (``no``/``maybe``/``skipped``) or
+        a judge failure leaves the conversation on the current step, so it renders
+        the same step next turn."""
+        current = resolve_current_step(workflow, current_step_id)
+        if current is None:
+            return
+        verdict = await judge_workflow_step(self._chat_client, workflow, current, user_message, reply)
+        if verdict == "yes":
+            advance = next_step(workflow, current)
+            resolved = advance.id if advance is not None else current.id
+        else:
+            resolved = current.id
+        # Persist the pointer (matches the TS judge, which always writes current.id),
+        # skipping the write only when it already holds this exact value.
+        if resolved != current_step_id:
+            await self._store.set_current_step_id(conversation_id, resolved)
 
     def _build_citations(self, user_message: str) -> list[dict[str, Any]]:
         """Build the auto-context citations for ``user_message`` from the knowledge

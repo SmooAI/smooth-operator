@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import websockets
 from smooth_operator_core import Knowledge
 
+from .agent_config import AgentConfig
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
 from .confirmation import ConfirmationRegistry
@@ -62,6 +63,12 @@ class ServerState:
     #: of these, the server parks the turn and emits ``write_confirmation_required``
     #: until the client replies with ``confirm_tool_action``.
     confirm_tools: list[str] = field(default_factory=list)
+    #: Per-agent config (instructions / conversation workflow / persona), keyed by
+    #: ``agentId`` (SMOODEV-590). Resolved per turn from the session's agent — an
+    #: agent with no entry falls back to ``system_prompt`` (behavior unchanged). This
+    #: is the config-delivery seam: a multi-tenant host populates it from the
+    #: `agents` table; the reference server leaves it empty.
+    agent_configs: dict[str, AgentConfig] = field(default_factory=dict)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -119,6 +126,7 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         tools=state.tools,
         confirm_tools=state.confirm_tools,
         confirmations=confirmations,
+        agent_configs=state.agent_configs,
     )
 
     cancel_wait = asyncio.ensure_future(state.cancel.wait())
