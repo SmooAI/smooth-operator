@@ -144,10 +144,11 @@ export class FrameDispatcher {
                     sink(protocol.error(requestId, 'UNSUPPORTED_ACTION', `Unsupported action '${action}'`));
                     break;
             }
-        } catch {
+        } catch (err) {
             // A handler failed mid-turn (retrieval / model / store error, or a bug).
             // Emit a clean error and KEEP the connection alive — never drop the socket
             // with no signal to the client. (Detail stays server-side, not on the wire.)
+            console.error(`[frameDispatcher] action '${action}' failed:`, err);
             sink(protocol.error(requestId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
         }
     }
@@ -229,9 +230,10 @@ export class FrameDispatcher {
             try {
                 const result = await runner.run(session.conversationId, reqId, message, sink, signal);
                 sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
-            } catch {
+            } catch (err) {
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean
                 // error and keeps the connection alive (detail stays server-side).
+                console.error('[frameDispatcher] turn failed:', err);
                 sink(protocol.error(reqId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
             }
         })();

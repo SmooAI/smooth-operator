@@ -55,7 +55,20 @@ async function buildChatClient(): Promise<ChatClientLike> {
         const mod = (await import(openaiModule)) as { default: new (opts: { apiKey: string; baseURL: string }) => ChatClientLike };
         const model = process.env.SMOOAI_MODEL ?? 'gpt-4o-mini';
         process.env.SMOOAI_MODEL = model;
-        return new mod.default({ apiKey: key, baseURL: url });
+        const openai = new mod.default({ apiKey: key, baseURL: url });
+        // The engine's `runStream` needs `chat.completions.createStream`; the raw SDK
+        // only exposes `create`. Adapt it: streaming is `create({ ...body, stream: true })`,
+        // whose async-iterable of chunks already matches the engine's `ChatChunk` shape.
+        // Without this the server boots but every turn throws "requires a streaming-capable
+        // client" (the server always uses runStream). ponytail: thin wrapper, no new dep.
+        const completions = openai.chat.completions;
+        completions.createStream = async function* (body: Record<string, unknown>) {
+            // openai's `create({stream:true})` resolves to a Stream; the engine wants a
+            // synchronous AsyncIterable, so await it here and re-yield its chunks.
+            const stream = (await completions.create({ ...body, stream: true })) as unknown as AsyncIterable<import('@smooai/smooth-operator-core').ChatChunk>;
+            yield* stream;
+        };
+        return openai;
     } catch {
         // The `openai` package isn't installed — fall back to the keyless client so
         // the server still boots (turns error cleanly).
