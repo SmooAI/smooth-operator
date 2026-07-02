@@ -55,12 +55,12 @@ describe('parseAgentConfig — tolerant', () => {
 
 describe('assembleSystemPrompt', () => {
     it('returns the base prompt unchanged when no config', () => {
-        expect(assembleSystemPrompt(BASE, undefined, undefined)).toBe(BASE);
+        expect(assembleSystemPrompt(BASE, undefined, undefined, true)).toBe(BASE);
     });
 
     it('makes per-agent instructions the primary body and keeps the base rules', () => {
         const config: AgentConfig = { instructions: 'You are Ada.' };
-        const prompt = assembleSystemPrompt(BASE, config, undefined);
+        const prompt = assembleSystemPrompt(BASE, config, undefined, true);
         expect(prompt).toContain('<AgentInstructions>\nYou are Ada.\n</AgentInstructions>');
         expect(prompt).toContain(BASE);
         // Instructions come before the base rules.
@@ -68,15 +68,22 @@ describe('assembleSystemPrompt', () => {
     });
 
     it('includes the base once when there are no instructions', () => {
-        const prompt = assembleSystemPrompt(BASE, { personality: 'warm' }, undefined);
+        const prompt = assembleSystemPrompt(BASE, { personality: 'warm' }, undefined, true);
         expect(prompt).toContain('<Personality>\nwarm\n</Personality>');
         expect(prompt).toContain(BASE);
     });
 
-    it('folds in greeting + personality sections', () => {
-        const prompt = assembleSystemPrompt(BASE, { instructions: 'x', greeting: 'Hi there', personality: 'warm' }, undefined);
+    it('folds in personality always and the greeting on the first turn', () => {
+        const prompt = assembleSystemPrompt(BASE, { instructions: 'x', greeting: 'Hi there', personality: 'warm' }, undefined, true);
         expect(prompt).toContain('<Personality>\nwarm\n</Personality>');
         expect(prompt).toContain('Hi there');
+    });
+
+    it('drops the greeting section on later turns but keeps personality', () => {
+        const prompt = assembleSystemPrompt(BASE, { instructions: 'x', greeting: 'Hi there', personality: 'warm' }, undefined, false);
+        expect(prompt).toContain('<Personality>\nwarm\n</Personality>');
+        expect(prompt).not.toContain('Hi there');
+        expect(prompt).not.toContain('GreetingAwareness');
     });
 
     it('renders the current workflow step into the prompt', () => {
@@ -84,8 +91,8 @@ describe('assembleSystemPrompt', () => {
             instructions: 'x',
             conversationWorkflow: { goal: 'Book a demo', steps: [{ id: 'greet', intent: 'Greet', criteria: 'Greeted' }, { id: 'book', intent: 'Book', criteria: 'Booked' }] },
         };
-        expect(assembleSystemPrompt(BASE, config, 'book')).toContain('CURRENT STEP (2/2): book');
-        expect(assembleSystemPrompt(BASE, config, undefined)).toContain('CURRENT STEP (1/2): greet');
+        expect(assembleSystemPrompt(BASE, config, 'book', false)).toContain('CURRENT STEP (2/2): book');
+        expect(assembleSystemPrompt(BASE, config, undefined, true)).toContain('CURRENT STEP (1/2): greet');
     });
 });
 

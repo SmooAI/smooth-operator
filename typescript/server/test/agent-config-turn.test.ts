@@ -89,6 +89,33 @@ describe('per-agent config over a real WebSocket', () => {
         await client.close();
     });
 
+    it('applies the greeting on the first turn only, isolated per agent', async () => {
+        const mock = new MockLlmProvider().pushText('r1').pushText('r2').pushText('rB');
+        const agentConfig = new StaticAgentConfigResolver({
+            [AGENT_A]: { instructions: 'You are Ada.', greeting: 'Thanks for calling Acme!' },
+            [AGENT_B]: { instructions: 'You are Boris.', greeting: 'Welcome to Beta Co!' },
+        });
+        server = await serve({ chatClient: mock, agentConfig });
+        const client = await TestClient.connect(server.url);
+
+        const sessionA = await openSession(client, AGENT_A);
+        await sendAndDrain(client, sessionA, 'turn 1');
+        await sendAndDrain(client, sessionA, 'turn 2');
+
+        // Turn 1 (call 0) carries A's greeting; turn 2 (call 1) does not.
+        expect(systemPromptOf(mock, 0)).toContain('Thanks for calling Acme!');
+        expect(systemPromptOf(mock, 1)).not.toContain('Thanks for calling Acme!');
+        expect(systemPromptOf(mock, 1)).not.toContain('GreetingAwareness');
+
+        // Agent B's first turn (call 2) carries B's greeting, not A's.
+        const sessionB = await openSession(client, AGENT_B);
+        await sendAndDrain(client, sessionB, 'turn 1');
+        expect(systemPromptOf(mock, 2)).toContain('Welcome to Beta Co!');
+        expect(systemPromptOf(mock, 2)).not.toContain('Acme');
+
+        await client.close();
+    });
+
     it('renders the workflow step and advances it across turns as the judge says yes', async () => {
         // Turn 1: reply (script[0]) + judge "yes" (script[1]) → advance greet → qualify.
         // Turn 2: reply (script[2]) + judge "no"  (script[3]) → stay on qualify.

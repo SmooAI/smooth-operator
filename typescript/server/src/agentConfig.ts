@@ -106,7 +106,7 @@ export function parseAgentConfig(raw: unknown): AgentConfig | undefined {
  * rules, plus optional personality / greeting sections and the rendered workflow
  * step.
  */
-export function assembleSystemPrompt(base: string, config: AgentConfig | undefined, currentStepId: string | null | undefined): string {
+export function assembleSystemPrompt(base: string, config: AgentConfig | undefined, currentStepId: string | null | undefined, isFirstTurn: boolean): string {
     if (!config) return base;
 
     const sections: string[] = [];
@@ -122,9 +122,12 @@ export function assembleSystemPrompt(base: string, config: AgentConfig | undefin
         sections.push(base);
     }
 
-    if (config.greeting) {
+    // Greeting is gated server-side to the FIRST turn only (mirrors the Python
+    // server's `is_first_turn`): the section is dropped entirely on later turns so
+    // the agent doesn't re-greet.
+    if (isFirstTurn && config.greeting) {
         sections.push(
-            `<GreetingAwareness>\nIf this is your first reply in the conversation, open with a natural, brief variant of: "${config.greeting}" — then address the user's message. Do not repeat it verbatim on later turns.\n</GreetingAwareness>`,
+            `<GreetingAwareness>\nThis is your first reply in the conversation. Open with a natural, brief variant of: "${config.greeting}" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>`,
         );
     }
 

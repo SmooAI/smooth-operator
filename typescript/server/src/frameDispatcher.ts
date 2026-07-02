@@ -229,8 +229,11 @@ export class FrameDispatcher {
         } catch {
             agentConfig = undefined;
         }
+        // First turn = no prior messages yet (the inbound is persisted by the runner
+        // AFTER this). Gates the greeting to turn one only, matching the Python server.
+        const isFirstTurn = (await this.store.listMessages(session.conversationId, 1)).length === 0;
         const baseSystemPrompt = this.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-        const effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId);
+        const effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
         const effectiveTools = agentConfig?.allowedTools?.length
             ? this.tools.filter((t) => agentConfig.allowedTools!.includes(t.name))
             : this.tools;
