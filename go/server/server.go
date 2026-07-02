@@ -142,7 +142,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, nil)
+	// Accept any Origin: browsers can't set WS handshake headers, so the bearer
+	// token on ?token= is the auth boundary, not the Origin header. Without this,
+	// coder/websocket's default same-origin check 403s a cross-origin browser (e.g.
+	// smooth-web served from another port), so onopen never fires — parity with the
+	// Rust/C#/Python/TS hosts, which all accept cross-origin.
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
 	if err != nil {
 		return // Accept already wrote the error response.
 	}

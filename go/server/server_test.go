@@ -2,13 +2,40 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	core "github.com/SmooAI/smooth-operator-core/go/core"
 	"github.com/SmooAI/smooth-operator/go/protocol"
 )
+
+// TestAcceptsCrossOriginHandshake asserts the /ws upgrade accepts a browser handshake
+// whose Origin differs from the server host. Browsers can't set WS handshake headers,
+// so the bearer token on ?token= is the auth boundary, not Origin — a browser serving
+// smooth-web from another port must still connect. Without OriginPatterns:["*"],
+// coder/websocket's default same-origin check 403s the handshake (onopen never fires).
+// Regression for the Go↔smooth-web parity fix.
+func TestAcceptsCrossOriginHandshake(t *testing.T) {
+	ls, err := SpawnLocal(WithLocalAddr("127.0.0.1:0"))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer ls.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, ls.WSURL(), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"http://cross.example:9999"}},
+	})
+	if err != nil {
+		t.Fatalf("cross-origin handshake rejected (want accepted): %v", err)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+}
 
 // newClient dials ls with the default WebSocket transport and connects a protocol
 // client, registering cleanup.
