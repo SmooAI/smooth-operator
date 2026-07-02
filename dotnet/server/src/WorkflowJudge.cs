@@ -40,12 +40,15 @@ public sealed class LlmWorkflowJudge : IWorkflowJudge
     private const int JudgeMaxTokens = 200;
 
     private readonly IChatClient _chatClient;
-    private readonly string? _modelOverride;
+    private readonly string? _judgeModel;
 
-    public LlmWorkflowJudge(IChatClient chatClient, string? modelOverride = null)
+    /// <summary><paramref name="judgeModel"/> — the uniform cross-lane judge-model option. Null ⇒ the
+    /// <c>SMOOTH_JUDGE_MODEL</c> env, else the server's own IChatClient model (already the cheap
+    /// haiku-tier default).</summary>
+    public LlmWorkflowJudge(IChatClient chatClient, string? judgeModel = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
-        _modelOverride = string.IsNullOrWhiteSpace(modelOverride) ? Environment.GetEnvironmentVariable("SMOOTH_JUDGE_MODEL") : modelOverride;
+        _judgeModel = string.IsNullOrWhiteSpace(judgeModel) ? Environment.GetEnvironmentVariable("SMOOTH_JUDGE_MODEL") : judgeModel;
     }
 
     public async Task<WorkflowVerdict> JudgeAsync(ConversationWorkflow workflow, ConversationWorkflowStep step, string userMessage, string agentReply, CancellationToken cancellationToken = default)
@@ -87,9 +90,9 @@ public sealed class LlmWorkflowJudge : IWorkflowJudge
         try
         {
             var options = new ChatOptions { Temperature = 0f, MaxOutputTokens = JudgeMaxTokens };
-            if (!string.IsNullOrWhiteSpace(_modelOverride))
+            if (!string.IsNullOrWhiteSpace(_judgeModel))
             {
-                options.ModelId = _modelOverride;
+                options.ModelId = _judgeModel;
             }
             var response = await _chatClient.GetResponseAsync(
                 new[] { new ChatMessage(ChatRole.System, system), new ChatMessage(ChatRole.User, human) },

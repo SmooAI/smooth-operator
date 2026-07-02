@@ -96,7 +96,9 @@ public static class SmoothOperatorWebSocketExtensions
                                                                  // gets its own ConfirmationRegistry (see the ConfirmTools type doc).
             confirmTools: services.GetService<ConfirmTools>()?.Patterns,
             agentConfigResolver: agentConfigResolver,
-            judge: judge);
+            judge: judge,
+            // Identity-verification seam for end_user tools on public agents (default fails closed).
+            authenticator: services.GetService<ISessionAuthenticator>());
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)

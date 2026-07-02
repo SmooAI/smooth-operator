@@ -43,7 +43,8 @@ public sealed record AgentConfig(
     ConversationWorkflow? Workflow = null,
     string? Greeting = null,
     string? Personality = null,
-    IReadOnlyList<EnabledTool>? EnabledTools = null)
+    IReadOnlyList<EnabledTool>? EnabledTools = null,
+    string? Visibility = null)
 {
     /// <summary>An empty config — the "no per-agent overrides" sentinel.</summary>
     public static readonly AgentConfig Empty = new();

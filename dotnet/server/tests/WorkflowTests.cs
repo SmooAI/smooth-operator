@@ -417,6 +417,20 @@ public class WorkflowTests
         Assert.Null(await store.GetWorkflowStepAsync(session.ConversationId));
     }
 
+    // ── ToolAuthGate.Evaluate — the pure auth-level table ────────────────────
+
+    [Theory]
+    [InlineData("none", "public", true, ToolAuthOutcome.Allow)] // no auth required
+    [InlineData("admin", "public", false, ToolAuthOutcome.Allow)] // tool doesn't support auth → not gated
+    [InlineData("admin", "public", true, ToolAuthOutcome.BlockAdminOnPublic)]
+    [InlineData("admin", "internal", true, ToolAuthOutcome.Allow)] // auto-satisfied
+    [InlineData("end_user", "internal", true, ToolAuthOutcome.Allow)] // auto-satisfied
+    [InlineData("end_user", "public", true, ToolAuthOutcome.ConsultAuthenticator)]
+    public void ToolAuthGate_Evaluate(string authLevel, string visibility, bool supportsAuth, ToolAuthOutcome expected)
+    {
+        Assert.Equal(expected, ToolAuthGate.Evaluate(authLevel, visibility, supportsAuth));
+    }
+
     // ── Greeting — first-turn only ───────────────────────────────────────────
 
     [Fact]
