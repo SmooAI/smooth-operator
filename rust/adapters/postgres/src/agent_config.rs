@@ -1,11 +1,11 @@
-//! Postgres-backed [`AgentConfigProvider`] over the monorepo `agents` table.
+//! Postgres-backed [`AgentConfigResolver`] over the monorepo `agents` table.
 //!
 //! The reference server points its Postgres storage backend at the same database
 //! the SmooAI monorepo owns (the schema in [`crate::schema`] mirrors that shape),
 //! so the `agents` row for a connection's `agent_id` is reachable on the adapter's
 //! existing pool — no second connection, no HTTP hop. This provider reads the
 //! per-agent behavior knobs (`instructions`, `personality`, `greeting`,
-//! `conversation_workflow`) so the runner can honor them.
+//! `conversation_workflow`, `tool_config`) so the runner can honor them.
 //!
 //! **Failure-tolerant by construction**: a non-UUID `agent_id`, an absent row, a
 //! missing `agents` table (a standalone deploy whose DB has only the operator's
@@ -16,15 +16,15 @@ use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use tracing::debug;
 
-use smooth_operator::agent_config::{AgentBehaviorConfig, AgentConfigProvider};
+use smooth_operator::agent_config::{AgentBehaviorConfig, AgentConfigResolver};
 
-/// Postgres-backed [`AgentConfigProvider`] over the `agents` table.
+/// Postgres-backed [`AgentConfigResolver`] over the `agents` table.
 #[derive(Clone)]
-pub struct PgAgentConfigProvider {
+pub struct PgAgentConfigResolver {
     pool: Pool,
 }
 
-impl PgAgentConfigProvider {
+impl PgAgentConfigResolver {
     /// Build over the adapter's async pool.
     #[must_use]
     pub fn new(pool: Pool) -> Self {
@@ -54,7 +54,7 @@ impl PgAgentConfigProvider {
 
         let row = match client
             .query_opt(
-                "SELECT instructions, personality, greeting, conversation_workflow \
+                "SELECT instructions, personality, greeting, conversation_workflow, tool_config \
                  FROM agents WHERE id = $1",
                 &[&id],
             )
@@ -74,9 +74,15 @@ impl PgAgentConfigProvider {
         let greeting: Option<String> = row.try_get("greeting").ok().flatten();
         let workflow: Option<serde_json::Value> =
             row.try_get("conversation_workflow").ok().flatten();
+        let tool_config: Option<serde_json::Value> = row.try_get("tool_config").ok().flatten();
 
-        let config =
-            AgentBehaviorConfig::from_row_values(instructions, personality, greeting, workflow);
+        let config = AgentBehaviorConfig::from_row_values(
+            instructions,
+            personality,
+            greeting,
+            workflow,
+            tool_config,
+        );
         if config.is_empty() {
             None
         } else {
@@ -86,8 +92,8 @@ impl PgAgentConfigProvider {
 }
 
 #[async_trait]
-impl AgentConfigProvider for PgAgentConfigProvider {
-    async fn agent_config(&self, agent_id: &str) -> Option<AgentBehaviorConfig> {
+impl AgentConfigResolver for PgAgentConfigResolver {
+    async fn resolve(&self, agent_id: &str) -> Option<AgentBehaviorConfig> {
         self.fetch(agent_id).await
     }
 }
@@ -115,7 +121,7 @@ mod tests {
                 tokio_postgres::NoTls,
             )
             .expect("build pool");
-        let provider = PgAgentConfigProvider::new(pool);
-        assert!(provider.agent_config("not-a-uuid").await.is_none());
+        let provider = PgAgentConfigResolver::new(pool);
+        assert!(provider.resolve("not-a-uuid").await.is_none());
     }
 }

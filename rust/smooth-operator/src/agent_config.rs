@@ -12,13 +12,14 @@
 //! The reference server resolves the turn's system prompt from **per-org**
 //! settings (see [`crate::settings`]); that gives every agent in an org the same
 //! voice and never applies `conversation_workflow`. This module is the
-//! **per-agent** seam: a host installs an [`AgentConfigProvider`] (backed by the
+//! **per-agent** seam: a host installs an [`AgentConfigResolver`] (backed by the
 //! `agents` table) so the runner can key behavior off the connection's
-//! `agent_id`.
+//! `agent_id`. Session-create carries only an agent UUID, so config is resolved
+//! server-side by id (matching the sibling lanes' `AgentConfigResolver.resolve`).
 //!
 //! Everything here is I/O-free and jsonb-tolerant on purpose: a malformed row
 //! degrades to "no per-agent config" (fall back to the org default) rather than
-//! failing the turn. The provider trait is the only async surface.
+//! failing the turn. The resolver trait is the only async surface.
 //!
 //! Mirrors the TS reference in
 //! `packages/backend/src/ai/graphs/general-agent/workflow.ts` +
@@ -55,6 +56,22 @@ pub struct ConversationWorkflow {
     pub steps: Vec<ConversationWorkflowStep>,
 }
 
+/// One entry in `tool_config.enabledTools` (the monorepo `AgentToolConfig`
+/// shape). `auth_level` / `config` are preserved on the parsed type for
+/// downstream hosts even though the reference server doesn't act on them yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnabledTool {
+    /// The tool's snake_case id (e.g. `knowledge_search`).
+    pub tool_id: String,
+    /// Whether the tool is enabled for this agent.
+    pub enabled: bool,
+    /// Auth level the tool requires (`none` by default). Carried for hosts.
+    pub auth_level: String,
+    /// Opaque per-tool config. Carried for hosts.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub config: serde_json::Value,
+}
+
 /// The resolved per-agent behavior knobs. Every field is optional so a partial
 /// or malformed `agents` row degrades cleanly to the org default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,11 +82,17 @@ pub struct AgentBehaviorConfig {
     /// `personality.persona` — an optional custom-persona addendum appended to
     /// the system prompt.
     pub persona: Option<String>,
-    /// `greeting` — an optional opening line the agent is told to open with.
+    /// `greeting` — an optional opening line, injected into the prompt only on
+    /// the first turn of a conversation (see [`greeting_section`]).
     pub greeting: Option<String>,
     /// `conversation_workflow` — the optional stepped guided flow. `None` (or a
     /// malformed / empty-steps value) means the agent runs freeform.
     pub conversation_workflow: Option<ConversationWorkflow>,
+    /// `tool_config.enabledTools` — a tool allow-list. When non-empty, this
+    /// agent's turns are restricted to the `enabled == true` entries' `tool_id`
+    /// (empty ⇒ the full server tool set). Unknown tool ids are ignored.
+    #[serde(default)]
+    pub enabled_tools: Vec<EnabledTool>,
 }
 
 impl AgentBehaviorConfig {
@@ -81,16 +104,16 @@ impl AgentBehaviorConfig {
             && self.persona.is_none()
             && self.greeting.is_none()
             && self.conversation_workflow.is_none()
+            && self.enabled_tools.is_empty()
     }
 
-    /// Build the per-agent system prompt from `instructions` (+ optional persona
-    /// + greeting), or `None` when there are no `instructions` to anchor it.
+    /// Build the per-agent system prompt from `instructions` (+ optional persona),
+    /// or `None` when there are no `instructions` to anchor it.
     ///
     /// `None` is the signal to fall back to the org default persona — a bare
-    /// persona/greeting with no instructions is not enough to define an agent, so
-    /// it does not by itself override the org default. When instructions ARE
-    /// present, persona and greeting are appended so the one prompt carries the
-    /// full per-agent voice.
+    /// persona with no instructions is not enough to define an agent. The greeting
+    /// is handled separately ([`greeting_section`](Self::greeting_section)) because
+    /// it is injected first-turn-only.
     #[must_use]
     pub fn system_prompt(&self) -> Option<String> {
         let instructions = self.instructions.as_deref()?.trim();
@@ -104,21 +127,44 @@ impl AgentBehaviorConfig {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            prompt.push_str("\n\n<CustomPersona>\n");
+            prompt.push_str("\n\n<Personality>\n");
             prompt.push_str(persona);
-            prompt.push_str("\n</CustomPersona>");
+            prompt.push_str("\n</Personality>");
         }
-        if let Some(greeting) = self
+        Some(prompt)
+    }
+
+    /// The `<GreetingAwareness>` prompt section, or `None` when no greeting is set.
+    /// The caller injects it only on the FIRST turn (empty prior history), so the
+    /// agent opens with it once. Mirrors the sibling lanes' first-turn greeting.
+    #[must_use]
+    pub fn greeting_section(&self) -> Option<String> {
+        let greeting = self
             .greeting
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            prompt.push_str("\n\n<Greeting>\nIf this is the first turn, open with this greeting (rephrased naturally for chat), then address the user's message: \"");
-            prompt.push_str(greeting);
-            prompt.push_str("\"\n</Greeting>");
+            .filter(|s| !s.is_empty())?;
+        Some(format!(
+            "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \"{greeting}\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>"
+        ))
+    }
+
+    /// The enabled tool-id allow-list, or `None` when unrestricted (no
+    /// `tool_config` / empty `enabledTools` ⇒ the full server tool set).
+    /// `Some(ids)` restricts the turn to those snake_case ids (`enabled == true`
+    /// entries only); unknown ids simply match nothing.
+    #[must_use]
+    pub fn enabled_tool_ids(&self) -> Option<Vec<String>> {
+        if self.enabled_tools.is_empty() {
+            return None;
         }
-        Some(prompt)
+        Some(
+            self.enabled_tools
+                .iter()
+                .filter(|t| t.enabled)
+                .map(|t| t.tool_id.clone())
+                .collect(),
+        )
     }
 
     /// Parse from the raw `agents`-row jsonb / text columns, tolerating any
@@ -127,13 +173,15 @@ impl AgentBehaviorConfig {
     /// - `instructions` — jsonb `{ "prompt": string }`,
     /// - `personality` — jsonb `{ "persona"?: string, ... }`,
     /// - `greeting` — text,
-    /// - `conversation_workflow` — jsonb `{ goal, steps: [...] }`.
+    /// - `conversation_workflow` — jsonb `{ goal, steps: [...] }`,
+    /// - `tool_config` — jsonb `{ enabledTools: [{ toolId, enabled, authLevel, config }] }`.
     #[must_use]
     pub fn from_row_values(
         instructions: Option<serde_json::Value>,
         personality: Option<serde_json::Value>,
         greeting: Option<String>,
         conversation_workflow: Option<serde_json::Value>,
+        tool_config: Option<serde_json::Value>,
     ) -> Self {
         let instructions = instructions
             .as_ref()
@@ -157,13 +205,47 @@ impl AgentBehaviorConfig {
             .and_then(|v| serde_json::from_value::<ConversationWorkflow>(v).ok())
             .filter(|w| !w.steps.is_empty());
 
+        // `tool_config.enabledTools`: parse each entry tolerantly (a bad entry is
+        // dropped, not fatal). camelCase keys mirror the monorepo jsonb.
+        let enabled_tools = tool_config
+            .as_ref()
+            .and_then(|v| v.get("enabledTools"))
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| arr.iter().filter_map(parse_enabled_tool).collect())
+            .unwrap_or_default();
+
         Self {
             instructions,
             persona,
             greeting,
             conversation_workflow,
+            enabled_tools,
         }
     }
+}
+
+/// Parse one `enabledTools` entry, tolerating missing/typed-wrong fields:
+/// `toolId` is required (else the entry is dropped); `enabled` defaults `true`,
+/// `authLevel` defaults `"none"`, `config` defaults `null`.
+fn parse_enabled_tool(v: &serde_json::Value) -> Option<EnabledTool> {
+    let tool_id = v
+        .get("toolId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())?;
+    Some(EnabledTool {
+        tool_id,
+        enabled: v
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        auth_level: v
+            .get("authLevel")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("none")
+            .to_string(),
+        config: v.get("config").cloned().unwrap_or(serde_json::Value::Null),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -323,37 +405,29 @@ pub fn advance_after_verdict(
 // Provider seam
 // ---------------------------------------------------------------------------
 
-/// Hook for resolving an agent's [`AgentBehaviorConfig`] by `agent_id`.
+/// Seam for resolving an agent's [`AgentBehaviorConfig`] by `agent_id`.
 ///
-/// Implemented by the host (backed by the monorepo `agents` table). Returning
-/// `None` means "no per-agent config" — the runner falls back to the org default
-/// persona, exactly as before this seam existed.
+/// The ws protocol's `create_conversation_session` carries only an agent UUID, so
+/// per-agent config is looked up **server-side by id**. Implemented by the host
+/// (backed by the monorepo `agents` table). Returning `None` means "no per-agent
+/// config" — the runner falls back to the org default persona, exactly as before
+/// this seam existed. Matches the sibling lanes' `AgentConfigResolver.resolve`.
 #[async_trait]
-pub trait AgentConfigProvider: Send + Sync {
+pub trait AgentConfigResolver: Send + Sync {
     /// The per-agent behavior config for `agent_id`, or `None` when the agent is
     /// unknown / has no usable config.
-    async fn agent_config(&self, agent_id: &str) -> Option<AgentBehaviorConfig>;
+    async fn resolve(&self, agent_id: &str) -> Option<AgentBehaviorConfig>;
 }
 
-/// Default provider: no per-agent config for any agent. Keeps the reference /
-/// OSS server on its org-default behavior until a real provider is installed.
+/// Static map resolver (`agentId` → config), for tests and DB-free hosts. The
+/// empty default is the server's no-op resolver (every agent → `None`), so the
+/// reference/OSS server stays on its org-default behavior.
 #[derive(Debug, Default)]
-pub struct NoAgentConfig;
-
-#[async_trait]
-impl AgentConfigProvider for NoAgentConfig {
-    async fn agent_config(&self, _agent_id: &str) -> Option<AgentBehaviorConfig> {
-        None
-    }
-}
-
-/// Static map provider (`agentId` → config), for tests and DB-free hosts.
-#[derive(Debug, Default)]
-pub struct StaticAgentConfig {
+pub struct StaticAgentConfigResolver {
     rows: std::collections::HashMap<String, AgentBehaviorConfig>,
 }
 
-impl StaticAgentConfig {
+impl StaticAgentConfigResolver {
     /// Build from an in-memory map.
     #[must_use]
     pub fn new(rows: std::collections::HashMap<String, AgentBehaviorConfig>) -> Self {
@@ -369,8 +443,8 @@ impl StaticAgentConfig {
 }
 
 #[async_trait]
-impl AgentConfigProvider for StaticAgentConfig {
-    async fn agent_config(&self, agent_id: &str) -> Option<AgentBehaviorConfig> {
+impl AgentConfigResolver for StaticAgentConfigResolver {
+    async fn resolve(&self, agent_id: &str) -> Option<AgentBehaviorConfig> {
         self.rows.get(agent_id).cloned()
     }
 }
@@ -586,25 +660,27 @@ mod tests {
             instructions: None,
             persona: Some("snarky".into()),
             greeting: Some("hi".into()),
-            conversation_workflow: None,
+            ..Default::default()
         };
         assert!(cfg.system_prompt().is_none());
     }
 
     #[test]
-    fn system_prompt_composes_instructions_persona_greeting() {
+    fn system_prompt_composes_instructions_and_personality() {
         let cfg = AgentBehaviorConfig {
             instructions: Some("You are the Posture assistant.".into()),
             persona: Some("Warm and direct.".into()),
             greeting: Some("Welcome!".into()),
-            conversation_workflow: None,
+            ..Default::default()
         };
         let p = cfg.system_prompt().unwrap();
         assert!(p.starts_with("You are the Posture assistant."));
-        assert!(p.contains("<CustomPersona>"));
+        assert!(p.contains("<Personality>"));
         assert!(p.contains("Warm and direct."));
-        assert!(p.contains("<Greeting>"));
-        assert!(p.contains("Welcome!"));
+        // Greeting is NOT in the system prompt — it is first-turn-only.
+        assert!(!p.contains("Welcome!"));
+        // ...and is available separately for the runner to inject on turn 1.
+        assert!(cfg.greeting_section().unwrap().contains("Welcome!"));
     }
 
     #[test]
@@ -621,6 +697,12 @@ mod tests {
                     { "id": "greet", "intent": "greet", "criteria": "name captured" }
                 ]
             })),
+            Some(json!({
+                "enabledTools": [
+                    { "toolId": "knowledge_search", "enabled": true, "authLevel": "none" },
+                    { "toolId": "notify_humans", "enabled": false }
+                ]
+            })),
         );
         assert_eq!(
             cfg.instructions.as_deref(),
@@ -628,10 +710,29 @@ mod tests {
         );
         assert_eq!(cfg.persona.as_deref(), Some("Warm."));
         assert_eq!(cfg.greeting.as_deref(), Some("Hey there"));
-        let wf = cfg.conversation_workflow.unwrap();
+        let wf = cfg.conversation_workflow.clone().unwrap();
         assert_eq!(wf.goal, "Assess");
         assert_eq!(wf.steps.len(), 1);
         assert_eq!(wf.steps[0].id, "greet");
+        // enabledTools parsed; only enabled=true entries are in the allow-list.
+        assert_eq!(cfg.enabled_tools.len(), 2);
+        assert_eq!(
+            cfg.enabled_tool_ids(),
+            Some(vec!["knowledge_search".to_string()])
+        );
+    }
+
+    #[test]
+    fn enabled_tool_ids_none_when_no_tool_config() {
+        let cfg = AgentBehaviorConfig::from_row_values(
+            Some(json!({ "prompt": "hi" })),
+            None,
+            None,
+            None,
+            None,
+        );
+        // No tool_config → unrestricted (full server tool set).
+        assert!(cfg.enabled_tool_ids().is_none());
     }
 
     #[test]
@@ -643,6 +744,7 @@ mod tests {
             Some(json!("not an object")),
             Some("   ".into()),
             Some(json!({ "goal": "no steps here" })),
+            Some(json!("tool_config not an object")),
         );
         assert!(
             cfg.is_empty(),
@@ -657,19 +759,23 @@ mod tests {
             None,
             None,
             Some(json!({ "goal": "g", "steps": [] })),
+            None,
         );
         assert!(cfg.conversation_workflow.is_none());
         assert_eq!(cfg.instructions.as_deref(), Some("hi"));
     }
 
     #[tokio::test]
-    async fn no_agent_config_returns_none() {
-        assert!(NoAgentConfig.agent_config("anything").await.is_none());
+    async fn empty_resolver_returns_none() {
+        assert!(StaticAgentConfigResolver::default()
+            .resolve("anything")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
     async fn static_provider_is_per_agent_isolated() {
-        let provider = StaticAgentConfig::default()
+        let provider = StaticAgentConfigResolver::default()
             .with(
                 "agent-a",
                 AgentBehaviorConfig {
@@ -686,7 +792,7 @@ mod tests {
             );
         assert_eq!(
             provider
-                .agent_config("agent-a")
+                .resolve("agent-a")
                 .await
                 .unwrap()
                 .instructions
@@ -695,13 +801,13 @@ mod tests {
         );
         assert_eq!(
             provider
-                .agent_config("agent-b")
+                .resolve("agent-b")
                 .await
                 .unwrap()
                 .instructions
                 .as_deref(),
             Some("B persona")
         );
-        assert!(provider.agent_config("agent-c").await.is_none());
+        assert!(provider.resolve("agent-c").await.is_none());
     }
 }

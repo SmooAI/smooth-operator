@@ -149,6 +149,8 @@ fn spawn_turn(
                 gateway_key: None,
                 workflow: None,
                 judge: None,
+                greeting_section: None,
+                enabled_tools: None,
             },
             &sink,
         )

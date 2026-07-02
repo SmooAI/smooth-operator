@@ -133,6 +133,8 @@ async fn run_turn_as(
             gateway_key: None,
             workflow: None,
             judge: None,
+            greeting_section: None,
+            enabled_tools: None,
         },
         &tx,
     )

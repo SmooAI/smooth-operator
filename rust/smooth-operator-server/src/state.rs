@@ -18,7 +18,7 @@ use smooth_operator_core::HumanResponse;
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::adapter::StorageAdapter;
-use smooth_operator::agent_config::{AgentConfigProvider, NoAgentConfig};
+use smooth_operator::agent_config::{AgentConfigResolver, StaticAgentConfigResolver};
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
@@ -69,11 +69,11 @@ pub struct AppState {
     /// (system prompt), `personality`, `greeting`, and `conversation_workflow`
     /// from its `agent_id` so a public chat agent behaves as its owner configured
     /// — not as the generic org-default persona. Defaults to
-    /// [`NoAgentConfig`](smooth_operator::agent_config::NoAgentConfig) (no
+    /// [`StaticAgentConfigResolver`](smooth_operator::agent_config::StaticAgentConfigResolver) (empty ⇒ no
     /// per-agent config → the org default persona is used, unchanged); a host
     /// installs a real provider (backed by the monorepo `agents` table) via
     /// [`with_agent_config`](Self::with_agent_config).
-    pub agent_config: Arc<dyn AgentConfigProvider>,
+    pub agent_config: Arc<dyn AgentConfigResolver>,
     /// Connection backplane: per-pod sink registry + cross-pod event delivery.
     /// Defaults to [`InMemoryBackplane`] (single-process); a host installs a
     /// Redis/NATS impl via [`with_backplane`](Self::with_backplane) to scale out
@@ -195,7 +195,7 @@ impl AppState {
             settings: Arc::new(InMemorySettingsStore::new()),
             tool_provider: None,
             widget_auth: Arc::new(PermissiveWidgetAuth),
-            agent_config: Arc::new(NoAgentConfig),
+            agent_config: Arc::new(StaticAgentConfigResolver::default()),
             backplane: Arc::new(InMemoryBackplane::new()),
             chat_provider: None,
             gateway_key_resolver,
@@ -316,7 +316,7 @@ impl AppState {
     /// `conversation_workflow` drive its conversations. Without it, the runner
     /// falls back to the org-default persona (unchanged behavior).
     #[must_use]
-    pub fn with_agent_config(mut self, provider: Arc<dyn AgentConfigProvider>) -> Self {
+    pub fn with_agent_config(mut self, provider: Arc<dyn AgentConfigResolver>) -> Self {
         self.agent_config = provider;
         self
     }

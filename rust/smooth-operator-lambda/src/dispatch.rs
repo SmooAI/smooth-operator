@@ -562,6 +562,8 @@ async fn send_message(
             // workflow (if any) is driven by the WS server path. Freeform here.
             workflow: None,
             judge: None,
+            greeting_section: None,
+            enabled_tools: None,
         },
         &tx,
     )

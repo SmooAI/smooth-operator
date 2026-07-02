@@ -229,6 +229,14 @@ pub struct TurnRequest<'a> {
     /// from the server's default (cheap) model; tests inject a mock. `None` ⇒ the
     /// workflow stays on its current step (never advances) — a safe degrade.
     pub judge: Option<Arc<dyn LlmProvider>>,
+    /// Per-agent first-turn greeting section (already rendered). Injected into the
+    /// system prompt ONLY when this conversation has no prior messages, so the
+    /// agent opens with it once. `None` ⇒ no greeting.
+    pub greeting_section: Option<String>,
+    /// Per-agent tool allow-list (snake_case ids). `Some` restricts the turn's
+    /// registry to those tools (built-ins + host tools alike); `None` ⇒ the full
+    /// tool set (unchanged). Unknown ids simply match nothing.
+    pub enabled_tools: Option<Vec<String>>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -270,6 +278,8 @@ pub async fn run_streaming_turn(
         gateway_key,
         workflow,
         judge,
+        greeting_section,
+        enabled_tools,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -315,13 +325,21 @@ pub async fn run_streaming_turn(
     let base_prompt = system_prompt
         .as_deref()
         .unwrap_or(KNOWLEDGE_CHAT_SYSTEM_PROMPT);
-    let resolved_prompt = match workflow.as_ref() {
-        Some(wt) => format!(
-            "{base_prompt}\n\n{}",
-            render_workflow_prompt_section(&wt.workflow, wt.current_step_id.as_deref())
-        ),
-        None => base_prompt.to_string(),
-    };
+    // Compose base → first-turn greeting → current workflow step. The greeting is
+    // injected only when this conversation has no prior messages (first turn).
+    let mut sections: Vec<String> = vec![base_prompt.to_string()];
+    if prior.is_empty() {
+        if let Some(greeting) = greeting_section.as_deref() {
+            sections.push(greeting.to_string());
+        }
+    }
+    if let Some(wt) = workflow.as_ref() {
+        sections.push(render_workflow_prompt_section(
+            &wt.workflow,
+            wt.current_step_id.as_deref(),
+        ));
+    }
+    let resolved_prompt = sections.join("\n\n");
     let config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
@@ -357,6 +375,13 @@ pub async fn run_streaming_turn(
         for tool in provider.tools_for(&ctx).await {
             tools.register_arc(tool);
         }
+    }
+
+    // SEAM 3 — per-agent tool allow-list. When the agent's `tool_config` restricts
+    // the tool set, drop every registered tool (built-in or host) whose snake_case
+    // name isn't enabled. `None` (empty/absent tool_config) leaves the full set.
+    if let Some(enabled) = enabled_tools {
+        tools.retain(|name| enabled.iter().any(|id| id == name));
     }
 
     // 3a. Write-confirmation HITL: when configured with tool patterns, install a

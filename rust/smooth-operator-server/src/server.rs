@@ -237,7 +237,7 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
             // same pool — so an agent's `instructions` / `conversation_workflow`
             // drive its conversations. Degrades to the org default when the table
             // is absent (a standalone deploy) or a row is malformed.
-            let agent_config = Arc::new(adapter.agent_config_provider());
+            let agent_config = Arc::new(adapter.agent_config_resolver());
             let storage: Arc<dyn StorageAdapter> = adapter;
             AppState::new(storage, config)
                 .with_connector_configs(connectors)

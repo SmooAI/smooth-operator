@@ -41,8 +41,8 @@ pub use access_control::{AccessContext, AclKnowledgeStore, DocAcl};
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
 pub use agent_config::{
     advance_after_verdict, judge_user_prompt, next_step, render_workflow_prompt_section,
-    resolve_current_step, AgentBehaviorConfig, AgentConfigProvider, ConversationWorkflow,
-    ConversationWorkflowStep, NoAgentConfig, StaticAgentConfig, WorkflowJudgeVerdict,
+    resolve_current_step, AgentBehaviorConfig, AgentConfigResolver, ConversationWorkflow,
+    ConversationWorkflowStep, EnabledTool, StaticAgentConfigResolver, WorkflowJudgeVerdict,
     JUDGE_SYSTEM_PROMPT,
 };
 pub use auth::{

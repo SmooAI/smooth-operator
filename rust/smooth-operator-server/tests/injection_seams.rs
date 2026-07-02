@@ -133,6 +133,8 @@ async fn run_turn_with_key(
             gateway_key,
             workflow: None,
             judge: None,
+            greeting_section: None,
+            enabled_tools: None,
         },
         &tx,
     )

@@ -653,10 +653,10 @@ async fn handle_send_message(
     // behave differently. Absent / malformed ⇒ `None`, so the org-default persona
     // (SEAM 2) is used, unchanged. Isolated per agent by construction.
     let agent_cfg: Option<AgentBehaviorConfig> =
-        state.agent_config.agent_config(&session.agent_id).await;
+        state.agent_config.resolve(&session.agent_id).await;
 
     // SEAM 2/3 — resolve the system prompt in priority order:
-    //   1. the per-AGENT instructions (+ persona/greeting), when set,
+    //   1. the per-AGENT instructions (+ personality), when set,
     //   2. the per-ORG persona override ([`AgentSettings::persona`]),
     //   3. the host's installed default persona ([`AppState::default_persona`]).
     // All absent ⇒ `None`, so the runner stays on its const customer-support
@@ -666,6 +666,16 @@ async fn handle_send_message(
         .and_then(AgentBehaviorConfig::system_prompt)
         .or_else(|| state.settings.get(&org_id).persona)
         .or_else(|| state.default_persona.clone());
+
+    // The agent's first-turn greeting section (the runner injects it only when
+    // the conversation has no prior messages) + its tool allow-list (`None` ⇒ the
+    // full server tool set).
+    let greeting_section = agent_cfg
+        .as_ref()
+        .and_then(AgentBehaviorConfig::greeting_section);
+    let enabled_tools = agent_cfg
+        .as_ref()
+        .and_then(AgentBehaviorConfig::enabled_tool_ids);
 
     // The agent's conversation workflow (if any) + the step this session is on.
     let workflow = agent_cfg
@@ -745,6 +755,9 @@ async fn handle_send_message(
                 // `None` for a freeform agent, so the turn is unchanged.
                 workflow,
                 judge,
+                // SEAM 3 — per-agent first-turn greeting + tool allow-list.
+                greeting_section,
+                enabled_tools,
             },
             &sink_owned,
         )

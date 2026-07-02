@@ -96,6 +96,8 @@ async fn run_turn(
             gateway_key: None,
             workflow,
             judge: judge.map(|j| j as Arc<dyn smooth_operator_core::llm_provider::LlmProvider>),
+            greeting_section: None,
+            enabled_tools: None,
         },
         &tx,
     )
@@ -238,4 +240,89 @@ async fn terminal_step_yes_stays_on_terminal() {
     .await;
     // Terminal step: yes verdict keeps us on the last step (workflow complete).
     assert_eq!(result.next_step_id.as_deref(), Some("collect"));
+}
+
+/// Run one turn against caller-provided storage with a greeting + tool allow-list,
+/// returning the system prompt and the tool names the main model was handed.
+async fn run_turn_on(
+    storage: Arc<dyn StorageAdapter>,
+    greeting_section: Option<String>,
+    enabled_tools: Option<Vec<String>>,
+) -> (String, Vec<String>) {
+    let main_arc = Arc::new(reply_mock("Hello!"));
+    let (tx, _rx) = unbounded_channel::<Value>();
+    runner::run_streaming_turn(
+        TurnRequest {
+            storage,
+            llm: mock_llm(),
+            max_iterations: 4,
+            conversation_id: CONVERSATION_ID,
+            request_id: REQUEST_ID,
+            user_message: "Hi",
+            access: AccessContext::anonymous(),
+            llm_provider: Some(main_arc.clone()),
+            reranker: None,
+            confirmation: None,
+            tool_provider: None,
+            system_prompt: None,
+            org_id: None,
+            gateway_key: None,
+            workflow: None,
+            judge: None,
+            greeting_section,
+            enabled_tools,
+        },
+        &tx,
+    )
+    .await
+    .expect("run_streaming_turn");
+
+    let call = main_arc.calls().into_iter().next().expect("one call");
+    let system = call
+        .messages
+        .iter()
+        .find(|m| m.role == Role::System)
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let tool_names = call.tools.iter().map(|t| t.name.clone()).collect();
+    (system, tool_names)
+}
+
+#[tokio::test]
+async fn greeting_injected_first_turn_only() {
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
+    let greeting = "<GreetingAwareness>Welcome to Acme!</GreetingAwareness>".to_string();
+
+    // Turn 1: no prior messages → greeting injected.
+    let (system1, _) = run_turn_on(storage.clone(), Some(greeting.clone()), None).await;
+    assert!(
+        system1.contains("Welcome to Acme!"),
+        "first turn should greet: {system1}"
+    );
+
+    // Turn 2: the runner persisted turn 1, so prior is non-empty → no greeting.
+    let (system2, _) = run_turn_on(storage.clone(), Some(greeting), None).await;
+    assert!(
+        !system2.contains("Welcome to Acme!"),
+        "second turn must not greet: {system2}"
+    );
+}
+
+#[tokio::test]
+async fn tool_allow_list_restricts_the_registry() {
+    // Unrestricted: the built-in knowledge_search is offered.
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
+    let (_s, tools) = run_turn_on(storage, None, None).await;
+    assert!(
+        tools.iter().any(|n| n == "knowledge_search"),
+        "default set has knowledge_search"
+    );
+
+    // Restricted to a tool that isn't registered → knowledge_search is filtered out.
+    let storage2: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
+    let (_s2, tools2) = run_turn_on(storage2, None, Some(vec!["notify_humans".to_string()])).await;
+    assert!(
+        !tools2.iter().any(|n| n == "knowledge_search"),
+        "allow-list should drop knowledge_search: {tools2:?}"
+    );
 }

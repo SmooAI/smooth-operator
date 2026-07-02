@@ -67,7 +67,7 @@ use smooth_operator_core::{CheckpointStore, KnowledgeBase};
 // consumers keep working. Only the adapter-specific `GatewayEmbedder` (+ its
 // 1536-d constant) is defined locally.
 pub use admin::{PgConnectorConfigStore, PgIndexingStore, PgSettingsStore};
-pub use agent_config::PgAgentConfigProvider;
+pub use agent_config::PgAgentConfigResolver;
 pub use embedder::{GatewayEmbedder, OPENAI_SMALL_EMBEDDING_DIM};
 pub use knowledge::PgKnowledgeBase;
 pub use memory::PgMemory;
@@ -259,14 +259,14 @@ impl PostgresAdapter {
         PgSettingsStore::new(self.pool.clone(), self.handle.clone())
     }
 
-    /// A Postgres-backed [`AgentConfigProvider`](smooth_operator::agent_config::AgentConfigProvider)
+    /// A Postgres-backed [`AgentConfigResolver`](smooth_operator::agent_config::AgentConfigResolver)
     /// over this adapter's pool (the monorepo `agents` table). Reads a
     /// connection's per-agent `instructions` / `conversation_workflow` so the
     /// runner honors them. Degrades to no per-agent config when the table is
     /// absent or the row is malformed. Cheap to build (clones the pool handle).
     #[must_use]
-    pub fn agent_config_provider(&self) -> PgAgentConfigProvider {
-        PgAgentConfigProvider::new(self.pool.clone())
+    pub fn agent_config_resolver(&self) -> PgAgentConfigResolver {
+        PgAgentConfigResolver::new(self.pool.clone())
     }
 
     /// A Postgres-backed [`IndexingStore`](smooth_operator_ingestion::indexing::IndexingStore)
