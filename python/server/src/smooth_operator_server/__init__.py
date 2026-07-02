@@ -26,6 +26,16 @@ from .auth import (
 )
 from .backplane import Backplane, InMemoryBackplane
 from .dispatcher import FrameDispatcher
+from .otp import (
+    OtpChannel,
+    OtpContact,
+    OtpDelivery,
+    OtpError,
+    OtpInvalid,
+    OtpService,
+    OtpVerified,
+    OtpVerifyOutcome,
+)
 from .server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -53,6 +63,14 @@ __all__ = [
     "Backplane",
     "InMemoryBackplane",
     "FrameDispatcher",
+    "OtpChannel",
+    "OtpContact",
+    "OtpDelivery",
+    "OtpError",
+    "OtpInvalid",
+    "OtpService",
+    "OtpVerified",
+    "OtpVerifyOutcome",
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "Server",

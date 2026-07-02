@@ -29,6 +29,11 @@ class StoredSession:
     agent_name: str
     user_participant_id: str
     agent_participant_id: str
+    #: The caller's email captured at create time, used as the OTP delivery contact
+    #: for the ``end_user`` identity flow (the Python analog of the Rust session's
+    #: ``metadata.contactEmail``). ``None`` when no email was supplied — the server
+    #: then can't offer OTP for this session.
+    contact_email: str | None = None
 
 
 class MessageDirection(Enum):
@@ -82,6 +87,20 @@ class SessionStore(ABC):
         ``state.currentStepId`` carried across turns)."""
         ...
 
+    @abstractmethod
+    async def is_session_authenticated(self, session_id: str) -> bool:
+        """Whether the caller has completed OTP identity verification for this session
+        (the Python analog of the Rust session's ``metadata.otpVerified``). ``False``
+        for an unknown or unverified session. Threaded into the ``end_user`` auth gate
+        so a verified session's gated tools run."""
+        ...
+
+    @abstractmethod
+    async def set_session_authenticated(self, session_id: str, verified: bool) -> None:
+        """Mark this session identity-verified (or clear it). Called after a
+        successful ``verify_otp``. A no-op for an unknown session."""
+        ...
+
 
 class InMemorySessionStore(SessionStore):
     """In-process :class:`SessionStore` — the reference store (the C# analog of
@@ -94,6 +113,9 @@ class InMemorySessionStore(SessionStore):
         self._messages: dict[str, list[StoredMessage]] = {}
         #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
         self._current_step: dict[str, str] = {}
+        #: Per-session OTP-verified bit (absent/False = unverified). Set by a
+        #: successful ``verify_otp``; read by the ``end_user`` auth gate.
+        self._authenticated: dict[str, bool] = {}
 
     async def create_session(self, agent_id: str, user_name: str | None, user_email: str | None) -> StoredSession:
         session = StoredSession(
@@ -103,6 +125,7 @@ class InMemorySessionStore(SessionStore):
             agent_name=AGENT_NAME,
             user_participant_id=str(uuid.uuid4()),
             agent_participant_id=str(uuid.uuid4()),
+            contact_email=(user_email.strip() or None) if isinstance(user_email, str) else None,
         )
         with self._gate:
             self._sessions[session.session_id] = session
@@ -134,3 +157,18 @@ class InMemorySessionStore(SessionStore):
                 self._current_step.pop(conversation_id, None)
             else:
                 self._current_step[conversation_id] = step_id
+
+    async def is_session_authenticated(self, session_id: str) -> bool:
+        with self._gate:
+            return self._authenticated.get(session_id, False)
+
+    async def set_session_authenticated(self, session_id: str, verified: bool) -> None:
+        with self._gate:
+            # Only a tracked session can be verified — mirrors the Rust no-op for an
+            # unknown session (a code can't authenticate something we don't hold).
+            if session_id not in self._sessions:
+                return
+            if verified:
+                self._authenticated[session_id] = True
+            else:
+                self._authenticated.pop(session_id, None)

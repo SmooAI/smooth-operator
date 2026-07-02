@@ -231,13 +231,35 @@ class NoSessionAuthenticator(SessionAuthenticator):
         return False
 
 
+@dataclass
+class OtpRefusal:
+    """A mutable slot recording an ``end_user`` tool this turn's gate refused for
+    lack of a verified session — the Python analog of the Rust gate's
+    ``Arc<Mutex<Option<String>>>``. The dispatcher shares one across a turn's gated
+    tools and reads :attr:`refused_tool` after the turn to decide whether to offer
+    the OTP flow. An ``admin`` refusal is never recorded here (no OTP can satisfy
+    it)."""
+
+    refused_tool: str | None = None
+
+
 class _GatedTool:
     """Wraps a :class:`Tool`, enforcing the per-agent ``authLevel`` at execution and
     delivering the entry's ``config`` to the inner tool. Structurally a ``Tool``
-    (delegates name/description/parameters). Mirrors ``tool-execution.ts``."""
+    (delegates name/description/parameters). Mirrors ``tool-execution.ts``.
+
+    ``session_authenticated`` is the turn's resolved identity bit (the session's
+    OTP-verified state OR'd with the host :class:`SessionAuthenticator` seam),
+    computed once by the dispatcher before the turn — the Python analog of the Rust
+    gate's ``session_authenticated`` field."""
 
     def __init__(
-        self, inner: Any, entry: EnabledTool, visibility: str, authenticator: SessionAuthenticator, conversation_id: str
+        self,
+        inner: Any,
+        entry: EnabledTool,
+        visibility: str,
+        session_authenticated: bool,
+        recorder: OtpRefusal | None = None,
     ) -> None:
         self.inner = inner
         self.name = inner.name
@@ -245,8 +267,8 @@ class _GatedTool:
         self.parameters = inner.parameters
         self._entry = entry
         self._visibility = visibility
-        self._authenticator = authenticator
-        self._conversation_id = conversation_id
+        self._session_authenticated = session_authenticated
+        self._recorder = recorder
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         auth_level = self._entry.auth_level
@@ -254,10 +276,16 @@ class _GatedTool:
         # `supports_auth_requirement` (default False) — faithful to the reference.
         if auth_level != "none" and getattr(self.inner, "supports_auth_requirement", False):
             if auth_level == "admin" and self._visibility == "public":
+                # An admin refusal is not OTP-remediable → never recorded for OTP.
                 return f"Tool '{self.name}' requires admin authentication and is not available on public-facing agents."
             # Internal agents auto-satisfy end_user/admin (the session is already authed).
             # Public agents must verify identity for end_user before the tool runs.
-            if self._visibility != "internal" and not await self._authenticator.is_authenticated(self._conversation_id):
+            if self._visibility != "internal" and not self._session_authenticated:
+                # Record an `end_user` refusal so the server can offer the OTP flow
+                # after the turn. Only `end_user` is OTP-remediable (mirrors the Rust
+                # gate, which records only AuthLevel::EndUser).
+                if auth_level == "end_user" and self._recorder is not None:
+                    self._recorder.refused_tool = self.name
                 return f"Tool '{self.name}' requires identity verification before it can run. Ask the user to verify their identity with a one-time code."
         # Deliver the per-tool config (only when set → behavior unchanged otherwise).
         if self._entry.config:
@@ -268,12 +296,14 @@ class _GatedTool:
 def gate_tools(
     tools: list[Any],
     config: AgentConfig | None,
-    authenticator: SessionAuthenticator,
-    conversation_id: str,
+    session_authenticated: bool,
+    recorder: OtpRefusal | None = None,
 ) -> list[Any]:
     """Wrap each tool that has an ``authLevel`` to enforce or per-tool ``config`` to
     deliver. Tools with neither pass through untouched, so an un-configured agent's
-    tools are unchanged."""
+    tools are unchanged. ``session_authenticated`` is the turn's resolved identity
+    bit; ``recorder`` (when given) captures an ``end_user`` refusal for the post-turn
+    OTP offer."""
     if config is None or not config.enabled_tools:
         return tools
     by_id = {e.tool_id: e for e in config.enabled_tools}
@@ -283,7 +313,7 @@ def gate_tools(
         if entry is None or (entry.auth_level == "none" and not entry.config):
             out.append(tool)
         else:
-            out.append(_GatedTool(tool, entry, config.visibility, authenticator, conversation_id))
+            out.append(_GatedTool(tool, entry, config.visibility, session_authenticated, recorder))
     return out
 
 
