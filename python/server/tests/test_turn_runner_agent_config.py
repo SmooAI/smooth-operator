@@ -12,6 +12,7 @@ from smooth_operator_server.agent_config import (
     AgentConfig,
     ConversationWorkflow,
     ConversationWorkflowStep,
+    EnabledTool,
     StaticAgentConfigResolver,
 )
 from smooth_operator_server.dispatcher import FrameDispatcher
@@ -242,7 +243,7 @@ async def test_tool_config_filters_tools_per_agent() -> None:
         mock,
         tools=server_tools,
         agent_config_resolver=StaticAgentConfigResolver(
-            {"agent-a": AgentConfig(allowed_tools=["crm", "ghost"])}  # ghost ignored
+            {"agent-a": AgentConfig(enabled_tools=[EnabledTool("crm"), EnabledTool("ghost")])}  # ghost ignored
         ),
     )
 

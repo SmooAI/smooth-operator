@@ -45,6 +45,18 @@ class ConversationWorkflow:
 
 
 @dataclass(frozen=True)
+class EnabledTool:
+    """One entry in ``tool_config.enabledTools`` (mirrors the monorepo ``AgentToolConfig``).
+    ``auth_level``/``config`` are preserved on the parsed type for downstream hosts even
+    though the reference server doesn't act on them yet."""
+
+    tool_id: str
+    enabled: bool = True
+    auth_level: str = "none"
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     """Resolved per-agent behavior. Every field is optional — an agent may set only
     its ``instructions`` prompt, only a workflow, or both."""
@@ -58,9 +70,10 @@ class AgentConfig:
     greeting: str | None = None
     #: Structured conversation workflow. ``None`` → freeform prompt only.
     conversation_workflow: ConversationWorkflow | None = None
-    #: Tool allow-list: when non-empty, this agent's turns are restricted to the
-    #: server tools whose names appear here (empty → the full server tool set).
-    allowed_tools: list[str] = field(default_factory=list)
+    #: ``tool_config.enabledTools`` — a tool allow-list. When non-empty, this agent's
+    #: turns are restricted to the ``enabled=true`` entries' ``tool_id`` (empty → the
+    #: full server tool set).
+    enabled_tools: list[EnabledTool] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -70,7 +83,7 @@ class AgentConfig:
             and self.personality is None
             and self.greeting is None
             and self.conversation_workflow is None
-            and not self.allowed_tools
+            and not self.enabled_tools
         )
 
 
@@ -138,32 +151,54 @@ def parse_agent_config(raw: Any) -> AgentConfig | None:
     else:
         instructions = _clean_str(instructions_raw)
 
-    # tool_config (snake) / allowedTools (camel) — a string-array tool allow-list.
-    tools_raw = raw.get("tool_config")
-    if not tools_raw:
-        tools_raw = raw.get("allowedTools")
-    allowed_tools = (
-        [name for name in tools_raw if isinstance(name, str) and name.strip()] if isinstance(tools_raw, list) else []
-    )
-
     config = AgentConfig(
         instructions=instructions,
         personality=_clean_str(raw.get("personality")),
         greeting=_clean_str(raw.get("greeting")),
         conversation_workflow=parse_workflow(raw.get("conversation_workflow")),
-        allowed_tools=allowed_tools,
+        enabled_tools=_parse_enabled_tools(raw.get("tool_config")),
     )
     return None if config.is_empty else config
 
 
+def _parse_enabled_tools(raw: Any) -> list[EnabledTool]:
+    """Parse ``tool_config.enabledTools`` tolerantly. Each entry needs a string
+    ``toolId``; ``enabled`` defaults true, ``authLevel`` defaults ``"none"``, ``config``
+    is an optional dict. Malformed entries are dropped; a bad/missing shape → ``[]``
+    (→ full tool set)."""
+    if not isinstance(raw, dict):
+        return []
+    entries = raw.get("enabledTools")
+    if not isinstance(entries, list):
+        return []
+    out: list[EnabledTool] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        tool_id = _clean_str(item.get("toolId"))
+        if tool_id is None:
+            continue
+        enabled = item.get("enabled")
+        cfg = item.get("config")
+        out.append(
+            EnabledTool(
+                tool_id=tool_id,
+                enabled=enabled if isinstance(enabled, bool) else True,
+                auth_level=_clean_str(item.get("authLevel")) or "none",
+                config=cfg if isinstance(cfg, dict) else {},
+            )
+        )
+    return out
+
+
 def filter_tools(tools: list[Any], config: AgentConfig | None) -> list[Any]:
-    """Restrict ``tools`` to the agent's allow-list (matched by ``.name``). An empty
-    allow-list or ``None`` config returns ``tools`` unchanged, so an un-configured
-    agent keeps the full server tool set; unknown names in the allow-list are
-    ignored. Mirrors the Go/TS ``filterTools``."""
-    if config is None or not config.allowed_tools:
+    """Restrict ``tools`` to the agent's allow-list (``enabled=true`` ``tool_id``s,
+    matched by ``.name``). An empty ``enabledTools`` or ``None`` config returns
+    ``tools`` unchanged (un-configured agents keep the full server tool set); unknown
+    tool_ids are ignored. Mirrors the monorepo ``AgentToolConfig`` semantics."""
+    if config is None or not config.enabled_tools:
         return tools
-    allowed = set(config.allowed_tools)
+    allowed = {e.tool_id for e in config.enabled_tools if e.enabled}
     return [t for t in tools if t.name in allowed]
 
 
