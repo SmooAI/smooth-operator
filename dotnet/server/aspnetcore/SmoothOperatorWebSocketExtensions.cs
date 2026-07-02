@@ -98,7 +98,10 @@ public static class SmoothOperatorWebSocketExtensions
             agentConfigResolver: agentConfigResolver,
             judge: judge,
             // Identity-verification seam for end_user tools on public agents (default fails closed).
-            authenticator: services.GetService<ISessionAuthenticator>());
+            authenticator: services.GetService<ISessionAuthenticator>(),
+            // Host OTP seam: a registered IOtpService turns a refused end_user tool into an OTP offer
+            // and answers verify_otp. Absent ⇒ no OTP offered, verify_otp fails closed (unchanged).
+            otpService: services.GetService<IOtpService>());
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)

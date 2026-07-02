@@ -28,6 +28,7 @@ public sealed class FrameDispatcher
     private readonly IAgentConfigResolver? _agentConfigResolver;
     private readonly IWorkflowJudge? _judge;
     private readonly ISessionAuthenticator _authenticator;
+    private readonly IOtpService? _otpService;
 
     // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
     // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
@@ -47,7 +48,8 @@ public sealed class FrameDispatcher
         ConfirmationRegistry? confirmations = null,
         IAgentConfigResolver? agentConfigResolver = null,
         IWorkflowJudge? judge = null,
-        ISessionAuthenticator? authenticator = null)
+        ISessionAuthenticator? authenticator = null,
+        IOtpService? otpService = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -67,8 +69,13 @@ public sealed class FrameDispatcher
         // agent uses the default persona, unchanged) and the post-turn workflow judge.
         _agentConfigResolver = agentConfigResolver;
         _judge = judge;
-        // Identity-verification seam for end_user-level tools on public agents. Default fails closed.
-        _authenticator = authenticator ?? DenyAllSessionAuthenticator.Instance;
+        // Identity-verification seam for end_user-level tools on public agents. A host's own
+        // authenticator wins; absent one, default to the store-backed authenticator so a session
+        // marked verified by a successful verify_otp lets its gated tools run (and every un-verified
+        // session still fails closed — reads false — exactly like the prior deny-all default).
+        _authenticator = authenticator ?? new StoreSessionAuthenticator(_store);
+        // Host OTP seam. Absent ⇒ no OTP is ever offered and verify_otp fails closed (unchanged).
+        _otpService = otpService;
     }
 
     /// <summary>
@@ -145,6 +152,9 @@ public sealed class FrameDispatcher
                     break;
                 case "confirm_tool_action":
                     HandleConfirmToolAction(frame, requestId, sink);
+                    break;
+                case "verify_otp":
+                    await HandleVerifyOtpAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
                 case null:
                     sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "Missing 'action'"));
@@ -239,7 +249,10 @@ public sealed class FrameDispatcher
         // 4. Enforce per-tool authLevel + deliver per-tool config at execution: wrap the surviving tools
         //    so an auth-gated one blocks (with the reference tool message) when its authLevel isn't
         //    satisfied, and a config-bearing one hands its config to the tool. No-op when nothing needs it.
-        var gatedTools = ToolAuthGate.Apply(effectiveTools, agentConfig, _authenticator, session.ConversationId);
+        //    When a host OTP service is installed, a per-turn recorder captures an end_user tool the gate
+        //    refused for lack of verification, so the OTP flow can be offered after the turn.
+        var otpRecorder = _otpService is not null ? new OtpRefusalRecorder() : null;
+        var gatedTools = ToolAuthGate.Apply(effectiveTools, agentConfig, _authenticator, session.ConversationId, otpRecorder);
 
         // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
@@ -256,12 +269,28 @@ public sealed class FrameDispatcher
         var requestIdStr = requestId;
         var sessionIdStr = session.SessionId;
         var conversationId = session.ConversationId;
+        var userEmail = session.UserEmail;
 
         var task = Task.Run(async () =>
         {
             try
             {
                 var result = await runner.RunAsync(conversationId, requestIdStr, message, sink, sessionIdStr, cancellationToken).ConfigureAwait(false);
+
+                // If the auth gate refused an end_user tool this turn for lack of a verified session,
+                // and a host OTP service is installed and the session has a contact to reach, offer the
+                // OTP flow (prompt → dispatch → ack) BEFORE the terminal response. Like the Rust
+                // reference, the server does not park/auto-resume: the client verifies via verify_otp
+                // and re-sends its message once the session is authenticated.
+                if (_otpService is not null && otpRecorder?.Refused is string refusedTool)
+                {
+                    var contact = new OtpContact(Email: userEmail);
+                    if (!contact.IsEmpty)
+                    {
+                        await OfferOtpAsync(sessionIdStr, refusedTool, contact, requestIdStr, sink, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
                 sink(ProtocolEvents.EventualResponse(
                     requestIdStr,
                     200,
@@ -334,5 +363,97 @@ public sealed class FrameDispatcher
             200,
             approved ? "Tool action approved" : "Tool action rejected",
             new JsonObject { ["sessionId"] = sessionId, ["approved"] = approved }));
+    }
+
+    /// <summary>
+    /// Emit the OTP-offer sequence for a turn whose <c>end_user</c> tool was refused for lack of a
+    /// verified session: <c>otp_verification_required</c> (prompt the client), then
+    /// <see cref="IOtpService.SendOtpAsync"/> on the host service, then <c>otp_sent</c> (ack delivery)
+    /// — or an <c>OTP_SEND_FAILED</c> error if delivery throws. The masked destination + channel come
+    /// from the host; the server never sees the code. <c>authLevel</c> is fixed <c>end_user</c> (the
+    /// only level this flow remedies). The C# analog of the Rust <c>offer_otp</c>.
+    /// </summary>
+    private async Task OfferOtpAsync(string sessionId, string tool, OtpContact contact, string requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    {
+        sink(ProtocolEvents.OtpVerificationRequired(
+            requestId,
+            tool,
+            $"Verify your identity to continue using '{tool}'.",
+            contact.AvailableChannels,
+            "end_user"));
+        try
+        {
+            var delivery = await _otpService!.SendOtpAsync(sessionId, contact, cancellationToken).ConfigureAwait(false);
+            sink(ProtocolEvents.OtpSent(requestId, delivery.Channel.ToWire(), delivery.MaskedDestination));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            sink(ProtocolEvents.Error(requestId, "OTP_SEND_FAILED", "Failed to send verification code."));
+        }
+    }
+
+    /// <summary>
+    /// <c>verify_otp</c> — validate a submitted OTP code and, on success, mark the session
+    /// identity-verified. Per <c>spec/actions/verify-otp.schema.json</c> the client replies with
+    /// <c>{action, sessionId, requestId, code}</c> to an <c>otp_verification_required</c> event. There
+    /// is no dedicated response event: a correct code emits <c>otp_verified</c> (the client then
+    /// re-sends its message to run the gated tool — the reference server does not park/auto-resume the
+    /// original turn); a rejected code emits <c>otp_invalid</c> with the host's remaining-attempt count.
+    /// With no <see cref="IOtpService"/> installed, verification is impossible, so we fail closed with
+    /// an <c>otp_invalid</c> (<c>NOT_FOUND</c>, 0 attempts). Validation order mirrors the Rust
+    /// reference: requestId, sessionId, code, session-exists, then service. The C# analog of
+    /// <c>handle_verify_otp</c>.
+    /// </summary>
+    private async Task HandleVerifyOtpAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    {
+        // requestId is load-bearing (it echoes the originating otp_verification_required); require it.
+        if (string.IsNullOrEmpty(requestId))
+        {
+            sink(ProtocolEvents.Error(null, "VALIDATION_ERROR", "verify_otp requires a 'requestId'"));
+            return;
+        }
+
+        var sessionId = frame["sessionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "verify_otp requires a 'sessionId'"));
+            return;
+        }
+
+        var code = frame["code"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(code))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "verify_otp requires a 'code'"));
+            return;
+        }
+
+        // The session must exist (a code can't verify a session we don't track).
+        var session = await _store.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (session is null)
+        {
+            sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));
+            return;
+        }
+
+        // No host OTP service → verification is impossible. Fail closed on the documented otp_invalid
+        // path (a client shouldn't reach here without first receiving otp_verification_required, which
+        // only an installed service emits).
+        if (_otpService is null)
+        {
+            sink(ProtocolEvents.OtpInvalid(requestId, "NOT_FOUND", 0, "No verification is in progress for this session."));
+            return;
+        }
+
+        var outcome = await _otpService.VerifyOtpAsync(sessionId, code, cancellationToken).ConfigureAwait(false);
+        switch (outcome)
+        {
+            case OtpVerifyOutcome.Verified:
+                await _store.SetSessionAuthenticatedAsync(session.ConversationId, true, cancellationToken).ConfigureAwait(false);
+                sink(ProtocolEvents.OtpVerified(requestId, "Identity verified successfully."));
+                break;
+            case OtpVerifyOutcome.Invalid invalid:
+                sink(ProtocolEvents.OtpInvalid(requestId, invalid.Error?.ToWire(), invalid.AttemptsRemaining, invalid.Message));
+                break;
+        }
     }
 }

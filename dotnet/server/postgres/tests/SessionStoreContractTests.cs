@@ -98,6 +98,40 @@ public abstract class SessionStoreContractTests
         // Scoped per conversation.
         Assert.Null(await store.GetWorkflowStepAsync(b.ConversationId));
     }
+
+    [SkippableFact]
+    public async Task SessionAuthenticated_DefaultsFalse_ThenUpsertsAndScopesByConversation()
+    {
+        var store = await CreateStoreAsync();
+        var a = await store.CreateSessionAsync("", null, null);
+        var b = await store.CreateSessionAsync("", null, null);
+
+        // Fresh conversation → not verified (fail closed).
+        Assert.False(await store.GetSessionAuthenticatedAsync(a.ConversationId));
+
+        await store.SetSessionAuthenticatedAsync(a.ConversationId, true);
+        Assert.True(await store.GetSessionAuthenticatedAsync(a.ConversationId));
+
+        // Upsert replaces (can be cleared back to false).
+        await store.SetSessionAuthenticatedAsync(a.ConversationId, false);
+        Assert.False(await store.GetSessionAuthenticatedAsync(a.ConversationId));
+
+        // Scoped per conversation.
+        await store.SetSessionAuthenticatedAsync(a.ConversationId, true);
+        Assert.False(await store.GetSessionAuthenticatedAsync(b.ConversationId));
+    }
+
+    [SkippableFact]
+    public async Task CreateSession_CapturesUserEmail_ForOtpContact()
+    {
+        var store = await CreateStoreAsync();
+
+        var withEmail = await store.CreateSessionAsync("", "Alice", "alice@example.com");
+        Assert.Equal("alice@example.com", (await store.GetSessionAsync(withEmail.SessionId))!.UserEmail);
+
+        var withoutEmail = await store.CreateSessionAsync("", null, null);
+        Assert.Null((await store.GetSessionAsync(withoutEmail.SessionId))!.UserEmail);
+    }
 }
 
 /// <summary>The contract, against the in-memory adapter (always runs — no Docker).</summary>

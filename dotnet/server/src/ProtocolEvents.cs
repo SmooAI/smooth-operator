@@ -114,6 +114,91 @@ public static class ProtocolEvents
         ["timestamp"] = NowMs(),
     };
 
+    /// <summary>
+    /// <c>otp_verification_required</c> — emitted after a turn's auth gate refused an <c>end_user</c>
+    /// tool on an unverified session and the host has an OTP service installed. Tells the client to
+    /// collect a one-time code. Wire shape matches <c>spec/events/otp-verification-required.schema.json</c>
+    /// (double-nested <c>data.data</c>). <paramref name="availableChannels"/> are the delivery channels
+    /// the server can offer given the session's known contacts.
+    /// </summary>
+    public static JsonObject OtpVerificationRequired(string requestId, string toolId, string actionDescription, IReadOnlyList<OtpChannel> availableChannels, string authLevel)
+    {
+        var channels = new JsonArray();
+        foreach (var channel in availableChannels)
+        {
+            channels.Add(channel.ToWire());
+        }
+        return new JsonObject
+        {
+            ["type"] = "otp_verification_required",
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject
+            {
+                ["requestId"] = requestId,
+                ["data"] = new JsonObject
+                {
+                    ["toolId"] = toolId,
+                    ["actionDescription"] = actionDescription,
+                    ["availableChannels"] = channels,
+                    ["authLevel"] = authLevel,
+                },
+            },
+            ["timestamp"] = NowMs(),
+        };
+    }
+
+    /// <summary><c>otp_sent</c> — acknowledgement that a code was dispatched to the caller. Wire shape
+    /// matches <c>spec/events/otp-sent.schema.json</c>. <paramref name="maskedDestination"/> is a
+    /// partially masked address safe to display (e.g. <c>j***@example.com</c>).</summary>
+    public static JsonObject OtpSent(string requestId, string channel, string maskedDestination) => new()
+    {
+        ["type"] = "otp_sent",
+        ["requestId"] = requestId,
+        ["data"] = new JsonObject
+        {
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject { ["channel"] = channel, ["maskedDestination"] = maskedDestination },
+        },
+        ["timestamp"] = NowMs(),
+    };
+
+    /// <summary><c>otp_verified</c> — emitted when a <c>verify_otp</c> attempt succeeds. The session is
+    /// now identity-verified; the client re-sends its message to run the gated tool. Wire shape matches
+    /// <c>spec/events/otp-verified.schema.json</c>.</summary>
+    public static JsonObject OtpVerified(string requestId, string message) => new()
+    {
+        ["type"] = "otp_verified",
+        ["requestId"] = requestId,
+        ["data"] = new JsonObject
+        {
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject { ["message"] = message },
+        },
+        ["timestamp"] = NowMs(),
+    };
+
+    /// <summary>
+    /// <c>otp_invalid</c> — emitted when a <c>verify_otp</c> attempt is rejected. <paramref name="error"/>
+    /// is an optional machine-readable reason; <paramref name="attemptsRemaining"/> of 0 means the code
+    /// is locked and the client must restart the flow. Wire shape matches
+    /// <c>spec/events/otp-invalid.schema.json</c> — <c>error</c> is omitted when the host determined no cause.
+    /// </summary>
+    public static JsonObject OtpInvalid(string requestId, string? error, int attemptsRemaining, string message)
+    {
+        var inner = new JsonObject { ["attemptsRemaining"] = attemptsRemaining, ["message"] = message };
+        if (error is not null)
+        {
+            inner["error"] = error;
+        }
+        return new JsonObject
+        {
+            ["type"] = "otp_invalid",
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject { ["requestId"] = requestId, ["data"] = inner },
+            ["timestamp"] = NowMs(),
+        };
+    }
+
     public static JsonObject Error(string? requestId, string code, string message)
     {
         // The {code, message} descriptor is duplicated at the envelope top level (`error`) and nested
