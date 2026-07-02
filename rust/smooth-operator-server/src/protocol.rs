@@ -196,6 +196,102 @@ pub fn write_confirmation_required(
     })
 }
 
+/// `otp_verification_required` — emitted after a turn's auth gate refused an
+/// `end_user` tool on an unverified session and the host has an OTP service
+/// installed. Tells the client to collect a one-time code. Wire shape matches
+/// `spec/events/otp-verification-required.schema.json` (double-nested
+/// `data.data`). `available_channels` are the delivery channels the server can
+/// offer given the session's known contacts (`email` / `sms`).
+#[must_use]
+pub fn otp_verification_required(
+    request_id: &str,
+    tool_id: &str,
+    action_description: &str,
+    available_channels: &[&str],
+    auth_level: &str,
+) -> Value {
+    json!({
+        "type": "otp_verification_required",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {
+                "toolId": tool_id,
+                "actionDescription": action_description,
+                "availableChannels": available_channels,
+                "authLevel": auth_level,
+            },
+        },
+        "timestamp": now_ms(),
+    })
+}
+
+/// `otp_sent` — acknowledgement that a code was dispatched to the caller. Wire
+/// shape matches `spec/events/otp-sent.schema.json`. `masked_destination` is a
+/// partially masked address safe to display (e.g. `j***@example.com`).
+#[must_use]
+pub fn otp_sent(request_id: &str, channel: &str, masked_destination: &str) -> Value {
+    json!({
+        "type": "otp_sent",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {
+                "channel": channel,
+                "maskedDestination": masked_destination,
+            },
+        },
+        "timestamp": now_ms(),
+    })
+}
+
+/// `otp_verified` — emitted when a `verify_otp` attempt succeeds. The session is
+/// now identity-verified; the client re-sends its message to run the gated tool.
+/// Wire shape matches `spec/events/otp-verified.schema.json`.
+#[must_use]
+pub fn otp_verified(request_id: &str, message: &str) -> Value {
+    json!({
+        "type": "otp_verified",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": { "message": message },
+        },
+        "timestamp": now_ms(),
+    })
+}
+
+/// `otp_invalid` — emitted when a `verify_otp` attempt is rejected. `error` is an
+/// optional machine-readable reason (`INVALID_CODE` / `MAX_ATTEMPTS` /
+/// `NOT_FOUND` / `EXPIRED`); `attempts_remaining` of 0 means the code is locked
+/// and the client must restart the flow. Wire shape matches
+/// `spec/events/otp-invalid.schema.json`.
+#[must_use]
+pub fn otp_invalid(
+    request_id: &str,
+    error: Option<&str>,
+    attempts_remaining: u32,
+    message: &str,
+) -> Value {
+    let mut inner = json!({
+        "attemptsRemaining": attempts_remaining,
+        "message": message,
+    });
+    // Optional per spec: only emit `error` when the host determined a cause.
+    if let Some(err) = error {
+        inner["error"] = json!(err);
+    }
+    json!({
+        "type": "otp_invalid",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": inner,
+        },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `error` — an unrecoverable error. The `{ code, message }` descriptor is
 /// duplicated at the envelope level and nested under `data.error` for wire
 /// backward-compatibility (per `error.schema.json`).
@@ -417,6 +513,75 @@ mod tests {
             .unwrap()
             .contains("delete_record"));
         assert!(ev["timestamp"].is_i64());
+    }
+
+    #[test]
+    fn otp_verification_required_matches_spec_shape() {
+        let ev = otp_verification_required(
+            "r1",
+            "pay_invoice",
+            "Verify your identity to use pay_invoice.",
+            &["email"],
+            "end_user",
+        );
+        assert_eq!(ev["type"], "otp_verification_required");
+        assert_eq!(ev["requestId"], "r1");
+        assert_eq!(ev["data"]["requestId"], "r1");
+        let inner = &ev["data"]["data"];
+        assert_eq!(inner["toolId"], "pay_invoice");
+        assert_eq!(inner["authLevel"], "end_user");
+        assert_eq!(inner["availableChannels"][0], "email");
+        assert!(inner["actionDescription"]
+            .as_str()
+            .unwrap()
+            .contains("pay_invoice"));
+        assert!(ev["timestamp"].is_i64());
+    }
+
+    #[test]
+    fn otp_sent_matches_spec_shape() {
+        let ev = otp_sent("r1", "email", "j***@example.com");
+        assert_eq!(ev["type"], "otp_sent");
+        assert_eq!(ev["requestId"], "r1");
+        assert_eq!(ev["data"]["data"]["channel"], "email");
+        assert_eq!(ev["data"]["data"]["maskedDestination"], "j***@example.com");
+    }
+
+    #[test]
+    fn otp_verified_matches_spec_shape() {
+        let ev = otp_verified("r1", "Identity verified successfully.");
+        assert_eq!(ev["type"], "otp_verified");
+        assert_eq!(ev["data"]["requestId"], "r1");
+        assert_eq!(
+            ev["data"]["data"]["message"],
+            "Identity verified successfully."
+        );
+    }
+
+    #[test]
+    fn otp_invalid_carries_error_and_attempts() {
+        let ev = otp_invalid(
+            "r1",
+            Some("INVALID_CODE"),
+            2,
+            "Invalid code. 2 attempt(s) remaining.",
+        );
+        assert_eq!(ev["type"], "otp_invalid");
+        let inner = &ev["data"]["data"];
+        assert_eq!(inner["error"], "INVALID_CODE");
+        assert_eq!(inner["attemptsRemaining"], 2);
+        assert!(inner["message"].as_str().unwrap().contains("remaining"));
+    }
+
+    #[test]
+    fn otp_invalid_omits_error_when_none() {
+        // Optional per spec: no `error` key when the host couldn't determine a cause.
+        let ev = otp_invalid("r1", None, 0, "Verification failed.");
+        assert!(
+            ev["data"]["data"].get("error").is_none(),
+            "error must be absent when None"
+        );
+        assert_eq!(ev["data"]["data"]["attemptsRemaining"], 0);
     }
 
     #[test]

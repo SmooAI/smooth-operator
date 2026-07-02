@@ -29,6 +29,7 @@ pub mod curation;
 pub mod domain;
 pub mod embedding;
 pub mod gateway_key;
+pub mod otp;
 pub mod rerank;
 pub mod runtime;
 pub mod settings;
@@ -64,6 +65,7 @@ pub use embedding::{
     cosine_similarity, DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
 };
 pub use gateway_key::{resolve_gateway_key, EnvGatewayKeyResolver, GatewayKeyResolver};
+pub use otp::{OtpChannel, OtpContact, OtpDelivery, OtpError, OtpService, OtpVerifyOutcome};
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
 pub use runtime::{
     AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState, MAX_CITATIONS,

@@ -195,6 +195,32 @@ async fn end_user_on_public_unauthenticated_is_blocked() {
 }
 
 #[tokio::test]
+async fn end_user_unauthenticated_refusal_is_recorded_for_otp() {
+    // The gate the server keeps a handle to should record the refused end_user
+    // tool during a real turn, so the post-turn OTP offer can trigger. The clone
+    // shares the Arc-backed flag with the instance installed in the turn.
+    let g = gate(AuthLevel::EndUser, Visibility::Public, false);
+    let observed = g.clone();
+    let (executed, _cfg, _events) = run(Some(g), None).await;
+    assert!(!executed, "end_user tool must not execute unauthenticated");
+    assert_eq!(
+        observed.otp_refused_tool(),
+        Some(TOOL.to_string()),
+        "the refused end_user tool should be recorded for the OTP offer"
+    );
+}
+
+#[tokio::test]
+async fn admin_refusal_is_not_recorded_for_otp() {
+    // An admin refusal is not OTP-remediable → the flag stays clear so the
+    // server never offers OTP for it.
+    let g = gate(AuthLevel::Admin, Visibility::Public, false);
+    let observed = g.clone();
+    let (_executed, _cfg, _events) = run(Some(g), None).await;
+    assert_eq!(observed.otp_refused_tool(), None);
+}
+
+#[tokio::test]
 async fn end_user_on_public_authenticated_executes() {
     let (executed, _cfg, _events) = run(
         Some(gate(AuthLevel::EndUser, Visibility::Public, true)),

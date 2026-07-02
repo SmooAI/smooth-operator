@@ -24,6 +24,7 @@ use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
+use smooth_operator::otp::{OtpContact, OtpService};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::tool_provider::ToolProvider;
 use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
@@ -97,6 +98,17 @@ pub struct AppState {
     /// tenant's usage is attributed to its own key. The per-turn LLM-config build
     /// falls back to the env key whenever the resolver returns `None`.
     pub gateway_key_resolver: Arc<dyn GatewayKeyResolver>,
+    /// **End-user OTP identity-verification seam.** When `Some`, a turn whose
+    /// auth gate refuses an `end_user` tool on an unverified session triggers the
+    /// OTP flow: the server emits `otp_verification_required`, calls
+    /// [`send_otp`](smooth_operator::otp::OtpService::send_otp), and emits
+    /// `otp_sent`; a later `verify_otp` action calls
+    /// [`verify_otp`](smooth_operator::otp::OtpService::verify_otp) and, on
+    /// success, marks the session authenticated. `None` (the default) keeps the
+    /// current fail-closed behavior — the `end_user` tool is refused and no OTP is
+    /// offered. Installed via [`with_otp_service`](Self::with_otp_service). The
+    /// reference server never holds a code; the host owns generation/expiry.
+    pub otp_service: Option<Arc<dyn OtpService>>,
     /// Graceful-shutdown signal, shared across every per-connection clone of this
     /// state. On SIGTERM/ctrl_c the serve loop cancels this token; each
     /// connection's reader loop selects on [`CancellationToken::cancelled`] so it
@@ -199,6 +211,7 @@ impl AppState {
             backplane: Arc::new(InMemoryBackplane::new()),
             chat_provider: None,
             gateway_key_resolver,
+            otp_service: None,
             // A fresh, never-cancelled token: every clone of this state shares
             // its cancellation state, so the serve loop cancelling once fans out
             // to every connection. Defaulting here (rather than at each call
@@ -354,6 +367,15 @@ impl AppState {
         self
     }
 
+    /// Install the end-user OTP identity-verification service (builder). Wires the
+    /// `end_user` auth gate to an OTP flow (see [`otp_service`](Self::otp_service));
+    /// leaving it unset keeps the fail-closed default (refuse, no OTP offered).
+    #[must_use]
+    pub fn with_otp_service(mut self, service: Arc<dyn OtpService>) -> Self {
+        self.otp_service = Some(service);
+        self
+    }
+
     /// Install the graceful-shutdown signal (builder). The serve loop owns a
     /// clone of this token and cancels it on SIGTERM/ctrl_c; every per-connection
     /// clone observes the cancellation and drains. Defaulted to a fresh token in
@@ -412,6 +434,65 @@ impl AppState {
                 }
                 session.metadata = Some(meta);
             }
+        }
+    }
+
+    /// Whether this session's caller has completed OTP identity verification,
+    /// read from the session's `metadata.otpVerified`. `false` for an unknown or
+    /// unverified session. Threaded into the `end_user` auth gate so a verified
+    /// session's gated tools run. Same durability as the session registry (lives
+    /// as long as the session, on the pod that owns it).
+    #[must_use]
+    pub fn session_authenticated(&self, session_id: &str) -> bool {
+        self.sessions
+            .read()
+            .ok()
+            .and_then(|map| {
+                map.get(session_id)?
+                    .metadata
+                    .as_ref()?
+                    .get("otpVerified")?
+                    .as_bool()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Mark this session identity-verified (or clear it) by setting
+    /// `metadata.otpVerified`. Called after a successful `verify_otp`. No-op for
+    /// an unknown session. Coexists with the workflow step pointer (both live in
+    /// the session's metadata map).
+    pub fn set_session_authenticated(&self, session_id: &str, verified: bool) {
+        if let Ok(mut map) = self.sessions.write() {
+            if let Some(session) = map.get_mut(session_id) {
+                let mut meta = session.metadata.take().unwrap_or_default();
+                meta.insert("otpVerified".to_string(), serde_json::Value::from(verified));
+                session.metadata = Some(meta);
+            }
+        }
+    }
+
+    /// The caller's OTP contact points for this session, read from the session's
+    /// `metadata.contactEmail` / `metadata.contactPhone` (stashed at
+    /// create-session time). Empty when the session is unknown or captured no
+    /// contact — the server then can't offer OTP. The reference create-session
+    /// path captures only an email.
+    #[must_use]
+    pub fn session_contact(&self, session_id: &str) -> OtpContact {
+        let Ok(map) = self.sessions.read() else {
+            return OtpContact::default();
+        };
+        let Some(meta) = map.get(session_id).and_then(|s| s.metadata.as_ref()) else {
+            return OtpContact::default();
+        };
+        OtpContact {
+            email: meta
+                .get("contactEmail")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            phone: meta
+                .get("contactPhone")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         }
     }
 
@@ -618,6 +699,51 @@ mod tests {
         state.set_session_current_step("s1", Some("greet"));
         assert_eq!(state.session_current_step("s1"), Some("greet".to_string()));
         assert_eq!(state.session_current_step("s2"), None);
+    }
+
+    #[test]
+    fn session_authenticated_round_trips_and_defaults_false() {
+        let state = state_with(config_with_env_key(None));
+        state.insert_session(test_session("s1"));
+
+        // Fresh session: not verified.
+        assert!(!state.session_authenticated("s1"));
+        // Unknown session: not verified (no panic).
+        assert!(!state.session_authenticated("missing"));
+
+        state.set_session_authenticated("s1", true);
+        assert!(state.session_authenticated("s1"));
+
+        state.set_session_authenticated("s1", false);
+        assert!(!state.session_authenticated("s1"));
+
+        // Verified bit coexists with the workflow step pointer.
+        state.set_session_authenticated("s1", true);
+        state.set_session_current_step("s1", Some("collect"));
+        assert!(state.session_authenticated("s1"));
+        assert_eq!(
+            state.session_current_step("s1"),
+            Some("collect".to_string())
+        );
+    }
+
+    #[test]
+    fn session_contact_reads_stashed_email() {
+        let state = state_with(config_with_env_key(None));
+        let mut session = test_session("s1");
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("contactEmail".to_string(), "a@example.com".into());
+        session.metadata = Some(meta);
+        state.insert_session(session);
+
+        let contact = state.session_contact("s1");
+        assert_eq!(contact.email.as_deref(), Some("a@example.com"));
+        assert_eq!(contact.phone, None);
+
+        // Unknown / contact-less sessions yield an empty contact.
+        assert!(state.session_contact("missing").is_empty());
+        state.insert_session(test_session("s2"));
+        assert!(state.session_contact("s2").is_empty());
     }
 
     /// Per-org resolver covering exactly one org; `None` (→ env fallback) for any

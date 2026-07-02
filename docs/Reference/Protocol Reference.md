@@ -42,7 +42,7 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `get_session` | fetch session | `sessionId` | session snapshot |
 | `get_messages` | history | `sessionId`, paging | messages |
 | `confirm_tool_action` | resume after a write-confirmation | `sessionId`, `requestId`, `approved` | resumed stream |
-| `verify_otp` | resume after an auth gate | `sessionId`, `requestId`, `code` | resumed stream |
+| `verify_otp` | submit an OTP code after an auth gate | `sessionId`, `requestId`, `code` | `otp_verified` or `otp_invalid` (see below) |
 | `ping` | keepalive | — | `pong` |
 
 ## Events (server → client)
@@ -89,6 +89,20 @@ A `Citation` is `{ id, title, url?, snippet, score }` (schema: [`spec/domain/cit
 
 - **What grounds a citation**: the runtime collects the knowledge-base documents that actually grounded the turn — the engine's auto-injected `[Relevant knowledge]` context (mirrored by the runtime with the same top-k query) plus every `knowledge_search` tool result. It deduplicates by `id`, caps the count (8), and maps each `KnowledgeResult` → `Citation`: `id` ← `document_id`, `title` ← `source`, `url` ← `source` when it is an `http(s)` URL (the GitHub blob/issue URL stamped on at ingest — see [[Connectors]]) else omitted, `snippet` ← the chunk truncated, `score` ← `score`.
 - **Back-compat**: `citations` is absent when the turn retrieved nothing, so clients that predate it are unaffected. Generated clients expose it as an optional field (`Citation` type) after regeneration from `spec/`.
+
+## OTP identity verification (auth gate)
+
+A public agent can gate a tool behind `authLevel: end_user` — the tool only runs once the caller's identity is verified. The Rust reference server implements this as a **host seam**, `smooth_operator::otp::OtpService` (install via `AppState::with_otp_service`), so the server never generates, delivers, or validates a code — the host owns the code store, expiry, attempt counting, and email/SMS delivery.
+
+Flow:
+
+1. A turn calls an `end_user` tool on an unverified session; the auth gate refuses it (the model sees a "verify your identity" refusal). If an `OtpService` is installed **and** the session captured a contact (email at `create_conversation_session`), the server emits `otp_verification_required` (with `availableChannels` + the refused `toolId`), calls `OtpService::send_otp`, then emits `otp_sent` (channel + masked destination).
+2. The client submits the received code via `verify_otp`. The server calls `OtpService::verify_otp`:
+   - **verified** → the session is marked identity-verified and `otp_verified` is emitted;
+   - **rejected** → `otp_invalid` is emitted with the host's `attemptsRemaining` (0 ⇒ locked, restart the flow) and an optional machine-readable `error` (`INVALID_CODE` / `MAX_ATTEMPTS` / `NOT_FOUND` / `EXPIRED`).
+3. Once verified, the client **re-sends** its original `send_message`; the gate now passes and the tool runs.
+
+> **Reference-server note:** the reference server does not park/auto-resume the original turn across the OTP round-trip (step 3 is a client re-send). Parking + automatic resume is a host concern behind the same events. With no `OtpService` installed, the gate stays fail-closed (the `end_user` tool is refused, no OTP offered), and a stray `verify_otp` returns `otp_invalid` / `NOT_FOUND`. The reference server currently offers only the `email` channel (`create_conversation_session` captures no phone).
 
 ## Mapping to smooth-operator's `AgentEvent` stream
 
