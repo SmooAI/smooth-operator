@@ -32,6 +32,13 @@ type FrameDispatcher struct {
 	// A confirm_tool_action frame resolves the verdict the parked turn awaits. Shared
 	// with the turn runner. Created on demand (one per connection) when HITL is enabled.
 	confirmations *ConfirmationRegistry
+	// agentConfigs resolves per-agent config (instructions, workflow, greeting,
+	// personality, tool allow-list) by the session's agent id (SMOODEV-590). nil → the
+	// built-in default prompt + full tool set, no workflow.
+	agentConfigs AgentConfigResolver
+	// judgeModel is the cheap model the workflow judge uses ("" → DefaultJudgeModel),
+	// forwarded to every turn runner.
+	judgeModel string
 	// turns tracks in-flight spawned send_message turns so the connection loop can wait
 	// for them to finish (and flush their eventual_response) on teardown — the
 	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
@@ -43,7 +50,7 @@ type FrameDispatcher struct {
 // knowledge retriever (default nil) and tools (default none) are threaded into every
 // turn the runner builds. confirmTools + confirmations wire write-confirmation HITL;
 // pass nil/empty + a registry to disable.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry) *FrameDispatcher {
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string) *FrameDispatcher {
 	if confirmations == nil {
 		confirmations = NewConfirmationRegistry()
 	}
@@ -56,6 +63,8 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 		tools:         tools,
 		confirmTools:  confirmTools,
 		confirmations: confirmations,
+		agentConfigs:  agentConfigs,
+		judgeModel:    judgeModel,
 	}
 }
 
@@ -161,6 +170,25 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		return
 	}
 
+	// Resolve this agent's per-agent config (instructions, conversation workflow,
+	// greeting, personality, tool allow-list) by the session's agent id, and fold it into
+	// the effective system prompt + tools for THIS turn (SMOODEV-590). An un-configured
+	// agent (no resolver / nil config) falls back to the server default prompt + full tool
+	// set — behavior unchanged. Resolution never fails the turn: a resolver error degrades
+	// to the default.
+	var agentConfig *AgentConfig
+	if d.agentConfigs != nil {
+		if cfg, cfgErr := d.agentConfigs.Resolve(ctx, session.AgentID); cfgErr == nil {
+			agentConfig = cfg
+		}
+	}
+	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID)
+	effectiveTools := filterTools(d.tools, agentConfig)
+	var workflow *ConversationWorkflow
+	if agentConfig != nil {
+		workflow = agentConfig.Workflow
+	}
+
 	// 1. Immediate ack (202).
 	sink(immediateResponse(requestID, 202, "Processing your request...", nil))
 
@@ -181,13 +209,20 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	d.turns.Add(1)
 	go func() {
 		defer d.turns.Done()
-		runner := NewTurnRunner(d.client, d.store, d.systemP, d.knowledge, d.tools, d.confirmTools, d.confirmations)
+		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel)
 		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean
 			// error and keep the connection alive. Detail stays server-side.
 			sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
 			return
+		}
+		// SMOODEV-590 — persist the workflow pointer the judge advanced to, so the next
+		// turn on this conversation resumes on the right step. No-op for freeform agents
+		// (NextStepID empty) or when unchanged. A persistence error must not fail the
+		// already-produced turn, so it's swallowed (the step simply doesn't advance).
+		if result.NextStepID != "" && result.NextStepID != session.CurrentStepID {
+			_ = d.store.SetCurrentStep(ctx, frame.SessionID, result.NextStepID)
 		}
 		// 3. Terminal eventual_response.
 		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations))
