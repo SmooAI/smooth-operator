@@ -14,6 +14,7 @@ import type { ChatClientLike, Knowledge, Tool } from '@smooai/smooth-operator-co
 import { randomUUID } from 'node:crypto';
 
 import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
+import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
 import * as protocol from './protocol.js';
@@ -50,6 +51,12 @@ export interface FrameDispatcherOptions {
     /** The cheap model id the workflow judge uses (forwarded to the {@link TurnRunner}). */
     judgeModel?: string;
     /**
+     * SMOODEV-590 — resolves whether a conversation's session is identity-verified,
+     * for `end_user` tool-auth gating on public agents. Absent → fail-closed (tools
+     * requiring end_user auth on public agents are blocked).
+     */
+    sessionAuthenticator?: SessionAuthenticator;
+    /**
      * Tool-name patterns gated behind write-confirmation HITL (default empty → no
      * gating, behavior unchanged). When a turn calls a tool whose name contains one of
      * these, the dispatcher parks the turn and emits `write_confirmation_required`
@@ -75,6 +82,7 @@ export class FrameDispatcher {
     private readonly confirmations: ConfirmationRegistry;
     private readonly agentConfig?: AgentConfigResolver;
     private readonly judgeModel?: string;
+    private readonly sessionAuthenticator?: SessionAuthenticator;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
 
@@ -89,6 +97,7 @@ export class FrameDispatcher {
         this.confirmations = options.confirmations ?? new ConfirmationRegistry();
         this.agentConfig = options.agentConfig;
         this.judgeModel = options.judgeModel;
+        this.sessionAuthenticator = options.sessionAuthenticator;
     }
 
     /**
@@ -235,9 +244,12 @@ export class FrameDispatcher {
         const baseSystemPrompt = this.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
         const effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
         const enabledTools = agentConfig?.enabledTools;
-        const effectiveTools = enabledTools?.length
+        const filteredTools = enabledTools?.length
             ? this.tools.filter((t) => enabledTools.some((e) => e.enabled && e.toolId === t.name))
             : this.tools;
+        // Enforce authLevel + deliver per-tool config at execution (mirrors the
+        // monorepo tool-execution gate). No-op for tools without a gated entry / config.
+        const effectiveTools = gateTools(filteredTools, agentConfig, session.conversationId, this.sessionAuthenticator);
 
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's
         //    access — so a user only ever sees documents their groups grant.

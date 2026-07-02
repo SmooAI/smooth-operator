@@ -31,7 +31,10 @@ export { DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
 export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
 
 export { assembleSystemPrompt, parseAgentConfig, StaticAgentConfigResolver } from './agentConfig.js';
-export type { AgentConfig, AgentConfigResolver } from './agentConfig.js';
+export type { AgentConfig, AgentConfigResolver, EnabledTool } from './agentConfig.js';
+
+export { gateTools } from './toolGating.js';
+export type { ServerTool, SessionAuthenticator } from './toolGating.js';
 
 export {
     advanceStep,

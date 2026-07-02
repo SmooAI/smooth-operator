@@ -133,8 +133,8 @@ Focus this turn on the CURRENT STEP. Pursue the INTENT and aim to satisfy the CR
 </ConversationWorkflow>`;
 }
 
-/** Default cheap model slot for the judge (matches the server's default main model). */
-export const DEFAULT_JUDGE_MODEL = 'gpt-4o-mini';
+/** Default cheap (haiku-tier) model slot for the judge — matches the cross-lane default. */
+export const DEFAULT_JUDGE_MODEL = 'claude-haiku-4-5';
 
 /** Extract the first `yes` / `no` / `maybe` token from a judge reply. */
 function parseVerdict(content: string | null | undefined): 'yes' | 'no' | 'maybe' | undefined {

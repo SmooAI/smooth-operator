@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseAgentConfig, StaticAgentConfigResolver } from '../src/agentConfig.js';
 import { serve, type RunningServer } from '../src/server.js';
 import { InMemorySessionStore } from '../src/sessionStore.js';
+import type { ServerTool } from '../src/toolGating.js';
 import { TestClient } from './wsClient.js';
 
 const AGENT_A = '11111111-1111-1111-1111-111111111111';
@@ -30,9 +31,34 @@ async function openSession(client: TestClient, agentId: string): Promise<string>
     return (created.data as Record<string, unknown>).sessionId as string;
 }
 
-async function sendAndDrain(client: TestClient, sessionId: string, message: string): Promise<void> {
+async function sendAndDrain(client: TestClient, sessionId: string, message: string): Promise<Record<string, unknown>[]> {
     client.sendAction({ action: 'send_message', requestId: `sm-${Math.random()}`, sessionId, message });
-    await client.receiveUntil('eventual_response');
+    return (await client.receiveUntil('eventual_response')).seen;
+}
+
+/** The result string of the (first) tool-result stream_chunk in `seen`. */
+function toolResultOf(seen: Record<string, unknown>[]): string | undefined {
+    for (const f of seen) {
+        if (f.type !== 'stream_chunk') continue;
+        const rawResponse = ((f.data as Record<string, unknown>).state as Record<string, unknown>).rawResponse as Record<string, unknown>;
+        const toolResult = rawResponse?.toolResult as { result?: string } | undefined;
+        if (toolResult) return toolResult.result;
+    }
+    return undefined;
+}
+
+/** A gate-participating tool that records each execution (name + delivered config). */
+function recordingTool(name: string, calls: { name: string; config?: unknown }[]): ServerTool {
+    return {
+        name,
+        description: name,
+        parameters: { type: 'object', properties: {} },
+        supportsAuthRequirement: true,
+        async execute(_args, config) {
+            calls.push({ name, config });
+            return `EXECUTED ${name}`;
+        },
+    };
 }
 
 describe('per-agent config over a real WebSocket', () => {
@@ -208,6 +234,119 @@ describe('per-agent config over a real WebSocket', () => {
         await sendAndDrain(client, sessionId, 'hello');
 
         expect(systemPromptOf(mock, 0)).toContain('helpful customer support agent');
+        await client.close();
+    });
+});
+
+describe('tool authLevel enforcement + per-tool config over a real WebSocket', () => {
+    let server: RunningServer | undefined;
+    afterEach(async () => {
+        await server?.close();
+        server = undefined;
+    });
+
+    // Each turn: the model calls the tool (script[0]), the engine dispatches it (gated
+    // or executed), feeds the result back, then the model answers (script[1]).
+    const twoTurnScript = () => new MockLlmProvider().pushToolCall('c1', 'crm', JSON.stringify({})).pushText('done');
+
+    it("blocks an 'admin' tool on a public agent — tool never executes", async () => {
+        const calls: { name: string; config?: unknown }[] = [];
+        server = await serve({
+            chatClient: twoTurnScript(),
+            tools: [recordingTool('crm', calls)],
+            agentConfig: new StaticAgentConfigResolver({
+                [AGENT_A]: { visibility: 'public', enabledTools: [{ toolId: 'crm', enabled: true, authLevel: 'admin' }] },
+            }),
+        });
+        const client = await TestClient.connect(server.url);
+        const sessionId = await openSession(client, AGENT_A);
+        const seen = await sendAndDrain(client, sessionId, 'look up my account');
+
+        expect(toolResultOf(seen)).toContain('requires admin authentication and is not available on public-facing agents');
+        expect(calls).toHaveLength(0);
+        await client.close();
+    });
+
+    it("blocks an 'end_user' tool on a public agent when unauthenticated (fail-closed)", async () => {
+        const calls: { name: string; config?: unknown }[] = [];
+        server = await serve({
+            chatClient: twoTurnScript(),
+            tools: [recordingTool('crm', calls)],
+            // No sessionAuthenticator → fail-closed.
+            agentConfig: new StaticAgentConfigResolver({
+                [AGENT_A]: { visibility: 'public', enabledTools: [{ toolId: 'crm', enabled: true, authLevel: 'end_user' }] },
+            }),
+        });
+        const client = await TestClient.connect(server.url);
+        const sessionId = await openSession(client, AGENT_A);
+        const seen = await sendAndDrain(client, sessionId, 'look up my account');
+
+        expect(toolResultOf(seen)).toContain('verify your identity');
+        expect(calls).toHaveLength(0);
+        await client.close();
+    });
+
+    it("executes an 'end_user' tool on a public agent once the authenticator says yes", async () => {
+        const calls: { name: string; config?: unknown }[] = [];
+        server = await serve({
+            chatClient: twoTurnScript(),
+            tools: [recordingTool('crm', calls)],
+            sessionAuthenticator: { isAuthenticated: async () => true },
+            agentConfig: new StaticAgentConfigResolver({
+                [AGENT_A]: { visibility: 'public', enabledTools: [{ toolId: 'crm', enabled: true, authLevel: 'end_user' }] },
+            }),
+        });
+        const client = await TestClient.connect(server.url);
+        const sessionId = await openSession(client, AGENT_A);
+        const seen = await sendAndDrain(client, sessionId, 'look up my account');
+
+        expect(toolResultOf(seen)).toBe('EXECUTED crm');
+        expect(calls).toHaveLength(1);
+        await client.close();
+    });
+
+    it('auto-satisfies auth for an internal agent (no authenticator consulted)', async () => {
+        const calls: { name: string; config?: unknown }[] = [];
+        let consulted = false;
+        server = await serve({
+            chatClient: twoTurnScript(),
+            tools: [recordingTool('crm', calls)],
+            sessionAuthenticator: {
+                isAuthenticated: async () => {
+                    consulted = true;
+                    return false;
+                },
+            },
+            agentConfig: new StaticAgentConfigResolver({
+                [AGENT_A]: { visibility: 'internal', enabledTools: [{ toolId: 'crm', enabled: true, authLevel: 'admin' }] },
+            }),
+        });
+        const client = await TestClient.connect(server.url);
+        const sessionId = await openSession(client, AGENT_A);
+        const seen = await sendAndDrain(client, sessionId, 'look up all customers');
+
+        expect(toolResultOf(seen)).toBe('EXECUTED crm');
+        expect(calls).toHaveLength(1);
+        expect(consulted).toBe(false); // internal auto-satisfies; the seam isn't hit
+        await client.close();
+    });
+
+    it("delivers the enabledTools entry's config to the tool at execution", async () => {
+        const calls: { name: string; config?: unknown }[] = [];
+        server = await serve({
+            chatClient: twoTurnScript(),
+            tools: [recordingTool('crm', calls)],
+            agentConfig: new StaticAgentConfigResolver({
+                // authLevel 'none' → not gated, but config must still be delivered.
+                [AGENT_A]: { enabledTools: [{ toolId: 'crm', enabled: true, authLevel: 'none', config: { pipeline: 'sales' } }] },
+            }),
+        });
+        const client = await TestClient.connect(server.url);
+        const sessionId = await openSession(client, AGENT_A);
+        await sendAndDrain(client, sessionId, 'go');
+
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.config).toEqual({ pipeline: 'sales' });
         await client.close();
     });
 });

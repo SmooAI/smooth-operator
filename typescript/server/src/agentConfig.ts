@@ -49,6 +49,12 @@ export interface AgentConfig {
      * `toolId`. Empty / undefined → all registered tools available (unchanged).
      */
     enabledTools?: EnabledTool[];
+    /**
+     * Agent visibility (`agents.visibility`). `internal` agents auto-satisfy
+     * `end_user`/`admin` tool auth; `public` (default) agents block `admin` tools and
+     * require identity verification for `end_user` tools. Drives {@link gateTools}.
+     */
+    visibility?: 'public' | 'internal';
 }
 
 /**
@@ -102,6 +108,7 @@ export function parseAgentConfig(raw: unknown): AgentConfig | undefined {
 
     if (typeof obj.greeting === 'string' && obj.greeting.trim().length > 0) config.greeting = obj.greeting;
     if (typeof obj.personality === 'string' && obj.personality.trim().length > 0) config.personality = obj.personality;
+    if (obj.visibility === 'public' || obj.visibility === 'internal') config.visibility = obj.visibility;
 
     // tool_config.enabledTools — authoritative AgentToolConfig shape. Defaults to []
     // on every agent row; a non-empty list restricts tools at dispatch time. Malformed
