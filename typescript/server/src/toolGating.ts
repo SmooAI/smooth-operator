@@ -14,6 +14,7 @@
 import type { Tool } from '@smooai/smooth-operator-core';
 
 import type { AgentConfig, EnabledTool } from './agentConfig.js';
+import type { OtpRefusal } from './otp.js';
 
 /**
  * A registered tool that can opt into auth-requirement gating and receive its
@@ -42,14 +43,30 @@ export interface SessionAuthenticator {
  *
  * Gating applies to a tool ONLY when its `enabledTools` entry sets
  * `authLevel != 'none'` AND the tool declares `supportsAuthRequirement`. Then:
- *   - `admin` on a `public` agent → blocked (admin tools are internal-only);
+ *   - `admin` on a `public` agent → blocked (admin tools are internal-only); NOT
+ *     recorded for OTP (an admin refusal is not OTP-remediable);
  *   - `internal` visibility → auto-satisfied (the session is already authenticated);
- *   - `public` + `end_user` → consult {@link SessionAuthenticator} (fail-closed);
- *     not authenticated → blocked with an identity-verification message.
+ *   - `public` + `end_user` → satisfied if the session is OTP-verified
+ *     (`sessionAuthenticated`) OR a host {@link SessionAuthenticator} says yes
+ *     (fail-closed when both absent); not authenticated → blocked with an
+ *     identity-verification message AND the tool recorded in `refusal` so the
+ *     dispatcher can offer OTP after the turn.
  * A blocked tool returns the reference message; otherwise it runs, receiving its
  * per-tool `config` as `execute`'s second argument.
+ *
+ * `sessionAuthenticated` is the session's own OTP-verified bit (from a prior
+ * successful `verify_otp`); it defaults false so existing callers are unchanged.
+ * `refusal` is a per-turn recorder the dispatcher reads afterward (the TS analog of
+ * the Rust `AuthGateHook::otp_refused_tool`); omit it when there's no OTP flow.
  */
-export function gateTools(tools: Tool[], config: AgentConfig | undefined, conversationId: string, authenticator: SessionAuthenticator | undefined): Tool[] {
+export function gateTools(
+    tools: Tool[],
+    config: AgentConfig | undefined,
+    conversationId: string,
+    authenticator: SessionAuthenticator | undefined,
+    sessionAuthenticated = false,
+    refusal?: OtpRefusal,
+): Tool[] {
     const byId = new Map<string, EnabledTool>((config?.enabledTools ?? []).map((e) => [e.toolId, e]));
     const visibility = config?.visibility ?? 'public';
 
@@ -70,8 +87,12 @@ export function gateTools(tools: Tool[], config: AgentConfig | undefined, conver
                         return `Tool '${tool.name}' requires admin authentication and is not available on public-facing agents.`;
                     }
                     if (visibility !== 'internal') {
-                        const authed = authenticator ? await authenticator.isAuthenticated(conversationId) : false;
+                        const authed = sessionAuthenticated || (authenticator ? await authenticator.isAuthenticated(conversationId) : false);
                         if (!authed) {
+                            // Record the refused end_user tool so the dispatcher can offer
+                            // OTP after the turn (only an unverified end_user refusal is
+                            // OTP-remediable — admin refusals returned above are not).
+                            if (refusal) refusal.refusedTool = tool.name;
                             return `I need to verify your identity before I can use ${tool.name}. Please verify with a one-time code.`;
                         }
                     }

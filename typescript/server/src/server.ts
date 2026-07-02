@@ -25,6 +25,7 @@ import { ANONYMOUS_ACCESS } from './auth.js';
 import { Backplane, InMemoryBackplane } from './backplane.js';
 import type { AgentConfigResolver } from './agentConfig.js';
 import type { SessionAuthenticator } from './toolGating.js';
+import type { OtpService } from './otp.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
 import type { Frame } from './protocol.js';
 import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
@@ -66,6 +67,13 @@ export interface ServerOptions {
      * for `end_user` tool-auth gating on public agents. Absent → fail-closed.
      */
     sessionAuthenticator?: SessionAuthenticator;
+    /**
+     * End-user OTP identity-verification seam. When set, a turn whose auth gate refuses
+     * an `end_user` tool on an unverified session (with a known contact) offers an
+     * OTP flow, and the `verify_otp` action validates submitted codes. Absent → the
+     * fail-closed default (refuse, no OTP). The server never holds a code.
+     */
+    otpService?: OtpService;
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -126,6 +134,7 @@ export function buildServer(options: ServerOptions): {
             agentConfig: options.agentConfig,
             judgeModel: options.judgeModel,
             sessionAuthenticator: options.sessionAuthenticator,
+            otpService: options.otpService,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);

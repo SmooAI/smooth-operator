@@ -129,6 +129,83 @@ export function writeConfirmationRequired(requestId: string, toolId: string, act
     };
 }
 
+/**
+ * `otp_verification_required` — emitted after a turn's auth gate refused an
+ * `end_user` tool on an unverified session and the host has an OTP service
+ * installed. Tells the client to collect a one-time code. Wire shape matches
+ * `spec/events/otp-verification-required.schema.json` (double-nested `data.data`).
+ * `availableChannels` are the delivery channels the server can offer given the
+ * session's known contacts (`email` / `sms`).
+ */
+export function otpVerificationRequired(requestId: string, toolId: string, actionDescription: string, availableChannels: string[], authLevel: string): Frame {
+    return {
+        type: 'otp_verification_required',
+        requestId,
+        data: {
+            requestId,
+            data: { toolId, actionDescription, availableChannels, authLevel },
+        },
+        timestamp: nowMs(),
+    };
+}
+
+/**
+ * `otp_sent` — acknowledgement that a code was dispatched to the caller via the
+ * chosen channel. Wire shape matches `spec/events/otp-sent.schema.json`. The
+ * `maskedDestination` comes from the host — the server never sees the full address
+ * or the code.
+ */
+export function otpSent(requestId: string, channel: string, maskedDestination: string): Frame {
+    return {
+        type: 'otp_sent',
+        requestId,
+        data: {
+            requestId,
+            data: { channel, maskedDestination },
+        },
+        timestamp: nowMs(),
+    };
+}
+
+/**
+ * `otp_verified` — emitted when a `verify_otp` attempt succeeds; the session is now
+ * identity-verified and the client re-sends its message to run the gated tool (the
+ * reference server does not park/auto-resume the original turn). Wire shape matches
+ * `spec/events/otp-verified.schema.json`.
+ */
+export function otpVerified(requestId: string, message: string): Frame {
+    return {
+        type: 'otp_verified',
+        requestId,
+        data: {
+            requestId,
+            data: { message },
+        },
+        timestamp: nowMs(),
+    };
+}
+
+/**
+ * `otp_invalid` — emitted when a `verify_otp` attempt is rejected, carrying the
+ * host's remaining-attempt count (0 ⇒ locked) and an optional machine-readable
+ * `error` (omitted when the host couldn't determine a cause, per the schema). Wire
+ * shape matches `spec/events/otp-invalid.schema.json`.
+ */
+export function otpInvalid(requestId: string, error: string | undefined, attemptsRemaining: number, message: string): Frame {
+    const inner: Record<string, unknown> = { attemptsRemaining, message };
+    // Optional per spec: only emit `error` when the host determined a cause.
+    if (error !== undefined) inner.error = error;
+    return {
+        type: 'otp_invalid',
+        requestId,
+        data: {
+            requestId,
+            data: inner,
+        },
+        timestamp: nowMs(),
+    };
+}
+
 export function error(requestId: string | undefined, code: string, message: string): Frame {
     const descriptor = { code, message };
     const data: Record<string, unknown> = { error: descriptor };

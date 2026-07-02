@@ -36,6 +36,9 @@ export type { AgentConfig, AgentConfigResolver, EnabledTool } from './agentConfi
 export { gateTools } from './toolGating.js';
 export type { ServerTool, SessionAuthenticator } from './toolGating.js';
 
+export { availableChannels, isContactEmpty } from './otp.js';
+export type { OtpChannel, OtpContact, OtpDelivery, OtpError, OtpRefusal, OtpService, OtpVerifyOutcome } from './otp.js';
+
 export {
     advanceStep,
     DEFAULT_JUDGE_MODEL,
