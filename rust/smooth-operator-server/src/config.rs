@@ -133,6 +133,11 @@ pub struct ServerConfig {
     /// no tool ever requires confirmation — no turn parks, byte-for-byte
     /// unchanged from before HITL. Matched by core's `ConfirmationHook` (`contains`).
     pub confirm_tools: Vec<String>,
+    /// Cheap fast-tier model for the post-turn conversation-workflow judge
+    /// (SMOODEV-590). Independent of [`model`](Self::model) so the judge stays
+    /// cheap even when a turn runs on a bigger model. Read from
+    /// `SMOOTH_AGENT_JUDGE_MODEL`; defaults to [`DEFAULT_MODEL`] (haiku-tier).
+    pub judge_model: String,
 }
 
 impl ServerConfig {
@@ -199,6 +204,12 @@ impl ServerConfig {
             .map(|s| parse_confirm_tools(&s))
             .unwrap_or_default();
 
+        let judge_model = std::env::var("SMOOTH_AGENT_JUDGE_MODEL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
         Self {
             bind,
             port,
@@ -211,6 +222,7 @@ impl ServerConfig {
             storage,
             widget_auth_strict,
             confirm_tools,
+            judge_model,
         }
     }
 
@@ -322,6 +334,7 @@ mod tests {
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
             confirm_tools: Vec::new(),
+            judge_model: DEFAULT_MODEL.to_string(),
         };
         assert_eq!(cfg.port, 8787);
         assert_eq!(cfg.storage, StorageBackend::Memory);
@@ -345,6 +358,7 @@ mod tests {
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
             confirm_tools: Vec::new(),
+            judge_model: DEFAULT_MODEL.to_string(),
         };
         assert!(cfg.has_llm());
         let llm = cfg.llm_config().expect("llm config");

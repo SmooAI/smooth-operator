@@ -43,6 +43,7 @@ fn test_config(seed_kb: bool) -> ServerConfig {
         storage: smooth_operator_server::config::StorageBackend::Memory,
         widget_auth_strict: false,
         confirm_tools: Vec::new(),
+        judge_model: "claude-haiku-4-5".to_string(),
     }
 }
 

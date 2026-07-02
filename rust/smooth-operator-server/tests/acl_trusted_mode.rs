@@ -136,6 +136,12 @@ async fn run_turn_as(
             system_prompt: None,
             org_id: None,
             gateway_key: None,
+            workflow: None,
+            judge: None,
+            greeting_section: None,
+            enabled_tools: None,
+            auth_gate: None,
+            tool_configs: None,
         },
         &tx,
     )

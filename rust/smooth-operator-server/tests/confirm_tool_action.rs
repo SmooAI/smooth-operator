@@ -57,6 +57,7 @@ fn confirm_config() -> ServerConfig {
         storage: StorageBackend::Memory,
         widget_auth_strict: false,
         confirm_tools: vec!["knowledge_search".into()],
+        judge_model: "claude-haiku-4-5".to_string(),
     }
 }
 
@@ -147,6 +148,12 @@ fn spawn_turn(
                 system_prompt: None,
                 org_id: None,
                 gateway_key: None,
+                workflow: None,
+                judge: None,
+                greeting_section: None,
+                enabled_tools: None,
+                auth_gate: None,
+                tool_configs: None,
             },
             &sink,
         )

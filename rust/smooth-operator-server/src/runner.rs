@@ -34,6 +34,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{MessageQuery, StorageAdapter};
+use smooth_operator::agent_config::{
+    advance_after_verdict, judge_user_prompt, render_workflow_prompt_section, resolve_current_step,
+    AuthGateHook, ConversationWorkflow, WorkflowJudgeVerdict, JUDGE_SYSTEM_PROMPT,
+};
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
@@ -108,6 +112,20 @@ pub struct ConfirmationConfig {
     pub clear: ClearConfirmation,
 }
 
+/// A turn's **conversation-workflow** context: the agent's configured workflow
+/// plus the step the conversation is currently on. When present on a
+/// [`TurnRequest`], the runner injects the current step's intent/criteria into
+/// the system prompt and, after the turn, runs the judge to decide whether to
+/// advance. `None` (the default) means the agent runs freeform — no workflow
+/// section, no judge, byte-for-byte unchanged.
+pub struct WorkflowTurn {
+    /// The agent's structured workflow (goal + ordered steps).
+    pub workflow: ConversationWorkflow,
+    /// The step id the conversation is on, or `None` for a fresh start (the
+    /// runner then resolves to the workflow's first step).
+    pub current_step_id: Option<String>,
+}
+
 /// The terminal outcome of a streamed turn.
 pub struct TurnResult {
     /// The agent's final natural-language reply.
@@ -125,6 +143,12 @@ pub struct TurnResult {
     /// object so clients accumulate live session cost. `None` when the engine
     /// reported no `Completed` event (e.g. an offline mock turn).
     pub usage: Option<crate::protocol::TurnUsage>,
+    /// The conversation-workflow step id **after** this turn's judge ran. `Some`
+    /// only when the turn had a [`WorkflowTurn`]; the caller persists it onto the
+    /// session so the next turn resumes on the right step. Equals the incoming
+    /// step when the judge did not advance (criteria not met, terminal step, or a
+    /// judge failure — never freezes, never crashes the turn).
+    pub next_step_id: Option<String>,
 }
 
 /// Everything one streaming turn needs. Bundled into a struct so the call sites
@@ -194,6 +218,32 @@ pub struct TurnRequest<'a> {
     /// it to talk to the gateway itself — that comes from [`llm`](Self::llm); it
     /// only carries it through to the provider context.
     pub gateway_key: Option<String>,
+    /// **Per-agent conversation workflow.** When `Some`, the runner injects the
+    /// current step's intent/criteria into the system prompt and runs the judge
+    /// after the turn to decide advancement. `None` (the default) ⇒ no workflow
+    /// section, no judge — freeform behavior, byte-for-byte unchanged.
+    pub workflow: Option<WorkflowTurn>,
+    /// The **judge** LLM surface: a cheap model that decides whether the current
+    /// workflow step's criteria were met this turn. Only consulted when
+    /// [`workflow`](Self::workflow) is `Some`. Production wires a client built
+    /// from the server's default (cheap) model; tests inject a mock. `None` ⇒ the
+    /// workflow stays on its current step (never advances) — a safe degrade.
+    pub judge: Option<Arc<dyn LlmProvider>>,
+    /// Per-agent first-turn greeting section (already rendered). Injected into the
+    /// system prompt ONLY when this conversation has no prior messages, so the
+    /// agent opens with it once. `None` ⇒ no greeting.
+    pub greeting_section: Option<String>,
+    /// Per-agent tool allow-list (snake_case ids). `Some` restricts the turn's
+    /// registry to those tools (built-ins + host tools alike); `None` ⇒ the full
+    /// tool set (unchanged). Unknown ids simply match nothing.
+    pub enabled_tools: Option<Vec<String>>,
+    /// Per-agent auth-level gate (SMOODEV-590). When `Some`, installed as a
+    /// `ToolHook` that blocks a call whose configured `authLevel` isn't satisfied
+    /// (admin on public, or unverified end_user on public). `None` ⇒ no gate.
+    pub auth_gate: Option<AuthGateHook>,
+    /// Per-tool config (`tool_id` → config), delivered to host tools via the
+    /// `ToolProviderContext`. `None`/empty ⇒ no per-tool config. Built-ins ignore it.
+    pub tool_configs: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -233,6 +283,12 @@ pub async fn run_streaming_turn(
         system_prompt,
         org_id,
         gateway_key,
+        workflow,
+        judge,
+        greeting_section,
+        enabled_tools,
+        auth_gate,
+        tool_configs,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -270,13 +326,30 @@ pub async fn run_streaming_turn(
     // 3. Build the agent: ACL-grounded config + knowledge_search tool (over the
     //    SAME ACL-filtered handle) + replayed prior messages for memory.
     //
-    //    SEAM 2 — resolve the system prompt: a host-supplied per-org persona
-    //    (`system_prompt`) overrides the built-in const; absent ⇒ the const, so
-    //    default behavior is byte-for-byte unchanged.
-    let resolved_prompt = system_prompt
+    //    SEAM 2 — resolve the system prompt: a host-supplied persona
+    //    (`system_prompt`, resolved per-agent then per-org) overrides the
+    //    built-in const; absent ⇒ the const, so default behavior is byte-for-byte
+    //    unchanged. When the agent has a conversation workflow, the current
+    //    step's intent/criteria are appended so the model drives that step.
+    let base_prompt = system_prompt
         .as_deref()
         .unwrap_or(KNOWLEDGE_CHAT_SYSTEM_PROMPT);
-    let config = AgentConfig::new("smooth-agent-chat", resolved_prompt, llm)
+    // Compose base → first-turn greeting → current workflow step. The greeting is
+    // injected only when this conversation has no prior messages (first turn).
+    let mut sections: Vec<String> = vec![base_prompt.to_string()];
+    if prior.is_empty() {
+        if let Some(greeting) = greeting_section.as_deref() {
+            sections.push(greeting.to_string());
+        }
+    }
+    if let Some(wt) = workflow.as_ref() {
+        sections.push(render_workflow_prompt_section(
+            &wt.workflow,
+            wt.current_step_id.as_deref(),
+        ));
+    }
+    let resolved_prompt = sections.join("\n\n");
+    let config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior);
@@ -308,9 +381,28 @@ pub async fn run_streaming_turn(
         if let Some(key) = gateway_key {
             ctx = ctx.with_gateway_key(key);
         }
+        // SEAM 3 — deliver per-tool config to host tools (registry.ts parity).
+        if let Some(configs) = tool_configs.clone() {
+            ctx = ctx.with_tool_configs(configs);
+        }
         for tool in provider.tools_for(&ctx).await {
             tools.register_arc(tool);
         }
+    }
+
+    // SEAM 3 — per-agent tool allow-list. When the agent's `tool_config` restricts
+    // the tool set, drop every registered tool (built-in or host) whose snake_case
+    // name isn't enabled. `None` (empty/absent tool_config) leaves the full set.
+    if let Some(enabled) = enabled_tools {
+        tools.retain(|name| enabled.iter().any(|id| id == name));
+    }
+
+    // SEAM 3 — per-agent authLevel gate. When installed, a tool call whose
+    // configured `authLevel` isn't satisfied is blocked at execution with the
+    // reference refusal (the engine surfaces the `pre_call` error to the model).
+    // `None` ⇒ no gate.
+    if let Some(gate) = auth_gate {
+        tools.add_hook(gate);
     }
 
     // 3a. Write-confirmation HITL: when configured with tool patterns, install a
@@ -495,13 +587,76 @@ pub async fn run_streaming_turn(
     };
     let citations = collect_citations(&auto_sources, &tool_sources);
 
+    // 6. Conversation-workflow advancement (SMOODEV-590 parity). When the agent
+    //    has a workflow, ask the cheap judge whether THIS turn satisfied the
+    //    current step's criteria and compute the next step id. Failure-tolerant:
+    //    no judge, an empty reply, or a judge error all keep the current step —
+    //    the conversation never freezes and the turn never fails on the judge.
+    let next_step_id = match workflow.as_ref() {
+        Some(wt) => Some(
+            judge_next_step(
+                judge.as_deref(),
+                &wt.workflow,
+                wt.current_step_id.as_deref(),
+                user_message,
+                &reply,
+            )
+            .await,
+        ),
+        None => None,
+    };
+
     Ok(TurnResult {
         reply,
         message_id,
         invoked_knowledge_search,
         citations,
         usage,
+        next_step_id,
     })
+}
+
+/// Run the workflow judge for one turn and return the step id to resume on.
+///
+/// Mirrors `nodes/workflow-judge.ts`: a cheap yes/no/maybe verdict on whether the
+/// current step's criteria were met, advancing only on `yes`. Every failure mode
+/// keeps the current step (never freezes, never advances on ambiguity):
+///   - no judge provider, an empty agent reply, or a judge LLM error → stay put,
+///   - an unrecognized verdict → `Maybe` → stay put.
+async fn judge_next_step(
+    judge: Option<&dyn LlmProvider>,
+    workflow: &ConversationWorkflow,
+    current_step_id: Option<&str>,
+    user_message: &str,
+    reply: &str,
+) -> String {
+    let current = match resolve_current_step(workflow, current_step_id) {
+        Some(step) => step.clone(),
+        // Empty workflow (shouldn't happen — the provider drops empty-steps
+        // workflows) → echo the incoming pointer or empty.
+        None => return current_step_id.unwrap_or_default().to_string(),
+    };
+
+    // Nothing to judge without a reply or a judge surface → stay on the step.
+    let stay = || current.id.clone();
+    if reply.trim().is_empty() {
+        return stay();
+    }
+    let Some(judge) = judge else {
+        return stay();
+    };
+
+    let system = EngineMessage::system(JUDGE_SYSTEM_PROMPT);
+    let user = EngineMessage::user(judge_user_prompt(workflow, &current, user_message, reply));
+    let verdict = match judge.chat(&[&system, &user], &[]).await {
+        Ok(resp) => WorkflowJudgeVerdict::parse(&resp.content),
+        Err(e) => {
+            tracing::warn!(error = %e, step = %current.id, "workflow judge failed; staying on current step");
+            WorkflowJudgeVerdict::Maybe
+        }
+    };
+
+    advance_after_verdict(workflow, Some(&current.id), verdict).unwrap_or_else(stay)
 }
 
 /// Spawn the **confirmation bridge** for a turn that has a `ConfirmationHook`

@@ -13,10 +13,12 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::access_control::AccessContext;
+use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel};
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
 };
-use smooth_operator_core::LlmConfig;
+use smooth_operator_core::llm_provider::LlmProvider;
+use smooth_operator_core::{LlmClient, LlmConfig};
 
 use crate::protocol;
 use crate::runner;
@@ -645,18 +647,68 @@ async fn handle_send_message(
     // auth. Used to (a) resolve the org's persona override (SEAM 2) and (b)
     // scope the host's tool provider (SEAM 1).
     let org_id = crate::server::SEED_ORG_ID.to_string();
-    // SEAM 2 — resolve the per-org persona, falling back to the host's installed
-    // default persona ([`AppState::default_persona`], e.g. the local daemon's
-    // "Big Smooth" personal-assistant prompt). With the default in-memory settings
-    // store AND no default persona installed, both are `None`, so the runner stays
-    // on its const prompt and behavior is byte-for-byte unchanged.
-    let system_prompt = state
-        .settings
-        .get(&org_id)
-        .persona
+
+    // SEAM 3 — per-agent behavior config (instructions + conversation workflow),
+    // resolved by the connection's `agent_id` so two agents in the same org can
+    // behave differently. Absent / malformed ⇒ `None`, so the org-default persona
+    // (SEAM 2) is used, unchanged. Isolated per agent by construction.
+    let agent_cfg: Option<AgentBehaviorConfig> =
+        state.agent_config.resolve(&session.agent_id).await;
+
+    // SEAM 2/3 — resolve the system prompt in priority order:
+    //   1. the per-AGENT instructions (+ personality), when set,
+    //   2. the per-ORG persona override ([`AgentSettings::persona`]),
+    //   3. the host's installed default persona ([`AppState::default_persona`]).
+    // All absent ⇒ `None`, so the runner stays on its const customer-support
+    // prompt and behavior is byte-for-byte unchanged.
+    let system_prompt = agent_cfg
+        .as_ref()
+        .and_then(AgentBehaviorConfig::system_prompt)
+        .or_else(|| state.settings.get(&org_id).persona)
         .or_else(|| state.default_persona.clone());
+
+    // The agent's first-turn greeting section (the runner injects it only when
+    // the conversation has no prior messages) + its tool allow-list (`None` ⇒ the
+    // full server tool set).
+    let greeting_section = agent_cfg
+        .as_ref()
+        .and_then(AgentBehaviorConfig::greeting_section);
+    let enabled_tools = agent_cfg
+        .as_ref()
+        .and_then(AgentBehaviorConfig::enabled_tool_ids);
+
+    // Per-tool config delivered to host tools at execution + the authLevel gate.
+    let tool_configs = agent_cfg
+        .as_ref()
+        .map(AgentBehaviorConfig::tool_configs)
+        .filter(|m| !m.is_empty());
+    let auth_gate = agent_cfg
+        .as_ref()
+        .and_then(|cfg| build_auth_gate(state, cfg));
+
+    // The agent's conversation workflow (if any) + the step this session is on.
+    let workflow = agent_cfg
+        .as_ref()
+        .and_then(|c| c.conversation_workflow.clone())
+        .map(|wf| runner::WorkflowTurn {
+            workflow: wf,
+            current_step_id: state.session_current_step(session_id),
+        });
+
+    // The judge LLM surface — only built when there's a workflow to advance. A
+    // test-injected chat provider (the mock) doubles as the judge offline; in
+    // production the judge runs on the server's default (cheap) model with the
+    // turn's resolved gateway key, independent of any per-turn model override so
+    // the yes/no/maybe decision stays cheap.
+    let judge: Option<Arc<dyn LlmProvider>> = if workflow.is_some() {
+        Some(build_judge_provider(state, &llm))
+    } else {
+        None
+    };
+
     // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
     let tool_provider = state.tool_provider.clone();
+    let session_id_owned = session_id.to_string();
 
     let state_for_turn = state.clone();
     // Carry the turn's org on the AccessContext so a multi-tenant host adapter's
@@ -708,6 +760,16 @@ async fn handle_send_message(
                 // The per-org key resolved above, threaded so a host tool
                 // provider's retrieval tools call the same gateway this turn used.
                 gateway_key: turn_gateway_key,
+                // SEAM 3 — per-agent conversation workflow + its cheap judge. Both
+                // `None` for a freeform agent, so the turn is unchanged.
+                workflow,
+                judge,
+                // SEAM 3 — per-agent first-turn greeting + tool allow-list.
+                greeting_section,
+                enabled_tools,
+                // SEAM 3 — authLevel gate + per-tool config delivery.
+                auth_gate,
+                tool_configs,
             },
             &sink_owned,
         )
@@ -715,6 +777,12 @@ async fn handle_send_message(
 
         match result {
             Ok(turn) => {
+                // Persist the workflow step pointer the judge landed on, so the
+                // next turn resumes on the right step. No-op when the agent has no
+                // workflow (`next_step_id` is `None`).
+                if let Some(step) = turn.next_step_id.as_deref() {
+                    state_for_turn.set_session_current_step(&session_id_owned, Some(step));
+                }
                 let response = runner::general_agent_response(&turn.reply);
                 let _ = sink_owned.send(protocol::eventual_response(
                     &request_id_owned,
@@ -833,6 +901,57 @@ fn apply_model_override(mut llm: LlmConfig, body: &Value) -> LlmConfig {
         }
     }
     llm
+}
+
+/// Cap the judge's output: a `yes` / `no` / `maybe` verdict needs only a few
+/// tokens. Small so the extra per-turn cost + latency stay negligible.
+const JUDGE_MAX_TOKENS: u32 = 16;
+
+/// Build the per-agent authLevel gate, or `None` when it would be inert.
+///
+/// The set of tools that "support auth requirements" (the operator analog of the
+/// TS `supportsAuthRequirement` flag) comes from `SMOOTH_AGENT_AUTH_TOOLS`
+/// (comma-separated); empty (the default) ⇒ nothing is gated. `session_authenticated`
+/// is fail-closed (`false`) — an OTP / identity-verification flow is host wiring
+/// behind this seam, not implemented by the reference server.
+fn build_auth_gate(state: &AppState, cfg: &AgentBehaviorConfig) -> Option<AuthGateHook> {
+    let supporting: std::collections::HashSet<String> = std::env::var("SMOOTH_AGENT_AUTH_TOOLS")
+        .ok()
+        .into_iter()
+        .flat_map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if supporting.is_empty() {
+        let _ = state; // no host-declared auth-supporting tools → gate is inert
+        return None;
+    }
+    let levels = cfg
+        .enabled_tools
+        .iter()
+        .map(|t| (t.tool_id.clone(), AuthLevel::parse(&t.auth_level)))
+        .collect();
+    let hook = AuthGateHook::new(levels, cfg.visibility, false, supporting);
+    hook.is_active().then_some(hook)
+}
+
+/// Build the workflow judge's LLM surface. Prefers a test-injected chat provider
+/// (the scenario mock — runs offline); otherwise builds a live client on the
+/// server's **default** (cheap) model with the turn's resolved gateway url/key,
+/// independent of any per-turn model override, so the judge stays cheap even when
+/// the turn itself runs on a bigger model.
+fn build_judge_provider(state: &AppState, turn_llm: &LlmConfig) -> Arc<dyn LlmProvider> {
+    if let Some(mock) = state.chat_provider.clone() {
+        return mock;
+    }
+    let mut cfg = turn_llm.clone();
+    cfg.model = state.config.judge_model.clone();
+    cfg.max_tokens = JUDGE_MAX_TOKENS;
+    Arc::new(LlmClient::new(cfg))
 }
 
 #[cfg(test)]
