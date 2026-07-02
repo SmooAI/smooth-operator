@@ -28,7 +28,7 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
 # Default spec dir: ../../spec relative to this file (python/src/smooth_operator/ -> spec).
-DEFAULT_SPEC_DIR = (Path(__file__).resolve().parent.parent.parent.parent / "spec")
+DEFAULT_SPEC_DIR = Path(__file__).resolve().parent.parent.parent.parent / "spec"
 
 _SUBDIRS = ["", "actions", "events", "domain"]
 

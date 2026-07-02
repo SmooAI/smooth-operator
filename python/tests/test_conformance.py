@@ -32,9 +32,7 @@ def test_exposes_the_five_documented_fixtures() -> None:
 
 
 @pytest.mark.parametrize("name", list(FIXTURES))
-def test_every_fixture_validates_against_its_declared_schema(
-    name: str, validator: ProtocolValidator
-) -> None:
+def test_every_fixture_validates_against_its_declared_schema(name: str, validator: ProtocolValidator) -> None:
     fixture = FIXTURES[name]
     result = validator.validate_at(fixture["$schema_ref"], fixture["instance"])
     assert result.valid, f"{name} ({fixture['$schema_ref']}): {format_errors(result.errors)}"

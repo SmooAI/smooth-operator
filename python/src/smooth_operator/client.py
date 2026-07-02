@@ -64,9 +64,7 @@ class TurnTimeoutError(Exception):
     and ``async for`` over it re-raises it) so a stuck server can't hang the caller."""
 
     def __init__(self, request_id: str, seconds: float) -> None:
-        super().__init__(
-            f"Turn {request_id} timed out after {seconds}s without a terminal response"
-        )
+        super().__init__(f"Turn {request_id} timed out after {seconds}s without a terminal response")
         self.request_id = request_id
 
 
@@ -143,9 +141,7 @@ class MessageTurn:
         """Settle the turn with a TurnTimeoutError when no terminal event arrived."""
         if self._done.is_set():
             return
-        self._finish(
-            None, TurnTimeoutError(self.request_id, self._turn_timeout)
-        )
+        self._finish(None, TurnTimeoutError(self.request_id, self._turn_timeout))
 
     def _finish(self, final: EventualResponse | None, err: BaseException | None) -> None:
         if self._done.is_set():
@@ -183,9 +179,7 @@ class MessageTurn:
             get_task = asyncio.ensure_future(self._queue.get())
             done_task = asyncio.ensure_future(self._done.wait())
             try:
-                await asyncio.wait(
-                    {get_task, done_task}, return_when=asyncio.FIRST_COMPLETED
-                )
+                await asyncio.wait({get_task, done_task}, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 if not get_task.done():
                     get_task.cancel()
@@ -219,9 +213,7 @@ class SmoothAgentClient:
         # ``token`` authenticates against a token-gated (local-flavor) server: it is
         # folded into the connection URL's ``?token=`` slot on the default transport.
         # A custom ``transport`` is used as-is (apply the token to its own URL there).
-        self._transport = (
-            transport if transport is not None else WebSocketTransport(url, token=token)
-        )
+        self._transport = transport if transport is not None else WebSocketTransport(url, token=token)
         self._request_timeout = request_timeout
         # Overall timeout (seconds) for a streaming send_message turn. 0 disables it.
         self._turn_timeout = turn_timeout
@@ -236,9 +228,7 @@ class SmoothAgentClient:
 
         self._unsubscribe: list[Callable[[], None]] = [
             self._transport.on_message(self._handle_frame),
-            self._transport.on_close(
-                lambda _info: self._fail_all(ConnectionError("Transport closed"))
-            ),
+            self._transport.on_close(lambda _info: self._fail_all(ConnectionError("Transport closed"))),
         ]
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -281,9 +271,7 @@ class SmoothAgentClient:
         if auth_context is not None:
             frame["authContext"] = auth_context
         event = await self._request(frame)
-        return CreateConversationSessionResponse.model_validate(
-            _immediate_data(event)
-        )
+        return CreateConversationSessionResponse.model_validate(_immediate_data(event))
 
     async def get_session(self, *, session_id: str) -> GetSessionResponse:
         """Fetch a session snapshot by ID."""
@@ -316,9 +304,7 @@ class SmoothAgentClient:
                 return event.data.timestamp
         return 0
 
-    def send_message(
-        self, *, session_id: str, message: str, stream: bool = True
-    ) -> MessageTurn:
+    def send_message(self, *, session_id: str, message: str, stream: bool = True) -> MessageTurn:
         """Submit a user message and return a :class:`MessageTurn`.
 
         Await it for the terminal ``eventual_response``, or ``async for`` over it for
@@ -349,9 +335,7 @@ class SmoothAgentClient:
             turn.abort(err)
         return turn
 
-    def confirm_tool_action(
-        self, *, session_id: str, request_id: str, approved: bool
-    ) -> None:
+    def confirm_tool_action(self, *, session_id: str, request_id: str, approved: bool) -> None:
         """Approve/reject a pending tool write, resuming the paused turn for
         ``request_id``. Resumed events flow back into the original :class:`MessageTurn`."""
         self._transport.send(

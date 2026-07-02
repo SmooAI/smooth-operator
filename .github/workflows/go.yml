@@ -1,0 +1,63 @@
+# Vet + test the Go trees: the protocol client/types module (go/) AND the native
+# WebSocket server module (go/server/) — each is its own Go module. The live gateway
+# E2E (e2e_live_test.go) calls t.Skip without SMOOTH_AGENT_E2E + SMOOAI_GATEWAY_KEY,
+# so `go test ./...` needs no secrets. spec/ is a trigger path because the conformance
+# test validates against spec/conformance/fixtures.json.
+name: Go
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - 'go/**'
+            - 'spec/**'
+            - '.github/workflows/go.yml'
+    pull_request:
+        paths:
+            - 'go/**'
+            - 'spec/**'
+            - '.github/workflows/go.yml'
+
+concurrency:
+    group: go-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    vet-test:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        strategy:
+            fail-fast: false
+            matrix:
+                module:
+                    - go # the protocol client + generated types
+                    - go/server # the native WebSocket server
+        defaults:
+            run:
+                working-directory: ${{ matrix.module }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Go (with build/module cache)
+              uses: actions/setup-go@v5
+              with:
+                  go-version-file: ${{ matrix.module }}/go.mod
+                  cache-dependency-path: ${{ matrix.module }}/go.sum
+
+            - name: gofmt (fail on unformatted files)
+              run: |
+                  unformatted="$(gofmt -l .)"
+                  if [ -n "$unformatted" ]; then
+                      echo "These files are not gofmt-clean:"
+                      echo "$unformatted"
+                      exit 1
+                  fi
+
+            - name: go vet
+              run: go vet ./...
+
+            - name: go test (race)
+              run: go test ./... -race

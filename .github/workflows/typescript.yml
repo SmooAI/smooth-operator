@@ -1,0 +1,54 @@
+# Typecheck + test the TypeScript trees: the published SDK (typescript/ — client,
+# React bindings, web-component widget) AND the native TS WebSocket server
+# (typescript/server/). Both are pnpm-workspace members; one root install links them.
+# The default `vitest run` (the `test` script) excludes the live-gateway E2E, so this
+# job needs no secrets. spec/ is a trigger path because the conformance test validates
+# against spec/conformance/fixtures.json.
+name: TypeScript
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - 'typescript/**'
+            - 'spec/**'
+            - '.github/workflows/typescript.yml'
+    pull_request:
+        paths:
+            - 'typescript/**'
+            - 'spec/**'
+            - '.github/workflows/typescript.yml'
+
+concurrency:
+    group: typescript-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    typecheck-test:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Set up Node (with pnpm cache)
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
+            - name: Install (frozen lockfile)
+              run: pnpm install --frozen-lockfile
+
+            # Scope to the two TypeScript packages the lane owns; `console` (the private
+            # admin app) is a workspace member too but out of scope for this lane.
+            - name: Typecheck
+              run: pnpm --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-server" typecheck
+
+            - name: Test
+              run: pnpm --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-server" test
