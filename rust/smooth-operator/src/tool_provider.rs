@@ -63,6 +63,12 @@ pub struct ToolProviderContext {
     /// billed/scoped to. `None` when no key resolved. The shared crate does not
     /// interpret it.
     pub gateway_key: Option<String>,
+    /// Per-tool config from the agent's `tool_config.enabledTools[*].config`,
+    /// keyed by tool id — the operator analog of `registry.ts`'s
+    /// `toolSpecificConfig`. A host tool reads its own entry to configure itself
+    /// for this agent's turn. Empty when no tool carries config; the shared crate
+    /// does not interpret it.
+    pub tool_specific_config: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl ToolProviderContext {
@@ -79,7 +85,18 @@ impl ToolProviderContext {
             access,
             conversation_id: None,
             gateway_key: None,
+            tool_specific_config: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set the per-tool config map (`tool_id` → config object).
+    #[must_use]
+    pub fn with_tool_configs(
+        mut self,
+        configs: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        self.tool_specific_config = configs;
+        self
     }
 
     /// Set the turn's [`conversation_id`](Self::conversation_id).

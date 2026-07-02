@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::access_control::AccessContext;
-use smooth_operator::agent_config::AgentBehaviorConfig;
+use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel};
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
 };
@@ -677,6 +677,15 @@ async fn handle_send_message(
         .as_ref()
         .and_then(AgentBehaviorConfig::enabled_tool_ids);
 
+    // Per-tool config delivered to host tools at execution + the authLevel gate.
+    let tool_configs = agent_cfg
+        .as_ref()
+        .map(AgentBehaviorConfig::tool_configs)
+        .filter(|m| !m.is_empty());
+    let auth_gate = agent_cfg
+        .as_ref()
+        .and_then(|cfg| build_auth_gate(state, cfg));
+
     // The agent's conversation workflow (if any) + the step this session is on.
     let workflow = agent_cfg
         .as_ref()
@@ -758,6 +767,9 @@ async fn handle_send_message(
                 // SEAM 3 — per-agent first-turn greeting + tool allow-list.
                 greeting_section,
                 enabled_tools,
+                // SEAM 3 — authLevel gate + per-tool config delivery.
+                auth_gate,
+                tool_configs,
             },
             &sink_owned,
         )
@@ -895,6 +907,38 @@ fn apply_model_override(mut llm: LlmConfig, body: &Value) -> LlmConfig {
 /// tokens. Small so the extra per-turn cost + latency stay negligible.
 const JUDGE_MAX_TOKENS: u32 = 16;
 
+/// Build the per-agent authLevel gate, or `None` when it would be inert.
+///
+/// The set of tools that "support auth requirements" (the operator analog of the
+/// TS `supportsAuthRequirement` flag) comes from `SMOOTH_AGENT_AUTH_TOOLS`
+/// (comma-separated); empty (the default) ⇒ nothing is gated. `session_authenticated`
+/// is fail-closed (`false`) — an OTP / identity-verification flow is host wiring
+/// behind this seam, not implemented by the reference server.
+fn build_auth_gate(state: &AppState, cfg: &AgentBehaviorConfig) -> Option<AuthGateHook> {
+    let supporting: std::collections::HashSet<String> = std::env::var("SMOOTH_AGENT_AUTH_TOOLS")
+        .ok()
+        .into_iter()
+        .flat_map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if supporting.is_empty() {
+        let _ = state; // no host-declared auth-supporting tools → gate is inert
+        return None;
+    }
+    let levels = cfg
+        .enabled_tools
+        .iter()
+        .map(|t| (t.tool_id.clone(), AuthLevel::parse(&t.auth_level)))
+        .collect();
+    let hook = AuthGateHook::new(levels, cfg.visibility, false, supporting);
+    hook.is_active().then_some(hook)
+}
+
 /// Build the workflow judge's LLM surface. Prefers a test-injected chat provider
 /// (the scenario mock — runs offline); otherwise builds a live client on the
 /// server's **default** (cheap) model with the turn's resolved gateway url/key,
@@ -905,7 +949,7 @@ fn build_judge_provider(state: &AppState, turn_llm: &LlmConfig) -> Arc<dyn LlmPr
         return mock;
     }
     let mut cfg = turn_llm.clone();
-    cfg.model = state.config.model.clone();
+    cfg.model = state.config.judge_model.clone();
     cfg.max_tokens = JUDGE_MAX_TOKENS;
     Arc::new(LlmClient::new(cfg))
 }

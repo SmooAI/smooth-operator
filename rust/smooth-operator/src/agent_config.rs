@@ -25,8 +25,11 @@
 //! `packages/backend/src/ai/graphs/general-agent/workflow.ts` +
 //! `nodes/workflow-judge.ts`.
 
+use std::collections::{HashMap, HashSet};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use smooth_operator_core::tool::{ToolCall, ToolHook};
 
 /// One step of a structured conversation workflow. Mirrors
 /// `ConversationWorkflowStep` (`packages/schemas/src/agents/agent.ts`).
@@ -72,10 +75,171 @@ pub struct EnabledTool {
     pub config: serde_json::Value,
 }
 
+/// Auth level a tool requires (monorepo `AuthLevel`, `agent.ts`). Gating only
+/// applies when this is not [`None`](AuthLevel::None) and the tool supports auth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthLevel {
+    /// No authentication required (the default).
+    #[default]
+    None,
+    /// The end user's identity must be verified (OTP on a public agent).
+    EndUser,
+    /// Admin authentication — only satisfiable on an internal agent.
+    Admin,
+}
+
+impl AuthLevel {
+    /// Parse from the `authLevel` string, defaulting to [`None`](Self::None).
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "end_user" => Self::EndUser,
+            "admin" => Self::Admin,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Where an agent is reachable (monorepo `AgentVisibility`). `internal` agents
+/// run behind an authenticated dashboard session, so their tool auth is
+/// auto-satisfied; `public` agents (the default) are widget-embeddable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    /// Public widget-embeddable agent (the default).
+    #[default]
+    Public,
+    /// Internal dashboard-only agent (authenticated session).
+    Internal,
+}
+
+impl Visibility {
+    /// Parse from the `visibility` string, defaulting to [`Public`](Self::Public).
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "internal" => Self::Internal,
+            _ => Self::Public,
+        }
+    }
+}
+
+/// Decide whether a tool call is allowed given its required auth level, the
+/// agent's visibility, and whether the session is identity-verified. Mirrors
+/// `tool-execution.ts` (lines ~145-190). `None` (allow) or `Some(message)` (the
+/// reference refusal the model is shown). Callers gate ONLY when `level !=
+/// AuthLevel::None` AND the tool supports auth requirements.
+///
+/// - internal agent → auto-satisfied (both `end_user` and `admin`);
+/// - public + `admin` → refuse (admin tools never run on public agents);
+/// - public + `end_user` → satisfied only when the session is identity-verified,
+///   else refuse asking for verification (the OTP flow is host wiring behind
+///   this seam — here the default is fail-closed).
+#[must_use]
+pub fn tool_auth_refusal(
+    tool_name: &str,
+    level: AuthLevel,
+    visibility: Visibility,
+    session_authenticated: bool,
+) -> Option<String> {
+    if visibility == Visibility::Internal {
+        return None; // authenticated dashboard session satisfies any level
+    }
+    match level {
+        AuthLevel::None => None,
+        AuthLevel::Admin => Some(format!(
+            "Tool '{tool_name}' requires admin authentication and is not available on public-facing agents."
+        )),
+        AuthLevel::EndUser => {
+            if session_authenticated {
+                None
+            } else {
+                Some(format!(
+                    "I need to verify your identity before I can use {tool_name}. Please verify with a one-time code."
+                ))
+            }
+        }
+    }
+}
+
+/// A [`ToolHook`] that blocks a tool call whose configured [`AuthLevel`] isn't
+/// satisfied — the operator-side analog of `tool-execution.ts`'s auth gate. A
+/// blocked call surfaces the reference refusal to the model (the engine turns a
+/// `pre_call` error into the tool result), so the tool never executes.
+///
+/// Only tools in [`auth_supporting_tools`](Self::auth_supporting_tools) are gated
+/// (the `supportsAuthRequirement` flag; empty ⇒ the hook is inert — every current
+/// built-in). The identity-verified `session_authenticated` bit is the seam a
+/// host with an OTP flow flips; the reference server leaves it fail-closed
+/// (`false`).
+#[derive(Debug, Clone)]
+pub struct AuthGateHook {
+    auth_levels: HashMap<String, AuthLevel>,
+    visibility: Visibility,
+    session_authenticated: bool,
+    auth_supporting_tools: HashSet<String>,
+}
+
+impl AuthGateHook {
+    /// Build the gate from an agent's resolved auth levels + visibility. Only the
+    /// tools in `auth_supporting_tools` are ever gated.
+    #[must_use]
+    pub fn new(
+        auth_levels: HashMap<String, AuthLevel>,
+        visibility: Visibility,
+        session_authenticated: bool,
+        auth_supporting_tools: HashSet<String>,
+    ) -> Self {
+        Self {
+            auth_levels,
+            visibility,
+            session_authenticated,
+            auth_supporting_tools,
+        }
+    }
+
+    /// `true` when this hook could ever block something — i.e. some auth-supporting
+    /// tool carries a non-`None` level. Lets the caller skip installing an inert
+    /// hook (keeps the default tool path byte-for-byte unchanged).
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.auth_supporting_tools
+            .iter()
+            .any(|name| self.auth_levels.get(name).copied().unwrap_or_default() != AuthLevel::None)
+    }
+}
+
+#[async_trait]
+impl ToolHook for AuthGateHook {
+    async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
+        if !self.auth_supporting_tools.contains(&call.name) {
+            return Ok(());
+        }
+        let level = self
+            .auth_levels
+            .get(&call.name)
+            .copied()
+            .unwrap_or_default();
+        match tool_auth_refusal(
+            &call.name,
+            level,
+            self.visibility,
+            self.session_authenticated,
+        ) {
+            Some(message) => Err(anyhow::anyhow!(message)),
+            None => Ok(()),
+        }
+    }
+}
+
 /// The resolved per-agent behavior knobs. Every field is optional so a partial
 /// or malformed `agents` row degrades cleanly to the org default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentBehaviorConfig {
+    /// Where the agent is reachable — gates tool auth. Defaults to `Public`.
+    #[serde(default)]
+    pub visibility: Visibility,
     /// `instructions.prompt` — the agent's system prompt / persona. When present
     /// it overrides the org default persona for this agent's conversations.
     pub instructions: Option<String>,
@@ -167,6 +331,28 @@ impl AgentBehaviorConfig {
         )
     }
 
+    /// The configured [`AuthLevel`] for a tool id (from its `enabledTools`
+    /// entry), or [`AuthLevel::None`] when unconfigured.
+    #[must_use]
+    pub fn auth_level_for(&self, tool_id: &str) -> AuthLevel {
+        self.enabled_tools
+            .iter()
+            .find(|t| t.tool_id == tool_id)
+            .map_or(AuthLevel::None, |t| AuthLevel::parse(&t.auth_level))
+    }
+
+    /// The per-tool `config` object delivered to a tool at execution (the
+    /// `enabledTools` entry's `config`), for every entry that carries one. Empty
+    /// when no tool has config. Mirrors `registry.ts`'s `toolSpecificConfig`.
+    #[must_use]
+    pub fn tool_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        self.enabled_tools
+            .iter()
+            .filter(|t| !t.config.is_null())
+            .map(|t| (t.tool_id.clone(), t.config.clone()))
+            .collect()
+    }
+
     /// Parse from the raw `agents`-row jsonb / text columns, tolerating any
     /// malformed shape (a bad value drops just that field — never an error).
     ///
@@ -174,7 +360,8 @@ impl AgentBehaviorConfig {
     /// - `personality` — jsonb `{ "persona"?: string, ... }`,
     /// - `greeting` — text,
     /// - `conversation_workflow` — jsonb `{ goal, steps: [...] }`,
-    /// - `tool_config` — jsonb `{ enabledTools: [{ toolId, enabled, authLevel, config }] }`.
+    /// - `tool_config` — jsonb `{ enabledTools: [{ toolId, enabled, authLevel, config }] }`,
+    /// - `visibility` — text `public` | `internal` (defaults `public`).
     #[must_use]
     pub fn from_row_values(
         instructions: Option<serde_json::Value>,
@@ -182,7 +369,11 @@ impl AgentBehaviorConfig {
         greeting: Option<String>,
         conversation_workflow: Option<serde_json::Value>,
         tool_config: Option<serde_json::Value>,
+        visibility: Option<String>,
     ) -> Self {
+        let visibility = visibility
+            .as_deref()
+            .map_or(Visibility::Public, Visibility::parse);
         let instructions = instructions
             .as_ref()
             .and_then(|v| v.get("prompt"))
@@ -215,6 +406,7 @@ impl AgentBehaviorConfig {
             .unwrap_or_default();
 
         Self {
+            visibility,
             instructions,
             persona,
             greeting,
@@ -700,9 +892,11 @@ mod tests {
             Some(json!({
                 "enabledTools": [
                     { "toolId": "knowledge_search", "enabled": true, "authLevel": "none" },
+                    { "toolId": "admin_tool", "enabled": true, "authLevel": "admin", "config": { "k": 1 } },
                     { "toolId": "notify_humans", "enabled": false }
                 ]
             })),
+            Some("internal".into()),
         );
         assert_eq!(
             cfg.instructions.as_deref(),
@@ -710,15 +904,26 @@ mod tests {
         );
         assert_eq!(cfg.persona.as_deref(), Some("Warm."));
         assert_eq!(cfg.greeting.as_deref(), Some("Hey there"));
+        assert_eq!(cfg.visibility, Visibility::Internal);
         let wf = cfg.conversation_workflow.clone().unwrap();
         assert_eq!(wf.goal, "Assess");
         assert_eq!(wf.steps.len(), 1);
         assert_eq!(wf.steps[0].id, "greet");
         // enabledTools parsed; only enabled=true entries are in the allow-list.
-        assert_eq!(cfg.enabled_tools.len(), 2);
+        assert_eq!(cfg.enabled_tools.len(), 3);
         assert_eq!(
             cfg.enabled_tool_ids(),
-            Some(vec!["knowledge_search".to_string()])
+            Some(vec![
+                "knowledge_search".to_string(),
+                "admin_tool".to_string()
+            ])
+        );
+        // Per-tool authLevel + config are parsed.
+        assert_eq!(cfg.auth_level_for("admin_tool"), AuthLevel::Admin);
+        assert_eq!(cfg.auth_level_for("knowledge_search"), AuthLevel::None);
+        assert_eq!(
+            cfg.tool_configs().get("admin_tool"),
+            Some(&json!({ "k": 1 }))
         );
     }
 
@@ -726,6 +931,7 @@ mod tests {
     fn enabled_tool_ids_none_when_no_tool_config() {
         let cfg = AgentBehaviorConfig::from_row_values(
             Some(json!({ "prompt": "hi" })),
+            None,
             None,
             None,
             None,
@@ -745,11 +951,14 @@ mod tests {
             Some("   ".into()),
             Some(json!({ "goal": "no steps here" })),
             Some(json!("tool_config not an object")),
+            Some("garbage-visibility".into()),
         );
         assert!(
             cfg.is_empty(),
             "malformed row must degrade to empty config: {cfg:?}"
         );
+        // Unknown visibility string → default public (never an error).
+        assert_eq!(cfg.visibility, Visibility::Public);
     }
 
     #[test]
@@ -760,9 +969,66 @@ mod tests {
             None,
             Some(json!({ "goal": "g", "steps": [] })),
             None,
+            None,
         );
         assert!(cfg.conversation_workflow.is_none());
         assert_eq!(cfg.instructions.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn auth_refusal_mirrors_reference_branches() {
+        // internal agent → any level satisfied.
+        assert!(tool_auth_refusal("t", AuthLevel::Admin, Visibility::Internal, false).is_none());
+        assert!(tool_auth_refusal("t", AuthLevel::EndUser, Visibility::Internal, false).is_none());
+        // public + none → allowed.
+        assert!(tool_auth_refusal("t", AuthLevel::None, Visibility::Public, false).is_none());
+        // public + admin → refuse.
+        let admin =
+            tool_auth_refusal("admin_tool", AuthLevel::Admin, Visibility::Public, false).unwrap();
+        assert!(admin.contains("requires admin authentication"));
+        // public + end_user, unauthenticated → refuse asking for verification.
+        let eu = tool_auth_refusal("pay", AuthLevel::EndUser, Visibility::Public, false).unwrap();
+        assert!(eu.contains("verify your identity"));
+        // public + end_user, authenticated → allowed.
+        assert!(tool_auth_refusal("pay", AuthLevel::EndUser, Visibility::Public, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_gate_hook_only_gates_supporting_tools() {
+        let levels: HashMap<String, AuthLevel> = [("pay".to_string(), AuthLevel::Admin)]
+            .into_iter()
+            .collect();
+        let supporting: HashSet<String> = ["pay".to_string()].into_iter().collect();
+        let hook = AuthGateHook::new(levels, Visibility::Public, false, supporting);
+        assert!(hook.is_active());
+
+        // The gated admin tool on a public agent is blocked.
+        let pay = ToolCall {
+            id: "1".into(),
+            name: "pay".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(hook.pre_call(&pay).await.is_err());
+
+        // A tool NOT in the supporting set is never gated, even with a level.
+        let ks = ToolCall {
+            id: "2".into(),
+            name: "knowledge_search".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(hook.pre_call(&ks).await.is_ok());
+    }
+
+    #[test]
+    fn auth_gate_inactive_when_no_supporting_tool_has_a_level() {
+        // A supporting tool with authLevel none, and a leveled tool that isn't
+        // supporting → nothing to gate.
+        let levels: HashMap<String, AuthLevel> = [("admin_tool".to_string(), AuthLevel::Admin)]
+            .into_iter()
+            .collect();
+        let supporting: HashSet<String> = ["knowledge_search".to_string()].into_iter().collect();
+        let hook = AuthGateHook::new(levels, Visibility::Public, false, supporting);
+        assert!(!hook.is_active());
     }
 
     #[tokio::test]

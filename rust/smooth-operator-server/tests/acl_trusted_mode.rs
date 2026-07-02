@@ -140,6 +140,8 @@ async fn run_turn_as(
             judge: None,
             greeting_section: None,
             enabled_tools: None,
+            auth_gate: None,
+            tool_configs: None,
         },
         &tx,
     )

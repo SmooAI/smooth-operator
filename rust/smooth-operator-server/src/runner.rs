@@ -36,7 +36,7 @@ use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{MessageQuery, StorageAdapter};
 use smooth_operator::agent_config::{
     advance_after_verdict, judge_user_prompt, render_workflow_prompt_section, resolve_current_step,
-    ConversationWorkflow, WorkflowJudgeVerdict, JUDGE_SYSTEM_PROMPT,
+    AuthGateHook, ConversationWorkflow, WorkflowJudgeVerdict, JUDGE_SYSTEM_PROMPT,
 };
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use smooth_operator::rerank::Reranker;
@@ -237,6 +237,13 @@ pub struct TurnRequest<'a> {
     /// registry to those tools (built-ins + host tools alike); `None` ⇒ the full
     /// tool set (unchanged). Unknown ids simply match nothing.
     pub enabled_tools: Option<Vec<String>>,
+    /// Per-agent auth-level gate (SMOODEV-590). When `Some`, installed as a
+    /// `ToolHook` that blocks a call whose configured `authLevel` isn't satisfied
+    /// (admin on public, or unverified end_user on public). `None` ⇒ no gate.
+    pub auth_gate: Option<AuthGateHook>,
+    /// Per-tool config (`tool_id` → config), delivered to host tools via the
+    /// `ToolProviderContext`. `None`/empty ⇒ no per-tool config. Built-ins ignore it.
+    pub tool_configs: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -280,6 +287,8 @@ pub async fn run_streaming_turn(
         judge,
         greeting_section,
         enabled_tools,
+        auth_gate,
+        tool_configs,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -372,6 +381,10 @@ pub async fn run_streaming_turn(
         if let Some(key) = gateway_key {
             ctx = ctx.with_gateway_key(key);
         }
+        // SEAM 3 — deliver per-tool config to host tools (registry.ts parity).
+        if let Some(configs) = tool_configs.clone() {
+            ctx = ctx.with_tool_configs(configs);
+        }
         for tool in provider.tools_for(&ctx).await {
             tools.register_arc(tool);
         }
@@ -382,6 +395,14 @@ pub async fn run_streaming_turn(
     // name isn't enabled. `None` (empty/absent tool_config) leaves the full set.
     if let Some(enabled) = enabled_tools {
         tools.retain(|name| enabled.iter().any(|id| id == name));
+    }
+
+    // SEAM 3 — per-agent authLevel gate. When installed, a tool call whose
+    // configured `authLevel` isn't satisfied is blocked at execution with the
+    // reference refusal (the engine surfaces the `pre_call` error to the model).
+    // `None` ⇒ no gate.
+    if let Some(gate) = auth_gate {
+        tools.add_hook(gate);
     }
 
     // 3a. Write-confirmation HITL: when configured with tool patterns, install a

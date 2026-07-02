@@ -98,6 +98,8 @@ async fn run_turn(
             judge: judge.map(|j| j as Arc<dyn smooth_operator_core::llm_provider::LlmProvider>),
             greeting_section: None,
             enabled_tools: None,
+            auth_gate: None,
+            tool_configs: None,
         },
         &tx,
     )
@@ -271,6 +273,8 @@ async fn run_turn_on(
             judge: None,
             greeting_section,
             enabled_tools,
+            auth_gate: None,
+            tool_configs: None,
         },
         &tx,
     )

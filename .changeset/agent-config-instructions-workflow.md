@@ -10,7 +10,8 @@ Config-delivery seam (matches the sibling Python/TS/C#/Go lanes): `AgentConfigRe
 
 - uses the agent's `instructions` (+ `personality.persona`) as the system prompt, overriding the org default;
 - injects the agent's `greeting` into the prompt only on the first turn of a conversation;
-- restricts the turn's tools to `tool_config.enabledTools` (`enabled == true` entries by snake_case `toolId`; empty/absent ⇒ full set; unknown ids ignored);
-- when a `conversation_workflow` is set, injects the current step's intent/criteria and, after each turn, runs a cheap failure-tolerant judge (yes/no/maybe) to advance the step; the step id is tracked per session.
+- restricts the turn's tools to `tool_config.enabledTools` (`enabled == true` entries by snake_case `toolId`; empty/absent ⇒ full set; unknown ids ignored), and delivers each entry's `config` to the tool via `ToolProviderContext`;
+- enforces per-tool `authLevel` at execution against the agent's `visibility` (a `ToolHook` gate: admin blocked on public agents; internal auto-satisfies; end_user on public requires an identity-verified session, fail-closed — the OTP flow is a host seam);
+- when a `conversation_workflow` is set, injects the current step's intent/criteria and, after each turn, runs a cheap failure-tolerant judge on the configurable `judge_model` (haiku-tier default) to advance the step; the step id is tracked per session.
 
-Per-agent isolation, malformed-jsonb tolerance (degrade to org default, never crash the turn), and judge-failure tolerance (stay on the current step) are covered by tests.
+Per-agent isolation, malformed-jsonb tolerance (degrade to org default, never crash the turn), judge-failure tolerance (stay on the current step), and the authLevel branches (admin/end_user/internal, authed vs not) are covered by unit + integration tests.

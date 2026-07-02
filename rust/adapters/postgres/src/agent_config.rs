@@ -54,7 +54,7 @@ impl PgAgentConfigResolver {
 
         let row = match client
             .query_opt(
-                "SELECT instructions, personality, greeting, conversation_workflow, tool_config \
+                "SELECT instructions, personality, greeting, conversation_workflow, tool_config, visibility \
                  FROM agents WHERE id = $1",
                 &[&id],
             )
@@ -75,6 +75,7 @@ impl PgAgentConfigResolver {
         let workflow: Option<serde_json::Value> =
             row.try_get("conversation_workflow").ok().flatten();
         let tool_config: Option<serde_json::Value> = row.try_get("tool_config").ok().flatten();
+        let visibility: Option<String> = row.try_get("visibility").ok().flatten();
 
         let config = AgentBehaviorConfig::from_row_values(
             instructions,
@@ -82,6 +83,7 @@ impl PgAgentConfigResolver {
             greeting,
             workflow,
             tool_config,
+            visibility,
         );
         if config.is_empty() {
             None
