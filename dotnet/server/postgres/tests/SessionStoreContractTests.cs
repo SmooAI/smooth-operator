@@ -77,6 +77,27 @@ public abstract class SessionStoreContractTests
         Assert.Single(aMessages);
         Assert.Equal("for A", aMessages[0].Text);
     }
+
+    [SkippableFact]
+    public async Task WorkflowStep_DefaultsNull_ThenUpsertsAndScopesByConversation()
+    {
+        var store = await CreateStoreAsync();
+        var a = await store.CreateSessionAsync("", null, null);
+        var b = await store.CreateSessionAsync("", null, null);
+
+        // Fresh conversation → no step recorded.
+        Assert.Null(await store.GetWorkflowStepAsync(a.ConversationId));
+
+        await store.SetWorkflowStepAsync(a.ConversationId, "greet");
+        Assert.Equal("greet", await store.GetWorkflowStepAsync(a.ConversationId));
+
+        // Upsert replaces (no duplicate row / stale read).
+        await store.SetWorkflowStepAsync(a.ConversationId, "qualify");
+        Assert.Equal("qualify", await store.GetWorkflowStepAsync(a.ConversationId));
+
+        // Scoped per conversation.
+        Assert.Null(await store.GetWorkflowStepAsync(b.ConversationId));
+    }
 }
 
 /// <summary>The contract, against the in-memory adapter (always runs — no Docker).</summary>

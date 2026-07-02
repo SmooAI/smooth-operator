@@ -36,6 +36,16 @@ public interface ISessionStore
 
     /// <summary>The most recent <paramref name="limit"/> messages for a conversation, oldest first.</summary>
     Task<IReadOnlyList<StoredMessage>> ListMessagesAsync(string conversationId, int limit, CancellationToken cancellationToken = default);
+
+    /// <summary>The persisted conversation-workflow step pointer for a conversation, or <c>null</c>
+    /// when none has been recorded (a fresh conversation starts on the workflow's first step).
+    /// Mirrors the monorepo graph state's <c>currentStepId</c>, persisted so a workflow advances
+    /// across turns (and connections).</summary>
+    Task<string?> GetWorkflowStepAsync(string conversationId, CancellationToken cancellationToken = default);
+
+    /// <summary>Record the conversation's current workflow step (upsert). Called after the judge
+    /// advances the pointer at the end of a turn.</summary>
+    Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>In-process <see cref="ISessionStore"/>. The C# analog of the Rust in-memory adapter.</summary>
@@ -44,6 +54,7 @@ public sealed class InMemorySessionStore : ISessionStore
     private readonly object _gate = new();
     private readonly Dictionary<string, StoredSession> _sessions = new();
     private readonly Dictionary<string, List<StoredMessage>> _messages = new();
+    private readonly Dictionary<string, string> _workflowSteps = new();
 
     public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default)
     {
@@ -95,5 +106,22 @@ public sealed class InMemorySessionStore : ISessionStore
                 : Array.Empty<StoredMessage>();
             return Task.FromResult(result);
         }
+    }
+
+    public Task<string?> GetWorkflowStepAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_workflowSteps.TryGetValue(conversationId, out var step) ? step : null);
+        }
+    }
+
+    public Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            _workflowSteps[conversationId] = stepId;
+        }
+        return Task.CompletedTask;
     }
 }

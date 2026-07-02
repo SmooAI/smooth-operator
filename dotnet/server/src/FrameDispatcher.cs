@@ -25,6 +25,9 @@ public sealed class FrameDispatcher
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry _confirmations;
+    private readonly IAgentConfigResolver? _agentConfigResolver;
+    private readonly IWorkflowJudge? _judge;
+    private readonly ISessionAuthenticator _authenticator;
 
     // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
     // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
@@ -41,7 +44,10 @@ public sealed class FrameDispatcher
         IReranker? reranker = null,
         IReadOnlyList<AITool>? tools = null,
         IReadOnlyList<string>? confirmTools = null,
-        ConfirmationRegistry? confirmations = null)
+        ConfirmationRegistry? confirmations = null,
+        IAgentConfigResolver? agentConfigResolver = null,
+        IWorkflowJudge? judge = null,
+        ISessionAuthenticator? authenticator = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -57,6 +63,12 @@ public sealed class FrameDispatcher
         // Session-keyed pending-confirmation registry shared with each spawned turn so a
         // confirm_tool_action frame resolves the verdict a parked turn awaits. One per connection.
         _confirmations = confirmations ?? new ConfirmationRegistry();
+        // Per-agent config resolution (null ⇒ no per-agent instructions/workflow are applied; every
+        // agent uses the default persona, unchanged) and the post-turn workflow judge.
+        _agentConfigResolver = agentConfigResolver;
+        _judge = judge;
+        // Identity-verification seam for end_user-level tools on public agents. Default fails closed.
+        _authenticator = authenticator ?? DenyAllSessionAuthenticator.Instance;
     }
 
     /// <summary>
@@ -205,10 +217,34 @@ public sealed class FrameDispatcher
         // 1. Immediate ack (202).
         sink(ProtocolEvents.ImmediateResponse(requestId, 202, "Processing your request...", new JsonObject()));
 
-        // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
+        // 2. Resolve this agent's per-agent config (instructions.prompt + conversation_workflow) by
+        //    the session's agentId. A missing/unknown/malformed config resolves to null → the turn
+        //    uses the org/default persona, unchanged. The lookup never throws (the store contract).
+        AgentConfig? agentConfig = null;
+        if (_agentConfigResolver is not null)
+        {
+            agentConfig = await _agentConfigResolver.ResolveAsync(session.AgentId, cancellationToken).ConfigureAwait(false);
+        }
+
+        // 3. Filter the server's tool set to the agent's tool_config. An agent can only RESTRICT the
+        //    DI-provided tools (matched by snake_case toolId), never invent them. A null EnabledTools
+        //    (config absent or enabledTools empty) ⇒ the full set, unchanged; a non-null list restricts
+        //    to its enabled=true entries (an all-disabled list ⇒ no tools). Unknown toolIds fall out of
+        //    the intersection. Mirrors the monorepo AgentToolConfig semantics.
+        var enabledTools = agentConfig?.EnabledTools;
+        var effectiveTools = enabledTools is null
+            ? _tools
+            : _tools.Where(t => enabledTools.Any(e => e.Enabled && e.ToolId == t.Name)).ToList();
+
+        // 4. Enforce per-tool authLevel + deliver per-tool config at execution: wrap the surviving tools
+        //    so an auth-gated one blocks (with the reference tool message) when its authLevel isn't
+        //    satisfied, and a config-bearing one hands its config to the tool. No-op when nothing needs it.
+        var gatedTools = ToolAuthGate.Apply(effectiveTools, agentConfig, _authenticator, session.ConversationId);
+
+        // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools, _confirmTools, _confirmations);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's

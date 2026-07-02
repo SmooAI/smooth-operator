@@ -36,6 +36,12 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         );
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
             ON conversation_messages (conversation_id, seq);
+
+        CREATE TABLE IF NOT EXISTS conversation_workflow_state (
+            conversation_id TEXT PRIMARY KEY,
+            step_id         TEXT NOT NULL,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
         """;
 
     private readonly NpgsqlDataSource _dataSource;
@@ -142,6 +148,28 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
             results.Add(new StoredMessage(reader.GetString(0), conversationId, direction, reader.GetString(2)));
         }
         return results;
+    }
+
+    public async Task<string?> GetWorkflowStepAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        const string sql = "SELECT step_id FROM conversation_workflow_state WHERE conversation_id = @cid";
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("cid", conversationId);
+        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return result as string;
+    }
+
+    public async Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default)
+    {
+        const string sql = """
+            INSERT INTO conversation_workflow_state (conversation_id, step_id, updated_at)
+            VALUES (@cid, @step, now())
+            ON CONFLICT (conversation_id) DO UPDATE SET step_id = EXCLUDED.step_id, updated_at = now()
+            """;
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("cid", conversationId);
+        command.Parameters.AddWithValue("step", stepId);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync() => _dataSource.DisposeAsync();
