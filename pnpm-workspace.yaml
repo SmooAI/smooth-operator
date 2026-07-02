@@ -12,7 +12,12 @@
 # speaks the protocol and runs `@smooai/smooth-operator-core` per turn (the TS
 # sibling of `rust/smooth-operator-server` and `dotnet/server`). Private (not
 # published); the client in `typescript/` is the published SDK.
+#
+# `typescript/extension-sdk` is the published SEP (Smooth Extension Protocol) SDK
+# — `defineExtension`/`defineTool`, a stdio JSON-RPC transport, an in-process test
+# host, and a conformance runner for building extensions in TypeScript.
 packages:
     - typescript
     - typescript/server
+    - typescript/extension-sdk
     - console

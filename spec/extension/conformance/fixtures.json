@@ -115,10 +115,28 @@
     "instance": { "content": "hello", "is_error": false }
   },
 
+  "tool_execute_result_error": {
+    "$schema_ref": "methods/tool-execute.schema.json#/$defs/Result",
+    "description": "A failed tool execution — the host surfaces it as an error tool-result.",
+    "instance": { "content": "unknown tool: nope", "is_error": true }
+  },
+
+  "tool_execute_result_with_details": {
+    "$schema_ref": "methods/tool-execute.schema.json#/$defs/Result",
+    "description": "A tool result carrying structured `details` for UI rendering alongside the LLM-facing content.",
+    "instance": { "content": "3 files changed", "is_error": false, "details": { "files": ["a.ts", "b.ts", "c.ts"] } }
+  },
+
   "tool_update_params": {
     "$schema_ref": "methods/tool-update.schema.json#/$defs/Params",
     "description": "Progress notification for an in-flight tool/execute.",
     "instance": { "call_id": "call-1", "message": "working...", "progress": 0.5 }
+  },
+
+  "tool_update_params_message_only": {
+    "$schema_ref": "methods/tool-update.schema.json#/$defs/Params",
+    "description": "A progress notification with only a message (no fractional progress) — the minimal tool/update.",
+    "instance": { "call_id": "call-1", "message": "started" }
   },
 
   "cancel_params": {
@@ -338,6 +356,16 @@
         "arguments": { "phrase": "hello" },
         "context": { "token": "epoch-7", "tier": "command" }
       }
+    },
+    {
+      "name": "tool_execute_result_missing_content",
+      "$schema_ref": "methods/tool-execute.schema.json#/$defs/Result",
+      "instance": { "is_error": true }
+    },
+    {
+      "name": "tool_update_progress_out_of_range",
+      "$schema_ref": "methods/tool-update.schema.json#/$defs/Params",
+      "instance": { "call_id": "call-1", "progress": 1.5 }
     },
     {
       "name": "frame_wrong_jsonrpc_version",

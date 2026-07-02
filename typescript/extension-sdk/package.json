@@ -1,0 +1,58 @@
+{
+    "name": "@smooai/smooth-extension-sdk",
+    "version": "0.1.0",
+    "description": "TypeScript SDK for building Smooth Extension Protocol (SEP) extensions: `defineExtension`, `defineTool`, a stdio JSON-RPC transport, an in-process test host, and a conformance runner. Extensions are subprocesses speaking JSON-RPC 2.0 ndjson to any SEP host (smooth-operator-core and its polyglot servers).",
+    "license": "MIT",
+    "type": "module",
+    "engines": {
+        "node": ">=22"
+    },
+    "main": "./dist/index.js",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/SmooAI/smooth-operator.git",
+        "directory": "typescript/extension-sdk"
+    },
+    "homepage": "https://github.com/SmooAI/smooth-operator/tree/main/typescript/extension-sdk",
+    "keywords": [
+        "smooth-operator",
+        "sep",
+        "extension",
+        "json-rpc",
+        "agent",
+        "tools",
+        "sdk"
+    ],
+    "files": [
+        "dist",
+        "src"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "ajv": "^8.17.1",
+        "ajv-formats": "^3.0.1",
+        "zod": "^4.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^25.9.2",
+        "tsx": "^4.19.2",
+        "typescript": "^5.7.3",
+        "vitest": "^2.1.8"
+    }
+}
