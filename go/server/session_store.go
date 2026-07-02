@@ -31,6 +31,15 @@ type StoredSession struct {
 	// Advanced by the post-turn workflow judge and persisted so the next turn resumes on
 	// the right step. SMOODEV-590.
 	CurrentStepID string
+	// ContactEmail is the caller's email captured at create-session time, used as the OTP
+	// delivery contact (the server offers OTP to it when an end_user tool is refused). The
+	// reference create path captures only an email; a host that also captures a phone would
+	// add an SMS channel. th-8078dd.
+	ContactEmail string
+	// OtpVerified is the session's identity-verified bit, set by a successful verify_otp and
+	// threaded into the auth gate so a verified caller's end_user tools run. The Go analog of
+	// the Rust session metadata.otpVerified. th-8078dd.
+	OtpVerified bool
 }
 
 // StoredMessage is one persisted conversation message.
@@ -56,6 +65,11 @@ type SessionStore interface {
 	// post-turn judge), so the next turn resumes on the right step. A no-op for an unknown
 	// session. SMOODEV-590.
 	SetCurrentStep(ctx context.Context, sessionID, stepID string) error
+	// SetSessionAuthenticated persists a session's OTP-verified bit (set by a successful
+	// verify_otp), so subsequent turns' auth gates let a verified caller's end_user tools run.
+	// A no-op for an unknown session. The Go analog of the Rust set_session_authenticated.
+	// th-8078dd.
+	SetSessionAuthenticated(ctx context.Context, sessionID string, verified bool) error
 }
 
 // InMemorySessionStore is an in-process SessionStore. The Go analog of the Rust
@@ -75,9 +89,9 @@ func NewInMemorySessionStore() *InMemorySessionStore {
 }
 
 // CreateSession mints a fresh session (and an empty message log for its conversation).
-// userName/userEmail are accepted for protocol parity but not retained by the
-// in-memory reference store.
-func (s *InMemorySessionStore) CreateSession(_ context.Context, agentID, _ /*userName*/, _ /*userEmail*/ string) (StoredSession, error) {
+// userName is accepted for protocol parity but not retained; userEmail is retained as the
+// OTP delivery contact (ContactEmail) so the end_user auth-gate flow can offer verification.
+func (s *InMemorySessionStore) CreateSession(_ context.Context, agentID, _ /*userName*/, userEmail string) (StoredSession, error) {
 	if agentID == "" {
 		agentID = uuid.NewString()
 	}
@@ -88,6 +102,7 @@ func (s *InMemorySessionStore) CreateSession(_ context.Context, agentID, _ /*use
 		AgentName:          "smooth-agent",
 		UserParticipantID:  uuid.NewString(),
 		AgentParticipantID: uuid.NewString(),
+		ContactEmail:       userEmail,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,6 +155,17 @@ func (s *InMemorySessionStore) SetCurrentStep(_ context.Context, sessionID, step
 	defer s.mu.Unlock()
 	if session, ok := s.sessions[sessionID]; ok {
 		session.CurrentStepID = stepID
+		s.sessions[sessionID] = session
+	}
+	return nil
+}
+
+// SetSessionAuthenticated persists a session's OTP-verified bit. A no-op for an unknown session.
+func (s *InMemorySessionStore) SetSessionAuthenticated(_ context.Context, sessionID string, verified bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session, ok := s.sessions[sessionID]; ok {
+		session.OtpVerified = verified
 		s.sessions[sessionID] = session
 	}
 	return nil

@@ -38,6 +38,9 @@ type gatedTool struct {
 	authenticator  SessionAuthenticator
 	conversationID string
 	config         map[string]any
+	// refusal records an end_user refusal (public agent, unverified session) so the server
+	// can offer OTP after the turn. nil → nothing recorded (the pre-OTP default). th-8078dd.
+	refusal *otpRefusal
 }
 
 func (g gatedTool) Execute(ctx context.Context, args map[string]any) (string, error) {
@@ -56,6 +59,11 @@ func (g gatedTool) Execute(ctx context.Context, args map[string]any) (string, er
 				}
 			}
 			if !authed {
+				// Record the OTP-remediable refusal (public agent, end_user tool, unverified
+				// session) so the server can offer a verification flow after the turn — the Go
+				// analog of the Rust AuthGateHook recording otp_refused_tool. An admin refusal
+				// above is never recorded (no OTP can satisfy it). nil recorder → no-op.
+				g.refusal.record(g.Name())
 				return "I need to verify your identity before I can use " + g.Name() + ". Please verify with a one-time code.", nil
 			}
 		}
@@ -76,8 +84,9 @@ func (g gatedTool) Execute(ctx context.Context, args map[string]any) (string, er
 // conversation. A tool is wrapped only when it has something to enforce/deliver (an
 // auth-gated entry or a config map); everything else passes through unchanged, so an
 // un-configured agent's tools are byte-for-byte identical. authRequiringTools is the set
-// of tool names that declare supportsAuthRequirement.
-func gateTools(tools []core.Tool, cfg *AgentConfig, authRequiringTools map[string]bool, auth SessionAuthenticator, conversationID string) []core.Tool {
+// of tool names that declare supportsAuthRequirement. refusal (nil-safe) captures an
+// end_user refusal on a public unverified session so the server can offer OTP after the turn.
+func gateTools(tools []core.Tool, cfg *AgentConfig, authRequiringTools map[string]bool, auth SessionAuthenticator, conversationID string, refusal *otpRefusal) []core.Tool {
 	if cfg == nil || len(cfg.EnabledTools) == 0 {
 		return tools
 	}
@@ -102,6 +111,7 @@ func gateTools(tools []core.Tool, cfg *AgentConfig, authRequiringTools map[strin
 			authenticator:  auth,
 			conversationID: conversationID,
 			config:         entry.Config,
+			refusal:        refusal,
 		}
 	}
 	return out

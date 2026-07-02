@@ -107,7 +107,7 @@ func TestGateToolsWrapsOnlyWhenNeeded(t *testing.T) {
 			// "plain" has no entry.
 		},
 	}
-	got := gateTools(tools, cfg, map[string]bool{"gated": true}, nil, "conv-1")
+	got := gateTools(tools, cfg, map[string]bool{"gated": true}, nil, "conv-1", nil)
 
 	// plain: no entry → passthrough (not wrapped).
 	if _, wrapped := got[0].(gatedTool); wrapped {
@@ -123,7 +123,7 @@ func TestGateToolsWrapsOnlyWhenNeeded(t *testing.T) {
 	}
 
 	// nil config → tools unchanged.
-	if same := gateTools(tools, nil, nil, nil, "c"); len(same) != 3 {
+	if same := gateTools(tools, nil, nil, nil, "c", nil); len(same) != 3 {
 		t.Fatalf("nil config should return tools unchanged")
 	}
 }

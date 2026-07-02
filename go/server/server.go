@@ -57,6 +57,12 @@ type Server struct {
 	// (default nil → fail-closed unauthenticated; a host wires OTP behind it).
 	sessionAuth SessionAuthenticator
 
+	// otpService is the host OTP identity-verification seam (default nil → no OTP offered; a
+	// refused end_user tool stays refused, behavior unchanged). When installed, a refused
+	// end_user tool on a session with a contact triggers the OTP-offer flow, and verify_otp
+	// validates codes through it. th-8078dd.
+	otpService OtpService
+
 	// drainCtx is the single shutdown source for the whole server (one source,
 	// default uncancelled). Each connection loop selects on its Done() so an
 	// in-flight turn can finish before the loop exits (graceful SIGTERM drain).
@@ -139,6 +145,16 @@ func WithAuthRequiringTools(names ...string) Option {
 // behind this seam in the host. SMOODEV-590.
 func WithSessionAuthenticator(a SessionAuthenticator) Option {
 	return func(srv *Server) { srv.sessionAuth = a }
+}
+
+// WithOtpService installs the host OTP identity-verification seam (default nil → no OTP
+// offered; a refused end_user tool stays refused, behavior unchanged). When installed, a turn
+// that refuses an end_user tool on a session with a contact emits otp_verification_required →
+// SendOtp → otp_sent, and a verify_otp action validates codes through it (success marks the
+// session authenticated). The reference server never generates, delivers, or holds a code.
+// th-8078dd.
+func WithOtpService(s OtpService) Option {
+	return func(srv *Server) { srv.otpService = s }
 }
 
 // New builds a Server with the given options, defaulting every collaborator to its
@@ -273,7 +289,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// the parked turn it resumes are always on the same connection (the session id keys
 	// within it), so the registry need not be server-wide.
 	confirmations := NewConfirmationRegistry()
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth)
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth, s.otpService)
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits
