@@ -71,6 +71,17 @@ class SessionStore(ABC):
         """The most recent ``limit`` messages for a conversation, oldest first."""
         ...
 
+    @abstractmethod
+    async def get_current_step_id(self, conversation_id: str) -> str | None:
+        """The conversation's current workflow-step pointer (``None`` = fresh start)."""
+        ...
+
+    @abstractmethod
+    async def set_current_step_id(self, conversation_id: str, step_id: str | None) -> None:
+        """Persist the conversation's workflow-step pointer (the analog of the TS
+        ``state.currentStepId`` carried across turns)."""
+        ...
+
 
 class InMemorySessionStore(SessionStore):
     """In-process :class:`SessionStore` — the reference store (the C# analog of
@@ -81,6 +92,8 @@ class InMemorySessionStore(SessionStore):
         self._gate = Lock()
         self._sessions: dict[str, StoredSession] = {}
         self._messages: dict[str, list[StoredMessage]] = {}
+        #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
+        self._current_step: dict[str, str] = {}
 
     async def create_session(self, agent_id: str, user_name: str | None, user_email: str | None) -> StoredSession:
         session = StoredSession(
@@ -110,3 +123,14 @@ class InMemorySessionStore(SessionStore):
         with self._gate:
             log = self._messages.get(conversation_id, [])
             return list(log[-limit:]) if limit > 0 else list(log)
+
+    async def get_current_step_id(self, conversation_id: str) -> str | None:
+        with self._gate:
+            return self._current_step.get(conversation_id)
+
+    async def set_current_step_id(self, conversation_id: str, step_id: str | None) -> None:
+        with self._gate:
+            if step_id is None:
+                self._current_step.pop(conversation_id, None)
+            else:
+                self._current_step[conversation_id] = step_id

@@ -45,6 +45,8 @@ asyncio.run(main())
 | Frame dispatch (`ping` / `create` / `get` / `send_message`) | `dispatcher.py` | C# `FrameDispatcher`, Rust `handler.rs` |
 | Session + message store | `session_store.py` | C# `SessionStore`, Rust storage adapter |
 | Streaming turn (engine → protocol events) | `turn_runner.py` | C# `TurnRunner`, Rust `runner.rs` |
+| Per-agent config parse (instructions / workflow / persona) | `agent_config.py` | monorepo `agents` schema |
+| Conversation-workflow step helpers + post-turn judge | `workflow.py` | monorepo `general-agent/workflow.ts` + `workflow-judge.ts` |
 | Protocol event builders | `protocol.py` | C# `ProtocolEvents`, Rust `protocol.rs` |
 | Auth verifier seam (permissive + local HS256 JWT) | `auth.py` | C# `Auth.cs`, Rust verifier seam |
 
@@ -58,6 +60,46 @@ turn dispatch awaited **inside** the frame branch, so an in-flight turn finishes
 before the loop exits. A backplane `detach` always runs after the loop (the
 detach-after-loop). The Redis/NATS cross-pod backplane the Rust server supports is
 left as a seam (`backplane.py`).
+
+### Per-agent config + conversation workflows (SMOODEV-590)
+
+`ServerState.agent_config_resolver` (an `AgentConfigResolver`) looks up an
+`AgentConfig` by `agentId`, server-side — the ws protocol's
+`create_conversation_session` carries only an agent UUID, so config can't ride
+the payload. The default `StaticAgentConfigResolver({...})` is dict-backed (empty
+= no-op); a multi-tenant host swaps in one backed by the `agents` table. Resolved
+per turn from the session's agent, it lets each agent override the server-wide
+`system_prompt`:
+
+- **`instructions`** — the agent's system-prompt body (falls back to
+  `system_prompt`, then the built-in default).
+- **`personality` / `greeting`** — appended to the prompt (greeting only on the
+  first turn of a conversation).
+- **`conversation_workflow`** — a `goal` + ordered `steps` (`id` / `intent` /
+  `criteria` / optional `next`). The current step is rendered into the prompt;
+  after each turn a cheap judge call decides whether the criteria were met and
+  advances the pointer (explicit `next` → sequential → terminal). The step id is
+  tracked per conversation.
+- **`tool_config.enabledTools`** — a tool allow-list (`[{ toolId, enabled,
+  authLevel, config }]`). When non-empty, the agent's turns are restricted to the
+  `enabled=true` entries' `toolId` (empty/absent → full server tool set; unknown
+  toolIds ignored).
+- **`authLevel` enforcement** (+ agent `visibility`) — at tool-execution time, a
+  tool whose entry has `authLevel != "none"` **and** that declares
+  `supports_auth_requirement = True` is gated: `admin` on a `public` agent is
+  refused; `internal` agents auto-satisfy; a `public` agent's `end_user` tool
+  consults `ServerState.session_authenticator` (`SessionAuthenticator.is_authenticated`,
+  fail-closed) and is refused until identity is verified. OTP itself is host wiring
+  behind the seam.
+- Each entry's **`config`** dict is delivered to the tool at execution (under the
+  reserved `__tool_config__` argument key).
+
+`ServerState.judge_model` sets the fast/cheap model for the post-turn workflow
+judge (haiku-tier default).
+
+Config is parsed tolerantly (malformed → server default, never crashes a
+session) and the judge is failure-tolerant (any error → stay on the current
+step). With `agent_configs` empty, behavior is unchanged.
 
 ## Develop
 
