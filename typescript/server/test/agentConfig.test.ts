@@ -29,15 +29,32 @@ describe('parseAgentConfig — tolerant', () => {
         expect(config?.conversationWorkflow).toBeUndefined();
     });
 
-    it('reads greeting, personality, and the tool allow-list', () => {
-        const config = parseAgentConfig({
-            greeting: 'Hi, thanks for calling Acme!',
-            personality: 'warm and concise',
-            tool_config: ['knowledge_search', 'notify_humans', 42],
-        });
+    it('reads greeting + personality', () => {
+        const config = parseAgentConfig({ greeting: 'Hi, thanks for calling Acme!', personality: 'warm and concise' });
         expect(config?.greeting).toBe('Hi, thanks for calling Acme!');
         expect(config?.personality).toBe('warm and concise');
-        expect(config?.allowedTools).toEqual(['knowledge_search', 'notify_humans']);
+    });
+
+    it('parses tool_config.enabledTools with defaults, preserving authLevel/config', () => {
+        const config = parseAgentConfig({
+            tool_config: {
+                enabledTools: [
+                    { toolId: 'knowledge_search' }, // enabled defaults true, authLevel "none"
+                    { toolId: 'notify_humans', enabled: false, authLevel: 'oauth', config: { channel: 'ops' } },
+                    { enabled: true }, // no toolId → skipped
+                    42, // not an object → skipped
+                ],
+            },
+        });
+        expect(config?.enabledTools).toEqual([
+            { toolId: 'knowledge_search', enabled: true, authLevel: 'none', config: undefined },
+            { toolId: 'notify_humans', enabled: false, authLevel: 'oauth', config: { channel: 'ops' } },
+        ]);
+    });
+
+    it('treats an empty enabledTools list as no restriction (undefined)', () => {
+        expect(parseAgentConfig({ tool_config: { enabledTools: [] } })).toBeUndefined();
+        expect(parseAgentConfig({ tool_config: {} })).toBeUndefined();
     });
 
     it('returns undefined when nothing usable is present', () => {

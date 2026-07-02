@@ -6,7 +6,7 @@
  * `conversationWorkflow` renders the current step and the post-turn judge advances it
  * across turns, and (d) a malformed config degrades to the default without crashing.
  */
-import { MockLlmProvider } from '@smooai/smooth-operator-core';
+import { MockLlmProvider, type Tool } from '@smooai/smooth-operator-core';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { parseAgentConfig, StaticAgentConfigResolver } from '../src/agentConfig.js';
@@ -113,6 +113,30 @@ describe('per-agent config over a real WebSocket', () => {
         expect(systemPromptOf(mock, 2)).toContain('Welcome to Beta Co!');
         expect(systemPromptOf(mock, 2)).not.toContain('Acme');
 
+        await client.close();
+    });
+
+    it('restricts the tool set to the agent enabled=true toolIds', async () => {
+        const mkTool = (name: string): Tool => ({ name, description: name, parameters: { type: 'object', properties: {} }, execute: async () => 'ok' });
+        const mock = new MockLlmProvider().pushText('reply');
+        const agentConfig = new StaticAgentConfigResolver({
+            [AGENT_A]: {
+                enabledTools: [
+                    { toolId: 'tool_a', enabled: true, authLevel: 'none' },
+                    { toolId: 'tool_b', enabled: false, authLevel: 'none' }, // disabled → withheld
+                    { toolId: 'tool_ghost', enabled: true, authLevel: 'none' }, // unknown → ignored
+                ],
+            },
+        });
+        server = await serve({ chatClient: mock, agentConfig, tools: [mkTool('tool_a'), mkTool('tool_b')] });
+        const client = await TestClient.connect(server.url);
+
+        const sessionId = await openSession(client, AGENT_A);
+        await sendAndDrain(client, sessionId, 'q');
+
+        const offered = (mock.calls[0]!.tools ?? []).map((t) => (t as { function?: { name?: string } }).function?.name);
+        expect(offered).toContain('tool_a');
+        expect(offered).not.toContain('tool_b');
         await client.close();
     });
 

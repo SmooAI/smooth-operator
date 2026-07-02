@@ -21,6 +21,19 @@ import { parseWorkflow, renderWorkflowPromptSection, type ConversationWorkflow }
  * optional — an agent may set only `instructions`, only a `conversationWorkflow`,
  * or nothing (in which case the server falls back to its base/org prompt).
  */
+/**
+ * One entry of the agent's `tool_config.enabledTools` (authoritative
+ * `AgentToolConfig` shape in the monorepo `agents` schema). `toolId` is snake_case
+ * and matched against a registered tool's name. `authLevel` / `config` are preserved
+ * even though the server doesn't act on them yet.
+ */
+export interface EnabledTool {
+    toolId: string;
+    enabled: boolean;
+    authLevel: string;
+    config?: Record<string, unknown>;
+}
+
 export interface AgentConfig {
     /** Freeform system-prompt body for this agent (`agents.instructions.prompt`). */
     instructions?: string;
@@ -30,9 +43,12 @@ export interface AgentConfig {
     greeting?: string;
     /** Optional short personality descriptor folded into the persona section. */
     personality?: string;
-    /** Optional allow-list of tool names this agent may use; when set, the server's
-     *  tool set is filtered to it. Empty / undefined → all server tools available. */
-    allowedTools?: string[];
+    /**
+     * Parsed `tool_config.enabledTools`. When present and non-empty, the server's
+     * tool set is restricted to entries with `enabled: true` matched by snake_case
+     * `toolId`. Empty / undefined → all registered tools available (unchanged).
+     */
+    enabledTools?: EnabledTool[];
 }
 
 /**
@@ -87,10 +103,27 @@ export function parseAgentConfig(raw: unknown): AgentConfig | undefined {
     if (typeof obj.greeting === 'string' && obj.greeting.trim().length > 0) config.greeting = obj.greeting;
     if (typeof obj.personality === 'string' && obj.personality.trim().length > 0) config.personality = obj.personality;
 
-    const tools = obj.tool_config ?? obj.allowedTools;
-    if (Array.isArray(tools)) {
-        const names = tools.filter((t): t is string => typeof t === 'string' && t.length > 0);
-        if (names.length > 0) config.allowedTools = names;
+    // tool_config.enabledTools — authoritative AgentToolConfig shape. Defaults to []
+    // on every agent row; a non-empty list restricts tools at dispatch time. Malformed
+    // entries are skipped individually; `enabled` defaults true, `authLevel` "none".
+    const toolConfig = obj.tool_config;
+    if (typeof toolConfig === 'object' && toolConfig !== null && !Array.isArray(toolConfig)) {
+        const list = (toolConfig as Record<string, unknown>).enabledTools;
+        if (Array.isArray(list)) {
+            const enabledTools: EnabledTool[] = [];
+            for (const raw of list) {
+                if (typeof raw !== 'object' || raw === null) continue;
+                const t = raw as Record<string, unknown>;
+                if (typeof t.toolId !== 'string' || t.toolId.length === 0) continue;
+                enabledTools.push({
+                    toolId: t.toolId,
+                    enabled: typeof t.enabled === 'boolean' ? t.enabled : true,
+                    authLevel: typeof t.authLevel === 'string' ? t.authLevel : 'none',
+                    config: typeof t.config === 'object' && t.config !== null && !Array.isArray(t.config) ? (t.config as Record<string, unknown>) : undefined,
+                });
+            }
+            if (enabledTools.length > 0) config.enabledTools = enabledTools;
+        }
     }
 
     return Object.keys(config).length > 0 ? config : undefined;
