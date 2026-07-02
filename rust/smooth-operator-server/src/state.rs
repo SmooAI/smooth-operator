@@ -18,6 +18,7 @@ use smooth_operator_core::HumanResponse;
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::adapter::StorageAdapter;
+use smooth_operator::agent_config::{AgentConfigProvider, NoAgentConfig};
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
@@ -64,6 +65,15 @@ pub struct AppState {
     /// [`PermissiveWidgetAuth`] (no enforcement) until a host installs a real
     /// provider via [`with_widget_auth`](Self::with_widget_auth).
     pub widget_auth: Arc<dyn WidgetAuthProvider>,
+    /// **Per-agent behavior config hook.** Resolves an agent's `instructions`
+    /// (system prompt), `personality`, `greeting`, and `conversation_workflow`
+    /// from its `agent_id` so a public chat agent behaves as its owner configured
+    /// — not as the generic org-default persona. Defaults to
+    /// [`NoAgentConfig`](smooth_operator::agent_config::NoAgentConfig) (no
+    /// per-agent config → the org default persona is used, unchanged); a host
+    /// installs a real provider (backed by the monorepo `agents` table) via
+    /// [`with_agent_config`](Self::with_agent_config).
+    pub agent_config: Arc<dyn AgentConfigProvider>,
     /// Connection backplane: per-pod sink registry + cross-pod event delivery.
     /// Defaults to [`InMemoryBackplane`] (single-process); a host installs a
     /// Redis/NATS impl via [`with_backplane`](Self::with_backplane) to scale out
@@ -185,6 +195,7 @@ impl AppState {
             settings: Arc::new(InMemorySettingsStore::new()),
             tool_provider: None,
             widget_auth: Arc::new(PermissiveWidgetAuth),
+            agent_config: Arc::new(NoAgentConfig),
             backplane: Arc::new(InMemoryBackplane::new()),
             chat_provider: None,
             gateway_key_resolver,
@@ -300,6 +311,16 @@ impl AppState {
         self
     }
 
+    /// Install the per-agent behavior-config provider (builder). A host backs
+    /// this with its `agents` store so each agent's `instructions` /
+    /// `conversation_workflow` drive its conversations. Without it, the runner
+    /// falls back to the org-default persona (unchanged behavior).
+    #[must_use]
+    pub fn with_agent_config(mut self, provider: Arc<dyn AgentConfigProvider>) -> Self {
+        self.agent_config = provider;
+        self
+    }
+
     /// Install the connection backplane (builder). A host installs a Redis/NATS
     /// impl to scale the WS service horizontally and to let other services push
     /// realtime events to connected clients via [`Backplane::publish`].
@@ -355,6 +376,43 @@ impl AppState {
     #[must_use]
     pub fn get_session(&self, session_id: &str) -> Option<Session> {
         self.sessions.read().ok()?.get(session_id).cloned()
+    }
+
+    /// The conversation-workflow step this session is currently on, read from the
+    /// session's `metadata.currentStepId`. `None` = no workflow / fresh start (the
+    /// runner then resolves to the workflow's first step).
+    #[must_use]
+    pub fn session_current_step(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .read()
+            .ok()?
+            .get(session_id)?
+            .metadata
+            .as_ref()?
+            .get("currentStepId")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Persist the workflow step pointer onto the in-memory session's
+    /// `metadata.currentStepId`. Matches the session registry's durability (the
+    /// pointer lives as long as the session does, on the pod that owns it). A
+    /// `None` step clears the pointer. No-op for an unknown session.
+    pub fn set_session_current_step(&self, session_id: &str, step_id: Option<&str>) {
+        if let Ok(mut map) = self.sessions.write() {
+            if let Some(session) = map.get_mut(session_id) {
+                let mut meta = session.metadata.take().unwrap_or_default();
+                match step_id {
+                    Some(id) => {
+                        meta.insert("currentStepId".to_string(), serde_json::Value::from(id));
+                    }
+                    None => {
+                        meta.remove("currentStepId");
+                    }
+                }
+                session.metadata = Some(meta);
+            }
+        }
     }
 
     /// Record that a document was added to a named document set **within an org**
@@ -496,6 +554,69 @@ mod tests {
         // An empty / whitespace-only persona is treated as "no default".
         let blank = state_with(config_with_env_key(None)).with_default_persona("   ");
         assert_eq!(blank.default_persona, None, "blank persona is ignored");
+    }
+
+    /// Minimal session for the step-tracking tests.
+    fn test_session(session_id: &str) -> Session {
+        Session {
+            session_id: session_id.to_string(),
+            conversation_id: "conv".to_string(),
+            organization_id: "org".to_string(),
+            agent_id: "agent".to_string(),
+            agent_name: "Agent".to_string(),
+            user_participant_id: "u".to_string(),
+            agent_participant_id: "a".to_string(),
+            thread_id: "conv".to_string(),
+            status: Some(smooth_operator::domain::SessionStatus::Active),
+            token_count: Some(0),
+            message_count: Some(0),
+            metadata: None,
+            created_at: None,
+            updated_at: None,
+            ended_at: None,
+            last_activity_at: None,
+        }
+    }
+
+    #[test]
+    fn session_step_tracking_round_trips_and_clears() {
+        let state = state_with(config_with_env_key(None));
+        state.insert_session(test_session("s1"));
+
+        // Fresh session: no step pointer.
+        assert_eq!(state.session_current_step("s1"), None);
+
+        // Set → read back.
+        state.set_session_current_step("s1", Some("collect"));
+        assert_eq!(
+            state.session_current_step("s1"),
+            Some("collect".to_string())
+        );
+
+        // Overwrite.
+        state.set_session_current_step("s1", Some("summary"));
+        assert_eq!(
+            state.session_current_step("s1"),
+            Some("summary".to_string())
+        );
+
+        // Clear.
+        state.set_session_current_step("s1", None);
+        assert_eq!(state.session_current_step("s1"), None);
+
+        // Unknown session is a no-op, not a panic.
+        state.set_session_current_step("missing", Some("x"));
+        assert_eq!(state.session_current_step("missing"), None);
+    }
+
+    #[test]
+    fn session_step_is_isolated_per_session() {
+        let state = state_with(config_with_env_key(None));
+        state.insert_session(test_session("s1"));
+        state.insert_session(test_session("s2"));
+        state.set_session_current_step("s1", Some("greet"));
+        assert_eq!(state.session_current_step("s1"), Some("greet".to_string()));
+        assert_eq!(state.session_current_step("s2"), None);
     }
 
     /// Per-org resolver covering exactly one org; `None` (→ env fallback) for any

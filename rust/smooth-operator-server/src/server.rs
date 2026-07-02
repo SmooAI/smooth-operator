@@ -233,11 +233,17 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
             let connectors = Arc::new(adapter.connector_config_store());
             let settings = Arc::new(adapter.settings_store());
             let indexing = Arc::new(adapter.indexing_store());
+            // Per-agent behavior config from the monorepo `agents` table on the
+            // same pool — so an agent's `instructions` / `conversation_workflow`
+            // drive its conversations. Degrades to the org default when the table
+            // is absent (a standalone deploy) or a row is malformed.
+            let agent_config = Arc::new(adapter.agent_config_provider());
             let storage: Arc<dyn StorageAdapter> = adapter;
             AppState::new(storage, config)
                 .with_connector_configs(connectors)
                 .with_settings(settings)
                 .with_indexing(indexing)
+                .with_agent_config(agent_config)
         }
 
         // The DynamoDB storage backend is only compiled in on a build with the

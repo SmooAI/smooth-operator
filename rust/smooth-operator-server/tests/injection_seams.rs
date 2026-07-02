@@ -131,6 +131,8 @@ async fn run_turn_with_key(
             system_prompt,
             org_id,
             gateway_key,
+            workflow: None,
+            judge: None,
         },
         &tx,
     )

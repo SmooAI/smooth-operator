@@ -558,6 +558,10 @@ async fn send_message(
             // configured gateway key through so a future host provider could
             // scope per-org (mirrors `org_id`).
             gateway_key: config.gateway_key.clone(),
+            // The lambda flavor does not resolve per-agent config; a conversation
+            // workflow (if any) is driven by the WS server path. Freeform here.
+            workflow: None,
+            judge: None,
         },
         &tx,
     )

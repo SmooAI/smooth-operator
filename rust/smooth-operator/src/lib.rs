@@ -21,6 +21,7 @@
 
 pub mod access_control;
 pub mod adapter;
+pub mod agent_config;
 pub mod auth;
 pub mod backplane;
 pub mod connector_config;
@@ -38,6 +39,12 @@ pub mod widget_auth;
 
 pub use access_control::{AccessContext, AclKnowledgeStore, DocAcl};
 pub use adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
+pub use agent_config::{
+    advance_after_verdict, judge_user_prompt, next_step, render_workflow_prompt_section,
+    resolve_current_step, AgentBehaviorConfig, AgentConfigProvider, ConversationWorkflow,
+    ConversationWorkflowStep, NoAgentConfig, StaticAgentConfig, WorkflowJudgeVerdict,
+    JUDGE_SYSTEM_PROMPT,
+};
 pub use auth::{
     AuthConfig, AuthError, AuthVerifier, JwtVerifier, LocalTokenVerifier, NoAuthVerifier,
     Principal, Role, SmooIdentityVerifier,

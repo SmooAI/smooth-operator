@@ -147,6 +147,8 @@ fn spawn_turn(
                 system_prompt: None,
                 org_id: None,
                 gateway_key: None,
+                workflow: None,
+                judge: None,
             },
             &sink,
         )

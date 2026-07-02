@@ -131,6 +131,8 @@ async fn run_turn_as(
             system_prompt: None,
             org_id: None,
             gateway_key: None,
+            workflow: None,
+            judge: None,
         },
         &tx,
     )
