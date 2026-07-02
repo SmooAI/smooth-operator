@@ -18,19 +18,29 @@ import type { ConfirmationRegistry } from './confirmation.js';
 import * as protocol from './protocol.js';
 import type { Citation, Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
+import { advanceStep, judgeStep, resolveCurrentStep, type ConversationWorkflow } from './workflow.js';
 
 /** What a completed turn produced (the analog of the C#/Rust `TurnResult`). */
 export interface TurnResult {
     reply: string;
     messageId: string;
     citations: Citation[];
+    /**
+     * SMOODEV-590 — the workflow step id this conversation should resume on next
+     * turn, after the post-turn judge. Present only when a `conversationWorkflow`
+     * was configured; the caller persists it. Undefined for freeform agents.
+     */
+    nextStepId?: string;
 }
 
 const AUTO_CONTEXT_LIMIT = 3;
 const MAX_PRIOR_MESSAGES = 50;
 const CITATION_SNIPPET_MAX_CHARS = 280;
 
-const DEFAULT_SYSTEM_PROMPT =
+/** The server/org default persona, used when neither the caller nor a per-agent
+ *  config supplies a system prompt. Exported so the dispatcher assembles per-agent
+ *  prompts on top of the same base. */
+export const DEFAULT_SYSTEM_PROMPT =
     'You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don\'t know.';
 
 /** A sink the runner pushes outbound protocol frames into (single-writer downstream). */
@@ -55,6 +65,17 @@ export interface TurnRunnerOptions {
     confirmations?: ConfirmationRegistry;
     /** The session id a parked confirmation is keyed by (so a `confirm_tool_action` frame routes here). */
     sessionId?: string;
+    /**
+     * SMOODEV-590 — the agent's structured workflow (already parsed). When set, the
+     * runner judges the turn after it completes and returns the advanced step id in
+     * {@link TurnResult.nextStepId}. The current step must already be rendered into
+     * `systemPrompt` by the caller (via `assembleSystemPrompt`).
+     */
+    workflow?: ConversationWorkflow;
+    /** The conversation's current workflow step id (the pointer the judge advances from). */
+    currentStepId?: string;
+    /** The cheap model id the workflow judge uses (defaults to the workflow module default). */
+    judgeModel?: string;
 }
 
 export class TurnRunner {
@@ -66,6 +87,9 @@ export class TurnRunner {
     private readonly confirmTools: string[];
     private readonly confirmations?: ConfirmationRegistry;
     private readonly sessionId?: string;
+    private readonly workflow?: ConversationWorkflow;
+    private readonly currentStepId?: string;
+    private readonly judgeModel?: string;
 
     constructor(options: TurnRunnerOptions) {
         this.chatClient = options.chatClient;
@@ -76,6 +100,9 @@ export class TurnRunner {
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations;
         this.sessionId = options.sessionId;
+        this.workflow = options.workflow;
+        this.currentStepId = options.currentStepId;
+        this.judgeModel = options.judgeModel;
     }
 
     /** True when `name` matches a confirmation-gated pattern (substring, like the Rust hook). */
@@ -179,9 +206,30 @@ export class TurnRunner {
             this.confirmations?.clear(confirmSession);
         }
 
-        // 5. Persist the outbound reply and return.
+        // 5. Persist the outbound reply.
         const outbound = await this.store.appendMessage(conversationId, 'outbound', reply);
-        return { reply, messageId: outbound.id, citations };
+
+        // 6. SMOODEV-590 — post-turn workflow judge. When the agent has a structured
+        //    workflow, a cheap judge call decides whether the current step's criteria
+        //    were met this turn and advances the pointer. Failure-tolerant: any judge
+        //    error keeps the conversation on the current step (never freezes / skips).
+        //    No-op for freeform agents (`nextStepId` stays undefined).
+        let nextStepId: string | undefined;
+        if (this.workflow) {
+            const current = resolveCurrentStep(this.workflow, this.currentStepId);
+            if (current) {
+                const verdict = await judgeStep(this.chatClient, {
+                    workflow: this.workflow,
+                    current,
+                    userMessage,
+                    reply,
+                    model: this.judgeModel,
+                });
+                nextStepId = advanceStep(this.workflow, current, verdict);
+            }
+        }
+
+        return { reply, messageId: outbound.id, citations, nextStepId };
     }
 
     /** Map one engine {@link StreamEvent} onto its protocol event(s). */

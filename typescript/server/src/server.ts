@@ -23,6 +23,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import { ANONYMOUS_ACCESS } from './auth.js';
 import { Backplane, InMemoryBackplane } from './backplane.js';
+import type { AgentConfigResolver } from './agentConfig.js';
+import type { SessionAuthenticator } from './toolGating.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
 import type { Frame } from './protocol.js';
 import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
@@ -51,6 +53,19 @@ export interface ServerOptions {
      * client replies with `confirm_tool_action`.
      */
     confirmTools?: string[];
+    /**
+     * SMOODEV-590 — resolves a session's `agentId` into its per-agent config
+     * (instructions, conversationWorkflow, greeting, personality, tool allow-list).
+     * Undefined → every agent uses the server/org default prompt + tools (unchanged).
+     */
+    agentConfig?: AgentConfigResolver;
+    /** The cheap model id the workflow judge uses (default {@link DEFAULT_JUDGE_MODEL}). */
+    judgeModel?: string;
+    /**
+     * SMOODEV-590 — resolves whether a conversation's session is identity-verified,
+     * for `end_user` tool-auth gating on public agents. Absent → fail-closed.
+     */
+    sessionAuthenticator?: SessionAuthenticator;
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -108,6 +123,9 @@ export function buildServer(options: ServerOptions): {
             systemPrompt: options.systemPrompt,
             tools: options.tools,
             confirmTools: options.confirmTools,
+            agentConfig: options.agentConfig,
+            judgeModel: options.judgeModel,
+            sessionAuthenticator: options.sessionAuthenticator,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);
