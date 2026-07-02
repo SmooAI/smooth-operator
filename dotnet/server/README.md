@@ -61,8 +61,8 @@ and each agent's own `instructions.prompt` drives its system prompt (overriding 
 persona); its `conversation_workflow` (goal + intent/criteria steps) runs as a stepped,
 judge-advanced flow — the current step is rendered into the prompt and a cheap post-turn judge
 advances the (per-conversation-persisted) pointer when the step's criteria are met; its `greeting`
-is woven into the first reply only; and its `tool_config` allow-list restricts the server's tool set
-to the named tools (empty/absent ⇒ the full set, unchanged).
+is woven into the first reply only; and its `tool_config.enabledTools` restricts the server's tool set
+to the enabled snake_case toolIds (empty/absent ⇒ the full set, unchanged).
 `create_conversation_session` carries only an agent UUID, so config is resolved server-side per
 turn from the session's agent (mirrors the TS / Python lanes' `AgentConfigResolver`). Config
 parsing is tolerant (malformed jsonb degrades to the default persona) and the judge is

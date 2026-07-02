@@ -222,13 +222,15 @@ public sealed class FrameDispatcher
             agentConfig = await _agentConfigResolver.ResolveAsync(session.AgentId, cancellationToken).ConfigureAwait(false);
         }
 
-        // 3. Filter the server's tool set to the agent's allow-list (tool_config). An agent config can
-        //    only RESTRICT the DI-provided tools, never invent them; empty/absent allow-list ⇒ the full
-        //    set (unchanged). Mirrors the TS lane's effectiveTools filter.
-        var allowed = agentConfig?.AllowedTools;
-        var effectiveTools = allowed is { Count: > 0 }
-            ? _tools.Where(t => allowed.Contains(t.Name)).ToList()
-            : _tools;
+        // 3. Filter the server's tool set to the agent's tool_config. An agent can only RESTRICT the
+        //    DI-provided tools (matched by snake_case toolId), never invent them. A null EnabledTools
+        //    (config absent or enabledTools empty) ⇒ the full set, unchanged; a non-null list restricts
+        //    to its enabled=true entries (an all-disabled list ⇒ no tools). Unknown toolIds fall out of
+        //    the intersection. Mirrors the monorepo AgentToolConfig semantics.
+        var enabledTools = agentConfig?.EnabledTools;
+        var effectiveTools = enabledTools is null
+            ? _tools
+            : _tools.Where(t => enabledTools.Any(e => e.Enabled && e.ToolId == t.Name)).ToList();
 
         // 4. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).

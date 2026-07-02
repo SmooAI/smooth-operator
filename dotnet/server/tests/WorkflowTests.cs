@@ -79,31 +79,48 @@ public class WorkflowTests
         Assert.Null(AgentConfig.ParseWorkflow($$"""{"goal":"g","steps":[{{steps}}]}"""));
     }
 
-    // ── AgentConfig.ParseAllowedTools — tolerant ─────────────────────────────
+    // ── AgentConfig.ParseToolConfig — authoritative AgentToolConfig shape ─────
 
     [Fact]
-    public void ParseAllowedTools_StringArray_Parses()
+    public void ParseToolConfig_EnabledTools_ParsesEntriesWithDefaults()
     {
-        Assert.Equal(new[] { "search", "book" }, AgentConfig.ParseAllowedTools("""["search","book"]"""));
+        var tools = AgentConfig.ParseToolConfig("""
+            {"enabledTools":[
+              {"toolId":"knowledge_search"},
+              {"toolId":"notify_humans","enabled":false,"authLevel":"oauth","config":{"scope":"x"}}
+            ]}
+            """);
+        Assert.NotNull(tools);
+        Assert.Equal(2, tools!.Count);
+        Assert.Equal("knowledge_search", tools[0].ToolId);
+        Assert.True(tools[0].Enabled); // default true
+        Assert.Equal("none", tools[0].AuthLevel); // default none
+        Assert.Null(tools[0].Config);
+        Assert.False(tools[1].Enabled);
+        Assert.Equal("oauth", tools[1].AuthLevel);
+        Assert.NotNull(tools[1].Config); // config preserved even if unused
     }
 
     [Fact]
-    public void ParseAllowedTools_ObjectWithAllowedTools_Parses()
+    public void ParseToolConfig_DropsNonSnakeCaseToolIds_ButKeepsRestrictionActive()
     {
-        Assert.Equal(new[] { "search" }, AgentConfig.ParseAllowedTools("""{"allowedTools":["search"]}"""));
+        // camelCase toolId is dropped (SMOODEV-981), but a non-empty enabledTools stays restrictive.
+        var tools = AgentConfig.ParseToolConfig("""{"enabledTools":[{"toolId":"knowledgeSearch"}]}""");
+        Assert.NotNull(tools);
+        Assert.Empty(tools!);
     }
 
     [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("not json")]
-    [InlineData("[]")] // empty → no restriction
-    [InlineData("""{"other":1}""")]
+    [InlineData("[]")] // array, not the object shape
+    [InlineData("""{"enabledTools":[]}""")] // empty → no restriction (NOT "no tools")
+    [InlineData("""{"other":1}""")] // no enabledTools key
     [InlineData("42")]
-    [InlineData("""[1,2,3]""")] // non-strings dropped → empty → null
-    public void ParseAllowedTools_MalformedOrEmpty_ReturnsNull(string? json)
+    public void ParseToolConfig_MalformedOrEmpty_ReturnsNull(string? json)
     {
-        Assert.Null(AgentConfig.ParseAllowedTools(json));
+        Assert.Null(AgentConfig.ParseToolConfig(json));
     }
 
     // ── Workflows.ResolveCurrentStep / NextStep ──────────────────────────────
@@ -448,12 +465,16 @@ public class WorkflowTests
         return chat;
     }
 
+    private static AgentConfig ToolConfig(params EnabledTool[] tools) => new(EnabledTools: tools);
+
     [Fact]
-    public async Task ToolConfig_AllowList_RestrictsToNamedTools()
+    public async Task ToolConfig_RestrictsToEnabledToolIds()
     {
         var store = new InMemorySessionStore();
         var session = await store.CreateSessionAsync("agent-tools", null, null);
-        var resolver = new StaticAgentConfigResolver().Set("agent-tools", new AgentConfig(AllowedTools: new[] { "search" }));
+        var resolver = new StaticAgentConfigResolver().Set("agent-tools", ToolConfig(
+            new EnabledTool("search", true, "none", null),
+            new EnabledTool("delete_record", false, "none", null))); // disabled → excluded
 
         var chat = await RunSendMessage(store, session, TwoTools(), resolver);
 
@@ -461,11 +482,11 @@ public class WorkflowTests
     }
 
     [Fact]
-    public async Task ToolConfig_EmptyAllowList_KeepsFullToolSet()
+    public async Task ToolConfig_Absent_KeepsFullToolSet()
     {
         var store = new InMemorySessionStore();
         var session = await store.CreateSessionAsync("agent-tools", null, null);
-        // No resolver entry → null config → no restriction.
+        // No resolver entry → null config → no restriction. (Same for empty enabledTools → null.)
         var resolver = new StaticAgentConfigResolver();
 
         var chat = await RunSendMessage(store, session, TwoTools(), resolver);
@@ -474,11 +495,26 @@ public class WorkflowTests
     }
 
     [Fact]
-    public async Task ToolConfig_UnknownToolNames_YieldEmptySet()
+    public async Task ToolConfig_UnknownToolIds_Ignored()
     {
         var store = new InMemorySessionStore();
         var session = await store.CreateSessionAsync("agent-tools", null, null);
-        var resolver = new StaticAgentConfigResolver().Set("agent-tools", new AgentConfig(AllowedTools: new[] { "nonexistent" }));
+        var resolver = new StaticAgentConfigResolver().Set("agent-tools", ToolConfig(
+            new EnabledTool("search", true, "none", null),
+            new EnabledTool("nonexistent", true, "none", null))); // not registered → ignored
+
+        var chat = await RunSendMessage(store, session, TwoTools(), resolver);
+
+        Assert.Equal(new[] { "search" }, chat.LastToolNames);
+    }
+
+    [Fact]
+    public async Task ToolConfig_AllDisabled_YieldsNoTools()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-tools", null, null);
+        var resolver = new StaticAgentConfigResolver().Set("agent-tools", ToolConfig(
+            new EnabledTool("search", false, "none", null)));
 
         var chat = await RunSendMessage(store, session, TwoTools(), resolver);
 
