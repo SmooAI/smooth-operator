@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/tools-set-active.schema.json",
+  "title": "ToolsSetActive",
+  "description": "Method `tools/set_active` (ext → host, request). Sets the active tool subset for the session. The host CLAMPS the requested set to the agent's `enabled_tools` and never widens it — the returned `active` set may therefore be a strict subset of the requested `tools`.",
+
+  "$defs": {
+    "Params": {
+      "title": "ToolsSetActiveParams",
+      "type": "object",
+      "required": ["tools"],
+      "additionalProperties": false,
+      "properties": {
+        "tools": { "type": "array", "items": { "type": "string" }, "description": "Requested set of active tool names." }
+      }
+    },
+
+    "Result": {
+      "title": "ToolsSetActiveResult",
+      "type": "object",
+      "required": ["active"],
+      "additionalProperties": false,
+      "properties": {
+        "active": { "type": "array", "items": { "type": "string" }, "description": "The tool names actually made active, after clamping to `enabled_tools`." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

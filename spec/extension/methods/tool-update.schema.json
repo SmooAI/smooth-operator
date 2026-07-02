@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/tool-update.schema.json",
+  "title": "ToolUpdate",
+  "description": "Method `tool/update` (ext → host, notification). Progress for an in-flight `tool/execute`, keyed by its `call_id`. Fire-and-forget; the host forwards it to clients as a progress event. Emitting `tool/update` for an unknown or already-completed `call_id` is ignored.",
+
+  "$defs": {
+    "Params": {
+      "title": "ToolUpdateParams",
+      "type": "object",
+      "required": ["call_id"],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "type": "string", "description": "The `call_id` from the corresponding `tool/execute`." },
+        "message": { "type": "string", "description": "Human-readable progress line." },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1, "description": "Fractional completion, 0..1." },
+        "details": { "description": "Optional structured progress payload.", "type": ["object", "array", "string", "number", "boolean", "null"] }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}
