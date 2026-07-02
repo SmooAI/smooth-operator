@@ -34,6 +34,7 @@ from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
 from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
+from .otp import OtpService
 from .session_store import InMemorySessionStore, SessionStore
 from .workflow import WORKFLOW_JUDGE_MODEL
 
@@ -73,6 +74,12 @@ class ServerState:
     #: Seam deciding whether a conversation's user is identity-verified — gates
     #: ``end_user`` auth-level tools on public agents. Default fails closed.
     session_authenticator: SessionAuthenticator = field(default_factory=NoSessionAuthenticator)
+    #: End-user OTP identity-verification seam. When set (a host implementation), a
+    #: turn whose gate refuses an ``end_user`` tool on an unverified session offers the
+    #: OTP flow, and ``verify_otp`` marks the session authenticated. Default ``None``
+    #: keeps the fail-closed behavior — the reference server never generates/holds a
+    #: code, so it ships without a service.
+    otp_service: OtpService | None = None
     #: Fast/cheap model for the post-turn workflow judge (default haiku-tier).
     judge_model: str = WORKFLOW_JUDGE_MODEL
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
@@ -135,6 +142,7 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         agent_config_resolver=state.agent_config_resolver,
         session_authenticator=state.session_authenticator,
         judge_model=state.judge_model,
+        otp_service=state.otp_service,
     )
 
     cancel_wait = asyncio.ensure_future(state.cancel.wait())

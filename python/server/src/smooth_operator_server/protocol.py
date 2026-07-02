@@ -125,6 +125,95 @@ def write_confirmation_required(request_id: str, tool_id: str, action_descriptio
     }
 
 
+def otp_verification_required(
+    request_id: str,
+    tool_id: str,
+    action_description: str,
+    available_channels: list[str],
+    auth_level: str,
+) -> dict[str, Any]:
+    """``otp_verification_required`` — emitted after a turn's auth gate refused an
+    ``end_user`` tool on an unverified session and a host OTP service is installed.
+    Tells the client to collect a one-time code.
+
+    Wire shape matches ``spec/events/otp-verification-required.schema.json`` and the
+    Rust reference byte-for-byte (double-nested ``data.data``). ``available_channels``
+    are the delivery channels the server can offer given the session's known contacts
+    (``email`` / ``sms``); ``tool_id`` is the opaque tool handle awaiting verification;
+    ``auth_level`` is the required level (fixed ``end_user`` on this flow)."""
+    return {
+        "type": "otp_verification_required",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {
+                "toolId": tool_id,
+                "actionDescription": action_description,
+                "availableChannels": available_channels,
+                "authLevel": auth_level,
+            },
+        },
+        "timestamp": _now_ms(),
+    }
+
+
+def otp_sent(request_id: str, channel: str, masked_destination: str) -> dict[str, Any]:
+    """``otp_sent`` — acknowledgement that a code was dispatched to the caller. Wire
+    shape matches ``spec/events/otp-sent.schema.json``. ``masked_destination`` is a
+    partially masked address safe to display (e.g. ``j***@example.com``)."""
+    return {
+        "type": "otp_sent",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {"channel": channel, "maskedDestination": masked_destination},
+        },
+        "timestamp": _now_ms(),
+    }
+
+
+def otp_verified(request_id: str, message: str) -> dict[str, Any]:
+    """``otp_verified`` — emitted when a ``verify_otp`` attempt succeeds. The session
+    is now identity-verified; the client re-sends its message to run the gated tool
+    (the reference server does not park/auto-resume the original turn). Wire shape
+    matches ``spec/events/otp-verified.schema.json``."""
+    return {
+        "type": "otp_verified",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {"message": message},
+        },
+        "timestamp": _now_ms(),
+    }
+
+
+def otp_invalid(
+    request_id: str,
+    error: str | None,
+    attempts_remaining: int,
+    message: str,
+) -> dict[str, Any]:
+    """``otp_invalid`` — emitted when a ``verify_otp`` attempt is rejected. ``error``
+    is an optional machine-readable reason (``INVALID_CODE`` / ``MAX_ATTEMPTS`` /
+    ``NOT_FOUND`` / ``EXPIRED``); ``attempts_remaining`` of 0 means the code is locked
+    and the client must restart the flow. Wire shape matches
+    ``spec/events/otp-invalid.schema.json`` — ``error`` is omitted (not null) when the
+    host couldn't determine a cause."""
+    inner: dict[str, Any] = {"attemptsRemaining": attempts_remaining, "message": message}
+    if error is not None:
+        inner["error"] = error
+    return {
+        "type": "otp_invalid",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": inner,
+        },
+        "timestamp": _now_ms(),
+    }
+
+
 def error(request_id: str | None, code: str, message: str) -> dict[str, Any]:
     """``error`` — an unrecoverable error. The ``{code, message}`` descriptor is
     duplicated at the envelope level and nested under ``data.error`` for wire

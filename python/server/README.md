@@ -87,15 +87,38 @@ per turn from the session's agent, it lets each agent override the server-wide
 - **`authLevel` enforcement** (+ agent `visibility`) — at tool-execution time, a
   tool whose entry has `authLevel != "none"` **and** that declares
   `supports_auth_requirement = True` is gated: `admin` on a `public` agent is
-  refused; `internal` agents auto-satisfy; a `public` agent's `end_user` tool
-  consults `ServerState.session_authenticator` (`SessionAuthenticator.is_authenticated`,
-  fail-closed) and is refused until identity is verified. OTP itself is host wiring
-  behind the seam.
+  refused; `internal` agents auto-satisfy; a `public` agent's `end_user` tool is
+  refused until the session's identity is verified — the session's OTP-verified bit
+  OR the `ServerState.session_authenticator` seam (`SessionAuthenticator.is_authenticated`,
+  fail-closed). See the OTP flow below.
 - Each entry's **`config`** dict is delivered to the tool at execution (under the
   reserved `__tool_config__` argument key).
 
 `ServerState.judge_model` sets the fast/cheap model for the post-turn workflow
 judge (haiku-tier default).
+
+### End-user OTP identity verification
+
+A public agent's `end_user`-gated tools can offer a one-time-code identity flow via
+the `OtpService` host seam (`smooth_operator_server.otp`). The reference server never
+generates, delivers, or validates a code — the host owns generation, delivery,
+expiry, and attempt counting. Install one with `ServerState.otp_service`; absent
+(the default), the `end_user` gate stays fail-closed and no OTP is offered.
+
+- When a turn's gate refuses an `end_user` tool on an unverified session **and** an
+  `OtpService` is installed **and** the session has a contact (the caller's email,
+  captured at create-session time as `StoredSession.contact_email`), the server emits
+  `otp_verification_required` → calls `send_otp` → emits `otp_sent`, before the
+  terminal `eventual_response`. An `admin` refusal is never OTP-remediable, so no OTP
+  is offered for it.
+- The `verify_otp` action (`{action, sessionId, requestId, code}`) validates a
+  submitted code via `OtpService.verify_otp`: an `OtpVerified` outcome marks the
+  session identity-verified (persisted on the store) and emits `otp_verified`; an
+  `OtpInvalid` outcome emits `otp_invalid` with the host's remaining-attempt count.
+  With no service installed, verification fails closed (`otp_invalid` / `NOT_FOUND`).
+
+The server does not park/auto-resume the original turn — the client re-sends its
+message after `otp_verified`.
 
 Config is parsed tolerantly (malformed → server default, never crashes a
 session) and the judge is failure-tolerant (any error → stay on the current

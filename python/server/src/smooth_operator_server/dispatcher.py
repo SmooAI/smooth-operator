@@ -21,6 +21,7 @@ from . import protocol
 from .agent_config import (
     AgentConfigResolver,
     NoSessionAuthenticator,
+    OtpRefusal,
     SessionAuthenticator,
     StaticAgentConfigResolver,
     filter_tools,
@@ -28,6 +29,7 @@ from .agent_config import (
 )
 from .auth import AccessContext
 from .confirmation import ConfirmationRegistry
+from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
 from .turn_runner import Sink, TurnRunner
 
@@ -49,6 +51,7 @@ class FrameDispatcher:
         agent_config_resolver: AgentConfigResolver | None = None,
         session_authenticator: SessionAuthenticator | None = None,
         judge_model: str | None = None,
+        otp_service: OtpService | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -69,6 +72,11 @@ class FrameDispatcher:
         self._agent_config_resolver = agent_config_resolver or StaticAgentConfigResolver()
         #: Identity-verification seam gating end_user auth-level tools (fail-closed).
         self._session_authenticator = session_authenticator or NoSessionAuthenticator()
+        #: End-user OTP identity-verification seam. When set, a turn whose gate refuses
+        #: an `end_user` tool on an unverified session with a known contact triggers the
+        #: OTP-offer flow, and `verify_otp` marks the session authenticated. `None` (the
+        #: default) keeps the fail-closed behavior — refuse, no OTP offered.
+        self._otp_service = otp_service
         #: Fast model for the post-turn workflow judge (None → runner's default).
         self._judge_model = judge_model
         #: Spawned turn tasks kept alive (the event loop only holds weak refs to
@@ -111,6 +119,8 @@ class FrameDispatcher:
                 await self._handle_send_message(frame, request_id, sink)
             elif action == "confirm_tool_action":
                 self._handle_confirm_tool_action(frame, request_id, sink)
+            elif action == "verify_otp":
+                await self._handle_verify_otp(frame, request_id, sink)
             elif action is None:
                 sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'action' field"))
             else:
@@ -196,10 +206,20 @@ class FrameDispatcher:
         #    Resolve the session's per-agent config (SMOODEV-590); None → the
         #    server-wide default prompt drives the turn (behavior unchanged).
         agent_config = await self._agent_config_resolver.resolve(session.agent_id)
+        # Resolve the turn's identity bit once: the session's OTP-verified state (set
+        # by a prior successful verify_otp) OR the host SessionAuthenticator seam. This
+        # is the Python analog of threading the Rust session's `otpVerified` bit into
+        # `build_auth_gate` (replacing the hardcoded false).
+        session_authed = await self._store.is_session_authenticated(
+            session.session_id
+        ) or await self._session_authenticator.is_authenticated(session.conversation_id)
+        # A shared slot the gated tools record an `end_user` refusal into, so after the
+        # turn we can decide whether to offer OTP (installed service + known contact).
+        otp_refusal = OtpRefusal()
         # Restrict the tool set to the agent's allow-list (empty/None → full set), then
         # wrap survivors to enforce per-tool authLevel + deliver per-tool config.
         agent_tools = filter_tools(self._tools, agent_config)
-        agent_tools = gate_tools(agent_tools, agent_config, self._session_authenticator, session.conversation_id)
+        agent_tools = gate_tools(agent_tools, agent_config, session_authed, otp_refusal)
         runner = TurnRunner(
             self._chat_client,
             self._store,
@@ -234,6 +254,12 @@ class FrameDispatcher:
                 # error and keeps the connection alive (detail stays server-side).
                 sink(protocol.error(request_id_str, "INTERNAL_ERROR", "Internal error processing the request."))
                 return
+            # If the gate refused an `end_user` tool this turn for lack of a verified
+            # session, and a host OTP service is installed and the session has a contact
+            # to reach, offer the OTP flow (prompt → dispatch → ack) BEFORE the terminal
+            # response — mirrors the Rust `offer_otp`. The reference server does not
+            # park/auto-resume; the client verifies via `verify_otp` and re-sends.
+            await self._maybe_offer_otp(otp_refusal, session, request_id_str, sink)
             sink(
                 protocol.eventual_response(
                     request_id_str,
@@ -248,6 +274,96 @@ class FrameDispatcher:
         task = asyncio.ensure_future(_run_turn())
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
+
+    async def _maybe_offer_otp(self, refusal: OtpRefusal, session: Any, request_id: str, sink: Sink) -> None:
+        """Emit the OTP-offer sequence for a turn whose ``end_user`` tool was refused
+        for lack of a verified session: ``otp_verification_required`` (prompt the
+        client), then :meth:`OtpService.send_otp`, then ``otp_sent`` (ack delivery) —
+        or an ``error`` event if delivery fails. Mirrors the Rust ``offer_otp``.
+
+        A no-op unless all three hold: a tool was refused, an OTP service is installed,
+        and the session has a contact to deliver a code to. ``auth_level`` is fixed
+        ``end_user`` (the only level this flow remedies); the masked destination +
+        channel come from the host — the server never sees the code."""
+        tool = refusal.refused_tool
+        if tool is None or self._otp_service is None:
+            return
+        contact = OtpContact(email=session.contact_email)
+        if contact.is_empty:
+            return
+        channels = [c.value for c in contact.available_channels()]
+        sink(
+            protocol.otp_verification_required(
+                request_id,
+                tool,
+                f"Verify your identity to continue using '{tool}'.",
+                channels,
+                "end_user",
+            )
+        )
+        try:
+            delivery = await self._otp_service.send_otp(session.session_id, contact)
+        except Exception as exc:
+            sink(protocol.error(request_id, "OTP_SEND_FAILED", f"failed to send verification code: {exc}"))
+            return
+        sink(protocol.otp_sent(request_id, delivery.channel.value, delivery.masked_destination))
+
+    async def _handle_verify_otp(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``verify_otp`` — validate a submitted OTP code and, on success, mark the
+        session identity-verified.
+
+        Per ``spec/actions/verify-otp.schema.json`` the client sends
+        ``{action, sessionId, requestId, code}`` in reply to an
+        ``otp_verification_required`` event. There is no dedicated response event: a
+        correct code emits ``otp_verified`` (the client then re-sends its message to
+        run the gated tool — the reference server does not park/auto-resume the
+        original turn), a rejected code emits ``otp_invalid`` carrying the host's
+        remaining-attempt count. Validation order mirrors the Rust handler: requestId
+        required, sessionId required, code required, session must exist, then — with no
+        :class:`OtpService` installed — fail closed with ``otp_invalid`` (``NOT_FOUND``,
+        0 attempts)."""
+        # requestId is load-bearing (it echoes the originating
+        # otp_verification_required); require it — do NOT auto-generate one.
+        if not request_id:
+            sink(protocol.error(None, "VALIDATION_ERROR", "verify_otp requires a 'requestId'"))
+            return
+
+        session_id = frame.get("sessionId")
+        if not session_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "verify_otp requires a 'sessionId'"))
+            return
+
+        code = frame.get("code")
+        if not isinstance(code, str) or not code:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "verify_otp requires a 'code'"))
+            return
+
+        # The session must exist (a code can't authenticate a session we don't track).
+        session = await self._store.get_session(session_id)
+        if session is None:
+            sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
+            return
+
+        # No host OTP service → verification is impossible. Fail closed on the
+        # documented otp_invalid path (a client shouldn't reach here without first
+        # receiving otp_verification_required, which only an installed service emits).
+        if self._otp_service is None:
+            sink(protocol.otp_invalid(request_id, "NOT_FOUND", 0, "No verification is in progress for this session."))
+            return
+
+        outcome = await self._otp_service.verify_otp(session_id, code)
+        if isinstance(outcome, OtpVerified):
+            await self._store.set_session_authenticated(session_id, True)
+            sink(protocol.otp_verified(request_id, "Identity verified successfully."))
+        elif isinstance(outcome, OtpInvalid):
+            sink(
+                protocol.otp_invalid(
+                    request_id,
+                    outcome.error.value if outcome.error is not None else None,
+                    outcome.attempts_remaining,
+                    outcome.message,
+                )
+            )
 
     def _handle_confirm_tool_action(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         """``confirm_tool_action`` — resume a turn parked on a write-tool confirmation.
