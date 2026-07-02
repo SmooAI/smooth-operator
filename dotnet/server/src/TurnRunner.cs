@@ -62,13 +62,22 @@ public sealed class TurnRunner
     /// (agentInstructions + workflowSection). With an empty <see cref="AgentConfig"/> this returns the
     /// default persona verbatim — behavior unchanged.
     /// </summary>
-    private string BuildSystemPrompt(string? currentStepId)
+    private string BuildSystemPrompt(string? currentStepId, bool isFirstTurn)
     {
         var basePrompt = string.IsNullOrWhiteSpace(_agentConfig.InstructionsPrompt) ? _systemPrompt : _agentConfig.InstructionsPrompt!;
         var builder = new StringBuilder(basePrompt);
         if (!string.IsNullOrWhiteSpace(_agentConfig.Personality))
         {
             builder.Append("\n\nPERSONALITY: ").Append(_agentConfig.Personality);
+        }
+        // First-turn greeting seed (mirrors the Python/TS lanes): weave the greeting into the opening
+        // reply, not a separate message — this server has no message-seed path. Only on the first turn,
+        // so the agent doesn't re-greet mid-conversation.
+        if (isFirstTurn && !string.IsNullOrWhiteSpace(_agentConfig.Greeting))
+        {
+            builder.Append("\n\n<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \"")
+                .Append(_agentConfig.Greeting)
+                .Append("\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>");
         }
         if (_agentConfig.Workflow is not null)
         {
@@ -130,7 +139,10 @@ public sealed class TurnRunner
         var currentStepId = _agentConfig.Workflow is null
             ? null
             : await _store.GetWorkflowStepAsync(conversationId, cancellationToken).ConfigureAwait(false);
-        var resolvedPrompt = BuildSystemPrompt(currentStepId);
+        // Prior history drives both the memory replay (below) and the first-turn greeting seed: an
+        // empty history means this is the agent's first reply, so the greeting section is rendered.
+        var priorMessages = await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false);
+        var resolvedPrompt = BuildSystemPrompt(currentStepId, isFirstTurn: priorMessages.Count == 0);
         var options = new AgentOptions { Instructions = resolvedPrompt, Knowledge = _knowledge };
         foreach (var tool in _tools)
         {
@@ -169,7 +181,7 @@ public sealed class TurnRunner
 
         var agent = new SmoothAgent(_chatClient, options);
         var thread = agent.GetNewThread();
-        foreach (var message in await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false))
+        foreach (var message in priorMessages)
         {
             var role = message.Direction == MessageDirection.Outbound ? ChatRole.Assistant : ChatRole.User;
             thread.Add(new ChatMessage(role, message.Text));

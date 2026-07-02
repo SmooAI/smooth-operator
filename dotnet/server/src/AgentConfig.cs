@@ -34,13 +34,14 @@ public sealed record AgentConfig(
     string? InstructionsPrompt = null,
     ConversationWorkflow? Workflow = null,
     string? Greeting = null,
-    string? Personality = null)
+    string? Personality = null,
+    IReadOnlyList<string>? AllowedTools = null)
 {
     /// <summary>An empty config — the "no per-agent overrides" sentinel.</summary>
     public static readonly AgentConfig Empty = new();
 
     /// <summary>True when this config carries nothing the server would apply.</summary>
-    public bool IsEmpty => string.IsNullOrWhiteSpace(InstructionsPrompt) && Workflow is null && string.IsNullOrWhiteSpace(Greeting) && string.IsNullOrWhiteSpace(Personality);
+    public bool IsEmpty => string.IsNullOrWhiteSpace(InstructionsPrompt) && Workflow is null && string.IsNullOrWhiteSpace(Greeting) && string.IsNullOrWhiteSpace(Personality) && (AllowedTools is null || AllowedTools.Count == 0);
 
     /// <summary>
     /// Parse the <c>instructions</c> jsonb (<c>{"prompt": "..."}</c>) into the freeform prompt
@@ -120,6 +121,43 @@ public sealed record AgentConfig(
             }
 
             return new ConversationWorkflow(goal, steps);
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Parse the agent's <c>tool_config</c> into the allow-list of tool names the agent may call.
+    /// Accepts a JSON array of strings, or an object carrying such an array under
+    /// <c>allowedTools</c> / <c>tools</c> (mirrors the TS lane's <c>tool_config ?? allowedTools</c>).
+    /// Tolerant: null/blank/malformed/empty → <c>null</c> = no restriction (the full server tool set).
+    /// </summary>
+    public static IReadOnlyList<string>? ParseAllowedTools(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+        try
+        {
+            var array = JsonNode.Parse(json) switch
+            {
+                JsonArray arr => arr,
+                JsonObject obj => obj["allowedTools"] as JsonArray ?? obj["tools"] as JsonArray,
+                _ => null,
+            };
+            if (array is null)
+            {
+                return null;
+            }
+            var names = array
+                .Select(n => (n as JsonValue)?.TryGetValue<string>(out var s) == true ? s : null)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s!)
+                .ToList();
+            return names.Count > 0 ? names : null;
         }
         catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException)
         {

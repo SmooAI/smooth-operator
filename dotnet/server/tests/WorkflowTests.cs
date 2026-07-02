@@ -79,6 +79,33 @@ public class WorkflowTests
         Assert.Null(AgentConfig.ParseWorkflow($$"""{"goal":"g","steps":[{{steps}}]}"""));
     }
 
+    // ── AgentConfig.ParseAllowedTools — tolerant ─────────────────────────────
+
+    [Fact]
+    public void ParseAllowedTools_StringArray_Parses()
+    {
+        Assert.Equal(new[] { "search", "book" }, AgentConfig.ParseAllowedTools("""["search","book"]"""));
+    }
+
+    [Fact]
+    public void ParseAllowedTools_ObjectWithAllowedTools_Parses()
+    {
+        Assert.Equal(new[] { "search" }, AgentConfig.ParseAllowedTools("""{"allowedTools":["search"]}"""));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("[]")] // empty → no restriction
+    [InlineData("""{"other":1}""")]
+    [InlineData("42")]
+    [InlineData("""[1,2,3]""")] // non-strings dropped → empty → null
+    public void ParseAllowedTools_MalformedOrEmpty_ReturnsNull(string? json)
+    {
+        Assert.Null(AgentConfig.ParseAllowedTools(json));
+    }
+
     // ── Workflows.ResolveCurrentStep / NextStep ──────────────────────────────
 
     private static ConversationWorkflow ThreeStep() => new(
@@ -373,6 +400,91 @@ public class WorkflowTests
         Assert.Null(await store.GetWorkflowStepAsync(session.ConversationId));
     }
 
+    // ── Greeting — first-turn only ───────────────────────────────────────────
+
+    [Fact]
+    public async Task Greeting_InjectedOnFirstTurn_NotOnLater()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var config = new AgentConfig(InstructionsPrompt: "Base.", Greeting: "Welcome to Acme!");
+
+        var chat1 = new CapturingChatClient("Hi!");
+        await new TurnRunner(chat1, store, agentConfig: config).RunAsync(session.ConversationId, "r1", "hello", _ => { });
+        Assert.Contains("<GreetingAwareness>", chat1.LastSystemPrompt);
+        Assert.Contains("Welcome to Acme!", chat1.LastSystemPrompt);
+
+        // Turn 2: prior history exists → no greeting re-injected.
+        var chat2 = new CapturingChatClient("Sure.");
+        await new TurnRunner(chat2, store, agentConfig: config).RunAsync(session.ConversationId, "r2", "another", _ => { });
+        Assert.DoesNotContain("<GreetingAwareness>", chat2.LastSystemPrompt);
+    }
+
+    [Fact]
+    public async Task Greeting_Absent_NoSection()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var chat = new CapturingChatClient("Hi!");
+        await new TurnRunner(chat, store, agentConfig: new AgentConfig(InstructionsPrompt: "Base.")).RunAsync(session.ConversationId, "r1", "hello", _ => { });
+        Assert.DoesNotContain("<GreetingAwareness>", chat.LastSystemPrompt);
+    }
+
+    // ── tool_config — the agent's tool allow-list ────────────────────────────
+
+    private static List<AITool> TwoTools() => new()
+    {
+        AIFunctionFactory.Create(() => "s", "search"),
+        AIFunctionFactory.Create(() => "d", "delete_record"),
+    };
+
+    private static async Task<CapturingChatClient> RunSendMessage(InMemorySessionStore store, StoredSession session, List<AITool> tools, StaticAgentConfigResolver resolver)
+    {
+        var chat = new CapturingChatClient("ok");
+        var dispatcher = new FrameDispatcher(store, chat, tools: tools, agentConfigResolver: resolver);
+        var frame = $$"""{"action":"send_message","requestId":"r","sessionId":"{{session.SessionId}}","message":"hi"}""";
+        await dispatcher.DispatchAsync(frame, _ => { });
+        await dispatcher.WaitForTurnsAsync();
+        return chat;
+    }
+
+    [Fact]
+    public async Task ToolConfig_AllowList_RestrictsToNamedTools()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-tools", null, null);
+        var resolver = new StaticAgentConfigResolver().Set("agent-tools", new AgentConfig(AllowedTools: new[] { "search" }));
+
+        var chat = await RunSendMessage(store, session, TwoTools(), resolver);
+
+        Assert.Equal(new[] { "search" }, chat.LastToolNames);
+    }
+
+    [Fact]
+    public async Task ToolConfig_EmptyAllowList_KeepsFullToolSet()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-tools", null, null);
+        // No resolver entry → null config → no restriction.
+        var resolver = new StaticAgentConfigResolver();
+
+        var chat = await RunSendMessage(store, session, TwoTools(), resolver);
+
+        Assert.Equal(new[] { "search", "delete_record" }, chat.LastToolNames);
+    }
+
+    [Fact]
+    public async Task ToolConfig_UnknownToolNames_YieldEmptySet()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-tools", null, null);
+        var resolver = new StaticAgentConfigResolver().Set("agent-tools", new AgentConfig(AllowedTools: new[] { "nonexistent" }));
+
+        var chat = await RunSendMessage(store, session, TwoTools(), resolver);
+
+        Assert.Empty(chat.LastToolNames);
+    }
+
     // ── Test doubles ─────────────────────────────────────────────────────────
 
     /// <summary>Records the last system-role message it was asked to complete, and streams a fixed reply.</summary>
@@ -384,25 +496,31 @@ public class WorkflowTests
 
         public string LastSystemPrompt { get; private set; } = string.Empty;
 
-        private void Capture(IEnumerable<ChatMessage> messages)
+        public IReadOnlyList<string> LastToolNames { get; private set; } = Array.Empty<string>();
+
+        private void Capture(IEnumerable<ChatMessage> messages, ChatOptions? options)
         {
             var system = messages.LastOrDefault(m => m.Role == ChatRole.System);
             if (system is not null)
             {
                 LastSystemPrompt = system.Text;
             }
+            if (options?.Tools is { } tools)
+            {
+                LastToolNames = tools.Select(t => t.Name).ToList();
+            }
         }
 
         public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
-            Capture(messages);
+            Capture(messages, options);
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)) { ModelId = "capture" });
         }
 
         public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            Capture(messages);
+            Capture(messages, options);
             foreach (var update in new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)).ToChatResponseUpdates())
             {
                 await Task.Yield();
