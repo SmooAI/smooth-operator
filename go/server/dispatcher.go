@@ -182,7 +182,12 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 			agentConfig = cfg
 		}
 	}
-	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID)
+	// First turn (server-side, from prior history) gates the greeting section — applied
+	// only on turn 1, matching the Python sibling. Checked before the runner persists this
+	// turn's inbound message, so an empty log means "no prior reply yet".
+	prior, _ := d.store.ListMessages(ctx, session.ConversationID, 1)
+	isFirstTurn := len(prior) == 0
+	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID, isFirstTurn)
 	effectiveTools := filterTools(d.tools, agentConfig)
 	var workflow *ConversationWorkflow
 	if agentConfig != nil {

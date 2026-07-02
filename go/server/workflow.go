@@ -345,15 +345,17 @@ Focus this turn on the CURRENT STEP. Pursue the INTENT and aim to satisfy the CR
 }
 
 // assembleSystemPrompt builds the effective system prompt for a turn from the server's
-// base prompt, the per-agent config, and the conversation's current workflow step. Port
-// of the TS assembleSystemPrompt (augment, not replace):
+// base prompt, the per-agent config, and the conversation's current workflow step:
 //   - nil / empty config ⇒ base unchanged (behavior identical to before per-agent config);
 //   - personality (when set) leads;
 //   - the agent's instructions become the primary persona, FOLLOWED by the base prompt so
 //     its grounding / behavior rules always apply (instructions augment, never discard,
 //     the base);
-//   - greeting and the rendered workflow step follow.
-func assembleSystemPrompt(base string, cfg *AgentConfig, currentStepID string) string {
+//   - the greeting section is included ONLY on the first turn (isFirstTurn) — the caller
+//     computes that server-side from the conversation's prior history, matching the Python
+//     sibling (a self-assessing "if this is your first reply" instruction is unreliable);
+//   - the rendered workflow step follows.
+func assembleSystemPrompt(base string, cfg *AgentConfig, currentStepID string, isFirstTurn bool) string {
 	if cfg == nil {
 		return base
 	}
@@ -366,8 +368,8 @@ func assembleSystemPrompt(base string, cfg *AgentConfig, currentStepID string) s
 		sections = append(sections, "<AgentInstructions>\n"+cfg.Instructions+"\n</AgentInstructions>")
 	}
 	sections = append(sections, base)
-	if cfg.Greeting != "" {
-		sections = append(sections, "<GreetingAwareness>\nIf this is your first reply in the conversation, open with a natural, brief variant of: \""+cfg.Greeting+"\" — then address the user's message. Do not repeat it verbatim on later turns.\n</GreetingAwareness>")
+	if isFirstTurn && cfg.Greeting != "" {
+		sections = append(sections, "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \""+cfg.Greeting+"\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>")
 	}
 	if section := renderWorkflowPromptSection(cfg.Workflow, currentStepID); section != "" {
 		sections = append(sections, section)

@@ -189,13 +189,13 @@ func TestAssembleSystemPrompt(t *testing.T) {
 	base := "DEFAULT PERSONA"
 
 	// nil config: base unchanged.
-	if got := assembleSystemPrompt(base, nil, ""); got != base {
+	if got := assembleSystemPrompt(base, nil, "", true); got != base {
 		t.Errorf("nil config = %q, want base unchanged", got)
 	}
 
 	// Instructions AUGMENT the base (both present; instructions lead, base retained so
 	// its grounding rules still apply).
-	got := assembleSystemPrompt(base, &AgentConfig{Instructions: "You are Bob."}, "")
+	got := assembleSystemPrompt(base, &AgentConfig{Instructions: "You are Bob."}, "", true)
 	if !strings.Contains(got, "<AgentInstructions>") || !strings.Contains(got, "You are Bob.") {
 		t.Errorf("instructions missing / not wrapped: %q", got)
 	}
@@ -206,16 +206,25 @@ func TestAssembleSystemPrompt(t *testing.T) {
 		t.Errorf("instructions should lead the base prompt: %q", got)
 	}
 
-	// Personality leads; greeting + workflow sections included.
-	got = assembleSystemPrompt(base, &AgentConfig{Personality: "warm", Greeting: "Hi!", Workflow: wf}, "greet")
+	// Personality leads; greeting (first turn) + workflow sections included.
+	got = assembleSystemPrompt(base, &AgentConfig{Personality: "warm", Greeting: "Hi!", Workflow: wf}, "greet", true)
 	for _, want := range []string{"<Personality>", "warm", base, "<GreetingAwareness>", "Hi!", "<ConversationWorkflow>", "CURRENT STEP (1/3): greet"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("assembled prompt missing %q\n%s", want, got)
 		}
 	}
 
+	// Greeting is turn-1-only: absent on later turns; personality + workflow still present.
+	got = assembleSystemPrompt(base, &AgentConfig{Personality: "warm", Greeting: "Hi!", Workflow: wf}, "greet", false)
+	if strings.Contains(got, "<GreetingAwareness>") || strings.Contains(got, "Hi!") {
+		t.Errorf("greeting must not appear after turn 1:\n%s", got)
+	}
+	if !strings.Contains(got, "<Personality>") || !strings.Contains(got, "<ConversationWorkflow>") {
+		t.Errorf("non-greeting sections should still be present on later turns:\n%s", got)
+	}
+
 	// Workflow section reflects the current-step pointer.
-	got = assembleSystemPrompt(base, &AgentConfig{Workflow: wf}, "book")
+	got = assembleSystemPrompt(base, &AgentConfig{Workflow: wf}, "book", false)
 	if !strings.Contains(got, base) || !strings.Contains(got, "CURRENT STEP (3/3): book") {
 		t.Errorf("expected base + book step, got %q", got)
 	}

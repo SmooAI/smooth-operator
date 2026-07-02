@@ -33,7 +33,7 @@ func TestTurnUsesAgentInstructions(t *testing.T) {
 	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
 	mock := core.NewMockLlmProvider().PushText("Hello from Bob.")
 
-	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Instructions: "You are Bob, a laconic support agent."}, "")
+	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Instructions: "You are Bob, a laconic support agent."}, "", true)
 	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "")
 	if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi", func(map[string]any) {}); err != nil {
 		t.Fatalf("run: %v", err)
@@ -55,7 +55,7 @@ func TestTurnDefaultPromptWithoutConfig(t *testing.T) {
 	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
 	mock := core.NewMockLlmProvider().PushText("hi")
 
-	prompt := assembleSystemPrompt(defaultSystemPrompt, nil, "")
+	prompt := assembleSystemPrompt(defaultSystemPrompt, nil, "", true)
 	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "")
 	if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi", func(map[string]any) {}); err != nil {
 		t.Fatalf("run: %v", err)
@@ -74,7 +74,7 @@ func TestTurnInjectsWorkflowStepAndAdvances(t *testing.T) {
 	// First call = the turn reply; second call = the judge verdict.
 	mock := core.NewMockLlmProvider().PushText("Nice to meet you, Alice.").PushText(`{"verdict":"yes"}`)
 
-	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Workflow: wf}, "")
+	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Workflow: wf}, "", true)
 	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, wf, "", "")
 	result, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi, I'm Alice", func(map[string]any) {})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestPerAgentIsolation(t *testing.T) {
 	run := func(agentID string) string {
 		session, _ := store.CreateSession(context.Background(), agentID, "U", "u@example.com")
 		cfg, _ := resolver.Resolve(context.Background(), agentID)
-		prompt := assembleSystemPrompt(defaultSystemPrompt, cfg, session.CurrentStepID)
+		prompt := assembleSystemPrompt(defaultSystemPrompt, cfg, session.CurrentStepID, true)
 		mock := core.NewMockLlmProvider().PushText("ok")
 		runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "")
 		if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r", "hi", func(map[string]any) {}); err != nil {
