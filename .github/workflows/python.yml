@@ -1,0 +1,59 @@
+# Lint + test the Python trees: the protocol client/types package (python/) AND the
+# native async WebSocket server (python/server/). Both are uv projects. The live
+# gateway E2E (tests/test_e2e_live.py) is skipif-marked and skips cleanly without
+# SMOOTH_AGENT_E2E + SMOOAI_GATEWAY_KEY, so this job needs no secrets. spec/ is a
+# trigger path because the conformance tests validate against spec/conformance/fixtures.json.
+name: Python
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - 'python/**'
+            - 'spec/**'
+            - '.github/workflows/python.yml'
+    pull_request:
+        paths:
+            - 'python/**'
+            - 'spec/**'
+            - '.github/workflows/python.yml'
+
+concurrency:
+    group: python-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    lint-test:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        strategy:
+            fail-fast: false
+            matrix:
+                project:
+                    - python # the protocol client + generated types
+                    - python/server # the native async WebSocket server
+        defaults:
+            run:
+                working-directory: ${{ matrix.project }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up uv (with cache)
+              uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+
+            - name: Sync (install deps + dev group)
+              run: uv sync
+
+            - name: Ruff lint
+              run: uv run ruff check .
+
+            - name: Ruff format check
+              run: uv run ruff format --check .
+
+            - name: Pytest
+              run: uv run pytest

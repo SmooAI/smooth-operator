@@ -112,12 +112,10 @@ async def test_streams_token_chunk_then_eventual_response_in_order_and_resolves(
     await asyncio.sleep(0)  # let the iterator start
 
     transport.emit(
-        {"type": "stream_token", "requestId": req_id, "token": "Hel",
-         "data": {"requestId": req_id, "token": "Hel"}}
+        {"type": "stream_token", "requestId": req_id, "token": "Hel", "data": {"requestId": req_id, "token": "Hel"}}
     )
     transport.emit(
-        {"type": "stream_token", "requestId": req_id, "token": "lo",
-         "data": {"requestId": req_id, "token": "lo"}}
+        {"type": "stream_token", "requestId": req_id, "token": "lo", "data": {"requestId": req_id, "token": "lo"}}
     )
     transport.emit(
         {
@@ -175,8 +173,7 @@ async def test_buffers_tokens_pushed_before_iteration_begins() -> None:
 
     # Emit before anyone iterates — must be buffered.
     transport.emit(
-        {"type": "stream_token", "requestId": req_id, "token": "A",
-         "data": {"requestId": req_id, "token": "A"}}
+        {"type": "stream_token", "requestId": req_id, "token": "A", "data": {"requestId": req_id, "token": "A"}}
     )
     transport.emit(
         {
@@ -247,8 +244,7 @@ async def test_routes_hitl_confirm_resume_back_into_the_same_turn() -> None:
     )
 
     # Caller approves; the resumed stream completes the original turn.
-    client.confirm_tool_action(session_id="22222222-2222-2222-2222-222222222222",
-                               request_id=req_id, approved=True)
+    client.confirm_tool_action(session_id="22222222-2222-2222-2222-222222222222", request_id=req_id, approved=True)
     sent = transport.last_sent()
     assert sent["action"] == "confirm_tool_action"
     assert sent["approved"] is True
@@ -281,8 +277,7 @@ async def test_create_session_resolves_with_immediate_response_data() -> None:
     await client.connect()
 
     coro = asyncio.create_task(
-        client.create_conversation_session(agent_id="11111111-1111-1111-1111-111111111111",
-                                           user_name="Alice")
+        client.create_conversation_session(agent_id="11111111-1111-1111-1111-111111111111", user_name="Alice")
     )
     await asyncio.sleep(0)
     req_id = transport.last_sent()["requestId"]
@@ -335,23 +330,31 @@ async def test_does_not_cross_correlate_two_concurrent_requests() -> None:
             "agentParticipantId": "55555555-5555-5555-5555-555555555555",
         }
 
-    p1 = asyncio.create_task(
-        client.get_session(session_id="22222222-2222-2222-2222-222222222221")
-    )
+    p1 = asyncio.create_task(client.get_session(session_id="22222222-2222-2222-2222-222222222221"))
     await asyncio.sleep(0)
     req1 = transport.last_sent()["requestId"]
-    p2 = asyncio.create_task(
-        client.get_session(session_id="22222222-2222-2222-2222-222222222222")
-    )
+    p2 = asyncio.create_task(client.get_session(session_id="22222222-2222-2222-2222-222222222222"))
     await asyncio.sleep(0)
     req2 = transport.last_sent()["requestId"]
     assert req1 != req2
 
     # Resolve out of order.
-    transport.emit({"type": "immediate_response", "requestId": req2, "status": 200,
-                    "data": session_data("22222222-2222-2222-2222-222222222222")})
-    transport.emit({"type": "immediate_response", "requestId": req1, "status": 200,
-                    "data": session_data("22222222-2222-2222-2222-222222222221")})
+    transport.emit(
+        {
+            "type": "immediate_response",
+            "requestId": req2,
+            "status": 200,
+            "data": session_data("22222222-2222-2222-2222-222222222222"),
+        }
+    )
+    transport.emit(
+        {
+            "type": "immediate_response",
+            "requestId": req1,
+            "status": 200,
+            "data": session_data("22222222-2222-2222-2222-222222222221"),
+        }
+    )
 
     s1 = await p1
     s2 = await p2
@@ -372,9 +375,7 @@ async def test_forwards_uncorrelated_keepalive_to_on_event_listeners() -> None:
 async def test_rejects_pending_requests_when_transport_closes() -> None:
     client, transport = make_client()
     await client.connect()
-    coro = asyncio.create_task(
-        client.get_session(session_id="22222222-2222-2222-2222-222222222222")
-    )
+    coro = asyncio.create_task(client.get_session(session_id="22222222-2222-2222-2222-222222222222"))
     await asyncio.sleep(0)
     await transport.close()
     with pytest.raises(Exception):

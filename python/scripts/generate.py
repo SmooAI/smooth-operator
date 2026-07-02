@@ -95,10 +95,7 @@ def build_merged_schema() -> dict:
 
         if has_one_of and local_defs:
             # Map each local $def name -> its global title, for ref rewriting.
-            rename = {
-                name: title_for(name, sub, file_title)
-                for name, sub in local_defs.items()
-            }
+            rename = {name: title_for(name, sub, file_title) for name, sub in local_defs.items()}
             rewrite = make_rewriter(rename)
             for name, sub in local_defs.items():
                 title = rename[name]
@@ -111,10 +108,7 @@ def build_merged_schema() -> dict:
                 merged_defs[title] = model
         else:
             # Flat top-level object (events, domain). It may carry its own $defs.
-            rename = {
-                name: title_for(name, sub, file_title)
-                for name, sub in local_defs.items()
-            }
+            rename = {name: title_for(name, sub, file_title) for name, sub in local_defs.items()}
             rewrite = make_rewriter(rename)
 
             # Promote the file's own $defs into the merged namespace.
@@ -183,7 +177,7 @@ def main() -> int:
         "3.11",
         "--use-annotated",
         "--use-field-description",
-        "--snake-case-field",          # snake_case attrs
+        "--snake-case-field",  # snake_case attrs
         "--use-default-kwarg",
         "--reuse-model",
         "--use-standard-collections",

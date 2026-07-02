@@ -51,10 +51,7 @@ _E2E_ENABLED = os.getenv("SMOOTH_AGENT_E2E") == "1" and bool(os.getenv("SMOOAI_G
 
 pytestmark = pytest.mark.skipif(
     not _E2E_ENABLED,
-    reason=(
-        "Live E2E disabled. Set SMOOTH_AGENT_E2E=1 and SMOOAI_GATEWAY_KEY to run "
-        "(see module docstring)."
-    ),
+    reason=("Live E2E disabled. Set SMOOTH_AGENT_E2E=1 and SMOOAI_GATEWAY_KEY to run (see module docstring)."),
 )
 
 # ── server location / config ────────────────────────────────────────────────────

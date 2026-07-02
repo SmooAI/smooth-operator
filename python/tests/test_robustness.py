@@ -100,8 +100,12 @@ async def test_streaming_turn_times_out_when_no_terminal_event_arrives() -> None
 
     # An intermediate event arrives, but the server never sends a terminal one.
     transport.emit(
-        {"type": "stream_token", "requestId": req_id, "token": "partial",
-         "data": {"requestId": req_id, "token": "partial"}}
+        {
+            "type": "stream_token",
+            "requestId": req_id,
+            "token": "partial",
+            "data": {"requestId": req_id, "token": "partial"},
+        }
     )
 
     loop = asyncio.get_running_loop()
