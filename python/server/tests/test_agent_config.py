@@ -12,9 +12,17 @@ from smooth_operator_server.agent_config import (
     MAX_STEPS,
     AgentConfig,
     StaticAgentConfigResolver,
+    filter_tools,
     parse_agent_config,
     parse_workflow,
 )
+
+
+class _Tool:
+    """Minimal stand-in exposing `.name` (matches the engine Tool surface)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
 def test_parse_workflow_full() -> None:
@@ -87,7 +95,7 @@ def test_parse_agent_config_all_fields() -> None:
             "instructions": {"prompt": "Help the user."},
             "personality": "warm",
             "greeting": "Hi there!",
-            "tool_config": {"crm": {"enabled": True}},
+            "tool_config": ["crm", "knowledge_search"],
             "conversation_workflow": {"goal": "g", "steps": [{"id": "a", "intent": "i", "criteria": "c"}]},
         }
     )
@@ -95,8 +103,18 @@ def test_parse_agent_config_all_fields() -> None:
     assert config.instructions == "Help the user."
     assert config.personality == "warm"
     assert config.greeting == "Hi there!"
-    assert config.tool_config == {"crm": {"enabled": True}}
+    assert config.allowed_tools == ["crm", "knowledge_search"]
     assert config.conversation_workflow is not None
+
+
+def test_parse_agent_config_allowed_tools_camel_and_snake() -> None:
+    assert parse_agent_config({"tool_config": ["a", "b"]}).allowed_tools == ["a", "b"]
+    assert parse_agent_config({"allowedTools": ["c"]}).allowed_tools == ["c"]
+    # tool_config wins when both present.
+    assert parse_agent_config({"tool_config": ["a"], "allowedTools": ["b"]}).allowed_tools == ["a"]
+    # Non-string entries / non-list are dropped tolerantly.
+    assert parse_agent_config({"tool_config": ["a", 1, "", None, "b"]}).allowed_tools == ["a", "b"]
+    assert parse_agent_config({"tool_config": {"crm": True}}) is None
 
 
 def test_parse_agent_config_bad_subfields_degrade_not_raise() -> None:
@@ -106,14 +124,14 @@ def test_parse_agent_config_bad_subfields_degrade_not_raise() -> None:
             "instructions": {"prompt": "Keep going."},
             "personality": 123,  # not a str → None
             "conversation_workflow": "garbage",  # → None
-            "tool_config": ["not", "a", "dict"],  # → {}
+            "tool_config": "not-a-list",  # → [] (allow-list wants an array)
         }
     )
     assert config is not None
     assert config.instructions == "Keep going."
     assert config.personality is None
     assert config.conversation_workflow is None
-    assert config.tool_config == {}
+    assert config.allowed_tools == []
 
 
 def test_parse_agent_config_empty_returns_none() -> None:
@@ -127,7 +145,23 @@ def test_parse_agent_config_empty_returns_none() -> None:
 def test_agent_config_is_empty() -> None:
     assert AgentConfig().is_empty
     assert not AgentConfig(instructions="x").is_empty
-    assert not AgentConfig(tool_config={"a": 1}).is_empty
+    assert not AgentConfig(allowed_tools=["a"]).is_empty
+
+
+def test_filter_tools() -> None:
+    tools = [_Tool("crm"), _Tool("knowledge_search"), _Tool("notify_humans")]
+
+    # Allow-list restricts to the named subset (order preserved from the tool list).
+    filtered = filter_tools(tools, AgentConfig(allowed_tools=["crm", "notify_humans"]))
+    assert [t.name for t in filtered] == ["crm", "notify_humans"]
+
+    # Empty allow-list / None config → full set unchanged (same object).
+    assert filter_tools(tools, AgentConfig(instructions="x")) is tools
+    assert filter_tools(tools, None) is tools
+
+    # Unknown names are ignored (no error, just no match).
+    assert [t.name for t in filter_tools(tools, AgentConfig(allowed_tools=["ghost", "crm"]))] == ["crm"]
+    assert filter_tools(tools, AgentConfig(allowed_tools=["ghost"])) == []
 
 
 @pytest.mark.asyncio

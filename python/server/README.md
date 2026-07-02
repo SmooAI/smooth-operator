@@ -80,6 +80,9 @@ per turn from the session's agent, it lets each agent override the server-wide
   after each turn a cheap judge call decides whether the criteria were met and
   advances the pointer (explicit `next` → sequential → terminal). The step id is
   tracked per conversation.
+- **`tool_config`** (or `allowedTools`) — a string-array tool allow-list. When
+  non-empty, the agent's turns are restricted to the server tools whose names
+  appear in it (empty/absent → the full server tool set; unknown names ignored).
 
 Config is parsed tolerantly (malformed → server default, never crashes a
 session) and the judge is failure-tolerant (any error → stay on the current

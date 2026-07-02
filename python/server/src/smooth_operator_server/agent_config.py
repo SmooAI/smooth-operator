@@ -58,8 +58,9 @@ class AgentConfig:
     greeting: str | None = None
     #: Structured conversation workflow. ``None`` → freeform prompt only.
     conversation_workflow: ConversationWorkflow | None = None
-    #: Opaque per-agent tool configuration (passed through untouched for the host).
-    tool_config: dict[str, Any] = field(default_factory=dict)
+    #: Tool allow-list: when non-empty, this agent's turns are restricted to the
+    #: server tools whose names appear here (empty → the full server tool set).
+    allowed_tools: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -69,7 +70,7 @@ class AgentConfig:
             and self.personality is None
             and self.greeting is None
             and self.conversation_workflow is None
-            and not self.tool_config
+            and not self.allowed_tools
         )
 
 
@@ -137,15 +138,33 @@ def parse_agent_config(raw: Any) -> AgentConfig | None:
     else:
         instructions = _clean_str(instructions_raw)
 
-    tool_config = raw.get("tool_config")
+    # tool_config (snake) / allowedTools (camel) — a string-array tool allow-list.
+    tools_raw = raw.get("tool_config")
+    if not tools_raw:
+        tools_raw = raw.get("allowedTools")
+    allowed_tools = (
+        [name for name in tools_raw if isinstance(name, str) and name.strip()] if isinstance(tools_raw, list) else []
+    )
+
     config = AgentConfig(
         instructions=instructions,
         personality=_clean_str(raw.get("personality")),
         greeting=_clean_str(raw.get("greeting")),
         conversation_workflow=parse_workflow(raw.get("conversation_workflow")),
-        tool_config=tool_config if isinstance(tool_config, dict) else {},
+        allowed_tools=allowed_tools,
     )
     return None if config.is_empty else config
+
+
+def filter_tools(tools: list[Any], config: AgentConfig | None) -> list[Any]:
+    """Restrict ``tools`` to the agent's allow-list (matched by ``.name``). An empty
+    allow-list or ``None`` config returns ``tools`` unchanged, so an un-configured
+    agent keeps the full server tool set; unknown names in the allow-list are
+    ignored. Mirrors the Go/TS ``filterTools``."""
+    if config is None or not config.allowed_tools:
+        return tools
+    allowed = set(config.allowed_tools)
+    return [t for t in tools if t.name in allowed]
 
 
 class AgentConfigResolver(ABC):

@@ -18,7 +18,7 @@ from typing import Any
 from smooth_operator_core import Knowledge
 
 from . import protocol
-from .agent_config import AgentConfigResolver, StaticAgentConfigResolver
+from .agent_config import AgentConfigResolver, StaticAgentConfigResolver, filter_tools
 from .auth import AccessContext
 from .confirmation import ConfirmationRegistry
 from .session_store import SessionStore
@@ -183,13 +183,15 @@ class FrameDispatcher:
         #    Resolve the session's per-agent config (SMOODEV-590); None → the
         #    server-wide default prompt drives the turn (behavior unchanged).
         agent_config = await self._agent_config_resolver.resolve(session.agent_id)
+        # Restrict the tool set to the agent's allow-list (empty/None → full set).
+        agent_tools = filter_tools(self._tools, agent_config)
         runner = TurnRunner(
             self._chat_client,
             self._store,
             knowledge=self._knowledge,
             system_prompt=self._system_prompt,
             model=self._model,
-            tools=self._tools,
+            tools=agent_tools,
             confirm_tools=self._confirm_tools,
             confirmations=self._confirmations,
             agent_config=agent_config,

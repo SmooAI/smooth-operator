@@ -6,7 +6,7 @@ advancement, current-step persistence, and per-agent isolation via the dispatche
 from __future__ import annotations
 
 import pytest
-from smooth_operator_core import MockLlmProvider
+from smooth_operator_core import FunctionTool, MockLlmProvider
 
 from smooth_operator_server.agent_config import (
     AgentConfig,
@@ -213,3 +213,46 @@ async def test_dispatcher_isolates_config_per_agent() -> None:
     assert "I am agent A." in prompts["a"]
     assert "I am agent B." in prompts["b"]
     assert "agent B" not in prompts["a"]
+
+
+def _tool(name: str) -> FunctionTool:
+    async def _run(_args):
+        return "ok"
+
+    return FunctionTool(name, f"the {name} tool", {"type": "object", "properties": {}}, _run)
+
+
+def _sent_tool_names(call) -> list[str]:
+    return [td["function"]["name"] for td in (call.kwargs.get("tools") or [])]
+
+
+@pytest.mark.asyncio
+async def test_tool_config_filters_tools_per_agent() -> None:
+    store = InMemorySessionStore()
+    sess_a = await store.create_session("agent-a", None, None)  # allow-list: crm only
+    sess_b = await store.create_session("agent-b", None, None)  # no config → full set
+
+    mock = MockLlmProvider()
+    mock.push_text("a")
+    mock.push_text("b")
+
+    server_tools = [_tool("crm"), _tool("knowledge_search"), _tool("notify_humans")]
+    dispatcher = FrameDispatcher(
+        store,
+        mock,
+        tools=server_tools,
+        agent_config_resolver=StaticAgentConfigResolver(
+            {"agent-a": AgentConfig(allowed_tools=["crm", "ghost"])}  # ghost ignored
+        ),
+    )
+
+    for sess in (sess_a, sess_b):
+        await dispatcher.dispatch(
+            '{"action":"send_message","sessionId":"%s","message":"hi"}' % sess.session_id,
+            lambda _e: None,
+        )
+        await dispatcher.wait_for_turns()
+
+    # agent-a restricted to its allow-list; agent-b (no config) sees the full set.
+    assert _sent_tool_names(mock.calls[0]) == ["crm"]
+    assert _sent_tool_names(mock.calls[1]) == ["crm", "knowledge_search", "notify_humans"]
