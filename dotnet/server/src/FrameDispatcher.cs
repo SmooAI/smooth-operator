@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using SmooAI.SmoothOperator.Core;
+using SmooAI.SmoothOperator.Core.Extensions;
 
 namespace SmooAI.SmoothOperator.Server;
 
@@ -241,10 +242,17 @@ public sealed class FrameDispatcher
         //    (config absent or enabledTools empty) ⇒ the full set, unchanged; a non-null list restricts
         //    to its enabled=true entries (an all-disabled list ⇒ no tools). Unknown toolIds fall out of
         //    the intersection. Mirrors the monorepo AgentToolConfig semantics.
+        // SEP — build the per-turn extension host (default deny via SMOOTH_EXTENSIONS_ALLOW; null when
+        // unconfigured, zero overhead). Its tools join the DI tool set so they flow through the SAME
+        // per-agent enabled_tools filtering + auth gate below (dotted <ext>.<tool> names match toolId),
+        // and its ui/confirm bridges onto write_confirmation_required via the shared confirmation registry.
+        var extHost = await ExtensionServerHost.BuildAsync(sink, requestId, session.SessionId, _confirmations).ConfigureAwait(false);
+        var baseTools = extHost is null ? _tools : _tools.Concat(extHost.Tools()).ToList();
+
         var enabledTools = agentConfig?.EnabledTools;
         var effectiveTools = enabledTools is null
-            ? _tools
-            : _tools.Where(t => enabledTools.Any(e => e.Enabled && e.ToolId == t.Name)).ToList();
+            ? baseTools
+            : baseTools.Where(t => enabledTools.Any(e => e.Enabled && e.ToolId == t.Name)).ToList();
 
         // 4. Enforce per-tool authLevel + deliver per-tool config at execution: wrap the surviving tools
         //    so an auth-gated one blocks (with the reference tool message) when its authLevel isn't
@@ -308,6 +316,15 @@ public sealed class FrameDispatcher
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean error and
                 // keeps the connection alive (detail stays server-side).
                 sink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
+            }
+            finally
+            {
+                // SEP — tear down the per-turn extension host (kills its subprocesses). The
+                // confirmation registry it may have parked on is cleared by the TurnRunner's finally.
+                if (extHost is not null)
+                {
+                    await extHost.ShutdownAllAsync().ConfigureAwait(false);
+                }
             }
         }, CancellationToken.None);
 

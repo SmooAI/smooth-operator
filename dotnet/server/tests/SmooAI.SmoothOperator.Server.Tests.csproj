@@ -17,6 +17,8 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <!-- For the streaming IChatClient mock (ToChatResponseUpdates etc.). -->
     <PackageReference Include="Microsoft.Extensions.AI" Version="9.7.1" />
+    <!-- SkippableFact so the live SEP extension-host integration test skips cleanly without Node. -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
   </ItemGroup>
 
   <ItemGroup>
