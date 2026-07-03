@@ -76,6 +76,21 @@ pub struct EnabledTool {
     pub config: serde_json::Value,
 }
 
+/// One entry in `extension_config.enabledExtensions` (the monorepo per-agent SEP
+/// enablement shape). `config` is preserved on the parsed type for downstream
+/// hosts even though the reference server doesn't act on it yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnabledExtension {
+    /// The extension's kebab-case id (e.g. `plan-mode`), matching the
+    /// `extension.toml` manifest name.
+    pub extension_id: String,
+    /// Whether the extension is enabled for this agent.
+    pub enabled: bool,
+    /// Opaque per-extension config. Carried for hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
 /// Auth level a tool requires (monorepo `AuthLevel`, `agent.ts`). Gating only
 /// applies when this is not [`None`](AuthLevel::None) and the tool supports auth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -288,6 +303,12 @@ pub struct AgentBehaviorConfig {
     /// (empty ⇒ the full server tool set). Unknown tool ids are ignored.
     #[serde(default)]
     pub enabled_tools: Vec<EnabledTool>,
+    /// `extension_config.enabledExtensions` — the per-agent SEP extension
+    /// allow-list. Empty means "activates NO extension" (fail-closed): a resolved
+    /// agent that lists no extensions must load zero, even when the server
+    /// allowlist is non-empty. See [`enabled_extension_ids`](Self::enabled_extension_ids).
+    #[serde(default)]
+    pub enabled_extensions: Vec<EnabledExtension>,
 }
 
 impl AgentBehaviorConfig {
@@ -300,6 +321,7 @@ impl AgentBehaviorConfig {
             && self.greeting.is_none()
             && self.conversation_workflow.is_none()
             && self.enabled_tools.is_empty()
+            && self.enabled_extensions.is_empty()
     }
 
     /// Build the per-agent system prompt from `instructions` (+ optional persona),
@@ -362,6 +384,22 @@ impl AgentBehaviorConfig {
         )
     }
 
+    /// The enabled SEP extension-id allow-list (kebab-case ids of the
+    /// `enabled == true` entries). Returns a plain `Vec` — **not** an `Option` —
+    /// because an empty result is meaningful: it is the fail-closed signal that a
+    /// resolved agent activates NO extensions (the extension host intersects this
+    /// with the server allowlist, so empty ⇒ zero extensions load). Compare with
+    /// [`enabled_tool_ids`](Self::enabled_tool_ids), whose `None` means
+    /// "unrestricted"; extensions default-deny per agent instead.
+    #[must_use]
+    pub fn enabled_extension_ids(&self) -> Vec<String> {
+        self.enabled_extensions
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.extension_id.clone())
+            .collect()
+    }
+
     /// The configured [`AuthLevel`] for a tool id (from its `enabledTools`
     /// entry), or [`AuthLevel::None`] when unconfigured.
     #[must_use]
@@ -392,6 +430,7 @@ impl AgentBehaviorConfig {
     /// - `greeting` — text,
     /// - `conversation_workflow` — jsonb `{ goal, steps: [...] }`,
     /// - `tool_config` — jsonb `{ enabledTools: [{ toolId, enabled, authLevel, config }] }`,
+    /// - `extension_config` — jsonb `{ enabledExtensions: [{ extensionId, enabled, config }] }`,
     /// - `visibility` — text `public` | `internal` (defaults `public`).
     #[must_use]
     pub fn from_row_values(
@@ -400,6 +439,7 @@ impl AgentBehaviorConfig {
         greeting: Option<String>,
         conversation_workflow: Option<serde_json::Value>,
         tool_config: Option<serde_json::Value>,
+        extension_config: Option<serde_json::Value>,
         visibility: Option<String>,
     ) -> Self {
         let visibility = visibility
@@ -436,6 +476,14 @@ impl AgentBehaviorConfig {
             .map(|arr| arr.iter().filter_map(parse_enabled_tool).collect())
             .unwrap_or_default();
 
+        // `extension_config.enabledExtensions`: same tolerant per-entry parse.
+        let enabled_extensions = extension_config
+            .as_ref()
+            .and_then(|v| v.get("enabledExtensions"))
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| arr.iter().filter_map(parse_enabled_extension).collect())
+            .unwrap_or_default();
+
         Self {
             visibility,
             instructions,
@@ -443,6 +491,7 @@ impl AgentBehaviorConfig {
             greeting,
             conversation_workflow,
             enabled_tools,
+            enabled_extensions,
         }
     }
 }
@@ -468,6 +517,25 @@ fn parse_enabled_tool(v: &serde_json::Value) -> Option<EnabledTool> {
             .unwrap_or("none")
             .to_string(),
         config: v.get("config").cloned().unwrap_or(serde_json::Value::Null),
+    })
+}
+
+/// Parse one `enabledExtensions` entry, tolerating missing/typed-wrong fields:
+/// `extensionId` is required (else the entry is dropped); `enabled` defaults
+/// `true`, `config` defaults absent.
+fn parse_enabled_extension(v: &serde_json::Value) -> Option<EnabledExtension> {
+    let extension_id = v
+        .get("extensionId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())?;
+    Some(EnabledExtension {
+        extension_id,
+        enabled: v
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        config: v.get("config").cloned(),
     })
 }
 
@@ -927,6 +995,13 @@ mod tests {
                     { "toolId": "notify_humans", "enabled": false }
                 ]
             })),
+            Some(json!({
+                "enabledExtensions": [
+                    { "extensionId": "plan-mode", "enabled": true, "config": { "x": 1 } },
+                    { "extensionId": "gate", "enabled": true },
+                    { "extensionId": "disabled-ext", "enabled": false }
+                ]
+            })),
             Some("internal".into()),
         );
         assert_eq!(
@@ -956,6 +1031,12 @@ mod tests {
             cfg.tool_configs().get("admin_tool"),
             Some(&json!({ "k": 1 }))
         );
+        // enabledExtensions parsed; only enabled=true entries in the id list.
+        assert_eq!(cfg.enabled_extensions.len(), 3);
+        assert_eq!(
+            cfg.enabled_extension_ids(),
+            vec!["plan-mode".to_string(), "gate".to_string()]
+        );
     }
 
     #[test]
@@ -967,9 +1048,27 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         // No tool_config → unrestricted (full server tool set).
         assert!(cfg.enabled_tool_ids().is_none());
+    }
+
+    #[test]
+    fn enabled_extension_ids_empty_when_no_extension_config() {
+        let cfg = AgentBehaviorConfig::from_row_values(
+            Some(json!({ "prompt": "hi" })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        // No extension_config → empty Vec (NOT None): a resolved agent that lists
+        // no extensions activates ZERO — the fail-closed signal, distinct from
+        // `enabled_tool_ids`'s "None ⇒ unrestricted".
+        assert!(cfg.enabled_extension_ids().is_empty());
     }
 
     #[test]
@@ -982,6 +1081,7 @@ mod tests {
             Some("   ".into()),
             Some(json!({ "goal": "no steps here" })),
             Some(json!("tool_config not an object")),
+            Some(json!("extension_config not an object")),
             Some("garbage-visibility".into()),
         );
         assert!(
@@ -999,6 +1099,7 @@ mod tests {
             None,
             None,
             Some(json!({ "goal": "g", "steps": [] })),
+            None,
             None,
             None,
         );

@@ -753,6 +753,17 @@ async fn handle_send_message(
         .as_ref()
         .and_then(AgentBehaviorConfig::enabled_tool_ids);
 
+    // SEP per-agent extension enablement (SMOODEV-2259). A resolved agent (Some
+    // cfg) always yields `Some(vec)` — even an EMPTY vec — so the extension host
+    // intersects the server allowlist with these ids and a resolved agent that
+    // enables no extension loads ZERO (fail-closed). `None` only when no per-agent
+    // config resolved at all (bare/standalone operator), preserving the
+    // server-allowlist-only behavior. Extensions can intercept & mutate tool calls,
+    // so a public agent must never silently inherit one.
+    let enabled_extensions: Option<Vec<String>> = agent_cfg
+        .as_ref()
+        .map(AgentBehaviorConfig::enabled_extension_ids);
+
     // Per-tool config delivered to host tools at execution + the authLevel gate.
     let tool_configs = agent_cfg
         .as_ref()
@@ -823,6 +834,7 @@ async fn handle_send_message(
             &session_id_owned,
             &request_id_owned,
             sink_owned.clone(),
+            enabled_extensions.as_deref(),
         )
         .await;
         let result = runner::run_streaming_turn(
