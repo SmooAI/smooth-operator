@@ -47,6 +47,8 @@ const EVENT_SCHEMA_FILE: Record<EventType, string> = {
     otp_sent: 'events/otp-sent.schema.json',
     otp_verified: 'events/otp-verified.schema.json',
     otp_invalid: 'events/otp-invalid.schema.json',
+    identity_intake_required: 'events/identity-intake-required.schema.json',
+    identity_intake_invalid: 'events/identity-intake-invalid.schema.json',
     error: 'events/error.schema.json',
     pong: 'events/pong.schema.json',
 };
@@ -59,6 +61,7 @@ const ACTION_SCHEMA_REF: Record<ActionType, string> = {
     get_conversation_messages: 'actions/get-messages.schema.json#/$defs/Request',
     confirm_tool_action: 'actions/confirm-tool-action.schema.json#/$defs/Request',
     verify_otp: 'actions/verify-otp.schema.json#/$defs/Request',
+    submit_identity_intake: 'actions/submit-identity-intake.schema.json#/$defs/Request',
     ping: 'actions/ping.schema.json#/$defs/Request',
 };
 

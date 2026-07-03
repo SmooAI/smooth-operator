@@ -29,6 +29,7 @@ pub mod curation;
 pub mod domain;
 pub mod embedding;
 pub mod gateway_key;
+pub mod identity_intake;
 pub mod otp;
 pub mod rerank;
 pub mod runtime;
@@ -65,6 +66,10 @@ pub use embedding::{
     cosine_similarity, DeterministicEmbedder, Embedder, InputType, DEFAULT_EMBEDDING_DIM,
 };
 pub use gateway_key::{resolve_gateway_key, EnvGatewayKeyResolver, GatewayKeyResolver};
+pub use identity_intake::{
+    normalize_email, normalize_phone_e164, validate_intake, IntakeField, IntakeFieldError,
+    IntakeFieldKey, IntakeOutcome, IntakeRequest, IntakeValues,
+};
 pub use otp::{OtpChannel, OtpContact, OtpDelivery, OtpError, OtpService, OtpVerifyOutcome};
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
 pub use runtime::{
@@ -76,8 +81,10 @@ pub use settings::{
 pub use telemetry::init_telemetry;
 pub use tool_provider::{ToolProvider, ToolProviderContext};
 pub use tools::{
-    builtin_tools, ConversationHistoryTool, FetchUrlTool, KnowledgeResultSink, KnowledgeSearchTool,
-    NoopWebSearchProvider, SearchResult, ToolContext, WebSearchProvider, WebSearchTool,
+    builtin_tools, intake_channel, ConversationHistoryTool, FetchUrlTool, IdentityAttach,
+    IntakeChannelPair, KnowledgeResultSink, KnowledgeSearchTool, NoopWebSearchProvider,
+    RequestIdentityIntakeTool, SearchResult, SubmitIdentityIntakeTool, ToolContext,
+    WebSearchProvider, WebSearchTool, REQUEST_IDENTITY_INTAKE_TOOL, SUBMIT_IDENTITY_INTAKE_TOOL,
 };
 
 // Re-export the engine so adapter crates and consumers depend on one version.

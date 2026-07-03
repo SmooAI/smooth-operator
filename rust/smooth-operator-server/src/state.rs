@@ -24,6 +24,7 @@ use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
+use smooth_operator::identity_intake::{IntakeField, IntakeOutcome, IntakeValues};
 use smooth_operator::otp::{OtpContact, OtpService};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::tool_provider::ToolProvider;
@@ -141,6 +142,15 @@ pub struct AppState {
     /// session has at most one outstanding confirmation; an empty map means no
     /// turn is parked (the default, byte-for-byte unchanged from before HITL).
     pending_confirmations: Arc<RwLock<HashMap<String, UnboundedSender<HumanResponse>>>>,
+    /// **Identity-intake pending parks**: `sessionId` → the parked turn's
+    /// requested fields + [`IntakeOutcome`] sender. When an agent turn's
+    /// `request_identity_intake` tool parks on a form-capable session, the
+    /// runner's intake bridge registers here; a subsequent
+    /// `submit_identity_intake` frame validates against the registered
+    /// `fields`, then takes the sender and feeds it the outcome (submitted
+    /// values or a decline) to resume the parked turn. One outstanding intake
+    /// per session (mirrors `pending_confirmations`).
+    pending_intakes: Arc<RwLock<HashMap<String, PendingIntake>>>,
     /// When `true`, the router mounts the embedded widget host page at `/` and
     /// the widget bundle at `/chat-widget.iife.js`. Off by default (the
     /// K8s/Lambda flavors never serve the widget); the local flavor opts in via
@@ -184,6 +194,16 @@ pub fn scoped_connector_key(org_id: &str, connector_name: &str) -> String {
     format!("IXCONN#{org_id}\u{1}{connector_name}")
 }
 
+/// A turn parked on identity intake: the fields it asked for (the validation
+/// contract for the incoming `submit_identity_intake`) and the sender that
+/// resumes it.
+pub struct PendingIntake {
+    /// The fields the agent requested (required-ness drives validation).
+    pub fields: Vec<IntakeField>,
+    /// Resumes the parked `request_identity_intake` tool.
+    pub responder: UnboundedSender<IntakeOutcome>,
+}
+
 impl AppState {
     /// Construct shared state over a storage adapter and config.
     ///
@@ -221,6 +241,7 @@ impl AppState {
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
+            pending_intakes: Arc::new(RwLock::new(HashMap::new())),
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
@@ -583,6 +604,114 @@ impl AppState {
             map.remove(session_id);
         }
     }
+
+    /// Register a turn parked on identity intake for `session_id` (fields +
+    /// resumable [`IntakeOutcome`] sender). Any prior pending intake for the
+    /// same session is replaced (one outstanding intake per session). Called by
+    /// the runner's intake bridge when `request_identity_intake` parks.
+    pub fn register_intake(
+        &self,
+        session_id: impl Into<String>,
+        fields: Vec<IntakeField>,
+        responder: UnboundedSender<IntakeOutcome>,
+    ) {
+        if let Ok(mut map) = self.pending_intakes.write() {
+            map.insert(session_id.into(), PendingIntake { fields, responder });
+        }
+    }
+
+    /// The fields the pending intake for `session_id` asked for (the validation
+    /// contract), WITHOUT consuming the park — an invalid submit must leave the
+    /// turn parked for a resubmit. `None` when no intake is pending.
+    #[must_use]
+    pub fn intake_fields(&self, session_id: &str) -> Option<Vec<IntakeField>> {
+        Some(
+            self.pending_intakes
+                .read()
+                .ok()?
+                .get(session_id)?
+                .fields
+                .clone(),
+        )
+    }
+
+    /// Take (remove + return) the pending [`IntakeOutcome`] sender for
+    /// `session_id`. Taking it — rather than cloning — guarantees a single
+    /// submit resolves a single parked intake, and a duplicate submit is a
+    /// no-op (`NO_PENDING_INTAKE`).
+    #[must_use]
+    pub fn take_intake(&self, session_id: &str) -> Option<UnboundedSender<IntakeOutcome>> {
+        Some(
+            self.pending_intakes
+                .write()
+                .ok()?
+                .remove(session_id)?
+                .responder,
+        )
+    }
+
+    /// Drop any pending intake registered for `session_id` without resolving it
+    /// (parked turn ended — timeout / disconnect). Mirrors
+    /// [`clear_confirmation`](Self::clear_confirmation).
+    pub fn clear_intake(&self, session_id: &str) {
+        if let Ok(mut map) = self.pending_intakes.write() {
+            map.remove(session_id);
+        }
+    }
+
+    /// Whether this session's client declared the `identity_form` render
+    /// capability at `create_conversation_session` (read from the session's
+    /// `metadata.supportsIdentityForm`). `false` for unknown sessions and
+    /// text-only channels — the intake tool then degrades to conversational
+    /// turn-by-turn collection.
+    #[must_use]
+    pub fn session_supports_identity_form(&self, session_id: &str) -> bool {
+        self.sessions
+            .read()
+            .ok()
+            .and_then(|map| {
+                map.get(session_id)?
+                    .metadata
+                    .as_ref()?
+                    .get("supportsIdentityForm")?
+                    .as_bool()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Attach validated intake values to the session: metadata `userName` /
+    /// `contactEmail` / `contactPhone` — the SAME keys the create-session
+    /// (pre-chat) path stashes and the OTP contact seam
+    /// ([`session_contact`](Self::session_contact)) reads, so a captured contact
+    /// is immediately OTP-verifiable. Only provided fields are written (an
+    /// intake that collected just an email never clobbers a known name).
+    /// Durable participant/CRM attach is a host concern.
+    pub fn attach_session_identity(&self, session_id: &str, values: &IntakeValues) {
+        if let Ok(mut map) = self.sessions.write() {
+            if let Some(session) = map.get_mut(session_id) {
+                let mut meta = session.metadata.take().unwrap_or_default();
+                if let Some(name) = &values.name {
+                    meta.insert(
+                        "userName".to_string(),
+                        serde_json::Value::from(name.clone()),
+                    );
+                }
+                if let Some(email) = &values.email {
+                    meta.insert(
+                        "contactEmail".to_string(),
+                        serde_json::Value::from(email.clone()),
+                    );
+                }
+                if let Some(phone) = &values.phone {
+                    meta.insert(
+                        "contactPhone".to_string(),
+                        serde_json::Value::from(phone.clone()),
+                    );
+                }
+                session.metadata = Some(meta);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -725,6 +854,82 @@ mod tests {
             state.session_current_step("s1"),
             Some("collect".to_string())
         );
+    }
+
+    #[test]
+    fn intake_registry_round_trips_and_peeks_without_consuming() {
+        use smooth_operator::identity_intake::{IntakeField, IntakeFieldKey};
+        let state = state_with(config_with_env_key(None));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let fields = vec![IntakeField {
+            key: IntakeFieldKey::Email,
+            required: true,
+            label: None,
+        }];
+        state.register_intake("s1", fields, tx);
+
+        // Peek does not consume (an invalid submit must leave the turn parked).
+        assert!(state.intake_fields("s1").is_some());
+        assert!(state.intake_fields("s1").is_some());
+
+        // Take consumes; a duplicate submit finds nothing.
+        assert!(state.take_intake("s1").is_some());
+        assert!(state.take_intake("s1").is_none());
+        assert!(state.intake_fields("s1").is_none());
+
+        // clear_intake drops without resolving.
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        state.register_intake("s2", Vec::new(), tx2);
+        state.clear_intake("s2");
+        assert!(state.take_intake("s2").is_none());
+    }
+
+    #[test]
+    fn attach_session_identity_stamps_contact_keys_without_clobbering() {
+        use smooth_operator::identity_intake::IntakeValues;
+        let state = state_with(config_with_env_key(None));
+        let mut session = test_session("s1");
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("contactEmail".to_string(), "old@example.com".into());
+        meta.insert("userName".to_string(), "Old Name".into());
+        session.metadata = Some(meta);
+        state.insert_session(session);
+
+        // Only provided fields are written; the known name survives.
+        state.attach_session_identity(
+            "s1",
+            &IntakeValues {
+                email: Some("new@example.com".into()),
+                phone: Some("+15551234567".into()),
+                ..Default::default()
+            },
+        );
+        let contact = state.session_contact("s1");
+        assert_eq!(contact.email.as_deref(), Some("new@example.com"));
+        assert_eq!(contact.phone.as_deref(), Some("+15551234567"));
+        let s = state.get_session("s1").unwrap();
+        assert_eq!(
+            s.metadata.as_ref().unwrap().get("userName").unwrap(),
+            "Old Name"
+        );
+
+        // Unknown session is a no-op, not a panic.
+        state.attach_session_identity("missing", &IntakeValues::default());
+    }
+
+    #[test]
+    fn session_supports_identity_form_defaults_false() {
+        let state = state_with(config_with_env_key(None));
+        state.insert_session(test_session("s1"));
+        assert!(!state.session_supports_identity_form("s1"));
+        assert!(!state.session_supports_identity_form("missing"));
+
+        let mut session = test_session("s2");
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("supportsIdentityForm".to_string(), true.into());
+        session.metadata = Some(meta);
+        state.insert_session(session);
+        assert!(state.session_supports_identity_form("s2"));
     }
 
     #[test]

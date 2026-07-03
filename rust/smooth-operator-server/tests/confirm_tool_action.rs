@@ -144,6 +144,7 @@ fn spawn_turn(
                 llm_provider: Some(Arc::new(mock)),
                 reranker: None,
                 confirmation: Some(confirmation_for(&state)),
+                identity_intake: None,
                 tool_provider: None,
                 system_prompt: None,
                 org_id: None,

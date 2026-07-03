@@ -39,6 +39,11 @@
           "type": "string",
           "description": "Browser fingerprint string (e.g. from ThumbmarkJS) used for anonymous user correlation across sessions."
         },
+        "supports": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Client render capabilities for this session. Known value: `identity_form` \u2014 the client can render a structured identity-intake form, so the server may emit `identity_intake_required` mid-turn. Text-only channels (SMS, voice) omit this and the server degrades intake to conversational turn-by-turn collection. Unknown values are ignored (forward-compatible)."
+        },
         "metadata": {
           "type": "object",
           "description": "Arbitrary key/value metadata to attach to the session.",
