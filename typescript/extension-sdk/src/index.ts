@@ -9,9 +9,9 @@
  * `runConformance`.
  */
 export { defineExtension, defineTool, Extension } from './extension.js';
-export type { ExtensionSetup, SmoothApi, ToolDef, ToolContext, ToolReturn, EventHandler, HookResult, ConnectHandle } from './extension.js';
+export type { ExtensionSetup, SmoothApi, ToolDef, ToolContext, ToolReturn, EventHandler, HookResult, ConnectHandle, UiApi } from './extension.js';
 export { createTestHost } from './test-host.js';
-export type { TestHost, CallToolOptions } from './test-host.js';
+export type { TestHost, CallToolOptions, CreateTestHostOptions, UiResponder } from './test-host.js';
 export { runConformance, DEFAULT_SPEC_DIR } from './conformance.js';
 export type { ConformanceReport, ConformanceStep, RunConformanceOptions } from './conformance.js';
 export { toJsonSchema } from './schema.js';
@@ -33,4 +33,7 @@ export type {
     EventParams,
     HookParams,
     HookOutcome,
+    UiKind,
+    UiRequestParams,
+    UiRequestResult,
 } from './protocol.js';
