@@ -67,6 +67,10 @@ export interface CreateConversationSessionRequest {
      */
     browserFingerprint?: string;
     /**
+     * Client render capabilities for this session. Known value: `identity_form` — the client can render a structured identity-intake form, so the server may emit `identity_intake_required` mid-turn. Text-only channels (SMS, voice) omit this and the server degrades intake to conversational turn-by-turn collection. Unknown values are ignored (forward-compatible).
+     */
+    supports?: string[];
+    /**
      * Arbitrary key/value metadata to attach to the session.
      */
     metadata?: {
@@ -321,6 +325,10 @@ export interface SendMessageRequest {
      * Whether to receive incremental `stream_chunk` and `stream_token` events. Defaults to `true`. Set to `false` to receive only the final `eventual_response`.
      */
     stream?: boolean;
+    /**
+     * Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model.
+     */
+    model?: string;
 }
 
 // ── from actions/send-message.schema.json ──
@@ -370,6 +378,54 @@ export interface GeneralAgentResponse {
      * Ordered list of suggested follow-up actions the client UI may surface to the user.
      */
     suggestedNextActions: string[];
+}
+
+// ── from actions/submit-identity-intake.schema.json ──
+/**
+ * Fields sent by the client to submit (or decline) identity intake.
+ */
+export interface SubmitIdentityIntakeRequest {
+    /**
+     * Action discriminator.
+     */
+    action: 'submit_identity_intake';
+    /**
+     * Must match the `requestId` from the `identity_intake_required` event being responded to.
+     */
+    requestId: string;
+    /**
+     * Session ID of the parked session.
+     */
+    sessionId: string;
+    /**
+     * The visitor's identity values. Required unless `declined` is true. Only the fields requested by the `identity_intake_required` event are meaningful; the server validates required-ness against that request.
+     */
+    values?: {
+        /**
+         * The visitor's display name.
+         */
+        name?: string;
+        /**
+         * The visitor's email address (validated server-side).
+         */
+        email?: string;
+        /**
+         * The visitor's phone number (normalized server-side to E.164).
+         */
+        phone?: string;
+    };
+    /**
+     * True when the visitor refused to share their details. The turn resumes with a declined payload so the agent can proceed gracefully. When true, `values` is ignored.
+     */
+    declined?: boolean;
+}
+
+// ── from actions/submit-identity-intake.schema.json ──
+/**
+ * No dedicated response event for `submit_identity_intake`. Valid values (or a decline) are acked with an `immediate_response` and the parked turn resumes its normal streaming sequence. Invalid values emit `identity_intake_invalid` (the turn stays parked). This schema is provided for documentation completeness only.
+ */
+export interface SubmitIdentityIntakeResponse {
+    [k: string]: unknown;
 }
 
 // ── from actions/verify-otp.schema.json ──
@@ -719,6 +775,10 @@ export interface Session {
      */
     conversationId: string;
     /**
+     * The organization that owns this session. Mirrors `organizationId` on the conversation, participants, and messages so org-scoping is uniform across every domain type and storage backends can write the session's org directly.
+     */
+    organizationId: string;
+    /**
      * The agent handling this session.
      */
     agentId: string;
@@ -804,6 +864,7 @@ export interface ActionEnvelope {
         | 'get_conversation_messages'
         | 'confirm_tool_action'
         | 'verify_otp'
+        | 'submit_identity_intake'
         | 'ping';
     /**
      * Client-generated correlation ID. Will be echoed back on all related server events. Should be unique per in-flight request. If omitted the server may generate one, but correlating responses becomes the client's problem.
@@ -920,6 +981,23 @@ export interface EventualResponse {
              */
             escalationReason?: string;
             /**
+             * Per-turn token accounting and cost, captured from the engine's terminal completion event. Lets a client accumulate live session cost. Optional and back-compatible: absent when the engine reported no usage for the turn (e.g. an offline/mock turn).
+             */
+            usage?: {
+                /**
+                 * Accumulated cost in USD across every LLM call in this turn (gateway-priced).
+                 */
+                costUsd?: number;
+                /**
+                 * Accumulated prompt (input) tokens across every LLM call in this turn.
+                 */
+                promptTokens?: number;
+                /**
+                 * Accumulated completion (output) tokens across every LLM call in this turn.
+                 */
+                completionTokens?: number;
+            };
+            /**
              * The sources that grounded this answer, when any were retrieved. Collected by the runtime from the documents that actually grounded the turn — the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results — deduplicated by source id and capped. Optional and back-compatible: absent when the turn used no knowledge sources. Each item is a `Citation` (see `domain/citation.schema.json`).
              */
             citations?: {
@@ -944,6 +1022,142 @@ export interface EventualResponse {
                  */
                 score: number;
             }[];
+        };
+    };
+    /**
+     * Unix epoch milliseconds when the event was emitted.
+     */
+    timestamp?: number;
+}
+
+// ── from events/identity-intake-invalid.schema.json ──
+/**
+ * Event: `identity_intake_invalid`. Emitted when a `submit_identity_intake` action carried values that failed server-side validation (missing required field, malformed email, unparseable phone). The turn REMAINS parked — the client should re-render the intake form with the per-field errors and let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable state, never a terminal `error` event.
+ */
+export interface IdentityIntakeInvalid {
+    /**
+     * Event type discriminator.
+     */
+    type: 'identity_intake_invalid';
+    /**
+     * Echoes the `requestId` of the parked turn (same correlation as the `identity_intake_required` event).
+     */
+    requestId?: string;
+    /**
+     * Validation failure details.
+     */
+    data: {
+        /**
+         * The request ID this intake belongs to.
+         */
+        requestId: string;
+        /**
+         * Per-field validation errors.
+         */
+        data: {
+            /**
+             * One entry per failed field.
+             *
+             * @minItems 1
+             */
+            errors: [
+                {
+                    /**
+                     * The field that failed validation.
+                     */
+                    field: 'name' | 'email' | 'phone';
+                    /**
+                     * Human-readable validation message for this field.
+                     */
+                    message: string;
+                },
+                ...{
+                    /**
+                     * The field that failed validation.
+                     */
+                    field: 'name' | 'email' | 'phone';
+                    /**
+                     * Human-readable validation message for this field.
+                     */
+                    message: string;
+                }[],
+            ];
+            /**
+             * Human-readable summary suitable for a form-level error line.
+             */
+            message: string;
+        };
+    };
+    /**
+     * Unix epoch milliseconds when the event was emitted.
+     */
+    timestamp?: number;
+}
+
+// ── from events/identity-intake-required.schema.json ──
+/**
+ * Event: `identity_intake_required`. Emitted mid-turn when the agent requests structured identity/lead intake (name / email / phone) and the session declared the `identity_form` capability at `create_conversation_session`. The turn is parked until the client replies with a `submit_identity_intake` action carrying the same `requestId` (values or `declined: true`). Sessions that did not declare `identity_form` never receive this event — the server degrades to conversational, turn-by-turn collection instead.
+ */
+export interface IdentityIntakeRequired {
+    /**
+     * Event type discriminator.
+     */
+    type: 'identity_intake_required';
+    /**
+     * Echoes the `requestId` from the originating `send_message` action. Must be included in the `submit_identity_intake` reply.
+     */
+    requestId?: string;
+    /**
+     * Intake prompt details.
+     */
+    data: {
+        /**
+         * The request ID this intake belongs to.
+         */
+        requestId: string;
+        /**
+         * The fields the agent wants and why.
+         */
+        data: {
+            /**
+             * The identity fields to collect, in display order.
+             *
+             * @minItems 1
+             */
+            fields: [
+                {
+                    /**
+                     * Which identity field to collect.
+                     */
+                    key: 'name' | 'email' | 'phone';
+                    /**
+                     * Whether the visitor must provide this field to submit.
+                     */
+                    required: boolean;
+                    /**
+                     * Optional display label overriding the client's default for this field.
+                     */
+                    label?: string;
+                },
+                ...{
+                    /**
+                     * Which identity field to collect.
+                     */
+                    key: 'name' | 'email' | 'phone';
+                    /**
+                     * Whether the visitor must provide this field to submit.
+                     */
+                    required: boolean;
+                    /**
+                     * Optional display label overriding the client's default for this field.
+                     */
+                    label?: string;
+                }[],
+            ];
+            /**
+             * Human-readable reason the agent needs these details, suitable for the form header (e.g. `to send you the quote`).
+             */
+            reason: string;
         };
     };
     /**
@@ -1273,6 +1487,42 @@ export interface StreamChunk {
          * Reserved for future use. When true, this is the last `stream_chunk` for the request. Currently clients should use `eventual_response` to detect stream completion.
          */
         done?: boolean;
+    };
+    /**
+     * Unix epoch milliseconds when the event was emitted.
+     */
+    timestamp?: number;
+}
+
+// ── from events/stream-reasoning.schema.json ──
+/**
+ * Event: `stream_reasoning`. A single *reasoning* token from a reasoning-model's separate thinking channel (`reasoning_content`/`reasoning` deltas — e.g. DeepSeek, gpt-oss/harmony, MiniMax, GLM), forwarded to the client in real time. Corresponds to smooth-operator's `AgentEvent::ReasoningDelta`. Shaped identically to `stream_token` so clients can render it the same way, but on a distinct `type` so reasoning is shown as collapsible "thinking" and is NEVER folded into the answer. The final response (carried by `eventual_response`) already excludes reasoning. Clients that do not recognize this event MUST ignore it — the answer still streams via `stream_token`, so reasoning simply isn't shown.
+ */
+export interface StreamReasoning {
+    /**
+     * Event type discriminator.
+     */
+    type: 'stream_reasoning';
+    /**
+     * Echoes the `requestId` from the originating `send_message` action.
+     */
+    requestId?: string;
+    /**
+     * The raw reasoning token text. Also present inside `data.token` for consumers that only inspect `data`.
+     */
+    token?: string;
+    /**
+     * Reasoning token event payload.
+     */
+    data: {
+        /**
+         * The request ID this reasoning token belongs to.
+         */
+        requestId: string;
+        /**
+         * The raw reasoning token text.
+         */
+        token: string;
     };
     /**
      * Unix epoch milliseconds when the event was emitted.

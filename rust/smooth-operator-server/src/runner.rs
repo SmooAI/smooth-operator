@@ -39,9 +39,13 @@ use smooth_operator::agent_config::{
     AuthGateHook, ConversationWorkflow, WorkflowJudgeVerdict, JUDGE_SYSTEM_PROMPT,
 };
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
+use smooth_operator::identity_intake::{IntakeField, IntakeOutcome, IntakeRequest, IntakeValues};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
-use smooth_operator::tools::{KnowledgeResultSink, KnowledgeSearchTool};
+use smooth_operator::tools::{
+    intake_channel, KnowledgeResultSink, KnowledgeSearchTool, RequestIdentityIntakeTool,
+    SubmitIdentityIntakeTool,
+};
 use smooth_operator::MAX_CITATIONS;
 
 /// How many auto-injected knowledge results the engine prepends as
@@ -110,6 +114,43 @@ pub struct ConfirmationConfig {
     /// turn ends (typically `AppState::clear_confirmation`), so a stale sender
     /// can't mis-route a later confirmation.
     pub clear: ClearConfirmation,
+}
+
+/// Registers a parked intake's [`IntakeOutcome`] sender (plus the requested
+/// fields — the validation contract) under a session id, so a later
+/// `submit_identity_intake` can validate + resume it. Typically
+/// `AppState::register_intake`.
+pub type RegisterIntake =
+    Arc<dyn Fn(&str, Vec<IntakeField>, UnboundedSender<IntakeOutcome>) + Send + Sync>;
+
+/// Attaches validated intake values to the session (metadata `userName` /
+/// `contactEmail` / `contactPhone`). Typically `AppState::attach_session_identity`.
+pub type AttachIdentity = Arc<dyn Fn(&IntakeValues) + Send + Sync>;
+
+/// Hooks the runner needs to wire **identity intake** into a turn (see
+/// `docs/Architecture/Identity Intake.md`) without depending on `AppState`.
+///
+/// When `Some`, the runner registers the `request_identity_intake` tool. On a
+/// [`form_supported`](Self::form_supported) session the tool PARKS the turn:
+/// the runner's intake bridge registers the outcome sender (via
+/// [`register`](Self::register)) and emits an `identity_intake_required` event;
+/// the WS handler validates the visitor's `submit_identity_intake` and resumes.
+/// On a text-only session the tool degrades to a conversational directive and
+/// the runner additionally registers the `submit_identity_intake` tool (which
+/// validates and calls [`attach`](Self::attach)). `None` (the default)
+/// registers neither tool — byte-for-byte the pre-intake behavior.
+pub struct IdentityIntakeConfig {
+    /// The session this turn belongs to (registration key for the resume).
+    pub session_id: String,
+    /// Whether the session's client declared the `identity_form` capability.
+    pub form_supported: bool,
+    /// Registers the parked turn's fields + outcome sender (form path).
+    pub register: RegisterIntake,
+    /// Clears any registered intake for the session when the turn ends.
+    pub clear: ClearConfirmation,
+    /// Attaches validated values to the session (conversational path — the
+    /// form path attaches in the WS handler, which owns validation there).
+    pub attach: AttachIdentity,
 }
 
 /// A turn's **conversation-workflow** context: the agent's configured workflow
@@ -192,6 +233,10 @@ pub struct TurnRequest<'a> {
     /// `confirm_tool_action_required` event + a registered resumable sender. See
     /// [`ConfirmationConfig`].
     pub confirmation: Option<ConfirmationConfig>,
+    /// Optional **identity intake** wiring (channel-normalized name/email/phone
+    /// capture). `None` (the default) registers no intake tools, so behavior is
+    /// identical to before the seam existed. See [`IdentityIntakeConfig`].
+    pub identity_intake: Option<IdentityIntakeConfig>,
     /// **SEAM 1 — host tool injection.** When `Some`, the runner asks this
     /// provider for EXTRA tools and merges them into the turn's
     /// [`ToolRegistry`] alongside the built-ins. `None` (the default) leaves the
@@ -289,6 +334,7 @@ pub async fn run_streaming_turn(
         llm_provider,
         reranker,
         confirmation,
+        identity_intake,
         tool_provider,
         system_prompt,
         org_id,
@@ -376,6 +422,40 @@ pub async fn run_streaming_turn(
         knowledge_search = knowledge_search.with_reranker(reranker);
     }
     tools.register(knowledge_search);
+
+    // Identity intake (see docs/Architecture/Identity Intake.md): register the
+    // channel-normalized `request_identity_intake` tool. On a form-capable
+    // session it parks the turn (the bridge below emits
+    // `identity_intake_required` + registers the resumable outcome sender); on
+    // a text-only session it returns a conversational directive and the
+    // companion `submit_identity_intake` tool validates + attaches the values
+    // the model collects turn-by-turn. With no config (the default), neither
+    // tool is registered — byte-for-byte unchanged.
+    let intake_bridge = match &identity_intake {
+        Some(cfg) => {
+            let pair = intake_channel();
+            tools.register(RequestIdentityIntakeTool::new(
+                cfg.form_supported,
+                pair.request_tx,
+                pair.outcome_rx,
+            ));
+            if cfg.form_supported {
+                Some(spawn_intake_bridge(
+                    pair.request_rx,
+                    pair.outcome_tx,
+                    sink.clone(),
+                    request_id.to_string(),
+                    cfg.session_id.clone(),
+                    Arc::clone(&cfg.register),
+                ))
+            } else {
+                tools
+                    .register(SubmitIdentityIntakeTool::new().with_attach(Arc::clone(&cfg.attach)));
+                None
+            }
+        }
+        None => None,
+    };
 
     // SEAM 1 — merge host-contributed tools. When a provider is installed, ask
     // it (with the turn's org + access context) for extra tools and register
@@ -591,6 +671,13 @@ pub async fn run_streaming_turn(
         let _ = handle.await;
         (cfg.clear)(&cfg.session_id);
     }
+    // Same teardown for the intake bridge: dropping the agent closed the tool's
+    // request sender, so the bridge drains and finishes; then clear any intake
+    // registration the turn left parked.
+    if let (Some(handle), Some(cfg)) = (intake_bridge, identity_intake.as_ref()) {
+        let _ = handle.await;
+        (cfg.clear)(&cfg.session_id);
+    }
     // SEP — clear any `ui/confirm` responder the turn left parked (a hosted
     // extension that requested a confirm the client never answered), then let the
     // host drop, which kills its extension subprocesses. Mirrors the native
@@ -756,6 +843,40 @@ fn spawn_confirmation_bridge(
                     });
                 }
             }
+        }
+    })
+}
+
+/// Spawn the **intake bridge** for a turn whose `request_identity_intake` tool
+/// may park (form-capable session). For every [`IntakeRequest`] the tool emits:
+///   1. registers the outcome sender + the requested fields under `session_id`
+///      via `register`, so an inbound `submit_identity_intake` (keyed by
+///      `sessionId`) can validate against those fields and resume, and
+///   2. emits an `identity_intake_required` event through the turn sink.
+///
+/// Mirrors [`spawn_confirmation_bridge`]. The loop ends when the request
+/// channel closes (the tool/agent dropped at turn end); the caller then clears
+/// the registration.
+fn spawn_intake_bridge(
+    mut request_rx: UnboundedReceiver<IntakeRequest>,
+    outcome_tx: UnboundedSender<IntakeOutcome>,
+    sink: UnboundedSender<serde_json::Value>,
+    request_id: String,
+    session_id: String,
+    register: RegisterIntake,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(req) = request_rx.recv().await {
+            // Register THIS turn's outcome sender (+ the fields as the
+            // validation contract) so the next `submit_identity_intake` for
+            // this session resumes it. Re-clone per request: the tool takes one
+            // outcome per park.
+            register(&session_id, req.fields.clone(), outcome_tx.clone());
+            let _ = sink.send(crate::protocol::identity_intake_required(
+                &request_id,
+                &req.fields,
+                &req.reason,
+            ));
         }
     })
 }

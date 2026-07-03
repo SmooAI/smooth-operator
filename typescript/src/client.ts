@@ -361,6 +361,21 @@ export class SmoothAgentClient {
         this.transport.send(JSON.stringify({ action: 'verify_otp', ...req }));
     }
 
+    /**
+     * Submit (or decline) identity intake, resuming the turn parked by an
+     * `identity_intake_required` event. Server-side validation may reply with an
+     * `identity_intake_invalid` event (the turn stays parked — resubmit); a valid
+     * submit resumes the stream back into the original {@link MessageTurn}.
+     */
+    submitIdentityIntake(req: {
+        sessionId: string;
+        requestId: string;
+        values?: { name?: string; email?: string; phone?: string };
+        declined?: boolean;
+    }): void {
+        this.transport.send(JSON.stringify({ action: 'submit_identity_intake', ...req }));
+    }
+
     // ─────────────────────────── Internals ─────────────────────────────────
 
     /** Send an action that expects a single correlated response event. */

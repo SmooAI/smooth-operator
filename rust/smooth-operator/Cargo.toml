@@ -14,6 +14,9 @@ name = "smooth_operator"
 # TODO: switch to crates.io once smooth-operator is published (roadmap Phase 0)
 smooai-smooth-operator-core = { workspace = true }
 async-trait = { workspace = true }
+# Identity-intake tools: the park-and-resume channel pair + timeout-bounded wait
+# (mirrors core's ConfirmationHook plumbing).
+tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

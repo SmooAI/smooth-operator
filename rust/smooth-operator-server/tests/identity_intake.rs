@@ -1,0 +1,557 @@
+//! Identity intake — the channel-normalized name/email/phone capture seam
+//! (`docs/Architecture/Identity Intake.md`).
+//!
+//! Proves both channel shapes end-to-end against the real runner + handler:
+//!
+//! - **Form path** (session declared `identity_form`): the turn parks inside
+//!   `request_identity_intake`, an `identity_intake_required` event surfaces
+//!   (per spec), an invalid `submit_identity_intake` frame gets
+//!   `identity_intake_invalid` and LEAVES the turn parked, a valid frame
+//!   attaches the identity to the session and resumes the tool with the
+//!   validated payload. A decline resumes with the declined payload.
+//! - **Conversational path** (no capability): the same tool returns the
+//!   conversational directive immediately (no park, no event); the model's
+//!   `submit_identity_intake` tool call is validated server-side — a bad email
+//!   is a tool error the model re-asks from, good values attach + return the
+//!   IDENTICAL structured payload.
+//!
+//! Runs fully offline (`MockLlmClient` scripts the tool calls).
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+use smooth_operator::access_control::AccessContext;
+use smooth_operator::adapter::StorageAdapter;
+use smooth_operator::domain::{Session, SessionStatus};
+use smooth_operator_adapter_memory::InMemoryStorageAdapter;
+use smooth_operator_core::llm::StreamEvent;
+use smooth_operator_core::llm_provider::MockLlmClient;
+use smooth_operator_core::LlmConfig;
+
+use smooth_operator_server::config::{ServerConfig, StorageBackend};
+use smooth_operator_server::handler;
+use smooth_operator_server::runner::{self, IdentityIntakeConfig, TurnRequest};
+use smooth_operator_server::state::AppState;
+
+const SESSION_ID: &str = "sess-intake-1";
+const CONVERSATION_ID: &str = "conv-intake-1";
+const REQUEST_ID: &str = "req-intake-1";
+
+fn mock_llm() -> LlmConfig {
+    LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o")
+}
+
+fn config() -> ServerConfig {
+    ServerConfig {
+        bind: "127.0.0.1".into(),
+        port: 0,
+        gateway_url: "https://example.invalid/v1".into(),
+        gateway_key: None,
+        model: "claude-haiku-4-5".into(),
+        seed_kb: false,
+        max_iterations: 6,
+        max_tokens: 128,
+        storage: StorageBackend::Memory,
+        widget_auth_strict: false,
+        confirm_tools: Vec::new(),
+        judge_model: "claude-haiku-4-5".to_string(),
+    }
+}
+
+/// A registered session so `attach_session_identity` has something to stamp.
+fn test_session() -> Session {
+    let now = chrono::Utc::now();
+    Session {
+        session_id: SESSION_ID.to_string(),
+        conversation_id: CONVERSATION_ID.to_string(),
+        organization_id: "org".to_string(),
+        agent_id: "agent".to_string(),
+        agent_name: "Agent".to_string(),
+        user_participant_id: "u".to_string(),
+        agent_participant_id: "a".to_string(),
+        thread_id: CONVERSATION_ID.to_string(),
+        status: Some(SessionStatus::Active),
+        token_count: Some(0),
+        message_count: Some(0),
+        metadata: None,
+        created_at: Some(now),
+        updated_at: Some(now),
+        ended_at: None,
+        last_activity_at: Some(now),
+    }
+}
+
+/// The intake wiring the WS handler builds, over a real `AppState`.
+fn intake_for(state: &AppState, form_supported: bool) -> IdentityIntakeConfig {
+    IdentityIntakeConfig {
+        session_id: SESSION_ID.to_string(),
+        form_supported,
+        register: {
+            let state = state.clone();
+            Arc::new(move |sid: &str, fields, responder| {
+                state.register_intake(sid, fields, responder);
+            })
+        },
+        clear: {
+            let state = state.clone();
+            Arc::new(move |sid: &str| state.clear_intake(sid))
+        },
+        attach: {
+            let state = state.clone();
+            Arc::new(move |values| state.attach_session_identity(SESSION_ID, values))
+        },
+    }
+}
+
+/// A mock that turn-1 raises `request_identity_intake` (email required, name
+/// optional), then answers.
+fn raising_mock() -> MockLlmClient {
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "request_identity_intake".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk:
+                r#"{"fields":[{"key":"email","required":true},{"key":"name","required":false}],"reason":"to send you the quote"}"#
+                    .into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ])
+    .push_stream(vec![
+        StreamEvent::Delta {
+            content: "Thanks, got it.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+    mock
+}
+
+fn spawn_turn(
+    state: AppState,
+    storage: Arc<dyn StorageAdapter>,
+    mock: MockLlmClient,
+    form_supported: bool,
+    sink: UnboundedSender<Value>,
+) -> tokio::task::JoinHandle<runner::TurnResult> {
+    let intake = intake_for(&state, form_supported);
+    tokio::spawn(async move {
+        runner::run_streaming_turn(
+            TurnRequest {
+                storage,
+                llm: mock_llm(),
+                max_iterations: 6,
+                conversation_id: CONVERSATION_ID,
+                request_id: REQUEST_ID,
+                user_message: "I'd like a quote",
+                access: AccessContext::anonymous(),
+                llm_provider: Some(Arc::new(mock)),
+                reranker: None,
+                confirmation: None,
+                identity_intake: Some(intake),
+                tool_provider: None,
+                system_prompt: None,
+                org_id: None,
+                gateway_key: None,
+                workflow: None,
+                judge: None,
+                greeting_section: None,
+                enabled_tools: None,
+                auth_gate: None,
+                tool_configs: None,
+                extensions: None,
+            },
+            &sink,
+        )
+        .await
+        .expect("run_streaming_turn")
+    })
+}
+
+/// Poll the sink until an event of `wanted` type arrives (bounded).
+async fn await_event(rx: &mut UnboundedReceiver<Value>, wanted: &str) -> (Value, Vec<Value>) {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(ev)) => {
+                let hit = ev["type"] == wanted;
+                seen.push(ev.clone());
+                if hit {
+                    return (ev, seen);
+                }
+            }
+            Ok(None) => panic!("sink closed before '{wanted}'; saw: {seen:?}"),
+            Err(_) => panic!("timed out waiting for '{wanted}'; saw: {seen:?}"),
+        }
+    }
+}
+
+fn drain_into(rx: &mut UnboundedReceiver<Value>, seen: &mut Vec<Value>) {
+    while let Ok(ev) = rx.try_recv() {
+        seen.push(ev);
+    }
+}
+
+/// Every tool-result string the model read (from `stream_chunk`s).
+fn tool_result_text(events: &[Value]) -> String {
+    let mut s = String::new();
+    for ev in events {
+        if let Some(result) = ev
+            .pointer("/data/state/rawResponse/toolResult/result")
+            .and_then(Value::as_str)
+        {
+            s.push_str(result);
+            s.push('\n');
+        }
+    }
+    s
+}
+
+/// Feed a `submit_identity_intake` frame through the real action dispatcher.
+async fn submit_frame(state: &AppState, sink: &UnboundedSender<Value>, body: Value) {
+    handler::handle_frame(
+        state,
+        &AccessContext::anonymous(),
+        "conn-1",
+        None,
+        None,
+        &body.to_string(),
+        sink,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn form_path_parks_validates_and_resumes_with_the_validated_payload() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), config());
+    state.insert_session(test_session());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    let turn = spawn_turn(
+        state.clone(),
+        storage as Arc<dyn StorageAdapter>,
+        raising_mock(),
+        true,
+        tx.clone(),
+    );
+
+    // 1. The turn parks and the spec-shaped event surfaces.
+    let (pending, mut seen) = await_event(&mut rx, "identity_intake_required").await;
+    assert_eq!(pending["requestId"], REQUEST_ID);
+    let inner = &pending["data"]["data"];
+    assert_eq!(inner["reason"], "to send you the quote");
+    assert_eq!(inner["fields"][0]["key"], "email");
+    assert_eq!(inner["fields"][0]["required"], true);
+    assert_eq!(inner["fields"][1]["key"], "name");
+
+    // 2. An INVALID submit → identity_intake_invalid, and the turn STAYS parked.
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_identity_intake",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "values": { "email": "not-an-email" }
+        }),
+    )
+    .await;
+    let (invalid, _) = await_event(&mut rx, "identity_intake_invalid").await;
+    assert_eq!(invalid["data"]["data"]["errors"][0]["field"], "email");
+    assert!(
+        state.intake_fields(SESSION_ID).is_some(),
+        "invalid submit must leave the turn parked for a resubmit"
+    );
+
+    // 3. A VALID submit → ack + the parked tool resumes with normalized values.
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_identity_intake",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "values": { "email": "Alice@Example.COM", "name": "  Alice  " }
+        }),
+    )
+    .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("turn should complete after submit")
+        .expect("turn task");
+    drain_into(&mut rx, &mut seen);
+
+    let tool_text = tool_result_text(&seen);
+    assert!(
+        tool_text.contains(r#""status":"submitted""#),
+        "tool result should be the submitted payload, got: {tool_text}"
+    );
+    assert!(
+        tool_text.contains("Alice@example.com"),
+        "email domain normalized: {tool_text}"
+    );
+    assert!(
+        tool_text.contains(r#""name":"Alice""#),
+        "name trimmed: {tool_text}"
+    );
+    assert_eq!(result.reply, "Thanks, got it.");
+
+    // 4. The identity landed on the session (the OTP-contact keys).
+    let contact = state.session_contact(SESSION_ID);
+    assert_eq!(contact.email.as_deref(), Some("Alice@example.com"));
+    let session = state.get_session(SESSION_ID).unwrap();
+    assert_eq!(
+        session.metadata.as_ref().unwrap().get("userName").unwrap(),
+        "Alice"
+    );
+
+    // 5. The ack + duplicate-submit no-op.
+    let acked = seen.iter().any(|ev| {
+        ev["type"] == "immediate_response" && ev["message"] == "Identity intake submitted"
+    });
+    assert!(acked, "valid submit is acked: {seen:?}");
+    assert!(state.intake_fields(SESSION_ID).is_none(), "park consumed");
+}
+
+#[tokio::test]
+async fn form_path_decline_resumes_gracefully() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), config());
+    state.insert_session(test_session());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    let turn = spawn_turn(
+        state.clone(),
+        storage as Arc<dyn StorageAdapter>,
+        raising_mock(),
+        true,
+        tx.clone(),
+    );
+
+    let (_pending, mut seen) = await_event(&mut rx, "identity_intake_required").await;
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_identity_intake",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "declined": true
+        }),
+    )
+    .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("turn completes after decline")
+        .expect("turn task");
+    drain_into(&mut rx, &mut seen);
+
+    let tool_text = tool_result_text(&seen);
+    assert!(
+        tool_text.contains(r#""status":"declined""#),
+        "declined payload reaches the model: {tool_text}"
+    );
+    assert_eq!(result.reply, "Thanks, got it.");
+    // Nothing was attached.
+    assert!(state.session_contact(SESSION_ID).is_empty());
+}
+
+#[tokio::test]
+async fn text_channel_degrades_to_validated_conversational_collection() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), config());
+    state.insert_session(test_session());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    // Scripted conversation: raise → (directive) → submit bad email → (tool
+    // error) → submit good values → (payload) → final answer.
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "request_identity_intake".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk: r#"{"fields":["email"],"reason":"to follow up"}"#.into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ])
+    .push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_2".into(),
+            name: "submit_identity_intake".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk: r#"{"email":"nope"}"#.into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ])
+    .push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_3".into(),
+            name: "submit_identity_intake".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk: r#"{"email":"bob@example.com","phone":"555-123-4567"}"#.into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ])
+    .push_stream(vec![
+        StreamEvent::Delta {
+            content: "All set, Bob.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+
+    let turn = spawn_turn(
+        state.clone(),
+        storage as Arc<dyn StorageAdapter>,
+        mock,
+        false, // no identity_form capability → conversational fallback
+        tx,
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("turn completes without any park")
+        .expect("turn task");
+
+    let mut seen = Vec::new();
+    drain_into(&mut rx, &mut seen);
+
+    // No form event on a text channel.
+    assert!(
+        seen.iter()
+            .all(|ev| ev["type"] != "identity_intake_required"),
+        "text channels must not receive the form event: {seen:?}"
+    );
+
+    let tool_text = tool_result_text(&seen);
+    // 1. The raise degraded to the conversational directive. (The stream_chunk
+    //    mirror truncates long tool results, so assert on the directive's
+    //    leading content rather than trailing keys.)
+    assert!(
+        tool_text.contains("Collect the requested details conversationally"),
+        "directive returned: {tool_text}"
+    );
+    assert!(tool_text.contains("submit_identity_intake"));
+    // 2. The bad email was rejected server-side (tool error the model re-asks from).
+    assert!(
+        tool_text.contains("must be a valid email address"),
+        "bad email rejected: {tool_text}"
+    );
+    // 3. The good submit produced the SAME validated payload as the form path.
+    assert!(tool_text.contains(r#""status":"submitted""#));
+    assert!(
+        tool_text.contains("+15551234567"),
+        "phone normalized to E.164: {tool_text}"
+    );
+    assert_eq!(result.reply, "All set, Bob.");
+
+    // 4. The identity landed on the session, same keys as the form path.
+    let contact = state.session_contact(SESSION_ID);
+    assert_eq!(contact.email.as_deref(), Some("bob@example.com"));
+    assert_eq!(contact.phone.as_deref(), Some("+15551234567"));
+}
+
+#[tokio::test]
+async fn create_session_records_the_identity_form_capability() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage, config());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    // With the capability.
+    handler::handle_frame(
+        &state,
+        &AccessContext::anonymous(),
+        "conn-1",
+        None,
+        None,
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "req-create-1",
+            "agentId": "11111111-1111-1111-1111-111111111111",
+            "supports": ["identity_form", "some_future_capability"]
+        })
+        .to_string(),
+        &tx,
+    )
+    .await;
+    let (created, _) = await_event(&mut rx, "immediate_response").await;
+    let session_id = created["data"]["sessionId"].as_str().expect("sessionId");
+    assert!(
+        state.session_supports_identity_form(session_id),
+        "declared capability must be recorded"
+    );
+
+    // Without it (an SMS-style client).
+    handler::handle_frame(
+        &state,
+        &AccessContext::anonymous(),
+        "conn-2",
+        None,
+        None,
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "req-create-2",
+            "agentId": "11111111-1111-1111-1111-111111111111"
+        })
+        .to_string(),
+        &tx,
+    )
+    .await;
+    let (created2, _) = await_event(&mut rx, "immediate_response").await;
+    let session_id2 = created2["data"]["sessionId"].as_str().expect("sessionId");
+    assert!(!state.session_supports_identity_form(session_id2));
+}
+
+#[tokio::test]
+async fn submit_without_a_pending_intake_is_a_clean_error() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage, config());
+    state.insert_session(test_session());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_identity_intake",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "values": { "email": "a@b.co" }
+        }),
+    )
+    .await;
+    let (err, _) = await_event(&mut rx, "error").await;
+    assert_eq!(err["error"]["code"], "NO_PENDING_INTAKE");
+}

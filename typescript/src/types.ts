@@ -21,6 +21,8 @@ import type {
     GetMessagesResponse,
     GetSessionRequest,
     GetSessionResponse,
+    IdentityIntakeInvalid,
+    IdentityIntakeRequired,
     ImmediateResponse,
     Keepalive,
     OtpInvalid,
@@ -33,6 +35,7 @@ import type {
     SendMessageResponse,
     StreamChunk,
     StreamToken,
+    SubmitIdentityIntakeRequest,
     VerifyOtpRequest,
     WriteConfirmationRequired,
 } from './generated/types.js';
@@ -55,6 +58,7 @@ export const ACTION_TYPES = [
     'get_conversation_messages',
     'confirm_tool_action',
     'verify_otp',
+    'submit_identity_intake',
     'ping',
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
@@ -71,6 +75,8 @@ export const EVENT_TYPES = [
     'otp_sent',
     'otp_verified',
     'otp_invalid',
+    'identity_intake_required',
+    'identity_intake_invalid',
     'error',
     'pong',
 ] as const;
@@ -89,6 +95,7 @@ export type ClientAction =
     | GetMessagesRequest
     | ConfirmToolActionRequest
     | VerifyOtpRequest
+    | SubmitIdentityIntakeRequest
     | PingRequest;
 
 // ───────────────────────────── Server events ───────────────────────────────
@@ -108,6 +115,8 @@ export type ServerEvent =
     | OtpSent
     | OtpVerified
     | OtpInvalid
+    | IdentityIntakeRequired
+    | IdentityIntakeInvalid
     | GeneratedErrorEvent
     | Pong;
 
@@ -125,6 +134,8 @@ export interface ServerEventByType {
     otp_sent: OtpSent;
     otp_verified: OtpVerified;
     otp_invalid: OtpInvalid;
+    identity_intake_required: IdentityIntakeRequired;
+    identity_intake_invalid: IdentityIntakeInvalid;
     error: GeneratedErrorEvent;
     pong: Pong;
 }
@@ -137,6 +148,7 @@ export interface ClientActionByType {
     get_conversation_messages: GetMessagesRequest;
     confirm_tool_action: ConfirmToolActionRequest;
     verify_otp: VerifyOtpRequest;
+    submit_identity_intake: SubmitIdentityIntakeRequest;
     ping: PingRequest;
 }
 

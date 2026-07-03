@@ -1,6 +1,5 @@
 {
   "$comment": "Conformance fixtures for the smooth-operator wire protocol. Each entry is a valid instance of the named schema. Clients and servers validate their outgoing/incoming messages against these to catch drift between implementations.",
-
   "create_session_request": {
     "$schema_ref": "actions/create-conversation-session.schema.json#/$defs/Request",
     "description": "Minimal create-session request (only required fields).",
@@ -17,7 +16,6 @@
       }
     }
   },
-
   "create_session_response": {
     "$schema_ref": "actions/create-conversation-session.schema.json#/$defs/Response",
     "description": "Session creation response carried in an immediate_response event's data field.",
@@ -30,7 +28,6 @@
       "agentParticipantId": "55555555-5555-5555-5555-555555555555"
     }
   },
-
   "send_message_request": {
     "$schema_ref": "actions/send-message.schema.json#/$defs/Request",
     "description": "A user message submitted to an active session with streaming enabled.",
@@ -42,7 +39,6 @@
       "stream": true
     }
   },
-
   "stream_chunk_event": {
     "$schema_ref": "events/stream-chunk.schema.json",
     "description": "A per-node state snapshot emitted as the knowledge_search node completes.",
@@ -68,7 +64,6 @@
       "timestamp": 1749340800000
     }
   },
-
   "verify_otp_request": {
     "$schema_ref": "actions/verify-otp.schema.json#/$defs/Request",
     "description": "A one-time code submitted in reply to an otp_verification_required event.",
@@ -79,7 +74,6 @@
       "code": "123456"
     }
   },
-
   "otp_verification_required_event": {
     "$schema_ref": "events/otp-verification-required.schema.json",
     "description": "Emitted when the auth gate refuses an end_user tool on an unverified session and a host OTP service is installed.",
@@ -91,14 +85,15 @@
         "data": {
           "toolId": "pay_invoice",
           "actionDescription": "Verify your identity to continue using 'pay_invoice'.",
-          "availableChannels": ["email"],
+          "availableChannels": [
+            "email"
+          ],
           "authLevel": "end_user"
         }
       },
       "timestamp": 1749340801000
     }
   },
-
   "otp_sent_event": {
     "$schema_ref": "events/otp-sent.schema.json",
     "description": "Acknowledgement that a code was dispatched to the caller's email.",
@@ -115,7 +110,6 @@
       "timestamp": 1749340801500
     }
   },
-
   "otp_verified_event": {
     "$schema_ref": "events/otp-verified.schema.json",
     "description": "Emitted when a verify_otp attempt succeeds; the session is now identity-verified.",
@@ -131,7 +125,6 @@
       "timestamp": 1749340802000
     }
   },
-
   "otp_invalid_event": {
     "$schema_ref": "events/otp-invalid.schema.json",
     "description": "Emitted when a verify_otp attempt is rejected, carrying the remaining attempt count.",
@@ -149,7 +142,6 @@
       "timestamp": 1749340802500
     }
   },
-
   "eventual_response_event": {
     "$schema_ref": "events/eventual-response.schema.json",
     "description": "Terminal response event for a completed send_message turn.",
@@ -182,7 +174,6 @@
       "timestamp": 1749340803500
     }
   },
-
   "eventual_response_with_citations_event": {
     "$schema_ref": "events/eventual-response.schema.json",
     "description": "Terminal response for a knowledge-grounded turn that carries the sources it used. One citation is a GitHub-sourced doc (with a blob url), the other a local doc with no web source (url omitted).",
@@ -219,6 +210,81 @@
         }
       },
       "timestamp": 1749340806700
+    }
+  },
+  "identity_intake_required_event": {
+    "$schema_ref": "events/identity-intake-required.schema.json",
+    "description": "Mid-turn identity-intake prompt for a session that declared the identity_form capability.",
+    "instance": {
+      "type": "identity_intake_required",
+      "requestId": "req-a1b2c3d4-0004",
+      "data": {
+        "requestId": "req-a1b2c3d4-0004",
+        "data": {
+          "fields": [
+            {
+              "key": "name",
+              "required": false
+            },
+            {
+              "key": "email",
+              "required": true,
+              "label": "Work email"
+            },
+            {
+              "key": "phone",
+              "required": false
+            }
+          ],
+          "reason": "to send you the quote"
+        }
+      },
+      "timestamp": 1749340807000
+    }
+  },
+  "submit_identity_intake_request": {
+    "$schema_ref": "actions/submit-identity-intake.schema.json#/$defs/Request",
+    "description": "Resume a parked intake turn with the visitor's values.",
+    "instance": {
+      "action": "submit_identity_intake",
+      "requestId": "req-a1b2c3d4-0004",
+      "sessionId": "22222222-2222-2222-2222-222222222222",
+      "values": {
+        "name": "Alice Example",
+        "email": "alice@example.com",
+        "phone": "+15551234567"
+      }
+    }
+  },
+  "submit_identity_intake_declined_request": {
+    "$schema_ref": "actions/submit-identity-intake.schema.json#/$defs/Request",
+    "description": "Resume a parked intake turn with a decline; the agent handles it gracefully.",
+    "instance": {
+      "action": "submit_identity_intake",
+      "requestId": "req-a1b2c3d4-0004",
+      "sessionId": "22222222-2222-2222-2222-222222222222",
+      "declined": true
+    }
+  },
+  "identity_intake_invalid_event": {
+    "$schema_ref": "events/identity-intake-invalid.schema.json",
+    "description": "Server-side validation rejected a submit; the turn stays parked for a resubmit.",
+    "instance": {
+      "type": "identity_intake_invalid",
+      "requestId": "req-a1b2c3d4-0004",
+      "data": {
+        "requestId": "req-a1b2c3d4-0004",
+        "data": {
+          "errors": [
+            {
+              "field": "email",
+              "message": "must be a valid email address"
+            }
+          ],
+          "message": "Some fields need attention."
+        }
+      },
+      "timestamp": 1749340808000
     }
   }
 }

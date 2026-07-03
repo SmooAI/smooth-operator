@@ -17,6 +17,7 @@ use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
 };
+use smooth_operator::identity_intake::{validate_intake, IntakeOutcome, IntakeValues};
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::{LlmClient, LlmConfig};
 
@@ -77,6 +78,9 @@ pub async fn handle_frame(
         }
         Some("verify_otp") => {
             handle_verify_otp(state, &parsed, request_id, sink).await;
+        }
+        Some("submit_identity_intake") => {
+            handle_submit_identity_intake(state, &parsed, request_id, sink);
         }
         Some(other) => {
             let _ = sink.send(protocol::error(
@@ -308,16 +312,32 @@ async fn handle_create_session(
         updated_at: now,
     };
 
+    // Client render capabilities (`supports`, per
+    // create-conversation-session.schema.json). `identity_form` means this
+    // client can render the structured identity-intake form, so mid-turn
+    // `identity_intake_required` events may be emitted; sessions without it get
+    // the conversational intake fallback. Unknown values are ignored.
+    let supports_identity_form = parsed
+        .get("supports")
+        .and_then(Value::as_array)
+        .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("identity_form")));
+
     // Stash the caller's OTP contact on the session so the end_user auth-gate
     // flow can offer verification without a storage roundtrip (mirrors how the
     // workflow step pointer lives in session metadata). The reference create path
     // captures only an email; a host that also captures a phone would add
-    // `contactPhone` here for an SMS channel.
-    let session_metadata = user_email.as_ref().map(|email| {
+    // `contactPhone` here for an SMS channel. The `identity_form` capability
+    // rides the same metadata map.
+    let session_metadata = {
         let mut meta = std::collections::HashMap::new();
-        meta.insert("contactEmail".to_string(), Value::from(email.clone()));
-        meta
-    });
+        if let Some(email) = user_email.as_ref() {
+            meta.insert("contactEmail".to_string(), Value::from(email.clone()));
+        }
+        if supports_identity_form {
+            meta.insert("supportsIdentityForm".to_string(), Value::from(true));
+        }
+        (!meta.is_empty()).then_some(meta)
+    };
 
     let session = Session {
         session_id: session_id.clone(),
@@ -657,6 +677,29 @@ async fn handle_send_message(
         }
     });
 
+    // Identity intake: always wired in the WS server (the primitive is on; the
+    // per-agent `enabled_tools` allow-list can restrict it). The form path is
+    // selected by the capability the client declared at create-session.
+    let identity_intake = Some(crate::runner::IdentityIntakeConfig {
+        session_id: session.session_id.clone(),
+        form_supported: state.session_supports_identity_form(session_id),
+        register: {
+            let state = state.clone();
+            Arc::new(move |sid: &str, fields, responder| {
+                state.register_intake(sid, fields, responder);
+            })
+        },
+        clear: {
+            let state = state.clone();
+            Arc::new(move |sid: &str| state.clear_intake(sid))
+        },
+        attach: {
+            let state = state.clone();
+            let sid = session.session_id.clone();
+            Arc::new(move |values| state.attach_session_identity(&sid, values))
+        },
+    });
+
     // The reference server is single-org; a multi-tenant host derives this from
     // auth. Used to (a) resolve the org's persona override (SEAM 2) and (b)
     // scope the host's tool provider (SEAM 1).
@@ -785,6 +828,9 @@ async fn handle_send_message(
                     &crate::reranker::RerankerConfig::from_server_config(&state_for_turn.config),
                 ),
                 confirmation,
+                // Channel-normalized identity intake (form park on capable
+                // clients; conversational fallback otherwise).
+                identity_intake,
                 // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
                 tool_provider,
                 // SEAM 2 — resolved per-org persona (None ⇒ const prompt).
@@ -1046,6 +1092,162 @@ async fn offer_otp(
             ));
         }
     }
+}
+
+/// `submit_identity_intake` — resume a turn parked on identity intake.
+///
+/// Per `spec/actions/submit-identity-intake.schema.json` the client sends
+/// `{ action, sessionId, requestId, values?, declined? }` in reply to an
+/// `identity_intake_required` event. Validation is **server-side** against the
+/// fields the parked `request_identity_intake` asked for (required-ness, email
+/// shape, E.164 phone):
+///   - invalid → an `identity_intake_invalid` event with per-field errors; the
+///     turn STAYS parked so the form can resubmit (mirrors `otp_invalid`);
+///   - valid → the identity is attached to the session (metadata `userName` /
+///     `contactEmail` / `contactPhone` — the OTP contact keys), the parked tool
+///     resumes with the validated payload, and an `immediate_response` acks;
+///   - `declined: true` → the tool resumes with a declined payload (the agent
+///     handles it gracefully).
+///
+/// Taking the responder only on resolution makes a duplicate submit a no-op
+/// (`NO_PENDING_INTAKE`).
+fn handle_submit_identity_intake(
+    state: &AppState,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    // requestId is load-bearing (it echoes the originating
+    // identity_intake_required); require it.
+    let Some(request_id) = request_id else {
+        let _ = sink.send(protocol::error(
+            None,
+            "VALIDATION_ERROR",
+            "submit_identity_intake requires a 'requestId'",
+        ));
+        return;
+    };
+
+    let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "VALIDATION_ERROR",
+            "submit_identity_intake requires a 'sessionId'",
+        ));
+        return;
+    };
+
+    // Peek the pending intake's fields WITHOUT consuming the park — an invalid
+    // submit must leave the turn parked for a resubmit.
+    let Some(fields) = state.intake_fields(session_id) else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "NO_PENDING_INTAKE",
+            &format!("no identity intake is awaiting submission for session '{session_id}'"),
+        ));
+        return;
+    };
+
+    // Decline path: resume the tool with a declined payload.
+    if parsed
+        .get("declined")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        if resolve_intake(state, session_id, request_id, IntakeOutcome::Declined, sink) {
+            let _ = sink.send(protocol::immediate_response(
+                Some(request_id),
+                200,
+                "Identity intake declined",
+                json!({ "sessionId": session_id, "declined": true }),
+            ));
+        }
+        return;
+    }
+
+    // Values path: parse + validate server-side.
+    let values: IntakeValues = match parsed.get("values") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(values) => values,
+            Err(e) => {
+                let _ = sink.send(protocol::error(
+                    Some(request_id),
+                    "VALIDATION_ERROR",
+                    &format!("invalid 'values' shape: {e}"),
+                ));
+                return;
+            }
+        },
+        None => {
+            let _ = sink.send(protocol::error(
+                Some(request_id),
+                "VALIDATION_ERROR",
+                "submit_identity_intake requires 'values' (or 'declined': true)",
+            ));
+            return;
+        }
+    };
+
+    match validate_intake(&fields, &values) {
+        Err(errors) => {
+            // Retryable: the turn stays parked; the client re-renders the form
+            // with the per-field errors (never a terminal `error` event).
+            let _ = sink.send(protocol::identity_intake_invalid(
+                request_id,
+                &errors,
+                "Some fields need attention.",
+            ));
+        }
+        Ok(validated) => {
+            // Attach the identity to the session (same keys the pre-chat /
+            // create path stashes; feeds the OTP contact seam), then resume.
+            state.attach_session_identity(session_id, &validated);
+            if resolve_intake(
+                state,
+                session_id,
+                request_id,
+                IntakeOutcome::Submitted(validated.clone()),
+                sink,
+            ) {
+                let _ = sink.send(protocol::immediate_response(
+                    Some(request_id),
+                    200,
+                    "Identity intake submitted",
+                    json!({ "sessionId": session_id, "values": validated }),
+                ));
+            }
+        }
+    }
+}
+
+/// Take the pending intake responder for `session_id` and feed it `outcome`.
+/// Returns `true` when the parked turn was resumed; emits `NO_PENDING_INTAKE`
+/// and returns `false` when the park raced away (duplicate submit, or the
+/// parked turn ended before the submit landed).
+fn resolve_intake(
+    state: &AppState,
+    session_id: &str,
+    request_id: &str,
+    outcome: IntakeOutcome,
+    sink: &UnboundedSender<Value>,
+) -> bool {
+    let Some(responder) = state.take_intake(session_id) else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "NO_PENDING_INTAKE",
+            &format!("no identity intake is awaiting submission for session '{session_id}'"),
+        ));
+        return false;
+    };
+    if responder.send(outcome).is_err() {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "NO_PENDING_INTAKE",
+            &format!("the turn awaiting intake for session '{session_id}' is no longer active"),
+        ));
+        return false;
+    }
+    true
 }
 
 /// `verify_otp` — validate a submitted OTP code and, on success, mark the

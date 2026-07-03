@@ -226,6 +226,57 @@ pub fn otp_verification_required(
     })
 }
 
+/// `identity_intake_required` — emitted mid-turn when the agent's
+/// `request_identity_intake` tool parks awaiting the visitor's details on a
+/// session that declared the `identity_form` capability. Wire shape matches
+/// `spec/events/identity-intake-required.schema.json` (double-nested
+/// `data.data.{ fields, reason }`). The client renders the form and replies
+/// with a `submit_identity_intake` action carrying the same `requestId`.
+#[must_use]
+pub fn identity_intake_required(
+    request_id: &str,
+    fields: &[smooth_operator::IntakeField],
+    reason: &str,
+) -> Value {
+    json!({
+        "type": "identity_intake_required",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {
+                "fields": fields,
+                "reason": reason,
+            },
+        },
+        "timestamp": now_ms(),
+    })
+}
+
+/// `identity_intake_invalid` — emitted when a `submit_identity_intake` carried
+/// values that failed server-side validation. The turn REMAINS parked; the
+/// client re-renders the form with the per-field `errors`. Mirrors
+/// `otp_invalid` (retryable, never a terminal `error`). Wire shape matches
+/// `spec/events/identity-intake-invalid.schema.json`.
+#[must_use]
+pub fn identity_intake_invalid(
+    request_id: &str,
+    errors: &[smooth_operator::IntakeFieldError],
+    message: &str,
+) -> Value {
+    json!({
+        "type": "identity_intake_invalid",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {
+                "errors": errors,
+                "message": message,
+            },
+        },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `otp_sent` — acknowledgement that a code was dispatched to the caller. Wire
 /// shape matches `spec/events/otp-sent.schema.json`. `masked_destination` is a
 /// partially masked address safe to display (e.g. `j***@example.com`).
@@ -536,6 +587,56 @@ mod tests {
             .unwrap()
             .contains("pay_invoice"));
         assert!(ev["timestamp"].is_i64());
+    }
+
+    #[test]
+    fn identity_intake_required_matches_spec_shape() {
+        let fields = vec![
+            smooth_operator::IntakeField {
+                key: smooth_operator::IntakeFieldKey::Email,
+                required: true,
+                label: Some("Work email".into()),
+            },
+            smooth_operator::IntakeField {
+                key: smooth_operator::IntakeFieldKey::Phone,
+                required: false,
+                label: None,
+            },
+        ];
+        let ev = identity_intake_required("r1", &fields, "to send you the quote");
+        // Per spec/events/identity-intake-required.schema.json.
+        assert_eq!(ev["type"], "identity_intake_required");
+        assert_eq!(ev["requestId"], "r1");
+        assert_eq!(ev["data"]["requestId"], "r1");
+        let inner = &ev["data"]["data"];
+        assert_eq!(inner["reason"], "to send you the quote");
+        assert_eq!(inner["fields"][0]["key"], "email");
+        assert_eq!(inner["fields"][0]["required"], true);
+        assert_eq!(inner["fields"][0]["label"], "Work email");
+        assert_eq!(inner["fields"][1]["key"], "phone");
+        assert!(
+            inner["fields"][1].get("label").is_none(),
+            "absent label is omitted, not null"
+        );
+        assert!(ev["timestamp"].is_i64());
+    }
+
+    #[test]
+    fn identity_intake_invalid_matches_spec_shape() {
+        let errors = vec![smooth_operator::IntakeFieldError {
+            field: smooth_operator::IntakeFieldKey::Email,
+            message: "must be a valid email address".into(),
+        }];
+        let ev = identity_intake_invalid("r1", &errors, "Some fields need attention.");
+        assert_eq!(ev["type"], "identity_intake_invalid");
+        assert_eq!(ev["data"]["requestId"], "r1");
+        let inner = &ev["data"]["data"];
+        assert_eq!(inner["message"], "Some fields need attention.");
+        assert_eq!(inner["errors"][0]["field"], "email");
+        assert!(inner["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("valid email"));
     }
 
     #[test]
