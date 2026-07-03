@@ -1,5 +1,7 @@
-github.com/SmooAI/smooth-operator-core/go v0.0.0-20260624141044-22905baca6a1 h1:I0/E8FdGus3KofohvRpK17xm57QixIq3gJxzOqWpNUY=
-github.com/SmooAI/smooth-operator-core/go v0.0.0-20260624141044-22905baca6a1/go.mod h1:0ApjGdU3zPGn2wN1Rf4al4iu43RR8buHsHYiAwBIr6U=
+github.com/BurntSushi/toml v1.4.0 h1:kuoIxZQy2WRRk1pttg9asf+WVv6tWQuBNVmK8+nqPr0=
+github.com/BurntSushi/toml v1.4.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
+github.com/SmooAI/smooth-operator-core/go v0.0.0-20260703120908-c922f7b69a2c h1:IUu801adC3HT9308D7vrwVYYwOYR0OmAkvW2CGKLcaE=
+github.com/SmooAI/smooth-operator-core/go v0.0.0-20260703120908-c922f7b69a2c/go.mod h1:JoJNR4TrGcCGBDBHi4n7Oy6OSz3yYicZyWuadEs7x9c=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=

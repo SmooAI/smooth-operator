@@ -215,9 +215,19 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	// Per-turn recorder: the auth gate writes the end_user tool it refused for lack of a
 	// verified session, so after the turn we can offer OTP. th-8078dd.
 	refusal := &otpRefusal{}
+	// SEP extension hosting (th-829d9f): discover + spawn allowlisted extensions for THIS
+	// turn and fold their tools into the base set BEFORE filtering, so an <ext>.<tool>
+	// composes with the SMOODEV-590 enabled_tools / authLevel gate exactly like a built-in
+	// tool. Default deny (empty SMOOTH_EXTENSIONS_ALLOW) → nil host, zero overhead, behavior
+	// unchanged. The host is closed when the turn goroutine finishes (below).
+	extTurn := buildExtensionHost(ctx, frame.SessionID, requestID, sink, d.confirmations)
+	baseTools := d.tools
+	if extTurn != nil {
+		baseTools = append(append([]core.Tool{}, d.tools...), extTurn.Tools()...)
+	}
 	// Restrict to the agent's enabled tools, then wrap survivors with the per-agent auth
 	// gate + per-tool config delivery (enforced at execution).
-	effectiveTools := gateTools(filterTools(d.tools, agentConfig), agentConfig, d.authRequiringTools, effectiveAuth, session.ConversationID, refusal)
+	effectiveTools := gateTools(filterTools(baseTools, agentConfig), agentConfig, d.authRequiringTools, effectiveAuth, session.ConversationID, refusal)
 	var workflow *ConversationWorkflow
 	if agentConfig != nil {
 		workflow = agentConfig.Workflow
@@ -243,6 +253,9 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	d.turns.Add(1)
 	go func() {
 		defer d.turns.Done()
+		// Tear the extension host down when the turn finishes: unpark any hung
+		// ui/confirm and shut the subprocesses down. No-op when no host was built.
+		defer extTurn.Close(ctx)
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel)
 		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		if err != nil {
