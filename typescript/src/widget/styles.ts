@@ -168,6 +168,35 @@ export function buildStyles(theme: Required<ChatWidgetTheme>, mode: ChatWidgetMo
 
 /* Sources panel — rendered under an assistant bubble whose terminal
    eventual_response carried citations. */
+.prompt {
+    align-self: flex-start;
+    max-width: 80%;
+    margin-top: -2px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.panel.fullpage .prompt { max-width: 100%; }
+.prompt-text { font-size: 13.5px; color: var(--sac-text); opacity: 0.9; }
+.prompt-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.prompt-button {
+    cursor: pointer;
+    border: 1px solid var(--sac-border);
+    background: var(--sac-bg);
+    color: var(--sac-text);
+    border-radius: 999px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.prompt-button:hover {
+    background: var(--sac-primary);
+    color: var(--sac-primary-text);
+    border-color: var(--sac-primary);
+}
+.prompt-answered { font-size: 12.5px; opacity: 0.7; font-style: italic; }
+
 .sources {
     align-self: flex-start;
     max-width: 80%;

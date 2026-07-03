@@ -15,13 +15,35 @@
  *
  * The controller is UI-agnostic: it emits typed events and the view renders them.
  */
-import { ProtocolError, SmoothAgentClient } from '../client.js';
+import { ProtocolError, SmoothAgentClient, type SmoothAgentClientOptions } from '../client.js';
 import type { Citation } from '../types.js';
 import type { ChatWidgetConfig } from './config.js';
 
 export type { Citation };
 
 export type Role = 'user' | 'assistant';
+
+/**
+ * A chat-native interactive prompt rendered as buttons inside an assistant
+ * bubble. Backs SEP `ui/confirm` and `ui/select`: the agent (or an extension it
+ * hosts) pauses the turn asking for a choice, and the click flows back as an
+ * action frame that resumes the same turn.
+ *
+ * `confirm` projects the protocol's `write_confirmation_required` event (Yes/No
+ * → `confirm_tool_action`); `select` projects a `ui/select` (one option → its
+ * value). Each option's `value` is what the resume action carries.
+ */
+export interface ChatPrompt {
+    /** The turn's `requestId` — the resume action must echo it. */
+    requestId: string;
+    kind: 'confirm' | 'select';
+    /** Human-readable prompt text (the confirmation description / select prompt). */
+    text: string;
+    /** The buttons. For `confirm`: Yes (`true`) / No (`false`). */
+    options: Array<{ label: string; value: string | boolean }>;
+    /** Set once the user picks — disables the buttons and records the choice. */
+    answered?: string;
+}
 
 export interface ChatMessage {
     id: string;
@@ -37,6 +59,11 @@ export interface ChatMessage {
      * defensively off the terminal event — see {@link extractCitations}.
      */
     citations?: Citation[];
+    /**
+     * A pending (or answered) chat-native button prompt. Present only on the
+     * bubble that carries a `write_confirmation_required` / `ui/select` request.
+     */
+    prompt?: ChatPrompt;
 }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'ready' | 'error' | 'closed';
@@ -94,10 +121,19 @@ export class ConversationController {
     private readonly messages: ChatMessage[] = [];
     private status: ConnectionStatus = 'idle';
     private seq = 0;
+    /**
+     * requestId → resolver for a pending button prompt. The turn loop parks on
+     * the promise; {@link answerPrompt} (called by the view on a button click)
+     * resolves it and the loop resumes consuming the (now un-paused) stream.
+     */
+    private readonly pendingPrompts = new Map<string, (choice: string | boolean) => void>();
+    /** Extra client options — a test seam for injecting a mock transport. */
+    private readonly clientOptions?: Partial<SmoothAgentClientOptions>;
 
-    constructor(config: ChatWidgetConfig, events: ConversationEvents) {
+    constructor(config: ChatWidgetConfig, events: ConversationEvents, clientOptions?: Partial<SmoothAgentClientOptions>) {
         this.config = config;
         this.events = events;
+        this.clientOptions = clientOptions;
     }
 
     get connectionStatus(): ConnectionStatus {
@@ -124,7 +160,7 @@ export class ConversationController {
         if (this.status === 'connecting' || this.status === 'ready') return;
         this.setStatus('connecting');
         try {
-            this.client = new SmoothAgentClient({ url: this.config.endpoint });
+            this.client = new SmoothAgentClient({ url: this.config.endpoint, ...this.clientOptions });
             await this.client.connect();
             const session = await this.client.createConversationSession({
                 agentId: this.config.agentId,
@@ -171,6 +207,22 @@ export class ConversationController {
                         assistant.text += token;
                         this.emitMessages();
                     }
+                } else if (event.type === 'write_confirmation_required') {
+                    // The turn is paused server-side awaiting a confirm_tool_action.
+                    // Render Yes/No buttons and block the loop until the user clicks
+                    // (or the transport drops). The click sends the resume action
+                    // via answerPrompt(); the stream then flows back into `turn`.
+                    const description = event.data?.data?.actionDescription ?? 'Approve this action?';
+                    const approved = await this.awaitPromptChoice(turn.requestId, {
+                        requestId: turn.requestId,
+                        kind: 'confirm',
+                        text: String(description),
+                        options: [
+                            { label: 'Yes', value: true },
+                            { label: 'No', value: false },
+                        ],
+                    });
+                    this.client?.confirmToolAction({ sessionId: this.sessionId!, requestId: turn.requestId, approved: approved === true });
                 }
             }
 
@@ -202,8 +254,48 @@ export class ConversationController {
         }
     }
 
+    /**
+     * Attach a pending `prompt` to the current assistant bubble and return a
+     * promise that resolves when the user clicks a button (via
+     * {@link answerPrompt}). The bubble carrying the prompt is the last
+     * assistant message.
+     */
+    private awaitPromptChoice(requestId: string, prompt: ChatPrompt): Promise<string | boolean> {
+        const last = this.messages[this.messages.length - 1];
+        if (last && last.role === 'assistant') {
+            last.prompt = prompt;
+            last.streaming = false; // stop the typing cursor while we wait
+        }
+        this.emitMessages();
+        return new Promise<string | boolean>((resolve) => {
+            this.pendingPrompts.set(requestId, resolve);
+        });
+    }
+
+    /**
+     * Resolve a pending button prompt — called by the view when the user clicks
+     * an option. Marks the prompt answered (buttons disable, choice sticks) and
+     * unblocks the turn loop. No-op if the prompt was already answered.
+     */
+    answerPrompt(requestId: string, value: string | boolean): void {
+        const resolve = this.pendingPrompts.get(requestId);
+        if (!resolve) return;
+        this.pendingPrompts.delete(requestId);
+        const msg = this.messages.find((m) => m.prompt?.requestId === requestId);
+        if (msg?.prompt) {
+            msg.prompt.answered = msg.prompt.options.find((o) => o.value === value)?.label ?? String(value);
+        }
+        this.emitMessages();
+        resolve(value);
+    }
+
     /** Tear down the underlying client. */
     disconnect(): void {
+        // Unblock any parked prompt so a pending turn loop doesn't hang forever.
+        for (const [requestId, resolve] of this.pendingPrompts) {
+            this.pendingPrompts.delete(requestId);
+            resolve(false);
+        }
         this.client?.disconnect('widget closed');
         this.client = null;
         this.sessionId = null;
