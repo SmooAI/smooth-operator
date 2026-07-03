@@ -54,7 +54,7 @@ impl PgAgentConfigResolver {
 
         let row = match client
             .query_opt(
-                "SELECT instructions, personality, greeting, conversation_workflow, tool_config, visibility \
+                "SELECT instructions, personality, greeting, conversation_workflow, tool_config, extension_config, visibility \
                  FROM agents WHERE id = $1",
                 &[&id],
             )
@@ -75,6 +75,12 @@ impl PgAgentConfigResolver {
         let workflow: Option<serde_json::Value> =
             row.try_get("conversation_workflow").ok().flatten();
         let tool_config: Option<serde_json::Value> = row.try_get("tool_config").ok().flatten();
+        // `try_get(...).ok().flatten()` also degrades a standalone deploy whose
+        // `agents` table predates the `extension_config` column to `None` — the
+        // column-absent read errors, `.ok()` swallows it, and we get "no per-agent
+        // extension list" (backward-compatible; see `enabled_extensions` handling).
+        let extension_config: Option<serde_json::Value> =
+            row.try_get("extension_config").ok().flatten();
         let visibility: Option<String> = row.try_get("visibility").ok().flatten();
 
         let config = AgentBehaviorConfig::from_row_values(
@@ -83,13 +89,20 @@ impl PgAgentConfigResolver {
             greeting,
             workflow,
             tool_config,
+            extension_config,
             visibility,
         );
-        if config.is_empty() {
-            None
-        } else {
-            Some(config)
-        }
+        // Discriminator is ROW EXISTENCE, not `is_empty()`: `query_opt`'s `None`
+        // (handled above via `row?`) is the only "no per-agent config" case. A row
+        // that exists but carries all-NULL config columns still yields `Some(empty)`
+        // — this is the SEP fail-closed contract (SMOODEV-2259): a resolved agent
+        // that lists no `enabled_extensions` must load ZERO extensions, so it must
+        // be distinguishable from "no resolver / agent unknown" (which fails open to
+        // the server allowlist). Returning `Some(empty)` is behavior-preserving for
+        // the persona/tool/workflow seams — each already treats an empty config the
+        // same as `None` (`system_prompt()`/`enabled_tool_ids()` return `None`,
+        // workflow is absent), so only the extension gate observes the difference.
+        Some(config)
     }
 }
 

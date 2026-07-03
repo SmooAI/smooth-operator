@@ -78,6 +78,19 @@ struct ConfirmUiProvider {
     register: RegisterConfirmation,
 }
 
+/// Whether an extension may load this turn: it must be in the server allowlist
+/// AND pass the per-agent gate. The per-agent gate (SMOODEV-2259):
+/// - `None` ⇒ no per-agent config resolved (bare/standalone operator) ⇒
+///   unrestricted, preserving the pre-per-agent behavior (server allowlist only);
+/// - `Some(ids)` ⇒ a per-agent config WAS resolved ⇒ the extension must ALSO be in
+///   `ids`. `Some(&[])` (a resolved agent that enables nothing) therefore admits
+///   nothing = **fail-closed**. Extensions can intercept & mutate tool calls, so a
+///   public agent must never silently inherit one from the server allowlist.
+fn extension_allowed(name: &str, allow: &[String], enabled_extensions: Option<&[String]>) -> bool {
+    allow.iter().any(|a| a == name)
+        && enabled_extensions.is_none_or(|ids| ids.iter().any(|id| id == name))
+}
+
 /// Parse `SMOOTH_EXTENSIONS_ALLOW` into a set of allowed extension names
 /// (comma-separated, trimmed, empties dropped). Absent/blank ⇒ empty ⇒ deny all.
 fn parse_allowlist(raw: Option<&str>) -> Vec<String> {
@@ -144,6 +157,7 @@ pub async fn build_extension_host(
     session_id: &str,
     request_id: &str,
     sink: UnboundedSender<Value>,
+    enabled_extensions: Option<&[String]>,
 ) -> Option<ExtensionTurn> {
     // Trust = a default-deny env allowlist (the server has no interactive prompt).
     // `SMOOTH_EXTENSIONS_ALLOW` comma-separated names; empty/unset ⇒ never build.
@@ -171,9 +185,9 @@ pub async fn build_extension_host(
     let allowed: Vec<DiscoveredExtension> = discovered
         .into_iter()
         .filter(|ext| {
-            let ok = allow.iter().any(|a| a == &ext.manifest.name);
+            let ok = extension_allowed(&ext.manifest.name, &allow, enabled_extensions);
             if !ok {
-                tracing::info!(name = %ext.manifest.name, "sep: skipping extension not in SMOOTH_EXTENSIONS_ALLOW");
+                tracing::info!(name = %ext.manifest.name, "sep: skipping extension — not in SMOOTH_EXTENSIONS_ALLOW ∩ per-agent enabled extensions");
             }
             ok
         })
@@ -272,6 +286,38 @@ mod tests {
             parse_allowlist(Some(" todo , gate ")),
             vec!["todo".to_string(), "gate".to_string()]
         );
+    }
+
+    #[test]
+    fn extension_allowed_intersects_server_allowlist_with_per_agent_ids() {
+        let allow = vec!["a".to_string(), "b".to_string()];
+
+        // No per-agent config resolved (bare/standalone operator) ⇒ unrestricted:
+        // the server allowlist alone decides (backward-compatible).
+        assert!(extension_allowed("a", &allow, None));
+        assert!(extension_allowed("b", &allow, None));
+        assert!(
+            !extension_allowed("c", &allow, None),
+            "not in server allowlist"
+        );
+
+        // A resolved agent that enables only `a`: server allowlist ∩ {a} = {a}.
+        let only_a = vec!["a".to_string()];
+        assert!(extension_allowed("a", &allow, Some(&only_a)));
+        assert!(
+            !extension_allowed("b", &allow, Some(&only_a)),
+            "b is allowed by server but NOT enabled per-agent"
+        );
+
+        // A resolved agent that enables NOTHING (empty) ⇒ fail-closed: nothing
+        // loads even though the server allowlist is non-empty.
+        let none_enabled: Vec<String> = vec![];
+        assert!(!extension_allowed("a", &allow, Some(&none_enabled)));
+        assert!(!extension_allowed("b", &allow, Some(&none_enabled)));
+
+        // A per-agent id NOT in the server allowlist still can't load (intersection).
+        let wants_c = vec!["c".to_string()];
+        assert!(!extension_allowed("c", &allow, Some(&wants_c)));
     }
 
     #[tokio::test]
