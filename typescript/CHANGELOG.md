@@ -1,5 +1,23 @@
 # @smooai/smooth-operator
 
+## 1.11.1
+
+### Patch Changes
+
+- 940560b: Add the SEP TypeScript extension SDK — Phase 1 (the tool path).
+
+  New published package `@smooai/smooth-extension-sdk`: build Smooth Extension Protocol
+  extensions in TypeScript. `defineExtension`/`defineTool` (zod v4 via `z.toJSONSchema`, with
+  raw JSON-Schema / TypeBox pass-through), a symmetric JSON-RPC 2.0 `Peer`, an ndjson stdio
+  transport (plus an in-memory `linkedPair`), `createTestHost` for driving an extension
+  in-process, and `runConformance` to replay the shared fixtures against a real extension
+  subprocess. Ships the `hello` demo extension (`hello.greet` — zod schema, streamed
+  `tool/update` progress, `$/cancel` cancellation). Wired into the TypeScript CI lane.
+
+  Extends `spec/extension/conformance/fixtures.json` for the tool path: `is_error` and
+  `details` tool results, a message-only `tool/update`, and invalid fixtures (missing
+  `content`, out-of-range `progress`).
+
 ## 1.11.0
 
 ### Minor Changes
@@ -8,9 +26,9 @@
 
   New `spec/extension/` tree: `envelope.md` (JSON-RPC 2.0 over ndjson framing, method
   catalog, error codes, context tiers, deferred WS binding), `methods/*.schema.json` (draft
-  2020-12, snake_case: initialize, shutdown, ping, event, hook, tool/execute, tool/update,
-  $/cancel, command/execute, registry/update, tools/set_active, session/_, exec/run,
-  ui/request, kv/_, bus/publish, log, plus the JSON-RPC frame envelope), and
+  2020-12, snake*case: initialize, shutdown, ping, event, hook, tool/execute, tool/update,
+  $/cancel, command/execute, registry/update, tools/set_active, session/*, exec/run,
+  ui/request, kv/\_, bus/publish, log, plus the JSON-RPC frame envelope), and
   `conformance/fixtures.json` (43 valid + 6 invalid instances) with the dependency-free
   `echo.mjs` demo extension. A new `extension-conformance.test.ts` validates every fixture
   against its schema, mirroring the existing operator-protocol conformance harness. SEP is a
