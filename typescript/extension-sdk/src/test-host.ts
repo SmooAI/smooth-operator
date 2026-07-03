@@ -37,6 +37,12 @@ export interface SessionCall {
     params: Record<string, unknown>;
 }
 
+/** A recorded ext→host `bus/publish` (Phase 8) the test can assert on. */
+export interface BusPublish {
+    topic: string;
+    payload?: unknown;
+}
+
 export interface CreateTestHostOptions {
     /** Answers `ui/request`. Default: reject every call with -32001 NoUI. */
     onUiRequest?: UiResponder;
@@ -84,6 +90,8 @@ export interface TestHost {
     oauthRefresh(provider: string, refreshToken: string, context?: Context): Promise<ProviderCredentials>;
     /** Every `session/*` request the extension made, in order — for assertions. */
     readonly sessionCalls: SessionCall[];
+    /** Every `bus/publish` (Phase 8) the extension made, in order. */
+    readonly busPublishes: BusPublish[];
     shutdown(): Promise<void>;
     close(): void;
 }
@@ -134,6 +142,13 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
             return {};
         });
     }
+    // Record ext→host `bus/publish` (Phase 8); a real host would fan it out.
+    const busPublishes: BusPublish[] = [];
+    host.setRequestHandler(method.BUS_PUBLISH, (params) => {
+        const p = (params ?? {}) as { topic?: string; payload?: unknown };
+        busPublishes.push({ topic: p.topic ?? '', ...(p.payload !== undefined ? { payload: p.payload } : {}) });
+        return {};
+    });
     hostT.start((frame) => host.receive(frame));
 
     return {
@@ -175,6 +190,7 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
             return host.request(method.COMMAND_COMPLETE, { command, context: context ?? DEFAULT_CONTEXT, partial });
         },
         sessionCalls,
+        busPublishes,
         ping() {
             return host.request<Record<string, unknown>>(method.PING, {});
         },

@@ -13,7 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
-const TEMPLATES = ['tool', 'permission-gate', 'command', 'provider-less'] as const;
+const TEMPLATES = ['tool', 'permission-gate', 'command', 'provider-less', 'provider'] as const;
 type Template = (typeof TEMPLATES)[number];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

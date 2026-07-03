@@ -69,7 +69,7 @@
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "set_widget" },
-            "widget": { "type": "object", "description": "Host-defined widget payload to render." }
+            "widget": { "type": "object", "description": "A Phase 8 render block (see `RenderBlock` in initialize.schema.json) — typically a `widget`-kind block for the interactive tier. Kept permissive here (SEP schemas carry no cross-file `$ref`s) so a frontend can render known kinds and fall back to the block's `text` for the rest." }
           }
         },
         {

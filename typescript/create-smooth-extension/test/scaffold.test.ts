@@ -27,7 +27,7 @@ describe('parseArgs', () => {
 });
 
 describe('scaffold', () => {
-    for (const template of ['tool', 'permission-gate', 'command', 'provider-less'] as const) {
+    for (const template of ['tool', 'permission-gate', 'command', 'provider-less', 'provider'] as const) {
         it(`generates a complete ${template} project`, () => {
             dir = mkdtempSync(join(tmpdir(), 'cse-'));
             const target = join(dir, 'proj');

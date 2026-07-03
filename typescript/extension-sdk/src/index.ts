@@ -9,9 +9,11 @@
  * `runConformance`.
  */
 export { defineExtension, defineTool, defineCommand, defineProvider, Extension } from './extension.js';
+export { render } from './render.js';
 export type {
     ExtensionSetup,
     SmoothApi,
+    EventsApi,
     ToolDef,
     ToolContext,
     ToolReturn,
@@ -29,7 +31,7 @@ export type {
     UiApi,
 } from './extension.js';
 export { createTestHost } from './test-host.js';
-export type { TestHost, CallToolOptions, CreateTestHostOptions, UiResponder } from './test-host.js';
+export type { TestHost, CallToolOptions, CreateTestHostOptions, UiResponder, BusPublish, SessionCall } from './test-host.js';
 export { runConformance, DEFAULT_SPEC_DIR } from './conformance.js';
 export type { ConformanceReport, ConformanceStep, RunConformanceOptions } from './conformance.js';
 export { toJsonSchema } from './schema.js';
@@ -38,12 +40,17 @@ export { Peer, RpcError } from './jsonrpc.js';
 export type { JsonRpcFrame } from './jsonrpc.js';
 export { stdioTransport, linkedPair } from './transport.js';
 export type { Transport } from './transport.js';
-export { PROTOCOL_VERSION, method, errorCode } from './protocol.js';
+export { PROTOCOL_VERSION, eventName, method, errorCode } from './protocol.js';
 export type {
     Context,
     InitializeParams,
     InitializeResult,
     Registrations,
+    MessageRendererRegistration,
+    RenderBlock,
+    Keybinding,
+    BusEventPayload,
+    WidgetKeyPayload,
     ToolRegistration,
     ToolExecuteParams,
     ToolExecuteResult,

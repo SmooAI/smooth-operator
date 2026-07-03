@@ -11,7 +11,7 @@
  * into them without breaking the tool path.
  */
 import { Peer } from './jsonrpc.js';
-import { PROTOCOL_VERSION, method } from './protocol.js';
+import { PROTOCOL_VERSION, eventName, method } from './protocol.js';
 import type {
     CommandCompleteParams,
     CommandCompleteResult,
@@ -26,6 +26,9 @@ import type {
     HookParams,
     InitializeParams,
     InitializeResult,
+    BusEventPayload,
+    MessageRendererRegistration,
+    RenderBlock,
     ProviderCompleteParams,
     ProviderCompleteResult,
     ProviderCredentials,
@@ -62,8 +65,22 @@ export interface UiApi {
     input(prompt: string, opts?: { default?: string }): Promise<UiRequestResult>;
     notify(message: string, level?: 'info' | 'warn' | 'error'): Promise<void>;
     setStatus(status: string): Promise<void>;
-    setWidget(widget: Record<string, unknown>): Promise<void>;
+    /** Render a Phase 8 render block. Use a `widget`-kind block (with keybindings)
+     *  for the interactive tier and re-call on each `widget/key` to re-render. */
+    setWidget(widget: RenderBlock): Promise<void>;
     setTitle(title: string): Promise<void>;
+}
+
+/**
+ * The inter-extension event bus (Phase 8), mirroring pi's `events`. `publish`
+ * fans a `{topic, payload}` out to every *other* extension subscribed to
+ * `bus/event`; `on` subscribes to one topic (a filtered `bus/event`). Requires
+ * the `bus` capability to publish and a `bus/event` events subscription (added
+ * automatically when you call `on`) to receive.
+ */
+export interface EventsApi {
+    publish(topic: string, payload?: unknown): void;
+    on(topic: string, handler: (payload: unknown, from: string) => void): void;
 }
 
 /** Build a [`UiApi`] that speaks `ui/request` over `peer`. */
@@ -275,6 +292,11 @@ export interface SmoothApi {
     registerShortcut(shortcut: ShortcutRegistration): void;
     /** Contribute an LLM provider to the host's model surface (Phase 7). */
     registerProvider(provider: ProviderDef): void;
+    /** Register a declarative custom-message renderer (Phase 8): a message `tag`
+     *  → render-block template with `{{path}}` placeholders. */
+    registerMessageRenderer(tag: string, template: RenderBlock): void;
+    /** The inter-extension event bus (Phase 8). */
+    readonly events: EventsApi;
     on(event: string, handler: EventHandler): void;
     log(level: 'debug' | 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
     /** The parsed value the host delivered for a declared flag (undefined before
@@ -302,6 +324,7 @@ export class Extension {
     private readonly shortcuts: ShortcutRegistration[] = [];
     private readonly providers = new Map<string, ProviderDef>();
     private readonly events = new Map<string, EventHandler[]>();
+    private readonly messageRenderers: MessageRendererRegistration[] = [];
     private name = 'extension';
     private version = '0.0.0';
     /** Set once connected so `log()` before connect is a safe no-op. */
@@ -339,6 +362,29 @@ export class Extension {
             },
             registerProvider: (provider) => {
                 this.providers.set(provider.name, provider);
+            },
+            registerMessageRenderer: (tag, template) => {
+                this.messageRenderers.push({ tag, template });
+            },
+            get events(): EventsApi {
+                return {
+                    publish: (topic, payload) => {
+                        // A request (not a notification) so it reaches the host's
+                        // bus/publish handler; fire-and-forget — we don't await it.
+                        void self.live?.request(method.BUS_PUBLISH, { topic, ...(payload !== undefined ? { payload } : {}) });
+                    },
+                    on: (topic, handler) => {
+                        // Subscribing to a topic is a filtered `bus/event` observe
+                        // subscription; registering it puts `bus/event` in our
+                        // subscriptions so the host delivers the fanout.
+                        const list = self.events.get(eventName.BUS_EVENT) ?? [];
+                        list.push((payload) => {
+                            const p = payload as BusEventPayload | undefined;
+                            if (p && p.topic === topic) handler(p.payload, p.from);
+                        });
+                        self.events.set(eventName.BUS_EVENT, list);
+                    },
+                };
             },
             on: (event, handler) => {
                 const list = this.events.get(event) ?? [];
@@ -412,6 +458,9 @@ export class Extension {
         // Only observe events go in `subscriptions` — hook names are intercepts
         // the host always calls, not events it filters by subscription.
         const subscriptions = [...this.events.keys()].filter((name) => !HOOK_NAMES.has(name));
+        // Declare the hooks we handle (Phase 8) so the host can skip the per-turn
+        // `context` hook when nobody handles it.
+        const hooks = [...this.events.keys()].filter((name) => HOOK_NAMES.has(name));
         const providers: ProviderRegistration[] = [...this.providers.values()].map((p) => ({
             name: p.name,
             ...(p.baseUrl ? { base_url: p.baseUrl } : {}),
@@ -429,6 +478,8 @@ export class Extension {
                 ...(flags.length ? { flags } : {}),
                 ...(this.shortcuts.length ? { shortcuts: this.shortcuts } : {}),
                 ...(providers.length ? { providers } : {}),
+                ...(hooks.length ? { hooks } : {}),
+                ...(this.messageRenderers.length ? { message_renderers: this.messageRenderers } : {}),
                 subscriptions,
             },
         };

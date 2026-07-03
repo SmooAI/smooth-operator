@@ -105,8 +105,39 @@
           "items": { "type": "string" },
           "description": "Event names the extension wants delivered. Doubles as the host's dispatch filter — unsubscribed events are never sent."
         },
-        "providers": { "type": "array", "items": { "$ref": "#/$defs/ProviderRegistration" }, "description": "LLM providers the extension contributes to the host's model surface (Phase 7). Proxied via `provider/complete`." }
+        "providers": { "type": "array", "items": { "$ref": "#/$defs/ProviderRegistration" }, "description": "LLM providers the extension contributes to the host's model surface (Phase 7). Proxied via `provider/complete`." },
+        "hooks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Intercept hooks the extension handles (Phase 8). Unlike `subscriptions` (observe events), hooks are awaited requests the host drives every turn — declaring them lets the host skip the per-turn `context` hook when nobody handles it. Empty/absent ⇒ unknown, so the host runs every hook to be safe (a pre-Phase-8 extension that hooks `tool_call` still fires)."
+        },
+        "message_renderers": { "type": "array", "items": { "$ref": "#/$defs/MessageRendererRegistration" }, "description": "Declarative custom-message renderers (Phase 8): a message `tag` → render-block template. Data-only; the frontend renders." }
       }
+    },
+
+    "MessageRendererRegistration": {
+      "title": "SepMessageRendererRegistration",
+      "type": "object",
+      "required": ["tag", "template"],
+      "additionalProperties": false,
+      "properties": {
+        "tag": { "type": "string", "description": "Custom message tag this renderer claims (e.g. `snake_board`)." },
+        "template": { "$ref": "#/$defs/RenderBlock", "description": "Render-block template; string fields may contain `{{path}}` placeholders resolved against the message's data." }
+      }
+    },
+
+    "RenderBlock": {
+      "title": "SepRenderBlock",
+      "description": "The declarative render-block DSL (Phase 8) — replaces pi's function renderers. Frontends render each `kind` natively (TUI/web/widget); `text` is the always-available plain fallback (a frontend may derive one when omitted). The `widget` kind is the interactive tier: it wraps a `body` block and declares `keybindings`; the host routes matching keys back as `widget/key` events and the extension re-renders via `ui/request` `set_widget`.",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "text"], "properties": { "kind": { "const": "markdown" }, "text": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "rows"], "properties": { "kind": { "const": "keyvalue" }, "title": { "type": "string" }, "text": { "type": "string" }, "rows": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["key", "value"], "properties": { "key": { "type": "string" }, "value": { "type": "string" } } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "columns", "rows"], "properties": { "kind": { "const": "table" }, "text": { "type": "string" }, "columns": { "type": "array", "items": { "type": "string" } }, "rows": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "patch"], "properties": { "kind": { "const": "diff" }, "text": { "type": "string" }, "patch": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "progress" }, "text": { "type": "string" }, "label": { "type": "string" }, "value": { "type": "number", "minimum": 0, "maximum": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "children"], "properties": { "kind": { "const": "stack" }, "text": { "type": "string" }, "children": { "type": "array", "items": { "$ref": "#/$defs/RenderBlock" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "widget_id", "body", "keybindings"], "properties": { "kind": { "const": "widget" }, "text": { "type": "string" }, "widget_id": { "type": "string" }, "body": { "$ref": "#/$defs/RenderBlock" }, "keybindings": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["key"], "properties": { "key": { "type": "string" }, "description": { "type": "string" } } } } } }
+      ]
     },
 
     "ProviderRegistration": {
