@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/hook.schema.json",
+  "title": "Hook",
+  "description": "Method `hook` (host → ext, request). An intercept: the host awaits the extension's `HookOutcome` and folds it into a chain across extensions in load order (each sees the prior patch). On timeout or crash the host applies the hook's default — fail-closed (block) for `tool_call`/`user_bash`, fail-open (continue) for the rest. Timeouts are manifest-overridable via `hook_timeout_ms`.",
+
+  "$defs": {
+    "Params": {
+      "title": "HookParams",
+      "type": "object",
+      "required": ["hook", "context", "input"],
+      "additionalProperties": false,
+      "properties": {
+        "hook": {
+          "type": "string",
+          "description": "Hook name.",
+          "enum": [
+            "tool_call",
+            "user_bash",
+            "tool_result",
+            "input",
+            "before_agent_start",
+            "context",
+            "before_provider_request",
+            "message_end",
+            "session_before_compact",
+            "session_before_tree"
+          ]
+        },
+        "context": { "$ref": "#/$defs/Context" },
+        "input": {
+          "type": "object",
+          "description": "The value being intercepted (e.g. `{ tool, arguments }` for `tool_call`). Shape is hook-specific; extensions read what they understand and ignore the rest."
+        }
+      }
+    },
+
+    "Result": { "$ref": "#/$defs/HookOutcome" },
+
+    "HookOutcome": {
+      "title": "HookOutcome",
+      "description": "An extension's reply to a `hook`. `continue` proceeds unchanged; `block` vetoes (honored for every hook, and the default for fail-closed hooks on timeout); `modify` replaces the intercepted value with `patch`, which the next extension in the chain then sees.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["action"],
+          "additionalProperties": false,
+          "properties": { "action": { "const": "continue" } }
+        },
+        {
+          "type": "object",
+          "required": ["action"],
+          "additionalProperties": false,
+          "properties": {
+            "action": { "const": "block" },
+            "reason": { "type": "string", "description": "Human-readable veto reason, surfaced to the model/user." }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["action", "patch"],
+          "additionalProperties": false,
+          "properties": {
+            "action": { "const": "modify" },
+            "patch": { "type": "object", "description": "Replacement value for the intercepted `input`." }
+          }
+        }
+      ]
+    },
+
+    "Context": {
+      "type": "object",
+      "required": ["token", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "token": { "type": "string" },
+        "tier": { "type": "string", "enum": ["event", "command"] }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/HookOutcome" }
+  ]
+}

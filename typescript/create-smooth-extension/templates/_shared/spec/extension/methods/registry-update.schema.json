@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/registry-update.schema.json",
+  "title": "RegistryUpdate",
+  "description": "Method `registry/update` (ext → host, notification). Adds or replaces the extension's registrations after the initial `initialize` handshake — same payload shape as `initialize`'s `Registrations`, re-inlined here since SEP schemas carry no cross-file `$ref`s. Fire-and-forget; the host merges by name (last write wins per tool/command).",
+
+  "$defs": {
+    "Params": {
+      "title": "RegistryUpdateParams",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": { "type": "array", "items": { "$ref": "#/$defs/ToolRegistration" } },
+        "commands": { "type": "array", "items": { "$ref": "#/$defs/CommandRegistration" } },
+        "flags": { "type": "array", "items": { "type": "string" }, "description": "CLI/slash flags the extension owns." },
+        "subscriptions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Event names the extension wants delivered. Doubles as the host's dispatch filter — unsubscribed events are never sent."
+        }
+      }
+    },
+
+    "ToolRegistration": {
+      "title": "SepToolRegistration",
+      "type": "object",
+      "required": ["name", "description", "parameters"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Bare tool name; the host exposes it as `<extension>.<name>`." },
+        "description": { "type": "string" },
+        "parameters": { "type": "object", "description": "JSON Schema for the tool's arguments." },
+        "deferred": { "type": "boolean", "default": false, "description": "If true, register into the host's deferred (tool_search-promoted) tier instead of eager." }
+      }
+    },
+
+    "CommandRegistration": {
+      "title": "SepCommandRegistration",
+      "type": "object",
+      "required": ["name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Slash-command name, without the leading `/`." },
+        "description": { "type": "string" }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}

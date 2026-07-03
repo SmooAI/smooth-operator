@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/exec-run.schema.json",
+  "title": "ExecRun",
+  "description": "Method `exec/run` (ext → host, request). Runs a command through the host's audited permission engine — the same gate interactive `bash` tool calls go through, not a raw `child_process.exec`. Extensions cannot bypass user_bash hooks, policy, or audit logging by shelling out directly.",
+
+  "$defs": {
+    "Params": {
+      "title": "ExecRunParams",
+      "type": "object",
+      "required": ["command", "context"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "type": "string", "description": "The command to run." },
+        "args": { "type": "array", "items": { "type": "string" }, "description": "Argument vector passed to `command`." },
+        "cwd": { "type": "string", "description": "Working directory for the command; defaults to the workspace root." },
+        "context": {
+          "type": "object",
+          "required": ["token", "tier"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "type": "string" },
+            "tier": { "type": "string", "enum": ["event", "command"] }
+          }
+        }
+      }
+    },
+
+    "Result": {
+      "title": "ExecRunResult",
+      "type": "object",
+      "required": ["stdout", "stderr", "exit_code"],
+      "additionalProperties": false,
+      "properties": {
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "exit_code": { "type": "integer", "description": "Process exit code." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

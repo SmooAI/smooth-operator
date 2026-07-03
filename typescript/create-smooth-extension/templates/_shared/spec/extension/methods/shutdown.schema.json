@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/shutdown.schema.json",
+  "title": "Shutdown",
+  "description": "Method `shutdown` (host → ext, request). Asks the extension to stop gracefully. The host waits up to 5s for the reply (and for the process to exit), then SIGKILLs. Params and result are empty objects.",
+
+  "$defs": {
+    "Params": {
+      "title": "ShutdownParams",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "Result": {
+      "title": "ShutdownResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/bus-publish.schema.json",
+  "title": "BusPublish",
+  "description": "Method `bus/publish` (ext → host, notification). Publishes an event onto the inter-extension bus; the host fans it out to every other extension subscribed to `topic` via `event`. Fire-and-forget, no reply.",
+
+  "$defs": {
+    "Params": {
+      "title": "BusPublishParams",
+      "type": "object",
+      "required": ["topic", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "topic": { "type": "string", "description": "Bus topic name." },
+        "payload": { "type": "object", "description": "Event payload delivered to subscribers." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}

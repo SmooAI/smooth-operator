@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/ui-request.schema.json",
+  "title": "UiRequest",
+  "description": "Method `ui/request` (ext → host, request). Asks the frontend to render one of `select`/`confirm`/`input`/`notify`/`set_status`/`set_widget`/`set_title`, discriminated by `kind`. Answerable kinds are capability-negotiated at handshake via `ui_capabilities`; a headless or uncapable frontend replies with error -32001 NoUI instead of a `Result`.",
+
+  "$defs": {
+    "Params": {
+      "title": "UiRequestParams",
+      "description": "One of the seven UI request kinds, discriminated by `kind`.",
+      "oneOf": [
+        {
+          "title": "UiRequestSelect",
+          "type": "object",
+          "required": ["kind", "prompt", "options"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "select" },
+            "prompt": { "type": "string", "description": "Prompt text shown above the option list." },
+            "options": { "type": "array", "items": { "type": "string" }, "description": "Choices presented to the user." }
+          }
+        },
+        {
+          "title": "UiRequestConfirm",
+          "type": "object",
+          "required": ["kind", "prompt"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "confirm" },
+            "prompt": { "type": "string", "description": "Yes/no prompt text." }
+          }
+        },
+        {
+          "title": "UiRequestInput",
+          "type": "object",
+          "required": ["kind", "prompt"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "input" },
+            "prompt": { "type": "string", "description": "Free-text prompt." },
+            "default": { "type": "string", "description": "Pre-filled default value." }
+          }
+        },
+        {
+          "title": "UiRequestNotify",
+          "type": "object",
+          "required": ["kind", "message"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "notify" },
+            "message": { "type": "string", "description": "Notification text." },
+            "level": { "type": "string", "enum": ["info", "warn", "error"], "description": "Notification severity; defaults to `info`." }
+          }
+        },
+        {
+          "title": "UiRequestSetStatus",
+          "type": "object",
+          "required": ["kind", "status"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "set_status" },
+            "status": { "type": "string", "description": "Status line text to display." }
+          }
+        },
+        {
+          "title": "UiRequestSetWidget",
+          "type": "object",
+          "required": ["kind", "widget"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "set_widget" },
+            "widget": { "type": "object", "description": "Host-defined widget payload to render." }
+          }
+        },
+        {
+          "title": "UiRequestSetTitle",
+          "type": "object",
+          "required": ["kind", "title"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "set_title" },
+            "title": { "type": "string", "description": "New title text." }
+          }
+        }
+      ]
+    },
+
+    "Result": {
+      "title": "UiRequestResult",
+      "description": "Reply shape varies by the request's `kind`: `select` returns `value`, `confirm` returns `confirmed`, `input` returns `text`, `notify`/`set_status`/`set_widget`/`set_title` return an empty object. Any kind may set `cancelled: true` if the user dismissed the UI without answering.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "string", "description": "The chosen option's text, for `select`." },
+        "confirmed": { "type": "boolean", "description": "Whether the user confirmed, for `confirm`." },
+        "text": { "type": "string", "description": "The entered text, for `input`." },
+        "cancelled": { "type": "boolean", "description": "True if the user dismissed the UI without answering." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

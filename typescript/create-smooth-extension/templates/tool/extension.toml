@@ -1,0 +1,12 @@
+name = "__NAME__"
+version = "0.1.0"
+protocol = 1
+
+# How the host launches this extension (a long-lived JSON-RPC subprocess).
+[run]
+command = "node"
+args = ["dist/index.js"]
+
+# This extension contributes tools the agent can call.
+[capabilities]
+tools = true
