@@ -198,7 +198,7 @@ describe('SmoothAgentClient.sendMessage streaming', () => {
         expect(seen).toEqual(['write_confirmation_required', 'eventual_response']);
     });
 
-    it('routes an identity-intake park through invalid → valid resubmit back into the same turn', async () => {
+    it('routes a Rich Interaction park through invalid → valid resubmit back into the same turn', async () => {
         const { client, transport } = makeClient();
         await client.connect();
         const turn = client.sendMessage({ sessionId: 's', message: 'quote please' });
@@ -210,28 +210,36 @@ describe('SmoothAgentClient.sendMessage streaming', () => {
         })();
 
         transport.emit({
-            type: 'identity_intake_required',
+            type: 'interaction_required',
             requestId: reqId,
             data: {
                 requestId: reqId,
-                data: { fields: [{ key: 'email', required: true }], reason: 'to send you the quote' },
+                data: {
+                    interactionId: 'int-1',
+                    kind: 'identity_intake',
+                    spec: { fields: [{ key: 'email', required: true }] },
+                    reason: 'to send you the quote',
+                },
             },
         });
 
         // First submit fails server-side validation — the turn stays parked and
         // the invalid event flows into the SAME turn (never a terminal error).
-        client.submitIdentityIntake({ sessionId: 's', requestId: reqId, values: { email: 'nope' } });
+        client.submitInteraction({ sessionId: 's', requestId: reqId, interactionId: 'int-1', values: { email: 'nope' } });
         expect(transport.lastSent()).toMatchObject({
-            action: 'submit_identity_intake',
+            action: 'submit_interaction',
             requestId: reqId,
+            interactionId: 'int-1',
             values: { email: 'nope' },
         });
         transport.emit({
-            type: 'identity_intake_invalid',
+            type: 'interaction_invalid',
             requestId: reqId,
             data: {
                 requestId: reqId,
                 data: {
+                    interactionId: 'int-1',
+                    kind: 'identity_intake',
                     errors: [{ field: 'email', message: 'must be a valid email address' }],
                     message: 'Some fields need attention.',
                 },
@@ -239,7 +247,7 @@ describe('SmoothAgentClient.sendMessage streaming', () => {
         });
 
         // Resubmit with valid values; the resumed stream completes the turn.
-        client.submitIdentityIntake({ sessionId: 's', requestId: reqId, values: { email: 'a@b.co' } });
+        client.submitInteraction({ sessionId: 's', requestId: reqId, interactionId: 'int-1', values: { email: 'a@b.co' } });
         transport.emit({
             type: 'eventual_response',
             requestId: reqId,
@@ -249,17 +257,18 @@ describe('SmoothAgentClient.sendMessage streaming', () => {
 
         await turn;
         await iterate;
-        expect(seen).toEqual(['identity_intake_required', 'identity_intake_invalid', 'eventual_response']);
+        expect(seen).toEqual(['interaction_required', 'interaction_invalid', 'eventual_response']);
     });
 
-    it('submitIdentityIntake can decline', async () => {
+    it('submitInteraction can decline', async () => {
         const { client, transport } = makeClient();
         await client.connect();
-        client.submitIdentityIntake({ sessionId: 's', requestId: 'r1', declined: true });
+        client.submitInteraction({ sessionId: 's', requestId: 'r1', interactionId: 'int-9', declined: true });
         expect(transport.lastSent()).toMatchObject({
-            action: 'submit_identity_intake',
+            action: 'submit_interaction',
             sessionId: 's',
             requestId: 'r1',
+            interactionId: 'int-9',
             declined: true,
         });
     });

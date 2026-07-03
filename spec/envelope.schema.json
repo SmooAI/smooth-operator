@@ -38,7 +38,7 @@
             "get_conversation_messages",
             "confirm_tool_action",
             "verify_otp",
-            "submit_identity_intake",
+            "submit_interaction",
             "ping"
           ],
           "description": "The action to perform."
@@ -70,8 +70,8 @@
             "otp_sent",
             "otp_verified",
             "otp_invalid",
-            "identity_intake_required",
-            "identity_intake_invalid",
+            "interaction_required",
+            "interaction_invalid",
             "error",
             "pong"
           ],

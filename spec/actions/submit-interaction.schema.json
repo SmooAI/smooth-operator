@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/actions/submit-interaction.schema.json",
+  "title": "SubmitInteraction",
+  "description": "Action: `submit_interaction`. The single Rich Interactions resume verb: sent in response to an `interaction_required` event with the visitor's values for that interaction kind — or with `declined: true` when the visitor refuses (the agent handles the decline gracefully). The server routes `values` to the kind's validator; invalid values emit `interaction_invalid` and the turn stays parked for a resubmit. Valid values (or a decline) resume the turn: the agent's raise tool returns the kind's canonical validated payload. Because this one verb serves every interaction kind, adding a new kind requires no new protocol action and no client-library release.",
+
+  "$defs": {
+    "Request": {
+      "title": "SubmitInteractionRequest",
+      "description": "Fields sent by the client to submit (or decline) a parked interaction.",
+      "type": "object",
+      "required": ["action", "sessionId", "requestId", "interactionId"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "submit_interaction",
+          "description": "Action discriminator."
+        },
+        "requestId": {
+          "type": "string",
+          "description": "Must match the `requestId` from the `interaction_required` event being responded to."
+        },
+        "sessionId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Session ID of the parked session."
+        },
+        "interactionId": {
+          "type": "string",
+          "description": "Must match the `interactionId` from the `interaction_required` event, so a stale submit can never resolve a newer park."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Optional interaction kind, for cross-checking; the server already knows the parked interaction's kind. When present and mismatched, the submit is rejected."
+        },
+        "values": {
+          "type": "object",
+          "description": "Kind-specific submitted values. Required unless `declined` is true. Shape per `interactions/<kind>.schema.json#/$defs/Values` (e.g. identity_intake's `{ name?, email?, phone? }`). Validated server-side by the kind's validator."
+        },
+        "declined": {
+          "type": "boolean",
+          "description": "True when the visitor refused the interaction. The turn resumes with a declined payload so the agent can proceed gracefully. When true, `values` is ignored."
+        }
+      }
+    },
+
+    "Response": {
+      "title": "SubmitInteractionResponse",
+      "description": "No dedicated response event for `submit_interaction`. Valid values (or a decline) are acked with an `immediate_response` and the parked turn resumes its normal streaming sequence. Invalid values emit `interaction_invalid` (the turn stays parked). This schema is provided for documentation completeness only.",
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Response" }
+  ]
+}

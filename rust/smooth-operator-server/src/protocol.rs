@@ -226,25 +226,30 @@ pub fn otp_verification_required(
     })
 }
 
-/// `identity_intake_required` — emitted mid-turn when the agent's
-/// `request_identity_intake` tool parks awaiting the visitor's details on a
-/// session that declared the `identity_form` capability. Wire shape matches
-/// `spec/events/identity-intake-required.schema.json` (double-nested
-/// `data.data.{ fields, reason }`). The client renders the form and replies
-/// with a `submit_identity_intake` action carrying the same `requestId`.
+/// `interaction_required` — the Rich Interactions envelope: emitted mid-turn
+/// when an agent's raise tool parks awaiting the visitor on a session that
+/// declared the kind's render capability. Wire shape matches
+/// `spec/events/interaction-required.schema.json` (double-nested
+/// `data.data.{ interactionId, kind, spec, reason }`). The client renders the
+/// kind's card and replies with a `submit_interaction` action carrying the
+/// same `requestId` + `interactionId`.
 #[must_use]
-pub fn identity_intake_required(
+pub fn interaction_required(
     request_id: &str,
-    fields: &[smooth_operator::IntakeField],
+    interaction_id: &str,
+    kind: &str,
+    spec: &Value,
     reason: &str,
 ) -> Value {
     json!({
-        "type": "identity_intake_required",
+        "type": "interaction_required",
         "requestId": request_id,
         "data": {
             "requestId": request_id,
             "data": {
-                "fields": fields,
+                "interactionId": interaction_id,
+                "kind": kind,
+                "spec": spec,
                 "reason": reason,
             },
         },
@@ -252,23 +257,27 @@ pub fn identity_intake_required(
     })
 }
 
-/// `identity_intake_invalid` — emitted when a `submit_identity_intake` carried
-/// values that failed server-side validation. The turn REMAINS parked; the
-/// client re-renders the form with the per-field `errors`. Mirrors
+/// `interaction_invalid` — emitted when a `submit_interaction` carried values
+/// that failed the kind's server-side validation. The turn REMAINS parked; the
+/// client re-renders the card with the per-field `errors`. Mirrors
 /// `otp_invalid` (retryable, never a terminal `error`). Wire shape matches
-/// `spec/events/identity-intake-invalid.schema.json`.
+/// `spec/events/interaction-invalid.schema.json`.
 #[must_use]
-pub fn identity_intake_invalid(
+pub fn interaction_invalid(
     request_id: &str,
-    errors: &[smooth_operator::IntakeFieldError],
+    interaction_id: &str,
+    kind: &str,
+    errors: &[smooth_operator::InteractionFieldError],
     message: &str,
 ) -> Value {
     json!({
-        "type": "identity_intake_invalid",
+        "type": "interaction_invalid",
         "requestId": request_id,
         "data": {
             "requestId": request_id,
             "data": {
+                "interactionId": interaction_id,
+                "kind": kind,
                 "errors": errors,
                 "message": message,
             },
@@ -590,47 +599,50 @@ mod tests {
     }
 
     #[test]
-    fn identity_intake_required_matches_spec_shape() {
-        let fields = vec![
-            smooth_operator::IntakeField {
-                key: smooth_operator::IntakeFieldKey::Email,
-                required: true,
-                label: Some("Work email".into()),
-            },
-            smooth_operator::IntakeField {
-                key: smooth_operator::IntakeFieldKey::Phone,
-                required: false,
-                label: None,
-            },
-        ];
-        let ev = identity_intake_required("r1", &fields, "to send you the quote");
-        // Per spec/events/identity-intake-required.schema.json.
-        assert_eq!(ev["type"], "identity_intake_required");
+    fn interaction_required_matches_spec_shape() {
+        let spec = json!({
+            "fields": [
+                { "key": "email", "required": true, "label": "Work email" },
+                { "key": "phone", "required": false },
+            ],
+        });
+        let ev = interaction_required(
+            "r1",
+            "int-1",
+            "identity_intake",
+            &spec,
+            "to send you the quote",
+        );
+        // Per spec/events/interaction-required.schema.json.
+        assert_eq!(ev["type"], "interaction_required");
         assert_eq!(ev["requestId"], "r1");
         assert_eq!(ev["data"]["requestId"], "r1");
         let inner = &ev["data"]["data"];
+        assert_eq!(inner["interactionId"], "int-1");
+        assert_eq!(inner["kind"], "identity_intake");
         assert_eq!(inner["reason"], "to send you the quote");
-        assert_eq!(inner["fields"][0]["key"], "email");
-        assert_eq!(inner["fields"][0]["required"], true);
-        assert_eq!(inner["fields"][0]["label"], "Work email");
-        assert_eq!(inner["fields"][1]["key"], "phone");
-        assert!(
-            inner["fields"][1].get("label").is_none(),
-            "absent label is omitted, not null"
-        );
+        assert_eq!(inner["spec"]["fields"][0]["key"], "email");
         assert!(ev["timestamp"].is_i64());
     }
 
     #[test]
-    fn identity_intake_invalid_matches_spec_shape() {
-        let errors = vec![smooth_operator::IntakeFieldError {
-            field: smooth_operator::IntakeFieldKey::Email,
+    fn interaction_invalid_matches_spec_shape() {
+        let errors = vec![smooth_operator::InteractionFieldError {
+            field: "email".into(),
             message: "must be a valid email address".into(),
         }];
-        let ev = identity_intake_invalid("r1", &errors, "Some fields need attention.");
-        assert_eq!(ev["type"], "identity_intake_invalid");
+        let ev = interaction_invalid(
+            "r1",
+            "int-1",
+            "identity_intake",
+            &errors,
+            "Some fields need attention.",
+        );
+        assert_eq!(ev["type"], "interaction_invalid");
         assert_eq!(ev["data"]["requestId"], "r1");
         let inner = &ev["data"]["data"];
+        assert_eq!(inner["interactionId"], "int-1");
+        assert_eq!(inner["kind"], "identity_intake");
         assert_eq!(inner["message"], "Some fields need attention.");
         assert_eq!(inner["errors"][0]["field"], "email");
         assert!(inner["errors"][0]["message"]

@@ -128,7 +128,7 @@ async fn run(
             llm_provider: Some(Arc::new(scripted_mock())),
             reranker: None,
             confirmation: None,
-            identity_intake: None,
+            interactions: None,
             tool_provider: Some(provider),
             system_prompt: None,
             org_id: None,

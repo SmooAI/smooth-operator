@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/events/interaction-required.schema.json",
+  "title": "InteractionRequired",
+  "description": "Event: `interaction_required`. The Rich Interactions envelope: emitted mid-turn when the agent requests a structured interaction (identity intake, a date picker, choice chips, …) and the session declared the interaction kind's render capability in `supports` at `create_conversation_session`. The turn is parked until the client replies with a `submit_interaction` action carrying the same `requestId` + `interactionId` (values or `declined: true`). Sessions without the capability never receive this event — the server degrades that kind to its conversational fallback instead. `kind` selects the client card and the server validator; `spec` is the kind-specific payload whose shape is defined by `interactions/<kind>.schema.json` (e.g. `interactions/identity-intake.schema.json#/$defs/Spec`).",
+  "type": "object",
+  "required": ["type", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "interaction_required",
+      "description": "Event type discriminator."
+    },
+    "requestId": {
+      "type": "string",
+      "description": "Echoes the `requestId` from the originating `send_message` action. Must be included in the `submit_interaction` reply."
+    },
+    "data": {
+      "type": "object",
+      "description": "Interaction prompt details.",
+      "required": ["requestId", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "The request ID this interaction belongs to."
+        },
+        "data": {
+          "type": "object",
+          "description": "The interaction the client should render.",
+          "required": ["interactionId", "kind", "spec", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "interactionId": {
+              "type": "string",
+              "description": "Server-generated ID for this specific interaction instance. Must be echoed on the `submit_interaction` reply so a stale submit can never resolve a newer park."
+            },
+            "kind": {
+              "type": "string",
+              "description": "The interaction kind (e.g. `identity_intake`). Selects the client's card component and the server's validator. The kind catalog lives in `spec/interactions/`."
+            },
+            "spec": {
+              "type": "object",
+              "description": "Kind-specific render spec. Shape per `interactions/<kind>.schema.json#/$defs/Spec` (e.g. identity_intake's `{ fields: [...] }`)."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Human-readable reason the agent raised this interaction, suitable for the card header (e.g. `to send you the quote`)."
+            }
+          }
+        }
+      }
+    },
+    "timestamp": {
+      "type": "integer",
+      "description": "Unix epoch milliseconds when the event was emitted."
+    }
+  }
+}

@@ -67,7 +67,7 @@ export interface CreateConversationSessionRequest {
      */
     browserFingerprint?: string;
     /**
-     * Client render capabilities for this session. Known value: `identity_form` — the client can render a structured identity-intake form, so the server may emit `identity_intake_required` mid-turn. Text-only channels (SMS, voice) omit this and the server degrades intake to conversational turn-by-turn collection. Unknown values are ignored (forward-compatible).
+     * Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
      */
     supports?: string[];
     /**
@@ -380,17 +380,17 @@ export interface GeneralAgentResponse {
     suggestedNextActions: string[];
 }
 
-// ── from actions/submit-identity-intake.schema.json ──
+// ── from actions/submit-interaction.schema.json ──
 /**
- * Fields sent by the client to submit (or decline) identity intake.
+ * Fields sent by the client to submit (or decline) a parked interaction.
  */
-export interface SubmitIdentityIntakeRequest {
+export interface SubmitInteractionRequest {
     /**
      * Action discriminator.
      */
-    action: 'submit_identity_intake';
+    action: 'submit_interaction';
     /**
-     * Must match the `requestId` from the `identity_intake_required` event being responded to.
+     * Must match the `requestId` from the `interaction_required` event being responded to.
      */
     requestId: string;
     /**
@@ -398,33 +398,28 @@ export interface SubmitIdentityIntakeRequest {
      */
     sessionId: string;
     /**
-     * The visitor's identity values. Required unless `declined` is true. Only the fields requested by the `identity_intake_required` event are meaningful; the server validates required-ness against that request.
+     * Must match the `interactionId` from the `interaction_required` event, so a stale submit can never resolve a newer park.
      */
-    values?: {
-        /**
-         * The visitor's display name.
-         */
-        name?: string;
-        /**
-         * The visitor's email address (validated server-side).
-         */
-        email?: string;
-        /**
-         * The visitor's phone number (normalized server-side to E.164).
-         */
-        phone?: string;
-    };
+    interactionId: string;
     /**
-     * True when the visitor refused to share their details. The turn resumes with a declined payload so the agent can proceed gracefully. When true, `values` is ignored.
+     * Optional interaction kind, for cross-checking; the server already knows the parked interaction's kind. When present and mismatched, the submit is rejected.
+     */
+    kind?: string;
+    /**
+     * Kind-specific submitted values. Required unless `declined` is true. Shape per `interactions/<kind>.schema.json#/$defs/Values` (e.g. identity_intake's `{ name?, email?, phone? }`). Validated server-side by the kind's validator.
+     */
+    values?: {};
+    /**
+     * True when the visitor refused the interaction. The turn resumes with a declined payload so the agent can proceed gracefully. When true, `values` is ignored.
      */
     declined?: boolean;
 }
 
-// ── from actions/submit-identity-intake.schema.json ──
+// ── from actions/submit-interaction.schema.json ──
 /**
- * No dedicated response event for `submit_identity_intake`. Valid values (or a decline) are acked with an `immediate_response` and the parked turn resumes its normal streaming sequence. Invalid values emit `identity_intake_invalid` (the turn stays parked). This schema is provided for documentation completeness only.
+ * No dedicated response event for `submit_interaction`. Valid values (or a decline) are acked with an `immediate_response` and the parked turn resumes its normal streaming sequence. Invalid values emit `interaction_invalid` (the turn stays parked). This schema is provided for documentation completeness only.
  */
-export interface SubmitIdentityIntakeResponse {
+export interface SubmitInteractionResponse {
     [k: string]: unknown;
 }
 
@@ -864,7 +859,7 @@ export interface ActionEnvelope {
         | 'get_conversation_messages'
         | 'confirm_tool_action'
         | 'verify_otp'
-        | 'submit_identity_intake'
+        | 'submit_interaction'
         | 'ping';
     /**
      * Client-generated correlation ID. Will be echoed back on all related server events. Should be unique per in-flight request. If omitted the server may generate one, but correlating responses becomes the client's problem.
@@ -1030,142 +1025,6 @@ export interface EventualResponse {
     timestamp?: number;
 }
 
-// ── from events/identity-intake-invalid.schema.json ──
-/**
- * Event: `identity_intake_invalid`. Emitted when a `submit_identity_intake` action carried values that failed server-side validation (missing required field, malformed email, unparseable phone). The turn REMAINS parked — the client should re-render the intake form with the per-field errors and let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable state, never a terminal `error` event.
- */
-export interface IdentityIntakeInvalid {
-    /**
-     * Event type discriminator.
-     */
-    type: 'identity_intake_invalid';
-    /**
-     * Echoes the `requestId` of the parked turn (same correlation as the `identity_intake_required` event).
-     */
-    requestId?: string;
-    /**
-     * Validation failure details.
-     */
-    data: {
-        /**
-         * The request ID this intake belongs to.
-         */
-        requestId: string;
-        /**
-         * Per-field validation errors.
-         */
-        data: {
-            /**
-             * One entry per failed field.
-             *
-             * @minItems 1
-             */
-            errors: [
-                {
-                    /**
-                     * The field that failed validation.
-                     */
-                    field: 'name' | 'email' | 'phone';
-                    /**
-                     * Human-readable validation message for this field.
-                     */
-                    message: string;
-                },
-                ...{
-                    /**
-                     * The field that failed validation.
-                     */
-                    field: 'name' | 'email' | 'phone';
-                    /**
-                     * Human-readable validation message for this field.
-                     */
-                    message: string;
-                }[],
-            ];
-            /**
-             * Human-readable summary suitable for a form-level error line.
-             */
-            message: string;
-        };
-    };
-    /**
-     * Unix epoch milliseconds when the event was emitted.
-     */
-    timestamp?: number;
-}
-
-// ── from events/identity-intake-required.schema.json ──
-/**
- * Event: `identity_intake_required`. Emitted mid-turn when the agent requests structured identity/lead intake (name / email / phone) and the session declared the `identity_form` capability at `create_conversation_session`. The turn is parked until the client replies with a `submit_identity_intake` action carrying the same `requestId` (values or `declined: true`). Sessions that did not declare `identity_form` never receive this event — the server degrades to conversational, turn-by-turn collection instead.
- */
-export interface IdentityIntakeRequired {
-    /**
-     * Event type discriminator.
-     */
-    type: 'identity_intake_required';
-    /**
-     * Echoes the `requestId` from the originating `send_message` action. Must be included in the `submit_identity_intake` reply.
-     */
-    requestId?: string;
-    /**
-     * Intake prompt details.
-     */
-    data: {
-        /**
-         * The request ID this intake belongs to.
-         */
-        requestId: string;
-        /**
-         * The fields the agent wants and why.
-         */
-        data: {
-            /**
-             * The identity fields to collect, in display order.
-             *
-             * @minItems 1
-             */
-            fields: [
-                {
-                    /**
-                     * Which identity field to collect.
-                     */
-                    key: 'name' | 'email' | 'phone';
-                    /**
-                     * Whether the visitor must provide this field to submit.
-                     */
-                    required: boolean;
-                    /**
-                     * Optional display label overriding the client's default for this field.
-                     */
-                    label?: string;
-                },
-                ...{
-                    /**
-                     * Which identity field to collect.
-                     */
-                    key: 'name' | 'email' | 'phone';
-                    /**
-                     * Whether the visitor must provide this field to submit.
-                     */
-                    required: boolean;
-                    /**
-                     * Optional display label overriding the client's default for this field.
-                     */
-                    label?: string;
-                }[],
-            ];
-            /**
-             * Human-readable reason the agent needs these details, suitable for the form header (e.g. `to send you the quote`).
-             */
-            reason: string;
-        };
-    };
-    /**
-     * Unix epoch milliseconds when the event was emitted.
-     */
-    timestamp?: number;
-}
-
 // ── from events/immediate-response.schema.json ──
 /**
  * Event: `immediate_response`. Sent by the server synchronously upon receiving any action, to acknowledge that the request was accepted and processing has begun. For streaming actions (`send_message`) this always precedes `stream_chunk` / `stream_token` events and the final `eventual_response`. For non-streaming actions (e.g. `get_session`, `create_conversation_session`) this also carries the complete response payload in `data`.
@@ -1192,6 +1051,127 @@ export interface ImmediateResponse {
      */
     data: {
         [k: string]: unknown;
+    };
+    /**
+     * Unix epoch milliseconds when the event was emitted.
+     */
+    timestamp?: number;
+}
+
+// ── from events/interaction-invalid.schema.json ──
+/**
+ * Event: `interaction_invalid`. Emitted when a `submit_interaction` action carried values that failed the kind's server-side validation. The turn REMAINS parked — the client should re-render the interaction card with the per-field errors and let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable state, never a terminal `error` event.
+ */
+export interface InteractionInvalid {
+    /**
+     * Event type discriminator.
+     */
+    type: 'interaction_invalid';
+    /**
+     * Echoes the `requestId` of the parked turn (same correlation as the `interaction_required` event).
+     */
+    requestId?: string;
+    /**
+     * Validation failure details.
+     */
+    data: {
+        /**
+         * The request ID this interaction belongs to.
+         */
+        requestId: string;
+        /**
+         * Per-field validation errors.
+         */
+        data: {
+            /**
+             * The interaction instance the rejected submit targeted.
+             */
+            interactionId: string;
+            /**
+             * The interaction kind (e.g. `identity_intake`).
+             */
+            kind: string;
+            /**
+             * One entry per failed field. `field` is a kind-specific field key (identity_intake: `name` | `email` | `phone`).
+             *
+             * @minItems 1
+             */
+            errors: [
+                {
+                    /**
+                     * The kind-specific field that failed validation.
+                     */
+                    field: string;
+                    /**
+                     * Human-readable validation message for this field.
+                     */
+                    message: string;
+                },
+                ...{
+                    /**
+                     * The kind-specific field that failed validation.
+                     */
+                    field: string;
+                    /**
+                     * Human-readable validation message for this field.
+                     */
+                    message: string;
+                }[],
+            ];
+            /**
+             * Human-readable summary suitable for a card-level error line.
+             */
+            message: string;
+        };
+    };
+    /**
+     * Unix epoch milliseconds when the event was emitted.
+     */
+    timestamp?: number;
+}
+
+// ── from events/interaction-required.schema.json ──
+/**
+ * Event: `interaction_required`. The Rich Interactions envelope: emitted mid-turn when the agent requests a structured interaction (identity intake, a date picker, choice chips, …) and the session declared the interaction kind's render capability in `supports` at `create_conversation_session`. The turn is parked until the client replies with a `submit_interaction` action carrying the same `requestId` + `interactionId` (values or `declined: true`). Sessions without the capability never receive this event — the server degrades that kind to its conversational fallback instead. `kind` selects the client card and the server validator; `spec` is the kind-specific payload whose shape is defined by `interactions/<kind>.schema.json` (e.g. `interactions/identity-intake.schema.json#/$defs/Spec`).
+ */
+export interface InteractionRequired {
+    /**
+     * Event type discriminator.
+     */
+    type: 'interaction_required';
+    /**
+     * Echoes the `requestId` from the originating `send_message` action. Must be included in the `submit_interaction` reply.
+     */
+    requestId?: string;
+    /**
+     * Interaction prompt details.
+     */
+    data: {
+        /**
+         * The request ID this interaction belongs to.
+         */
+        requestId: string;
+        /**
+         * The interaction the client should render.
+         */
+        data: {
+            /**
+             * Server-generated ID for this specific interaction instance. Must be echoed on the `submit_interaction` reply so a stale submit can never resolve a newer park.
+             */
+            interactionId: string;
+            /**
+             * The interaction kind (e.g. `identity_intake`). Selects the client's card component and the server's validator. The kind catalog lives in `spec/interactions/`.
+             */
+            kind: string;
+            /**
+             * Kind-specific render spec. Shape per `interactions/<kind>.schema.json#/$defs/Spec` (e.g. identity_intake's `{ fields: [...] }`).
+             */
+            spec: {};
+            /**
+             * Human-readable reason the agent raised this interaction, suitable for the card header (e.g. `to send you the quote`).
+             */
+            reason: string;
+        };
     };
     /**
      * Unix epoch milliseconds when the event was emitted.
@@ -1605,4 +1585,91 @@ export interface WriteConfirmationRequired {
      * Unix epoch milliseconds when the event was emitted.
      */
     timestamp?: number;
+}
+
+// ── from interactions/identity-intake.schema.json ──
+/**
+ * The `spec` carried on `interaction_required` for kind `identity_intake`: which fields to collect.
+ */
+export interface IdentityIntakeSpec {
+    /**
+     * The identity fields to collect, in display order.
+     *
+     * @minItems 1
+     */
+    fields: [
+        {
+            /**
+             * Which identity field to collect.
+             */
+            key: 'name' | 'email' | 'phone';
+            /**
+             * Whether the visitor must provide this field to submit.
+             */
+            required: boolean;
+            /**
+             * Optional display label overriding the client's default for this field.
+             */
+            label?: string;
+        },
+        ...{
+            /**
+             * Which identity field to collect.
+             */
+            key: 'name' | 'email' | 'phone';
+            /**
+             * Whether the visitor must provide this field to submit.
+             */
+            required: boolean;
+            /**
+             * Optional display label overriding the client's default for this field.
+             */
+            label?: string;
+        }[],
+    ];
+}
+
+// ── from interactions/identity-intake.schema.json ──
+/**
+ * The `values` a client submits via `submit_interaction` for kind `identity_intake`. Validated server-side: required fields present, email shape, phone normalized to E.164.
+ */
+export interface IdentityIntakeValues {
+    /**
+     * The visitor's display name.
+     */
+    name?: string;
+    /**
+     * The visitor's email address (validated server-side).
+     */
+    email?: string;
+    /**
+     * The visitor's phone number (normalized server-side to E.164).
+     */
+    phone?: string;
+}
+
+// ── from interactions/identity-intake.schema.json ──
+/**
+ * The canonical validated payload the parked turn resumes with (identical on the form and conversational paths). On success the server also attaches the identity to the session (metadata `userName` / `contactEmail` / `contactPhone` — the same keys the OTP contact seam reads).
+ */
+export interface IdentityIntakePayload {
+    /**
+     * How the interaction resolved.
+     */
+    status: 'submitted' | 'declined' | 'no_response';
+    /**
+     * Present when `status` is `submitted`: the validated, normalized values.
+     */
+    values?: {
+        name?: string;
+        email?: string;
+        /**
+         * E.164-normalized (`+15551234567`).
+         */
+        phone?: string;
+    };
+    /**
+     * Guidance for the agent when `status` is `declined` / `no_response`.
+     */
+    message?: string;
 }

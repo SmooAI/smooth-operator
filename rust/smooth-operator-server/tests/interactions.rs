@@ -1,19 +1,21 @@
-//! Identity intake — the channel-normalized name/email/phone capture seam
-//! (`docs/Architecture/Identity Intake.md`).
+//! Rich Interactions — the extensible structured-interaction seam
+//! (`docs/Architecture/Rich Interactions.md`), exercised through its first
+//! kind, `identity_intake`.
 //!
 //! Proves both channel shapes end-to-end against the real runner + handler:
 //!
-//! - **Form path** (session declared `identity_form`): the turn parks inside
-//!   `request_identity_intake`, an `identity_intake_required` event surfaces
-//!   (per spec), an invalid `submit_identity_intake` frame gets
-//!   `identity_intake_invalid` and LEAVES the turn parked, a valid frame
-//!   attaches the identity to the session and resumes the tool with the
-//!   validated payload. A decline resumes with the declined payload.
-//! - **Conversational path** (no capability): the same tool returns the
-//!   conversational directive immediately (no park, no event); the model's
-//!   `submit_identity_intake` tool call is validated server-side — a bad email
-//!   is a tool error the model re-asks from, good values attach + return the
-//!   IDENTICAL structured payload.
+//! - **Rich path** (session declared the kind's `identity_form` capability):
+//!   the turn parks inside the raise tool, an `interaction_required` event
+//!   surfaces (per spec, with `interactionId`/`kind`/`spec`), an invalid
+//!   `submit_interaction` frame gets `interaction_invalid` and LEAVES the turn
+//!   parked, a mismatched `interactionId` is rejected, a valid frame runs the
+//!   kind's host effect (session identity attach) and resumes the raise with
+//!   the canonical payload. A decline resumes with the declined payload.
+//! - **Conversational fallback** (no capability): the same raise returns the
+//!   kind's directive immediately (no park, no event); the model's generic
+//!   `submit_interaction` tool call is validated server-side — a bad email is
+//!   a tool error the model re-asks from, good values attach + return the
+//!   IDENTICAL canonical payload.
 //!
 //! Runs fully offline (`MockLlmClient` scripts the tool calls).
 
@@ -31,10 +33,12 @@ use smooth_operator_core::llm::StreamEvent;
 use smooth_operator_core::llm_provider::MockLlmClient;
 use smooth_operator_core::LlmConfig;
 
+use smooth_operator::interaction::InteractionRegistry;
 use smooth_operator_server::config::{ServerConfig, StorageBackend};
 use smooth_operator_server::handler;
-use smooth_operator_server::runner::{self, IdentityIntakeConfig, TurnRequest};
+use smooth_operator_server::runner::{self, InteractionConfig, TurnRequest};
 use smooth_operator_server::state::AppState;
+use smooth_operator_server::state::PendingInteraction;
 
 const SESSION_ID: &str = "sess-intake-1";
 const CONVERSATION_ID: &str = "conv-intake-1";
@@ -84,29 +88,48 @@ fn test_session() -> Session {
     }
 }
 
-/// The intake wiring the WS handler builds, over a real `AppState`.
-fn intake_for(state: &AppState, form_supported: bool) -> IdentityIntakeConfig {
-    IdentityIntakeConfig {
+/// The interactions wiring the WS handler builds, over a real `AppState`.
+fn interactions_for(state: &AppState, capabilities: &[&str]) -> InteractionConfig {
+    InteractionConfig {
         session_id: SESSION_ID.to_string(),
-        form_supported,
+        kinds: Arc::new(InteractionRegistry::default()),
+        capabilities: capabilities.iter().map(|s| (*s).to_string()).collect(),
         register: {
             let state = state.clone();
-            Arc::new(move |sid: &str, fields, responder| {
-                state.register_intake(sid, fields, responder);
-            })
+            Arc::new(
+                move |sid: &str, interaction_id: &str, kind: &str, spec: &Value, responder| {
+                    state.register_interaction(
+                        sid,
+                        PendingInteraction {
+                            interaction_id: interaction_id.to_string(),
+                            kind: kind.to_string(),
+                            spec: spec.clone(),
+                            responder,
+                        },
+                    );
+                },
+            )
         },
         clear: {
             let state = state.clone();
-            Arc::new(move |sid: &str| state.clear_intake(sid))
+            Arc::new(move |sid: &str| state.clear_interaction(sid))
         },
         attach: {
             let state = state.clone();
-            Arc::new(move |values| state.attach_session_identity(SESSION_ID, values))
+            Arc::new(move |kind, values| {
+                if kind == "identity_intake" {
+                    if let Ok(v) =
+                        serde_json::from_value::<smooth_operator::IntakeValues>(values.clone())
+                    {
+                        state.attach_session_identity(SESSION_ID, &v);
+                    }
+                }
+            })
         },
     }
 }
 
-/// A mock that turn-1 raises `request_identity_intake` (email required, name
+/// A mock that turn-1 raises `request_identity_intake`/// A mock that turn-1 raises `request_identity_intake` (email required, name
 /// optional), then answers.
 fn raising_mock() -> MockLlmClient {
     let mock = MockLlmClient::new();
@@ -141,10 +164,10 @@ fn spawn_turn(
     state: AppState,
     storage: Arc<dyn StorageAdapter>,
     mock: MockLlmClient,
-    form_supported: bool,
+    capabilities: &[&str],
     sink: UnboundedSender<Value>,
 ) -> tokio::task::JoinHandle<runner::TurnResult> {
-    let intake = intake_for(&state, form_supported);
+    let interactions = interactions_for(&state, capabilities);
     tokio::spawn(async move {
         runner::run_streaming_turn(
             TurnRequest {
@@ -158,7 +181,7 @@ fn spawn_turn(
                 llm_provider: Some(Arc::new(mock)),
                 reranker: None,
                 confirmation: None,
-                identity_intake: Some(intake),
+                interactions: Some(interactions),
                 tool_provider: None,
                 system_prompt: None,
                 org_id: None,
@@ -234,7 +257,7 @@ async fn submit_frame(state: &AppState, sink: &UnboundedSender<Value>, body: Val
 }
 
 #[tokio::test]
-async fn form_path_parks_validates_and_resumes_with_the_validated_payload() {
+async fn rich_path_parks_validates_and_resumes_with_the_canonical_payload() {
     let storage = Arc::new(InMemoryStorageAdapter::new());
     let state = AppState::new(storage.clone(), config());
     state.insert_session(test_session());
@@ -244,46 +267,75 @@ async fn form_path_parks_validates_and_resumes_with_the_validated_payload() {
         state.clone(),
         storage as Arc<dyn StorageAdapter>,
         raising_mock(),
-        true,
+        &["identity_form"],
         tx.clone(),
     );
 
     // 1. The turn parks and the spec-shaped event surfaces.
-    let (pending, mut seen) = await_event(&mut rx, "identity_intake_required").await;
+    let (pending, mut seen) = await_event(&mut rx, "interaction_required").await;
     assert_eq!(pending["requestId"], REQUEST_ID);
     let inner = &pending["data"]["data"];
+    assert_eq!(inner["kind"], "identity_intake");
     assert_eq!(inner["reason"], "to send you the quote");
-    assert_eq!(inner["fields"][0]["key"], "email");
-    assert_eq!(inner["fields"][0]["required"], true);
-    assert_eq!(inner["fields"][1]["key"], "name");
+    assert_eq!(inner["spec"]["fields"][0]["key"], "email");
+    assert_eq!(inner["spec"]["fields"][0]["required"], true);
+    let interaction_id = inner["interactionId"]
+        .as_str()
+        .expect("interactionId")
+        .to_string();
 
-    // 2. An INVALID submit → identity_intake_invalid, and the turn STAYS parked.
+    // 2. A submit with the WRONG interactionId is rejected and stays parked.
     submit_frame(
         &state,
         &tx,
         json!({
-            "action": "submit_identity_intake",
+            "action": "submit_interaction",
             "requestId": REQUEST_ID,
             "sessionId": SESSION_ID,
+            "interactionId": "stale-id",
+            "values": { "email": "a@b.co" }
+        }),
+    )
+    .await;
+    let (mismatch, _) = await_event(&mut rx, "error").await;
+    assert_eq!(mismatch["error"]["code"], "INTERACTION_MISMATCH");
+    assert!(
+        state.pending_interaction(SESSION_ID).is_some(),
+        "still parked"
+    );
+
+    // 3. An INVALID submit → interaction_invalid, and the turn STAYS parked.
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_interaction",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "interactionId": interaction_id,
+            "kind": "identity_intake",
             "values": { "email": "not-an-email" }
         }),
     )
     .await;
-    let (invalid, _) = await_event(&mut rx, "identity_intake_invalid").await;
+    let (invalid, _) = await_event(&mut rx, "interaction_invalid").await;
+    assert_eq!(invalid["data"]["data"]["kind"], "identity_intake");
+    assert_eq!(invalid["data"]["data"]["interactionId"], interaction_id);
     assert_eq!(invalid["data"]["data"]["errors"][0]["field"], "email");
     assert!(
-        state.intake_fields(SESSION_ID).is_some(),
+        state.pending_interaction(SESSION_ID).is_some(),
         "invalid submit must leave the turn parked for a resubmit"
     );
 
-    // 3. A VALID submit → ack + the parked tool resumes with normalized values.
+    // 4. A VALID submit → ack + the parked raise resumes with canonical values.
     submit_frame(
         &state,
         &tx,
         json!({
-            "action": "submit_identity_intake",
+            "action": "submit_interaction",
             "requestId": REQUEST_ID,
             "sessionId": SESSION_ID,
+            "interactionId": interaction_id,
             "values": { "email": "Alice@Example.COM", "name": "  Alice  " }
         }),
     )
@@ -298,7 +350,7 @@ async fn form_path_parks_validates_and_resumes_with_the_validated_payload() {
     let tool_text = tool_result_text(&seen);
     assert!(
         tool_text.contains(r#""status":"submitted""#),
-        "tool result should be the submitted payload, got: {tool_text}"
+        "tool result should be the canonical payload, got: {tool_text}"
     );
     assert!(
         tool_text.contains("Alice@example.com"),
@@ -310,7 +362,7 @@ async fn form_path_parks_validates_and_resumes_with_the_validated_payload() {
     );
     assert_eq!(result.reply, "Thanks, got it.");
 
-    // 4. The identity landed on the session (the OTP-contact keys).
+    // 5. The kind's host effect ran (the OTP-contact keys).
     let contact = state.session_contact(SESSION_ID);
     assert_eq!(contact.email.as_deref(), Some("Alice@example.com"));
     let session = state.get_session(SESSION_ID).unwrap();
@@ -319,16 +371,19 @@ async fn form_path_parks_validates_and_resumes_with_the_validated_payload() {
         "Alice"
     );
 
-    // 5. The ack + duplicate-submit no-op.
-    let acked = seen.iter().any(|ev| {
-        ev["type"] == "immediate_response" && ev["message"] == "Identity intake submitted"
-    });
+    // 6. The ack + duplicate-submit no-op.
+    let acked = seen
+        .iter()
+        .any(|ev| ev["type"] == "immediate_response" && ev["message"] == "Interaction submitted");
     assert!(acked, "valid submit is acked: {seen:?}");
-    assert!(state.intake_fields(SESSION_ID).is_none(), "park consumed");
+    assert!(
+        state.pending_interaction(SESSION_ID).is_none(),
+        "park consumed"
+    );
 }
 
 #[tokio::test]
-async fn form_path_decline_resumes_gracefully() {
+async fn rich_path_decline_resumes_gracefully() {
     let storage = Arc::new(InMemoryStorageAdapter::new());
     let state = AppState::new(storage.clone(), config());
     state.insert_session(test_session());
@@ -338,18 +393,20 @@ async fn form_path_decline_resumes_gracefully() {
         state.clone(),
         storage as Arc<dyn StorageAdapter>,
         raising_mock(),
-        true,
+        &["identity_form"],
         tx.clone(),
     );
 
-    let (_pending, mut seen) = await_event(&mut rx, "identity_intake_required").await;
+    let (pending, mut seen) = await_event(&mut rx, "interaction_required").await;
+    let interaction_id = pending["data"]["data"]["interactionId"].as_str().unwrap();
     submit_frame(
         &state,
         &tx,
         json!({
-            "action": "submit_identity_intake",
+            "action": "submit_interaction",
             "requestId": REQUEST_ID,
             "sessionId": SESSION_ID,
+            "interactionId": interaction_id,
             "declined": true
         }),
     )
@@ -399,11 +456,11 @@ async fn text_channel_degrades_to_validated_conversational_collection() {
         StreamEvent::ToolCallStart {
             index: 0,
             id: "call_2".into(),
-            name: "submit_identity_intake".into(),
+            name: "submit_interaction".into(),
         },
         StreamEvent::ToolCallArgumentsDelta {
             index: 0,
-            arguments_chunk: r#"{"email":"nope"}"#.into(),
+            arguments_chunk: r#"{"kind":"identity_intake","values":{"email":"nope"}}"#.into(),
         },
         StreamEvent::Done {
             finish_reason: "tool_calls".into(),
@@ -413,11 +470,11 @@ async fn text_channel_degrades_to_validated_conversational_collection() {
         StreamEvent::ToolCallStart {
             index: 0,
             id: "call_3".into(),
-            name: "submit_identity_intake".into(),
+            name: "submit_interaction".into(),
         },
         StreamEvent::ToolCallArgumentsDelta {
             index: 0,
-            arguments_chunk: r#"{"email":"bob@example.com","phone":"555-123-4567"}"#.into(),
+            arguments_chunk: r#"{"kind":"identity_intake","values":{"email":"bob@example.com","phone":"555-123-4567"}}"#.into(),
         },
         StreamEvent::Done {
             finish_reason: "tool_calls".into(),
@@ -436,7 +493,7 @@ async fn text_channel_degrades_to_validated_conversational_collection() {
         state.clone(),
         storage as Arc<dyn StorageAdapter>,
         mock,
-        false, // no identity_form capability → conversational fallback
+        &[], // no capabilities → conversational fallback for every kind
         tx,
     );
 
@@ -460,10 +517,10 @@ async fn text_channel_degrades_to_validated_conversational_collection() {
     //    mirror truncates long tool results, so assert on the directive's
     //    leading content rather than trailing keys.)
     assert!(
-        tool_text.contains("Collect the requested details conversationally"),
+        tool_text.contains("ask for ONE field at a time"),
         "directive returned: {tool_text}"
     );
-    assert!(tool_text.contains("submit_identity_intake"));
+    assert!(tool_text.contains("submit_interaction"));
     // 2. The bad email was rejected server-side (tool error the model re-asks from).
     assert!(
         tool_text.contains("must be a valid email address"),
@@ -484,12 +541,12 @@ async fn text_channel_degrades_to_validated_conversational_collection() {
 }
 
 #[tokio::test]
-async fn create_session_records_the_identity_form_capability() {
+async fn create_session_records_the_declared_capabilities() {
     let storage = Arc::new(InMemoryStorageAdapter::new());
     let state = AppState::new(storage, config());
     let (tx, mut rx) = unbounded_channel::<Value>();
 
-    // With the capability.
+    // With capabilities.
     handler::handle_frame(
         &state,
         &AccessContext::anonymous(),
@@ -508,12 +565,17 @@ async fn create_session_records_the_identity_form_capability() {
     .await;
     let (created, _) = await_event(&mut rx, "immediate_response").await;
     let session_id = created["data"]["sessionId"].as_str().expect("sessionId");
+    let caps = state.session_capabilities(session_id);
     assert!(
-        state.session_supports_identity_form(session_id),
-        "declared capability must be recorded"
+        caps.contains("identity_form"),
+        "declared capability recorded"
+    );
+    assert!(
+        caps.contains("some_future_capability"),
+        "unknown capabilities are kept (forward-compatible)"
     );
 
-    // Without it (an SMS-style client).
+    // Without them (an SMS-style client).
     handler::handle_frame(
         &state,
         &AccessContext::anonymous(),
@@ -531,11 +593,11 @@ async fn create_session_records_the_identity_form_capability() {
     .await;
     let (created2, _) = await_event(&mut rx, "immediate_response").await;
     let session_id2 = created2["data"]["sessionId"].as_str().expect("sessionId");
-    assert!(!state.session_supports_identity_form(session_id2));
+    assert!(state.session_capabilities(session_id2).is_empty());
 }
 
 #[tokio::test]
-async fn submit_without_a_pending_intake_is_a_clean_error() {
+async fn submit_without_a_pending_interaction_is_a_clean_error() {
     let storage = Arc::new(InMemoryStorageAdapter::new());
     let state = AppState::new(storage, config());
     state.insert_session(test_session());
@@ -545,13 +607,14 @@ async fn submit_without_a_pending_intake_is_a_clean_error() {
         &state,
         &tx,
         json!({
-            "action": "submit_identity_intake",
+            "action": "submit_interaction",
             "requestId": REQUEST_ID,
             "sessionId": SESSION_ID,
+            "interactionId": "int-x",
             "values": { "email": "a@b.co" }
         }),
     )
     .await;
     let (err, _) = await_event(&mut rx, "error").await;
-    assert_eq!(err["error"]["code"], "NO_PENDING_INTAKE");
+    assert_eq!(err["error"]["code"], "NO_PENDING_INTERACTION");
 }

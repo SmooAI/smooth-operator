@@ -1,20 +1,26 @@
-//! Identity intake — channel-normalized lead/identity capture.
+//! Identity intake — channel-normalized lead/identity capture: the first
+//! (reference) **Rich Interaction kind** (see `docs/Architecture/Rich Interactions.md`
+//! and [`crate::interaction`]).
 //!
-//! The shared types + **server-side validation** for the `identity_intake`
-//! protocol seam (see `docs/Architecture/Identity Intake.md`):
-//!
-//! - On a **form-capable** channel (the chat widget declares `identity_form` at
-//!   `create_conversation_session`), the agent's `request_identity_intake` tool
-//!   parks the turn and the server emits `identity_intake_required`; the client
-//!   resumes with a `submit_identity_intake` action.
-//! - On a **text-only** channel, the same tool degrades to a conversational
-//!   directive and the model submits collected values through the
-//!   `submit_identity_intake` *tool*.
+//! - On a channel that declared the `identity_form` capability, the agent's
+//!   `request_identity_intake` tool parks the turn and the server emits
+//!   `interaction_required { kind: "identity_intake" }`; the client's form
+//!   resumes with a `submit_interaction` action.
+//! - On a **text-only** channel, the same raise degrades to a conversational
+//!   directive and the model submits collected values through the generic
+//!   `submit_interaction` *tool*.
 //!
 //! Both paths validate through [`validate_intake`] — one implementation, one
 //! behavior — and resume the turn with the same structured payload.
+//! [`IdentityIntakeKind`] packages it all as an
+//! [`InteractionKind`](crate::interaction::InteractionKind).
 
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use smooth_operator_core::tool::ToolSchema;
+
+use crate::interaction::{InteractionFieldError, InteractionKind, InteractionRequest};
 
 /// The closed set of identity fields intake can collect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,17 +61,6 @@ pub struct IntakeField {
     pub label: Option<String>,
 }
 
-/// A parsed `request_identity_intake` request: the fields the agent wants and
-/// the human-readable reason (shown on the form header / woven into the
-/// conversational ask).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntakeRequest {
-    /// The identity fields to collect, in display order.
-    pub fields: Vec<IntakeField>,
-    /// Why the agent needs these details (e.g. `to send you the quote`).
-    pub reason: String,
-}
-
 /// Validated, normalized identity values — the structured payload the parked
 /// turn resumes with (identical on the form and conversational paths).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,16 +91,6 @@ pub struct IntakeFieldError {
     pub field: IntakeFieldKey,
     /// Human-readable validation message.
     pub message: String,
-}
-
-/// How a parked intake resolved: the visitor submitted validated values, or
-/// declined to share them. (A timeout is surfaced by the tool itself.)
-#[derive(Debug, Clone)]
-pub enum IntakeOutcome {
-    /// The visitor submitted values; already validated + normalized.
-    Submitted(IntakeValues),
-    /// The visitor declined to share their details.
-    Declined,
 }
 
 /// Validate raw submitted values against the requested `fields`, returning the
@@ -250,6 +235,178 @@ pub fn normalize_phone_e164(raw: &str) -> Option<String> {
         10 => Some(format!("+1{digits}")),
         11 if digits.starts_with('1') => Some(format!("+{digits}")),
         _ => None,
+    }
+}
+
+/// Parse the raise tool's `fields` argument. Accepts both the structured form
+/// (`[{ "key": "email", "required": true, "label": "Work email" }]`) and the
+/// shorthand models like to emit (`["email", "name"]` — shorthand fields are
+/// `required: true`). Unknown keys are an error (closed set).
+fn parse_fields(raw: &Value) -> anyhow::Result<Vec<IntakeField>> {
+    let items = raw
+        .as_array()
+        .ok_or_else(|| anyhow!("'fields' must be an array"))?;
+    if items.is_empty() {
+        return Err(anyhow!("'fields' must contain at least one field"));
+    }
+    let parse_key = |s: &str| -> anyhow::Result<IntakeFieldKey> {
+        match s {
+            "name" => Ok(IntakeFieldKey::Name),
+            "email" => Ok(IntakeFieldKey::Email),
+            "phone" => Ok(IntakeFieldKey::Phone),
+            other => Err(anyhow!(
+                "unknown intake field '{other}' (expected name, email, or phone)"
+            )),
+        }
+    };
+    let mut fields = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::String(s) => fields.push(IntakeField {
+                key: parse_key(s)?,
+                required: true,
+                label: None,
+            }),
+            Value::Object(obj) => {
+                let key = obj
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("each field object needs a string 'key'"))?;
+                fields.push(IntakeField {
+                    key: parse_key(key)?,
+                    required: obj.get("required").and_then(Value::as_bool).unwrap_or(true),
+                    label: obj.get("label").and_then(Value::as_str).map(str::to_string),
+                });
+            }
+            other => return Err(anyhow!("invalid field entry: {other}")),
+        }
+    }
+    Ok(fields)
+}
+
+/// The `identity_intake` Rich Interaction kind — the reference implementation
+/// of [`InteractionKind`] (see the module docs and
+/// `spec/interactions/identity-intake.schema.json`).
+pub struct IdentityIntakeKind;
+
+impl InteractionKind for IdentityIntakeKind {
+    fn kind(&self) -> &'static str {
+        "identity_intake"
+    }
+
+    fn capability(&self) -> &'static str {
+        "identity_form"
+    }
+
+    fn tool_schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "request_identity_intake".to_string(),
+            description: "Ask the visitor for their contact details (name, email, and/or phone) \
+                          in a channel-appropriate way. On channels that can render a form the \
+                          visitor fills a structured form; on text channels you will be told to \
+                          collect the fields conversationally. Always use this tool instead of \
+                          free-forming a request for contact details."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "fields": {
+                        "type": "array",
+                        "description": "Which fields to collect, in order. Each entry is either a string (\"name\" | \"email\" | \"phone\") or an object { key, required?, label? }.",
+                        "items": {
+                            "anyOf": [
+                                { "type": "string", "enum": ["name", "email", "phone"] },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "key": { "type": "string", "enum": ["name", "email", "phone"] },
+                                        "required": { "type": "boolean" },
+                                        "label": { "type": "string" }
+                                    },
+                                    "required": ["key"]
+                                }
+                            ]
+                        }
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why you need these details, phrased for the visitor (e.g. \"to send you the quote\")."
+                    }
+                },
+                "required": ["fields", "reason"]
+            }),
+        }
+    }
+
+    fn parse_request(&self, args: &Value) -> anyhow::Result<InteractionRequest> {
+        let fields = parse_fields(args.get("fields").unwrap_or(&Value::Null))?;
+        let reason = args
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("to help you better")
+            .to_string();
+        Ok(InteractionRequest {
+            kind: self.kind().to_string(),
+            spec: json!({ "fields": fields }),
+            reason,
+        })
+    }
+
+    fn validate(&self, spec: &Value, values: &Value) -> Result<Value, Vec<InteractionFieldError>> {
+        // The spec's fields drive required-ness; a Null/absent spec (fallback
+        // raise from an earlier turn) degrades to format-only validation.
+        let fields: Vec<IntakeField> = spec
+            .get("fields")
+            .cloned()
+            .and_then(|f| serde_json::from_value(f).ok())
+            .unwrap_or_default();
+        let values: IntakeValues = serde_json::from_value(values.clone()).map_err(|e| {
+            vec![InteractionFieldError {
+                field: "values".to_string(),
+                message: format!("invalid values shape: {e}"),
+            }]
+        })?;
+        if values.is_empty() {
+            return Err(vec![InteractionFieldError {
+                field: "values".to_string(),
+                message: "provide at least one of name/email/phone, or declined=true".to_string(),
+            }]);
+        }
+        match validate_intake(&fields, &values) {
+            Ok(validated) => Ok(serde_json::to_value(validated).unwrap_or(Value::Null)),
+            Err(errors) => Err(errors
+                .into_iter()
+                .map(|e| InteractionFieldError {
+                    field: e.field.as_str().to_string(),
+                    message: e.message,
+                })
+                .collect()),
+        }
+    }
+
+    fn fallback_directive(&self, spec: &Value, reason: &str) -> String {
+        let field_list = spec
+            .get("fields")
+            .and_then(Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(|f| f.get("key").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        format!(
+            "This visitor's channel cannot display a form. Collect the requested details \
+             ({field_list}) conversationally: ask for ONE field at a time, in the order given, \
+             naturally weaving in the reason ({reason}). When you have the values, call the \
+             `submit_interaction` tool with kind \"identity_intake\" and the values — it \
+             validates each field and will tell you if something looks wrong so you can re-ask. \
+             If the visitor declines to share, call `submit_interaction` with declined=true and \
+             continue helping them without the details."
+        )
     }
 }
 

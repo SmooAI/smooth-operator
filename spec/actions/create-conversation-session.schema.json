@@ -42,7 +42,7 @@
         "supports": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Client render capabilities for this session. Known value: `identity_form` \u2014 the client can render a structured identity-intake form, so the server may emit `identity_intake_required` mid-turn. Text-only channels (SMS, voice) omit this and the server degrades intake to conversational turn-by-turn collection. Unknown values are ignored (forward-compatible)."
+          "description": "Client render capabilities for this session \u2014 a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` \u2192 capability `identity_form`); future kinds add their own values (`date_picker`, `file_upload`, \u2026). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible)."
         },
         "metadata": {
           "type": "object",
