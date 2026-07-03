@@ -1,0 +1,16 @@
+name = "__NAME__"
+version = "0.1.0"
+protocol = 1
+
+# How the host launches this extension (a long-lived JSON-RPC subprocess).
+# The provider reads its base URL + API key from the environment; forward them in.
+[run]
+command = "node"
+args = ["dist/index.js"]
+env = { PROVIDER_BASE_URL = "${env:PROVIDER_BASE_URL}", PROVIDER_API_KEY = "${env:PROVIDER_API_KEY}" }
+
+# Contributes an LLM provider to the host's model surface. `ui` lets an OAuth
+# login drive the ui/* prompts; drop it if the provider uses a static API key.
+[capabilities]
+providers = true
+ui = true

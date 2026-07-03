@@ -385,6 +385,43 @@
     "instance": { "topic": "echo.said", "payload": { "phrase": "hello" } }
   },
 
+  "event_bus_fanout": {
+    "$schema_ref": "methods/event.schema.json#/$defs/Params",
+    "description": "The inter-extension bus fanout (Phase 8): a bus/publish re-emitted to subscribers.",
+    "instance": { "event": "bus/event", "seq": 12, "context": { "token": "epoch-1", "tier": "event" }, "payload": { "from": "publisher", "topic": "echo.said", "payload": { "phrase": "hello" } } }
+  },
+
+  "event_widget_key": {
+    "$schema_ref": "methods/event.schema.json#/$defs/Params",
+    "description": "A targeted render-block v2 keypress (Phase 8) routed to the active widget's owner.",
+    "instance": { "event": "widget/key", "seq": 34, "context": { "token": "epoch-1", "tier": "event" }, "payload": { "widget_id": "snake", "key": "ArrowUp" } }
+  },
+
+  "registrations_phase8": {
+    "$schema_ref": "methods/initialize.schema.json#/$defs/Registrations",
+    "description": "Phase 8 registrations: declared intercept hooks + a declarative message renderer.",
+    "instance": {
+      "tools": [{ "name": "play", "description": "Start the game.", "parameters": { "type": "object" } }],
+      "hooks": ["context", "before_agent_start"],
+      "subscriptions": ["widget/key", "bus/event"],
+      "message_renderers": [
+        { "tag": "snake_board", "template": { "kind": "markdown", "text": "score: {{score}}" } }
+      ]
+    }
+  },
+
+  "render_block_widget": {
+    "$schema_ref": "methods/initialize.schema.json#/$defs/RenderBlock",
+    "description": "An interactive widget render block (Phase 8) wrapping a body block and declaring keybindings.",
+    "instance": {
+      "kind": "widget",
+      "widget_id": "snake",
+      "body": { "kind": "stack", "children": [{ "kind": "markdown", "text": "score: 3" }, { "kind": "progress", "label": "speed", "value": 0.4 }] },
+      "keybindings": [{ "key": "ArrowUp", "description": "up" }, { "key": "q", "description": "quit" }],
+      "text": "snake — score 3"
+    }
+  },
+
   "frame_request": {
     "$schema_ref": "methods/envelope.schema.json#/$defs/Request",
     "description": "A ping request frame.",

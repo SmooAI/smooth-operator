@@ -32,6 +32,16 @@ export const method = {
     PROVIDER_DELTA: 'provider/delta',
     PROVIDER_OAUTH_LOGIN: 'provider/oauth_login',
     PROVIDER_OAUTH_REFRESH: 'provider/oauth_refresh',
+    /** Ext → host: publish onto the inter-extension bus (Phase 8). */
+    BUS_PUBLISH: 'bus/publish',
+} as const;
+
+/** SEP observe-event names the host fans out (Phase 8 additions included). */
+export const eventName = {
+    /** Inter-extension bus fanout — payload `{ from, topic, payload }`. */
+    BUS_EVENT: 'bus/event',
+    /** Targeted render-block v2 keypress — payload `{ widget_id?, key }`. */
+    WIDGET_KEY: 'widget/key',
 } as const;
 
 /** JSON-RPC + SEP error codes (see spec/extension/envelope.md). */
@@ -117,6 +127,15 @@ export interface ProviderRegistration {
     models?: ProviderModel[];
 }
 
+/** A declarative message renderer (Phase 8, pi's `registerMessageRenderer`):
+ *  a custom message `tag` → render-block `template`. When a session entry carries
+ *  the tag, the frontend renders the template with `{{path}}` placeholders
+ *  resolved against the entry's data. Data-only — the host never runs it. */
+export interface MessageRendererRegistration {
+    tag: string;
+    template: RenderBlock;
+}
+
 export interface Registrations {
     tools?: ToolRegistration[];
     commands?: CommandRegistration[];
@@ -124,6 +143,51 @@ export interface Registrations {
     shortcuts?: ShortcutRegistration[];
     subscriptions?: string[];
     providers?: ProviderRegistration[];
+    /** Intercept hooks this extension handles (Phase 8) — lets the host skip the
+     *  per-turn `context` hook when no extension handles it. Empty = unknown. */
+    hooks?: string[];
+    /** Declarative custom-message renderers (Phase 8). */
+    message_renderers?: MessageRendererRegistration[];
+}
+
+// --- render blocks (Phase 8) --------------------------------------------
+
+/** One key an interactive `widget` render block declares. The host routes the
+ *  matching keypress back as a `widget/key` event ({@link WidgetKeyPayload}). */
+export interface Keybinding {
+    /** A human chord the frontend matches, e.g. `ArrowUp`, `space`, `q`. */
+    key: string;
+    description?: string;
+}
+
+/**
+ * The declarative render-block DSL (Phase 8) — replaces pi's function renderers.
+ * The host/frontend renders each `kind` natively (TUI/web/widget); `text` is the
+ * always-available plain fallback (frontends may derive one when omitted). The
+ * `widget` kind is the interactive tier: it wraps a `body` block and declares
+ * `keybindings`; the host routes matching keys back as `widget/key` events and
+ * the extension re-renders via `ui.setWidget`.
+ */
+export type RenderBlock =
+    | { kind: 'markdown'; text: string }
+    | { kind: 'keyvalue'; rows: { key: string; value: string }[]; title?: string; text?: string }
+    | { kind: 'table'; columns: string[]; rows: string[][]; text?: string }
+    | { kind: 'diff'; patch: string; text?: string }
+    | { kind: 'progress'; value: number; label?: string; text?: string }
+    | { kind: 'stack'; children: RenderBlock[]; text?: string }
+    | { kind: 'widget'; widget_id: string; body: RenderBlock; keybindings: Keybinding[]; text?: string };
+
+/** Payload of the `bus/event` observe event (inter-extension bus, Phase 8). */
+export interface BusEventPayload {
+    from: string;
+    topic: string;
+    payload?: unknown;
+}
+
+/** Payload of the `widget/key` observe event (render-block v2, Phase 8). */
+export interface WidgetKeyPayload {
+    widget_id?: string;
+    key: string;
 }
 
 export interface InitializeResult {
@@ -183,7 +247,7 @@ export type UiRequestParams =
     | { kind: 'input'; prompt: string; default?: string }
     | { kind: 'notify'; message: string; level?: 'info' | 'warn' | 'error' }
     | { kind: 'set_status'; status: string }
-    | { kind: 'set_widget'; widget: Record<string, unknown> }
+    | { kind: 'set_widget'; widget: RenderBlock }
     | { kind: 'set_title'; title: string };
 
 /**
