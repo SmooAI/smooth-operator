@@ -38,7 +38,7 @@ const COMPILE_OPTS = {
 
 async function listSchemas(): Promise<string[]> {
     const out: string[] = [];
-    for (const sub of ['', 'actions', 'events', 'domain']) {
+    for (const sub of ['', 'actions', 'events', 'domain', 'interactions']) {
         const dir = sub ? join(SPEC_DIR, sub) : SPEC_DIR;
         const entries = await readdir(dir, { withFileTypes: true });
         for (const e of entries) {

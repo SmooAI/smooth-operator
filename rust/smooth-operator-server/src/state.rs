@@ -24,7 +24,8 @@ use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
 use smooth_operator::domain::Session;
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
-use smooth_operator::identity_intake::{IntakeField, IntakeOutcome, IntakeValues};
+use smooth_operator::identity_intake::IntakeValues;
+use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry};
 use smooth_operator::otp::{OtpContact, OtpService};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::tool_provider::ToolProvider;
@@ -99,6 +100,12 @@ pub struct AppState {
     /// tenant's usage is attributed to its own key. The per-turn LLM-config build
     /// falls back to the env key whenever the resolver returns `None`.
     pub gateway_key_resolver: Arc<dyn GatewayKeyResolver>,
+    /// **Rich Interactions kind catalog.** The interaction kinds this server
+    /// hosts (raise tool + validator + conversational fallback per kind — see
+    /// `smooth_operator::interaction`). Defaults to the reference catalog
+    /// (`identity_intake`); a host may extend it via
+    /// [`with_interactions`](Self::with_interactions).
+    pub interactions: Arc<InteractionRegistry>,
     /// **End-user OTP identity-verification seam.** When `Some`, a turn whose
     /// auth gate refuses an `end_user` tool on an unverified session triggers the
     /// OTP flow: the server emits `otp_verification_required`, calls
@@ -142,15 +149,15 @@ pub struct AppState {
     /// session has at most one outstanding confirmation; an empty map means no
     /// turn is parked (the default, byte-for-byte unchanged from before HITL).
     pending_confirmations: Arc<RwLock<HashMap<String, UnboundedSender<HumanResponse>>>>,
-    /// **Identity-intake pending parks**: `sessionId` → the parked turn's
-    /// requested fields + [`IntakeOutcome`] sender. When an agent turn's
-    /// `request_identity_intake` tool parks on a form-capable session, the
-    /// runner's intake bridge registers here; a subsequent
-    /// `submit_identity_intake` frame validates against the registered
-    /// `fields`, then takes the sender and feeds it the outcome (submitted
-    /// values or a decline) to resume the parked turn. One outstanding intake
-    /// per session (mirrors `pending_confirmations`).
-    pending_intakes: Arc<RwLock<HashMap<String, PendingIntake>>>,
+    /// **Rich Interactions pending parks**: `sessionId` → the parked turn's
+    /// interaction (id + kind + spec) and [`InteractionOutcome`] sender. When an
+    /// agent turn's raise tool parks on a capability-declaring session, the
+    /// runner's interaction bridge registers here; a subsequent
+    /// `submit_interaction` frame validates against the registered kind + spec,
+    /// then takes the sender and feeds it the outcome (submitted values or a
+    /// decline) to resume the parked turn. One outstanding interaction per
+    /// session (mirrors `pending_confirmations`).
+    pending_interactions: Arc<RwLock<HashMap<String, PendingInteraction>>>,
     /// When `true`, the router mounts the embedded widget host page at `/` and
     /// the widget bundle at `/chat-widget.iife.js`. Off by default (the
     /// K8s/Lambda flavors never serve the widget); the local flavor opts in via
@@ -194,14 +201,20 @@ pub fn scoped_connector_key(org_id: &str, connector_name: &str) -> String {
     format!("IXCONN#{org_id}\u{1}{connector_name}")
 }
 
-/// A turn parked on identity intake: the fields it asked for (the validation
-/// contract for the incoming `submit_identity_intake`) and the sender that
-/// resumes it.
-pub struct PendingIntake {
-    /// The fields the agent requested (required-ness drives validation).
-    pub fields: Vec<IntakeField>,
-    /// Resumes the parked `request_identity_intake` tool.
-    pub responder: UnboundedSender<IntakeOutcome>,
+/// A turn parked on a Rich Interaction: the interaction instance (id + kind +
+/// spec — the validation contract for the incoming `submit_interaction`) and
+/// the sender that resumes it.
+#[derive(Clone)]
+pub struct PendingInteraction {
+    /// Server-generated id for this interaction instance; the submit must echo
+    /// it so a stale submit can never resolve a newer park.
+    pub interaction_id: String,
+    /// The interaction kind (routes to its validator).
+    pub kind: String,
+    /// The kind-specific spec the raise carried (drives validation).
+    pub spec: serde_json::Value,
+    /// Resumes the parked raise tool.
+    pub responder: UnboundedSender<InteractionOutcome>,
 }
 
 impl AppState {
@@ -232,6 +245,7 @@ impl AppState {
             chat_provider: None,
             gateway_key_resolver,
             otp_service: None,
+            interactions: Arc::new(InteractionRegistry::default()),
             // A fresh, never-cancelled token: every clone of this state shares
             // its cancellation state, so the serve loop cancelling once fans out
             // to every connection. Defaulting here (rather than at each call
@@ -241,7 +255,7 @@ impl AppState {
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
-            pending_intakes: Arc::new(RwLock::new(HashMap::new())),
+            pending_interactions: Arc::new(RwLock::new(HashMap::new())),
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
@@ -385,6 +399,14 @@ impl AppState {
     #[must_use]
     pub fn with_gateway_key_resolver(mut self, resolver: Arc<dyn GatewayKeyResolver>) -> Self {
         self.gateway_key_resolver = resolver;
+        self
+    }
+
+    /// Install a custom Rich Interactions kind catalog (builder). The default
+    /// hosts the reference kinds; a host adds its own kinds here.
+    #[must_use]
+    pub fn with_interactions(mut self, registry: InteractionRegistry) -> Self {
+        self.interactions = Arc::new(registry);
         self
     }
 
@@ -605,78 +627,70 @@ impl AppState {
         }
     }
 
-    /// Register a turn parked on identity intake for `session_id` (fields +
-    /// resumable [`IntakeOutcome`] sender). Any prior pending intake for the
-    /// same session is replaced (one outstanding intake per session). Called by
-    /// the runner's intake bridge when `request_identity_intake` parks.
-    pub fn register_intake(
-        &self,
-        session_id: impl Into<String>,
-        fields: Vec<IntakeField>,
-        responder: UnboundedSender<IntakeOutcome>,
-    ) {
-        if let Ok(mut map) = self.pending_intakes.write() {
-            map.insert(session_id.into(), PendingIntake { fields, responder });
+    /// Register a turn parked on a Rich Interaction for `session_id`. Any prior
+    /// pending interaction for the same session is replaced (one outstanding
+    /// interaction per session). Called by the runner's interaction bridge when
+    /// a raise tool parks.
+    pub fn register_interaction(&self, session_id: impl Into<String>, pending: PendingInteraction) {
+        if let Ok(mut map) = self.pending_interactions.write() {
+            map.insert(session_id.into(), pending);
         }
     }
 
-    /// The fields the pending intake for `session_id` asked for (the validation
-    /// contract), WITHOUT consuming the park — an invalid submit must leave the
-    /// turn parked for a resubmit. `None` when no intake is pending.
+    /// The pending interaction for `session_id` (id + kind + spec), WITHOUT
+    /// consuming the park — an invalid submit must leave the turn parked for a
+    /// resubmit. `None` when no interaction is pending. The responder in the
+    /// clone is the SAME sender (clones share the channel), but resolution must
+    /// go through [`take_interaction`](Self::take_interaction) so duplicates
+    /// are no-ops.
     #[must_use]
-    pub fn intake_fields(&self, session_id: &str) -> Option<Vec<IntakeField>> {
-        Some(
-            self.pending_intakes
-                .read()
-                .ok()?
-                .get(session_id)?
-                .fields
-                .clone(),
-        )
+    pub fn pending_interaction(&self, session_id: &str) -> Option<PendingInteraction> {
+        self.pending_interactions
+            .read()
+            .ok()?
+            .get(session_id)
+            .cloned()
     }
 
-    /// Take (remove + return) the pending [`IntakeOutcome`] sender for
-    /// `session_id`. Taking it — rather than cloning — guarantees a single
-    /// submit resolves a single parked intake, and a duplicate submit is a
-    /// no-op (`NO_PENDING_INTAKE`).
+    /// Take (remove + return) the pending interaction for `session_id`. Taking
+    /// it — rather than cloning — guarantees a single submit resolves a single
+    /// parked raise, and a duplicate submit is a no-op (`NO_PENDING_INTERACTION`).
     #[must_use]
-    pub fn take_intake(&self, session_id: &str) -> Option<UnboundedSender<IntakeOutcome>> {
-        Some(
-            self.pending_intakes
-                .write()
-                .ok()?
-                .remove(session_id)?
-                .responder,
-        )
+    pub fn take_interaction(&self, session_id: &str) -> Option<PendingInteraction> {
+        self.pending_interactions.write().ok()?.remove(session_id)
     }
 
-    /// Drop any pending intake registered for `session_id` without resolving it
-    /// (parked turn ended — timeout / disconnect). Mirrors
+    /// Drop any pending interaction registered for `session_id` without
+    /// resolving it (parked turn ended — timeout / disconnect). Mirrors
     /// [`clear_confirmation`](Self::clear_confirmation).
-    pub fn clear_intake(&self, session_id: &str) {
-        if let Ok(mut map) = self.pending_intakes.write() {
+    pub fn clear_interaction(&self, session_id: &str) {
+        if let Ok(mut map) = self.pending_interactions.write() {
             map.remove(session_id);
         }
     }
 
-    /// Whether this session's client declared the `identity_form` render
-    /// capability at `create_conversation_session` (read from the session's
-    /// `metadata.supportsIdentityForm`). `false` for unknown sessions and
-    /// text-only channels — the intake tool then degrades to conversational
-    /// turn-by-turn collection.
+    /// The client render capabilities this session declared in `supports` at
+    /// `create_conversation_session` (read from the session's
+    /// `metadata.supports`). Empty for unknown sessions and text-only channels
+    /// — every interaction kind then degrades to its conversational fallback.
     #[must_use]
-    pub fn session_supports_identity_form(&self, session_id: &str) -> bool {
+    pub fn session_capabilities(&self, session_id: &str) -> std::collections::HashSet<String> {
         self.sessions
             .read()
             .ok()
             .and_then(|map| {
-                map.get(session_id)?
+                let caps = map
+                    .get(session_id)?
                     .metadata
                     .as_ref()?
-                    .get("supportsIdentityForm")?
-                    .as_bool()
+                    .get("supports")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+                Some(caps)
             })
-            .unwrap_or(false)
+            .unwrap_or_default()
     }
 
     /// Attach validated intake values to the session: metadata `userName` /
@@ -857,31 +871,43 @@ mod tests {
     }
 
     #[test]
-    fn intake_registry_round_trips_and_peeks_without_consuming() {
-        use smooth_operator::identity_intake::{IntakeField, IntakeFieldKey};
+    fn interaction_registry_round_trips_and_peeks_without_consuming() {
         let state = state_with(config_with_env_key(None));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let fields = vec![IntakeField {
-            key: IntakeFieldKey::Email,
-            required: true,
-            label: None,
-        }];
-        state.register_intake("s1", fields, tx);
+        state.register_interaction(
+            "s1",
+            PendingInteraction {
+                interaction_id: "int-1".into(),
+                kind: "identity_intake".into(),
+                spec: serde_json::json!({ "fields": [{ "key": "email", "required": true }] }),
+                responder: tx,
+            },
+        );
 
         // Peek does not consume (an invalid submit must leave the turn parked).
-        assert!(state.intake_fields("s1").is_some());
-        assert!(state.intake_fields("s1").is_some());
+        let p = state.pending_interaction("s1").expect("pending");
+        assert_eq!(p.interaction_id, "int-1");
+        assert_eq!(p.kind, "identity_intake");
+        assert!(state.pending_interaction("s1").is_some());
 
         // Take consumes; a duplicate submit finds nothing.
-        assert!(state.take_intake("s1").is_some());
-        assert!(state.take_intake("s1").is_none());
-        assert!(state.intake_fields("s1").is_none());
+        assert!(state.take_interaction("s1").is_some());
+        assert!(state.take_interaction("s1").is_none());
+        assert!(state.pending_interaction("s1").is_none());
 
-        // clear_intake drops without resolving.
+        // clear_interaction drops without resolving.
         let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
-        state.register_intake("s2", Vec::new(), tx2);
-        state.clear_intake("s2");
-        assert!(state.take_intake("s2").is_none());
+        state.register_interaction(
+            "s2",
+            PendingInteraction {
+                interaction_id: "int-2".into(),
+                kind: "identity_intake".into(),
+                spec: serde_json::Value::Null,
+                responder: tx2,
+            },
+        );
+        state.clear_interaction("s2");
+        assert!(state.take_interaction("s2").is_none());
     }
 
     #[test]
@@ -918,18 +944,24 @@ mod tests {
     }
 
     #[test]
-    fn session_supports_identity_form_defaults_false() {
+    fn session_capabilities_default_empty_and_read_the_supports_list() {
         let state = state_with(config_with_env_key(None));
         state.insert_session(test_session("s1"));
-        assert!(!state.session_supports_identity_form("s1"));
-        assert!(!state.session_supports_identity_form("missing"));
+        assert!(state.session_capabilities("s1").is_empty());
+        assert!(state.session_capabilities("missing").is_empty());
 
         let mut session = test_session("s2");
         let mut meta = std::collections::HashMap::new();
-        meta.insert("supportsIdentityForm".to_string(), true.into());
+        meta.insert(
+            "supports".to_string(),
+            serde_json::json!(["identity_form", "date_picker"]),
+        );
         session.metadata = Some(meta);
         state.insert_session(session);
-        assert!(state.session_supports_identity_form("s2"));
+        let caps = state.session_capabilities("s2");
+        assert!(caps.contains("identity_form"));
+        assert!(caps.contains("date_picker"));
+        assert!(!caps.contains("file_upload"));
     }
 
     #[test]

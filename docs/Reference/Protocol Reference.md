@@ -37,13 +37,13 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 
 | action | purpose | key request fields | response |
 | ------ | ------- | ------------------ | -------- |
-| `create_conversation_session` | start a session | `agentId`, `userName?`, `userEmail?`, `browserFingerprint?`, `metadata?`, `supports?` (client render capabilities, e.g. `["identity_form"]`) | `sessionId`, `conversationId`, `agentId`, `userParticipantId`, `agentParticipantId` |
+| `create_conversation_session` | start a session | `agentId`, `userName?`, `userEmail?`, `browserFingerprint?`, `metadata?`, `supports?` (per-kind Rich-Interaction render capabilities, e.g. `["identity_form"]`) | `sessionId`, `conversationId`, `agentId`, `userParticipantId`, `agentParticipantId` |
 | `send_message` | a turn | `sessionId`, `message`, `stream?` | streamed events, then `eventual_response` |
 | `get_session` | fetch session | `sessionId` | session snapshot |
 | `get_messages` | history | `sessionId`, paging | messages |
 | `confirm_tool_action` | resume after a write-confirmation | `sessionId`, `requestId`, `approved` | resumed stream |
 | `verify_otp` | submit an OTP code after an auth gate | `sessionId`, `requestId`, `code` | `otp_verified` or `otp_invalid` (see below) |
-| `submit_identity_intake` | resume a turn parked on identity intake | `sessionId`, `requestId`, `values?` (`{name?, email?, phone?}`) or `declined: true` | resumed stream, or `identity_intake_invalid` (turn stays parked) |
+| `submit_interaction` | resume a turn parked on a Rich Interaction (ANY kind) | `sessionId`, `requestId`, `interactionId`, `kind?`, `values?` or `declined: true` | resumed stream, or `interaction_invalid` (turn stays parked) |
 | `ping` | keepalive | — | `pong` |
 
 ## Events (server → client)
@@ -57,8 +57,8 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `keepalive` | heartbeat |
 | `write_confirmation_required` | a tool wants to perform a write; client must `confirm_tool_action` |
 | `otp_verification_required` / `otp_sent` / `otp_verified` / `otp_invalid` | auth-gated tool flow |
-| `identity_intake_required` | the agent wants the visitor's name/email/phone; only sent to sessions that declared the `identity_form` capability — client renders the inline form and replies with `submit_identity_intake` (see [[Identity Intake]]) |
-| `identity_intake_invalid` | a `submit_identity_intake` failed server-side validation (per-field `errors`); the turn stays parked for a resubmit |
+| `interaction_required` | the agent raised a Rich Interaction (`kind` + `spec`, e.g. `identity_intake`); only sent to sessions that declared the kind's capability — client renders the kind's card and replies with `submit_interaction` (see [[Rich Interactions]]) |
+| `interaction_invalid` | a `submit_interaction` failed the kind's server-side validation (per-field `errors`); the turn stays parked for a resubmit |
 | `error` | `{ code, message }` |
 | `pong` | reply to `ping` |
 
@@ -107,9 +107,9 @@ Flow:
 
 > **Reference-server note:** the reference server does not park/auto-resume the original turn across the OTP round-trip (step 3 is a client re-send). Parking + automatic resume is a host concern behind the same events. With no `OtpService` installed, the gate stays fail-closed (the `end_user` tool is refused, no OTP offered), and a stray `verify_otp` returns `otp_invalid` / `NOT_FOUND`. The reference server currently offers only the `email` channel (`create_conversation_session` captures no phone).
 
-## Identity intake (channel-normalized lead capture)
+## Rich Interactions (structured cards, channel-normalized)
 
-The agent tool `request_identity_intake({ fields, reason })` collects the visitor's name/email/phone in a channel-appropriate way. Sessions that declared `supports: ["identity_form"]` at create get a parked turn + `identity_intake_required` → the client's inline form → `submit_identity_intake` (server-side validation: required fields, email shape, E.164 phone; invalid ⇒ `identity_intake_invalid`, turn stays parked). Text-only channels (no capability) get the conversational fallback: the tool returns a collect-one-field-at-a-time directive and the model submits through the `submit_identity_intake` *tool* — same validation, same resume payload. On success the identity is attached to the session (metadata `userName`/`contactEmail`/`contactPhone` — the OTP contact keys). Full design: [[Identity Intake]].
+A Rich Interaction is a typed, server-validated mid-turn ask (`interaction_required { interactionId, kind, spec, reason }` → the client card → `submit_interaction`). Sessions declare per-kind render capabilities in `supports` at create; kinds without their capability degrade to a **conversational fallback** (the raise tool returns kind-specific instructions and the model submits through the generic `submit_interaction` tool — same server-side validator, same canonical resume payload). The kind catalog lives in `spec/interactions/` (first kind: `identity_intake`, capability `identity_form` — name/email/phone with email-shape + E.164 validation, attaching to the session's OTP contact keys). Full design + extension recipe: [[Rich Interactions]].
 
 ## Mapping to smooth-operator's `AgentEvent` stream
 

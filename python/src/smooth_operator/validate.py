@@ -30,7 +30,7 @@ from referencing.jsonschema import DRAFT202012
 # Default spec dir: ../../spec relative to this file (python/src/smooth_operator/ -> spec).
 DEFAULT_SPEC_DIR = Path(__file__).resolve().parent.parent.parent.parent / "spec"
 
-_SUBDIRS = ["", "actions", "events", "domain"]
+_SUBDIRS = ["", "actions", "events", "domain", "interactions"]
 
 # Maps an event ``type`` to its schema file (spec-relative).
 _EVENT_SCHEMA_FILE: dict[str, str] = {

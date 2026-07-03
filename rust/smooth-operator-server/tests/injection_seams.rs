@@ -127,7 +127,7 @@ async fn run_turn_with_key(
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,
             confirmation: None,
-            identity_intake: None,
+            interactions: None,
             tool_provider,
             system_prompt,
             org_id,

@@ -362,18 +362,25 @@ export class SmoothAgentClient {
     }
 
     /**
-     * Submit (or decline) identity intake, resuming the turn parked by an
-     * `identity_intake_required` event. Server-side validation may reply with an
-     * `identity_intake_invalid` event (the turn stays parked — resubmit); a valid
+     * Submit (or decline) a Rich Interaction, resuming the turn parked by an
+     * `interaction_required` event. This ONE verb serves every interaction kind
+     * (identity intake, future date pickers, choice chips, …) — adding a kind
+     * needs no new client method. Server-side validation may reply with an
+     * `interaction_invalid` event (the turn stays parked — resubmit); a valid
      * submit resumes the stream back into the original {@link MessageTurn}.
      */
-    submitIdentityIntake(req: {
+    submitInteraction(req: {
         sessionId: string;
         requestId: string;
-        values?: { name?: string; email?: string; phone?: string };
+        /** Echo of the `interaction_required` event's `interactionId`. */
+        interactionId: string;
+        /** Optional kind cross-check (e.g. `identity_intake`). */
+        kind?: string;
+        /** Kind-shaped values (identity_intake: `{ name?, email?, phone? }`). */
+        values?: Record<string, unknown>;
         declined?: boolean;
     }): void {
-        this.transport.send(JSON.stringify({ action: 'submit_identity_intake', ...req }));
+        this.transport.send(JSON.stringify({ action: 'submit_interaction', ...req }));
     }
 
     // ─────────────────────────── Internals ─────────────────────────────────

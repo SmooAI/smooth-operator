@@ -26,7 +26,7 @@ pub mod context;
 pub mod conversation_history;
 pub mod fetch_url;
 pub mod github_search;
-pub mod identity_intake;
+pub mod interaction;
 pub mod knowledge_search;
 pub mod web_search;
 
@@ -37,10 +37,9 @@ pub use github_search::{
     GithubAuth, GithubSearchBackend, GithubSearchKind, GithubSearchResult, GithubSearchTool,
     OctocrabGithubSearch,
 };
-pub use identity_intake::{
-    intake_channel, IdentityAttach, IntakeChannelPair, RequestIdentityIntakeTool,
-    SubmitIdentityIntakeTool, INTAKE_TIMEOUT, REQUEST_IDENTITY_INTAKE_TOOL,
-    SUBMIT_IDENTITY_INTAKE_TOOL,
+pub use interaction::{
+    interaction_channel, InteractionAttach, InteractionChannelPair, RaisedSpecs,
+    RequestInteractionTool, SubmitInteractionTool, INTERACTION_TIMEOUT, SUBMIT_INTERACTION_TOOL,
 };
 pub use knowledge_search::{KnowledgeResultSink, KnowledgeSearchTool};
 pub use web_search::{NoopWebSearchProvider, SearchResult, WebSearchProvider, WebSearchTool};

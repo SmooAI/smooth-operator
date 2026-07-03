@@ -212,43 +212,70 @@
       "timestamp": 1749340806700
     }
   },
-  "identity_intake_required_event": {
-    "$schema_ref": "events/identity-intake-required.schema.json",
-    "description": "Mid-turn identity-intake prompt for a session that declared the identity_form capability.",
+  "interaction_required_event": {
+    "$schema_ref": "events/interaction-required.schema.json",
+    "description": "Mid-turn Rich Interaction prompt (kind identity_intake) for a session that declared the identity_form capability.",
     "instance": {
-      "type": "identity_intake_required",
+      "type": "interaction_required",
       "requestId": "req-a1b2c3d4-0004",
       "data": {
         "requestId": "req-a1b2c3d4-0004",
         "data": {
-          "fields": [
-            {
-              "key": "name",
-              "required": false
-            },
-            {
-              "key": "email",
-              "required": true,
-              "label": "Work email"
-            },
-            {
-              "key": "phone",
-              "required": false
-            }
-          ],
+          "interactionId": "88888888-8888-8888-8888-888888888888",
+          "kind": "identity_intake",
+          "spec": {
+            "fields": [
+              {
+                "key": "name",
+                "required": false
+              },
+              {
+                "key": "email",
+                "required": true,
+                "label": "Work email"
+              },
+              {
+                "key": "phone",
+                "required": false
+              }
+            ]
+          },
           "reason": "to send you the quote"
         }
       },
       "timestamp": 1749340807000
     }
   },
-  "submit_identity_intake_request": {
-    "$schema_ref": "actions/submit-identity-intake.schema.json#/$defs/Request",
-    "description": "Resume a parked intake turn with the visitor's values.",
+  "identity_intake_spec": {
+    "$schema_ref": "interactions/identity-intake.schema.json#/$defs/Spec",
+    "description": "The identity_intake kind's spec, as carried in interaction_required.data.data.spec.",
     "instance": {
-      "action": "submit_identity_intake",
+      "fields": [
+        {
+          "key": "name",
+          "required": false
+        },
+        {
+          "key": "email",
+          "required": true,
+          "label": "Work email"
+        },
+        {
+          "key": "phone",
+          "required": false
+        }
+      ]
+    }
+  },
+  "submit_interaction_request": {
+    "$schema_ref": "actions/submit-interaction.schema.json#/$defs/Request",
+    "description": "Resume a parked interaction (kind identity_intake) with the visitor's values.",
+    "instance": {
+      "action": "submit_interaction",
       "requestId": "req-a1b2c3d4-0004",
       "sessionId": "22222222-2222-2222-2222-222222222222",
+      "interactionId": "88888888-8888-8888-8888-888888888888",
+      "kind": "identity_intake",
       "values": {
         "name": "Alice Example",
         "email": "alice@example.com",
@@ -256,25 +283,49 @@
       }
     }
   },
-  "submit_identity_intake_declined_request": {
-    "$schema_ref": "actions/submit-identity-intake.schema.json#/$defs/Request",
-    "description": "Resume a parked intake turn with a decline; the agent handles it gracefully.",
+  "identity_intake_values": {
+    "$schema_ref": "interactions/identity-intake.schema.json#/$defs/Values",
+    "description": "The identity_intake kind's submit values, as carried in submit_interaction.values.",
     "instance": {
-      "action": "submit_identity_intake",
+      "name": "Alice Example",
+      "email": "alice@example.com",
+      "phone": "+15551234567"
+    }
+  },
+  "identity_intake_payload": {
+    "$schema_ref": "interactions/identity-intake.schema.json#/$defs/Payload",
+    "description": "The canonical validated payload the parked turn resumes with.",
+    "instance": {
+      "status": "submitted",
+      "values": {
+        "name": "Alice Example",
+        "email": "alice@example.com",
+        "phone": "+15551234567"
+      }
+    }
+  },
+  "submit_interaction_declined_request": {
+    "$schema_ref": "actions/submit-interaction.schema.json#/$defs/Request",
+    "description": "Resume a parked interaction with a decline; the agent handles it gracefully.",
+    "instance": {
+      "action": "submit_interaction",
       "requestId": "req-a1b2c3d4-0004",
       "sessionId": "22222222-2222-2222-2222-222222222222",
+      "interactionId": "88888888-8888-8888-8888-888888888888",
       "declined": true
     }
   },
-  "identity_intake_invalid_event": {
-    "$schema_ref": "events/identity-intake-invalid.schema.json",
-    "description": "Server-side validation rejected a submit; the turn stays parked for a resubmit.",
+  "interaction_invalid_event": {
+    "$schema_ref": "events/interaction-invalid.schema.json",
+    "description": "The kind's server-side validation rejected a submit; the turn stays parked for a resubmit.",
     "instance": {
-      "type": "identity_intake_invalid",
+      "type": "interaction_invalid",
       "requestId": "req-a1b2c3d4-0004",
       "data": {
         "requestId": "req-a1b2c3d4-0004",
         "data": {
+          "interactionId": "88888888-8888-8888-8888-888888888888",
+          "kind": "identity_intake",
           "errors": [
             {
               "field": "email",

@@ -17,7 +17,8 @@ use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
 };
-use smooth_operator::identity_intake::{validate_intake, IntakeOutcome, IntakeValues};
+use smooth_operator::identity_intake::IntakeValues;
+use smooth_operator::interaction::InteractionOutcome;
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::{LlmClient, LlmConfig};
 
@@ -79,8 +80,8 @@ pub async fn handle_frame(
         Some("verify_otp") => {
             handle_verify_otp(state, &parsed, request_id, sink).await;
         }
-        Some("submit_identity_intake") => {
-            handle_submit_identity_intake(state, &parsed, request_id, sink);
+        Some("submit_interaction") => {
+            handle_submit_interaction(state, &parsed, request_id, sink);
         }
         Some(other) => {
             let _ = sink.send(protocol::error(
@@ -313,28 +314,34 @@ async fn handle_create_session(
     };
 
     // Client render capabilities (`supports`, per
-    // create-conversation-session.schema.json). `identity_form` means this
-    // client can render the structured identity-intake form, so mid-turn
-    // `identity_intake_required` events may be emitted; sessions without it get
-    // the conversational intake fallback. Unknown values are ignored.
-    let supports_identity_form = parsed
+    // create-conversation-session.schema.json) — the per-kind list gating which
+    // Rich Interactions this session gets as parked cards (e.g. `identity_form`
+    // for kind `identity_intake`); kinds without their capability degrade to
+    // the conversational fallback. Unknown values are kept (forward-compatible:
+    // a future kind may gate on them).
+    let supports: Vec<String> = parsed
         .get("supports")
         .and_then(Value::as_array)
-        .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("identity_form")));
+        .map(|caps| {
+            caps.iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Stash the caller's OTP contact on the session so the end_user auth-gate
     // flow can offer verification without a storage roundtrip (mirrors how the
     // workflow step pointer lives in session metadata). The reference create path
     // captures only an email; a host that also captures a phone would add
-    // `contactPhone` here for an SMS channel. The `identity_form` capability
-    // rides the same metadata map.
+    // `contactPhone` here for an SMS channel. The declared render capabilities
+    // (`supports`) ride the same metadata map.
     let session_metadata = {
         let mut meta = std::collections::HashMap::new();
         if let Some(email) = user_email.as_ref() {
             meta.insert("contactEmail".to_string(), Value::from(email.clone()));
         }
-        if supports_identity_form {
-            meta.insert("supportsIdentityForm".to_string(), Value::from(true));
+        if !supports.is_empty() {
+            meta.insert("supports".to_string(), Value::from(supports.clone()));
         }
         (!meta.is_empty()).then_some(meta)
     };
@@ -677,30 +684,42 @@ async fn handle_send_message(
         }
     });
 
-    // Identity intake: always wired in the WS server (the primitive is on; the
-    // per-agent `enabled_tools` allow-list can restrict it). The form path is
-    // selected by the capability the client declared at create-session.
-    let identity_intake = Some(crate::runner::IdentityIntakeConfig {
+    // Rich Interactions: always wired in the WS server (the primitive is on;
+    // the per-agent `enabled_tools` allow-list can restrict individual raise
+    // tools). Rich vs conversational-fallback is decided PER KIND from the
+    // capabilities the client declared at create-session.
+    let interactions = Some(crate::runner::InteractionConfig {
         session_id: session.session_id.clone(),
-        form_supported: state.session_supports_identity_form(session_id),
+        kinds: Arc::clone(&state.interactions),
+        capabilities: state.session_capabilities(session_id),
         register: {
             let state = state.clone();
-            Arc::new(move |sid: &str, fields, responder| {
-                state.register_intake(sid, fields, responder);
-            })
+            Arc::new(
+                move |sid: &str, interaction_id: &str, kind: &str, spec: &Value, responder| {
+                    state.register_interaction(
+                        sid,
+                        crate::state::PendingInteraction {
+                            interaction_id: interaction_id.to_string(),
+                            kind: kind.to_string(),
+                            spec: spec.clone(),
+                            responder,
+                        },
+                    );
+                },
+            )
         },
         clear: {
             let state = state.clone();
-            Arc::new(move |sid: &str| state.clear_intake(sid))
+            Arc::new(move |sid: &str| state.clear_interaction(sid))
         },
         attach: {
             let state = state.clone();
             let sid = session.session_id.clone();
-            Arc::new(move |values| state.attach_session_identity(&sid, values))
+            Arc::new(move |kind, values| attach_interaction_effect(&state, &sid, kind, values))
         },
     });
 
-    // The reference server is single-org; a multi-tenant host derives this from
+    // The reference server is single-org; a multi-tenant host derives this from    // The reference server is single-org; a multi-tenant host derives this from
     // auth. Used to (a) resolve the org's persona override (SEAM 2) and (b)
     // scope the host's tool provider (SEAM 1).
     let org_id = crate::server::SEED_ORG_ID.to_string();
@@ -828,9 +847,9 @@ async fn handle_send_message(
                     &crate::reranker::RerankerConfig::from_server_config(&state_for_turn.config),
                 ),
                 confirmation,
-                // Channel-normalized identity intake (form park on capable
-                // clients; conversational fallback otherwise).
-                identity_intake,
+                // Rich Interactions (per-kind card park on capable clients;
+                // validated conversational fallback otherwise).
+                interactions,
                 // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
                 tool_provider,
                 // SEAM 2 — resolved per-org persona (None ⇒ const prompt).
@@ -1095,36 +1114,48 @@ async fn offer_otp(
     }
 }
 
-/// `submit_identity_intake` — resume a turn parked on identity intake.
+/// The kind-routed host effect of an accepted interaction. For
+/// `identity_intake`, stamp the validated values onto the session (metadata
+/// `userName` / `contactEmail` / `contactPhone` — the same keys the pre-chat /
+/// create path stashes and the OTP contact seam reads). Future kinds add their
+/// effect here (or a host overrides the attach seam entirely).
+fn attach_interaction_effect(state: &AppState, session_id: &str, kind: &str, values: &Value) {
+    if kind == "identity_intake" {
+        if let Ok(values) = serde_json::from_value::<IntakeValues>(values.clone()) {
+            state.attach_session_identity(session_id, &values);
+        }
+    }
+}
+
+/// `submit_interaction` — resume a turn parked on a Rich Interaction.
 ///
-/// Per `spec/actions/submit-identity-intake.schema.json` the client sends
-/// `{ action, sessionId, requestId, values?, declined? }` in reply to an
-/// `identity_intake_required` event. Validation is **server-side** against the
-/// fields the parked `request_identity_intake` asked for (required-ness, email
-/// shape, E.164 phone):
-///   - invalid → an `identity_intake_invalid` event with per-field errors; the
-///     turn STAYS parked so the form can resubmit (mirrors `otp_invalid`);
-///   - valid → the identity is attached to the session (metadata `userName` /
-///     `contactEmail` / `contactPhone` — the OTP contact keys), the parked tool
-///     resumes with the validated payload, and an `immediate_response` acks;
-///   - `declined: true` → the tool resumes with a declined payload (the agent
-///     handles it gracefully).
+/// Per `spec/actions/submit-interaction.schema.json` the client sends
+/// `{ action, sessionId, requestId, interactionId, kind?, values?, declined? }`
+/// in reply to an `interaction_required` event. Validation is **server-side**,
+/// routed to the parked kind's validator against the spec the raise carried:
+///   - invalid → an `interaction_invalid` event with per-field errors; the
+///     turn STAYS parked so the card can resubmit (mirrors `otp_invalid`);
+///   - valid → the kind's host effect runs (identity_intake: session identity
+///     attach), the parked raise resumes with the canonical values, and an
+///     `immediate_response` acks;
+///   - `declined: true` → the raise resumes with a declined payload.
 ///
-/// Taking the responder only on resolution makes a duplicate submit a no-op
-/// (`NO_PENDING_INTAKE`).
-fn handle_submit_identity_intake(
+/// The `interactionId` must echo the event's, so a stale submit can never
+/// resolve a newer park; taking the responder only on resolution makes a
+/// duplicate submit a no-op (`NO_PENDING_INTERACTION`).
+fn handle_submit_interaction(
     state: &AppState,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
 ) {
     // requestId is load-bearing (it echoes the originating
-    // identity_intake_required); require it.
+    // interaction_required); require it.
     let Some(request_id) = request_id else {
         let _ = sink.send(protocol::error(
             None,
             "VALIDATION_ERROR",
-            "submit_identity_intake requires a 'requestId'",
+            "submit_interaction requires a 'requestId'",
         ));
         return;
     };
@@ -1133,125 +1164,165 @@ fn handle_submit_identity_intake(
         let _ = sink.send(protocol::error(
             Some(request_id),
             "VALIDATION_ERROR",
-            "submit_identity_intake requires a 'sessionId'",
+            "submit_interaction requires a 'sessionId'",
         ));
         return;
     };
 
-    // Peek the pending intake's fields WITHOUT consuming the park — an invalid
+    // Peek the pending interaction WITHOUT consuming the park — an invalid
     // submit must leave the turn parked for a resubmit.
-    let Some(fields) = state.intake_fields(session_id) else {
+    let Some(pending) = state.pending_interaction(session_id) else {
         let _ = sink.send(protocol::error(
             Some(request_id),
-            "NO_PENDING_INTAKE",
-            &format!("no identity intake is awaiting submission for session '{session_id}'"),
+            "NO_PENDING_INTERACTION",
+            &format!("no interaction is awaiting submission for session '{session_id}'"),
         ));
         return;
     };
 
-    // Decline path: resume the tool with a declined payload.
+    // The submit must target THIS interaction instance (and, when it names a
+    // kind, the right kind) — a stale card can never resolve a newer park.
+    let interaction_id = parsed.get("interactionId").and_then(Value::as_str);
+    if interaction_id != Some(pending.interaction_id.as_str()) {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "INTERACTION_MISMATCH",
+            "the submitted 'interactionId' does not match the pending interaction",
+        ));
+        return;
+    }
+    if let Some(kind) = parsed.get("kind").and_then(Value::as_str) {
+        if kind != pending.kind {
+            let _ = sink.send(protocol::error(
+                Some(request_id),
+                "INTERACTION_MISMATCH",
+                &format!(
+                    "the pending interaction is '{}', not '{kind}'",
+                    pending.kind
+                ),
+            ));
+            return;
+        }
+    }
+
+    // Decline path: resume the raise with a declined payload.
     if parsed
         .get("declined")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        if resolve_intake(state, session_id, request_id, IntakeOutcome::Declined, sink) {
+        if resolve_interaction(
+            state,
+            session_id,
+            request_id,
+            InteractionOutcome::Declined,
+            sink,
+        ) {
             let _ = sink.send(protocol::immediate_response(
                 Some(request_id),
                 200,
-                "Identity intake declined",
-                json!({ "sessionId": session_id, "declined": true }),
+                "Interaction declined",
+                json!({ "sessionId": session_id, "interactionId": pending.interaction_id, "declined": true }),
             ));
         }
         return;
     }
 
-    // Values path: parse + validate server-side.
-    let values: IntakeValues = match parsed.get("values") {
-        Some(v) => match serde_json::from_value(v.clone()) {
-            Ok(values) => values,
-            Err(e) => {
-                let _ = sink.send(protocol::error(
-                    Some(request_id),
-                    "VALIDATION_ERROR",
-                    &format!("invalid 'values' shape: {e}"),
-                ));
-                return;
-            }
-        },
-        None => {
-            let _ = sink.send(protocol::error(
-                Some(request_id),
-                "VALIDATION_ERROR",
-                "submit_identity_intake requires 'values' (or 'declined': true)",
-            ));
-            return;
-        }
+    // Values path: route to the parked kind's server-side validator.
+    let Some(values) = parsed.get("values") else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "VALIDATION_ERROR",
+            "submit_interaction requires 'values' (or 'declined': true)",
+        ));
+        return;
+    };
+    let Some(kind) = state.interactions.get(&pending.kind) else {
+        // A parked kind the registry no longer hosts (shouldn't happen).
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "NO_PENDING_INTERACTION",
+            &format!(
+                "interaction kind '{}' is not hosted by this server",
+                pending.kind
+            ),
+        ));
+        return;
     };
 
-    match validate_intake(&fields, &values) {
+    match kind.validate(&pending.spec, values) {
         Err(errors) => {
-            // Retryable: the turn stays parked; the client re-renders the form
+            // Retryable: the turn stays parked; the client re-renders the card
             // with the per-field errors (never a terminal `error` event).
-            let _ = sink.send(protocol::identity_intake_invalid(
+            let _ = sink.send(protocol::interaction_invalid(
                 request_id,
+                &pending.interaction_id,
+                &pending.kind,
                 &errors,
                 "Some fields need attention.",
             ));
         }
-        Ok(validated) => {
-            // Attach the identity to the session (same keys the pre-chat /
-            // create path stashes; feeds the OTP contact seam), then resume.
-            state.attach_session_identity(session_id, &validated);
-            if resolve_intake(
+        Ok(canonical) => {
+            // Run the kind's host effect, then resume the parked raise.
+            attach_interaction_effect(state, session_id, &pending.kind, &canonical);
+            if resolve_interaction(
                 state,
                 session_id,
                 request_id,
-                IntakeOutcome::Submitted(validated.clone()),
+                InteractionOutcome::Submitted {
+                    values: canonical.clone(),
+                },
                 sink,
             ) {
                 let _ = sink.send(protocol::immediate_response(
                     Some(request_id),
                     200,
-                    "Identity intake submitted",
-                    json!({ "sessionId": session_id, "values": validated }),
+                    "Interaction submitted",
+                    json!({
+                        "sessionId": session_id,
+                        "interactionId": pending.interaction_id,
+                        "kind": pending.kind,
+                        "values": canonical,
+                    }),
                 ));
             }
         }
     }
 }
 
-/// Take the pending intake responder for `session_id` and feed it `outcome`.
-/// Returns `true` when the parked turn was resumed; emits `NO_PENDING_INTAKE`
-/// and returns `false` when the park raced away (duplicate submit, or the
-/// parked turn ended before the submit landed).
-fn resolve_intake(
+/// Take the pending interaction responder for `session_id` and feed it
+/// `outcome`. Returns `true` when the parked turn was resumed; emits
+/// `NO_PENDING_INTERACTION` and returns `false` when the park raced away
+/// (duplicate submit, or the parked turn ended before the submit landed).
+fn resolve_interaction(
     state: &AppState,
     session_id: &str,
     request_id: &str,
-    outcome: IntakeOutcome,
+    outcome: InteractionOutcome,
     sink: &UnboundedSender<Value>,
 ) -> bool {
-    let Some(responder) = state.take_intake(session_id) else {
+    let Some(pending) = state.take_interaction(session_id) else {
         let _ = sink.send(protocol::error(
             Some(request_id),
-            "NO_PENDING_INTAKE",
-            &format!("no identity intake is awaiting submission for session '{session_id}'"),
+            "NO_PENDING_INTERACTION",
+            &format!("no interaction is awaiting submission for session '{session_id}'"),
         ));
         return false;
     };
-    if responder.send(outcome).is_err() {
+    if pending.responder.send(outcome).is_err() {
         let _ = sink.send(protocol::error(
             Some(request_id),
-            "NO_PENDING_INTAKE",
-            &format!("the turn awaiting intake for session '{session_id}' is no longer active"),
+            "NO_PENDING_INTERACTION",
+            &format!(
+                "the turn awaiting an interaction for session '{session_id}' is no longer active"
+            ),
         ));
         return false;
     }
     true
 }
 
-/// `verify_otp` — validate a submitted OTP code and, on success, mark the
+/// `verify_otp` — validate a submitted OTP code and, on success, mark the/// `verify_otp` — validate a submitted OTP code and, on success, mark the
 /// session identity-verified. Per `spec/actions/verify-otp.schema.json` the
 /// client sends `{ action, sessionId, requestId, code }` in reply to an
 /// `otp_verification_required` event. There is no dedicated response event: a

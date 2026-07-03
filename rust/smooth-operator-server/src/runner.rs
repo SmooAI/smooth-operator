@@ -39,12 +39,12 @@ use smooth_operator::agent_config::{
     AuthGateHook, ConversationWorkflow, WorkflowJudgeVerdict, JUDGE_SYSTEM_PROMPT,
 };
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
-use smooth_operator::identity_intake::{IntakeField, IntakeOutcome, IntakeRequest, IntakeValues};
+use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry, InteractionRequest};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator::tools::{
-    intake_channel, KnowledgeResultSink, KnowledgeSearchTool, RequestIdentityIntakeTool,
-    SubmitIdentityIntakeTool,
+    interaction_channel, InteractionAttach, KnowledgeResultSink, KnowledgeSearchTool,
+    RequestInteractionTool, SubmitInteractionTool,
 };
 use smooth_operator::MAX_CITATIONS;
 
@@ -116,41 +116,42 @@ pub struct ConfirmationConfig {
     pub clear: ClearConfirmation,
 }
 
-/// Registers a parked intake's [`IntakeOutcome`] sender (plus the requested
-/// fields — the validation contract) under a session id, so a later
-/// `submit_identity_intake` can validate + resume it. Typically
-/// `AppState::register_intake`.
-pub type RegisterIntake =
-    Arc<dyn Fn(&str, Vec<IntakeField>, UnboundedSender<IntakeOutcome>) + Send + Sync>;
+/// Registers a parked interaction (id + kind + spec + [`InteractionOutcome`]
+/// sender) under a session id, so a later `submit_interaction` can validate +
+/// resume it. Typically wraps `AppState::register_interaction`.
+pub type RegisterInteraction = Arc<
+    dyn Fn(&str, &str, &str, &serde_json::Value, UnboundedSender<InteractionOutcome>) + Send + Sync,
+>;
 
-/// Attaches validated intake values to the session (metadata `userName` /
-/// `contactEmail` / `contactPhone`). Typically `AppState::attach_session_identity`.
-pub type AttachIdentity = Arc<dyn Fn(&IntakeValues) + Send + Sync>;
-
-/// Hooks the runner needs to wire **identity intake** into a turn (see
-/// `docs/Architecture/Identity Intake.md`) without depending on `AppState`.
+/// Hooks the runner needs to wire **Rich Interactions** into a turn (see
+/// `docs/Architecture/Rich Interactions.md`) without depending on `AppState`.
 ///
-/// When `Some`, the runner registers the `request_identity_intake` tool. On a
-/// [`form_supported`](Self::form_supported) session the tool PARKS the turn:
-/// the runner's intake bridge registers the outcome sender (via
-/// [`register`](Self::register)) and emits an `identity_intake_required` event;
-/// the WS handler validates the visitor's `submit_identity_intake` and resumes.
-/// On a text-only session the tool degrades to a conversational directive and
-/// the runner additionally registers the `submit_identity_intake` tool (which
-/// validates and calls [`attach`](Self::attach)). `None` (the default)
-/// registers neither tool — byte-for-byte the pre-intake behavior.
-pub struct IdentityIntakeConfig {
+/// When `Some`, the runner registers ONE raise tool per kind in
+/// [`kinds`](Self::kinds). A kind whose render capability is in
+/// [`capabilities`](Self::capabilities) PARKS the turn on raise: the runner's
+/// interaction bridge registers the outcome sender (via
+/// [`register`](Self::register)) and emits an `interaction_required` event; the
+/// WS handler validates the visitor's `submit_interaction` and resumes. Kinds
+/// without the capability degrade to their conversational-fallback directive,
+/// and the runner additionally registers the generic `submit_interaction` tool
+/// (which routes to the kind's validator and calls [`attach`](Self::attach)).
+/// `None` (the default) registers no interaction tools — byte-for-byte the
+/// pre-interactions behavior.
+pub struct InteractionConfig {
     /// The session this turn belongs to (registration key for the resume).
     pub session_id: String,
-    /// Whether the session's client declared the `identity_form` capability.
-    pub form_supported: bool,
-    /// Registers the parked turn's fields + outcome sender (form path).
-    pub register: RegisterIntake,
-    /// Clears any registered intake for the session when the turn ends.
+    /// The interaction kinds hosted this turn.
+    pub kinds: Arc<InteractionRegistry>,
+    /// The render capabilities the session's client declared at create.
+    pub capabilities: std::collections::HashSet<String>,
+    /// Registers a parked raise `(session_id, interaction_id, kind, spec, responder)`.
+    pub register: RegisterInteraction,
+    /// Clears any registered interaction for the session when the turn ends.
     pub clear: ClearConfirmation,
-    /// Attaches validated values to the session (conversational path — the
-    /// form path attaches in the WS handler, which owns validation there).
-    pub attach: AttachIdentity,
+    /// Kind-routed host effect on a successful conversational submit
+    /// `(kind, canonical values)` — the rich path attaches in the WS handler,
+    /// which owns validation there.
+    pub attach: InteractionAttach,
 }
 
 /// A turn's **conversation-workflow** context: the agent's configured workflow
@@ -238,10 +239,11 @@ pub struct TurnRequest<'a> {
     /// `confirm_tool_action_required` event + a registered resumable sender. See
     /// [`ConfirmationConfig`].
     pub confirmation: Option<ConfirmationConfig>,
-    /// Optional **identity intake** wiring (channel-normalized name/email/phone
-    /// capture). `None` (the default) registers no intake tools, so behavior is
-    /// identical to before the seam existed. See [`IdentityIntakeConfig`].
-    pub identity_intake: Option<IdentityIntakeConfig>,
+    /// Optional **Rich Interactions** wiring (structured interaction cards with
+    /// per-kind conversational fallbacks; identity intake is the first kind).
+    /// `None` (the default) registers no interaction tools, so behavior is
+    /// identical to before the seam existed. See [`InteractionConfig`].
+    pub interactions: Option<InteractionConfig>,
     /// **SEAM 1 — host tool injection.** When `Some`, the runner asks this
     /// provider for EXTRA tools and merges them into the turn's
     /// [`ToolRegistry`] alongside the built-ins. `None` (the default) leaves the
@@ -339,7 +341,7 @@ pub async fn run_streaming_turn(
         llm_provider,
         reranker,
         confirmation,
-        identity_intake,
+        interactions,
         tool_provider,
         system_prompt,
         org_id,
@@ -432,41 +434,50 @@ pub async fn run_streaming_turn(
     }
     tools.register(knowledge_search);
 
-    // Identity intake (see docs/Architecture/Identity Intake.md): register the
-    // channel-normalized `request_identity_intake` tool. On a form-capable
-    // session it parks the turn (the bridge below emits
-    // `identity_intake_required` + registers the resumable outcome sender); on
-    // a text-only session it returns a conversational directive and the
-    // companion `submit_identity_intake` tool validates + attaches the values
-    // the model collects turn-by-turn. With no config (the default), neither
-    // tool is registered — byte-for-byte unchanged.
-    let intake_bridge = match &identity_intake {
+    // Rich Interactions (see docs/Architecture/Rich Interactions.md): register
+    // ONE raise tool per hosted kind. Kinds whose render capability the session
+    // declared park the turn (the bridge below emits `interaction_required` +
+    // registers the resumable outcome sender); the rest degrade to their
+    // conversational directive, backed by the generic `submit_interaction` tool
+    // (kind-routed validation + attach). With no config (the default), no
+    // interaction tools are registered — byte-for-byte unchanged.
+    let interaction_bridge = match &interactions {
         Some(cfg) => {
-            let pair = intake_channel();
-            tools.register(RequestIdentityIntakeTool::new(
-                cfg.form_supported,
-                pair.request_tx,
-                pair.outcome_rx,
-            ));
-            if cfg.form_supported {
-                Some(spawn_intake_bridge(
-                    pair.request_rx,
-                    pair.outcome_tx,
-                    sink.clone(),
-                    request_id.to_string(),
-                    cfg.session_id.clone(),
-                    Arc::clone(&cfg.register),
-                ))
-            } else {
-                tools
-                    .register(SubmitIdentityIntakeTool::new().with_attach(Arc::clone(&cfg.attach)));
-                None
+            let pair = interaction_channel();
+            let raised: smooth_operator::tools::RaisedSpecs = Arc::default();
+            let mut any_fallback = false;
+            for kind in cfg.kinds.kinds() {
+                let rich = cfg.capabilities.contains(kind.capability());
+                any_fallback |= !rich;
+                tools.register(RequestInteractionTool::new(
+                    Arc::clone(kind),
+                    rich,
+                    pair.request_tx.clone(),
+                    Arc::clone(&pair.outcome_rx),
+                    Arc::clone(&raised),
+                ));
             }
+            if any_fallback {
+                tools.register(
+                    SubmitInteractionTool::new((*cfg.kinds).clone(), raised)
+                        .with_attach(Arc::clone(&cfg.attach)),
+                );
+            }
+            // The bridge is only needed when a rich raise can park; harmless if
+            // no kind is rich (the request channel just never fires).
+            Some(spawn_interaction_bridge(
+                pair.request_rx,
+                pair.outcome_tx,
+                sink.clone(),
+                request_id.to_string(),
+                cfg.session_id.clone(),
+                Arc::clone(&cfg.register),
+            ))
         }
         None => None,
     };
 
-    // SEAM 1 — merge host-contributed tools. When a provider is installed, ask
+    // SEAM 1 — merge host-contributed tools.    // SEAM 1 — merge host-contributed tools. When a provider is installed, ask
     // it (with the turn's org + access context) for extra tools and register
     // each alongside the built-ins. Built-ins are registered FIRST, so a host
     // tool that intentionally reuses a built-in name replaces it; a distinct
@@ -689,10 +700,10 @@ pub async fn run_streaming_turn(
         let _ = handle.await;
         (cfg.clear)(&cfg.session_id);
     }
-    // Same teardown for the intake bridge: dropping the agent closed the tool's
-    // request sender, so the bridge drains and finishes; then clear any intake
-    // registration the turn left parked.
-    if let (Some(handle), Some(cfg)) = (intake_bridge, identity_intake.as_ref()) {
+    // Same teardown for the interaction bridge: dropping the agent closed the
+    // raise tools' request sender, so the bridge drains and finishes; then clear
+    // any interaction registration the turn left parked.
+    if let (Some(handle), Some(cfg)) = (interaction_bridge, interactions.as_ref()) {
         let _ = handle.await;
         (cfg.clear)(&cfg.session_id);
     }
@@ -867,41 +878,52 @@ fn spawn_confirmation_bridge(
     })
 }
 
-/// Spawn the **intake bridge** for a turn whose `request_identity_intake` tool
-/// may park (form-capable session). For every [`IntakeRequest`] the tool emits:
-///   1. registers the outcome sender + the requested fields under `session_id`
-///      via `register`, so an inbound `submit_identity_intake` (keyed by
-///      `sessionId`) can validate against those fields and resume, and
-///   2. emits an `identity_intake_required` event through the turn sink.
+/// Spawn the **interaction bridge** for a turn whose raise tools may park
+/// (capability-declaring session). For every [`InteractionRequest`] a raise
+/// tool emits:
+///   1. generates a fresh `interactionId` and registers it (with the kind, the
+///      spec — the validation contract — and the outcome sender) under
+///      `session_id` via `register`, so an inbound `submit_interaction` (keyed
+///      by `sessionId`, echoing the `interactionId`) can validate and resume, and
+///   2. emits an `interaction_required` event through the turn sink.
 ///
 /// Mirrors [`spawn_confirmation_bridge`]. The loop ends when the request
-/// channel closes (the tool/agent dropped at turn end); the caller then clears
+/// channel closes (the tools/agent dropped at turn end); the caller then clears
 /// the registration.
-fn spawn_intake_bridge(
-    mut request_rx: UnboundedReceiver<IntakeRequest>,
-    outcome_tx: UnboundedSender<IntakeOutcome>,
+fn spawn_interaction_bridge(
+    mut request_rx: UnboundedReceiver<InteractionRequest>,
+    outcome_tx: UnboundedSender<InteractionOutcome>,
     sink: UnboundedSender<serde_json::Value>,
     request_id: String,
     session_id: String,
-    register: RegisterIntake,
+    register: RegisterInteraction,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(req) = request_rx.recv().await {
-            // Register THIS turn's outcome sender (+ the fields as the
-            // validation contract) so the next `submit_identity_intake` for
-            // this session resumes it. Re-clone per request: the tool takes one
+            let interaction_id = uuid::Uuid::new_v4().to_string();
+            // Register THIS turn's outcome sender (+ the kind/spec as the
+            // validation contract) so the next `submit_interaction` for this
+            // session resumes it. Re-clone per request: the raise tool takes one
             // outcome per park.
-            register(&session_id, req.fields.clone(), outcome_tx.clone());
-            let _ = sink.send(crate::protocol::identity_intake_required(
+            register(
+                &session_id,
+                &interaction_id,
+                &req.kind,
+                &req.spec,
+                outcome_tx.clone(),
+            );
+            let _ = sink.send(crate::protocol::interaction_required(
                 &request_id,
-                &req.fields,
+                &interaction_id,
+                &req.kind,
+                &req.spec,
                 &req.reason,
             ));
         }
     })
 }
 
-/// Build the turn's [`Citation`]s from the knowledge sources that grounded it:
+/// Build the turn's [`Citation`]s from the knowledge sources that grounded it:/// Build the turn's [`Citation`]s from the knowledge sources that grounded it:
 /// the engine's auto-injected `[Relevant knowledge]` context (`auto`, mirrored
 /// by the runner) followed by everything the agent's `knowledge_search` calls
 /// surfaced (`tool`). Concatenated auto-first, deduplicated by document id

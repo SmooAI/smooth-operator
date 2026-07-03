@@ -30,6 +30,7 @@ pub mod domain;
 pub mod embedding;
 pub mod gateway_key;
 pub mod identity_intake;
+pub mod interaction;
 pub mod otp;
 pub mod rerank;
 pub mod runtime;
@@ -67,8 +68,12 @@ pub use embedding::{
 };
 pub use gateway_key::{resolve_gateway_key, EnvGatewayKeyResolver, GatewayKeyResolver};
 pub use identity_intake::{
-    normalize_email, normalize_phone_e164, validate_intake, IntakeField, IntakeFieldError,
-    IntakeFieldKey, IntakeOutcome, IntakeRequest, IntakeValues,
+    normalize_email, normalize_phone_e164, validate_intake, IdentityIntakeKind, IntakeField,
+    IntakeFieldError, IntakeFieldKey, IntakeValues,
+};
+pub use interaction::{
+    InteractionFieldError, InteractionKind, InteractionOutcome, InteractionRegistry,
+    InteractionRequest,
 };
 pub use otp::{OtpChannel, OtpContact, OtpDelivery, OtpError, OtpService, OtpVerifyOutcome};
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
@@ -81,10 +86,10 @@ pub use settings::{
 pub use telemetry::init_telemetry;
 pub use tool_provider::{ToolProvider, ToolProviderContext};
 pub use tools::{
-    builtin_tools, intake_channel, ConversationHistoryTool, FetchUrlTool, IdentityAttach,
-    IntakeChannelPair, KnowledgeResultSink, KnowledgeSearchTool, NoopWebSearchProvider,
-    RequestIdentityIntakeTool, SearchResult, SubmitIdentityIntakeTool, ToolContext,
-    WebSearchProvider, WebSearchTool, REQUEST_IDENTITY_INTAKE_TOOL, SUBMIT_IDENTITY_INTAKE_TOOL,
+    builtin_tools, interaction_channel, ConversationHistoryTool, FetchUrlTool, InteractionAttach,
+    InteractionChannelPair, KnowledgeResultSink, KnowledgeSearchTool, NoopWebSearchProvider,
+    RaisedSpecs, RequestInteractionTool, SearchResult, SubmitInteractionTool, ToolContext,
+    WebSearchProvider, WebSearchTool, SUBMIT_INTERACTION_TOOL,
 };
 
 // Re-export the engine so adapter crates and consumers depend on one version.

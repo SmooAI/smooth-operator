@@ -86,7 +86,7 @@ public sealed class ProtocolValidator
         specDir ??= DefaultSpecDir();
         var byFile = new Dictionary<string, JsonSchema>(StringComparer.Ordinal);
 
-        foreach (var sub in new[] { "", "actions", "events", "domain" })
+        foreach (var sub in new[] { "", "actions", "events", "domain", "interactions" })
         {
             var dir = string.IsNullOrEmpty(sub) ? specDir : Path.Combine(specDir, sub);
             if (!Directory.Exists(dir)) continue;

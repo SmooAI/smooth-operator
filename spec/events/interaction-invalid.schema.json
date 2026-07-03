@@ -1,20 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://smooth-agent.dev/spec/events/identity-intake-invalid.schema.json",
-  "title": "IdentityIntakeInvalid",
-  "description": "Event: `identity_intake_invalid`. Emitted when a `submit_identity_intake` action carried values that failed server-side validation (missing required field, malformed email, unparseable phone). The turn REMAINS parked — the client should re-render the intake form with the per-field errors and let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable state, never a terminal `error` event.",
+  "$id": "https://smooth-agent.dev/spec/events/interaction-invalid.schema.json",
+  "title": "InteractionInvalid",
+  "description": "Event: `interaction_invalid`. Emitted when a `submit_interaction` action carried values that failed the kind's server-side validation. The turn REMAINS parked — the client should re-render the interaction card with the per-field errors and let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable state, never a terminal `error` event.",
   "type": "object",
   "required": ["type", "data"],
   "additionalProperties": false,
   "properties": {
     "type": {
       "type": "string",
-      "const": "identity_intake_invalid",
+      "const": "interaction_invalid",
       "description": "Event type discriminator."
     },
     "requestId": {
       "type": "string",
-      "description": "Echoes the `requestId` of the parked turn (same correlation as the `identity_intake_required` event)."
+      "description": "Echoes the `requestId` of the parked turn (same correlation as the `interaction_required` event)."
     },
     "data": {
       "type": "object",
@@ -24,18 +24,26 @@
       "properties": {
         "requestId": {
           "type": "string",
-          "description": "The request ID this intake belongs to."
+          "description": "The request ID this interaction belongs to."
         },
         "data": {
           "type": "object",
           "description": "Per-field validation errors.",
-          "required": ["errors", "message"],
+          "required": ["interactionId", "kind", "errors", "message"],
           "additionalProperties": false,
           "properties": {
+            "interactionId": {
+              "type": "string",
+              "description": "The interaction instance the rejected submit targeted."
+            },
+            "kind": {
+              "type": "string",
+              "description": "The interaction kind (e.g. `identity_intake`)."
+            },
             "errors": {
               "type": "array",
               "minItems": 1,
-              "description": "One entry per failed field.",
+              "description": "One entry per failed field. `field` is a kind-specific field key (identity_intake: `name` | `email` | `phone`).",
               "items": {
                 "type": "object",
                 "required": ["field", "message"],
@@ -43,8 +51,7 @@
                 "properties": {
                   "field": {
                     "type": "string",
-                    "enum": ["name", "email", "phone"],
-                    "description": "The field that failed validation."
+                    "description": "The kind-specific field that failed validation."
                   },
                   "message": {
                     "type": "string",
@@ -55,7 +62,7 @@
             },
             "message": {
               "type": "string",
-              "description": "Human-readable summary suitable for a form-level error line."
+              "description": "Human-readable summary suitable for a card-level error line."
             }
           }
         }

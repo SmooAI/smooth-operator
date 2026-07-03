@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/interactions/identity-intake.schema.json",
+  "title": "IdentityIntakeInteraction",
+  "description": "The `identity_intake` interaction kind — structured name/email/phone lead capture, the first instance of the Rich Interactions pattern. Render capability: `identity_form`. On capable channels the client renders an inline form from `Spec`; on text-only channels the server degrades to validated conversational turn-by-turn collection. Either way the turn resumes with the same validated `Payload`. Kind-specific shapes referenced by the generic `interaction_required` / `submit_interaction` envelope.",
+
+  "$defs": {
+    "Spec": {
+      "title": "IdentityIntakeSpec",
+      "description": "The `spec` carried on `interaction_required` for kind `identity_intake`: which fields to collect.",
+      "type": "object",
+      "required": ["fields"],
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The identity fields to collect, in display order.",
+          "items": {
+            "type": "object",
+            "required": ["key", "required"],
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string",
+                "enum": ["name", "email", "phone"],
+                "description": "Which identity field to collect."
+              },
+              "required": {
+                "type": "boolean",
+                "description": "Whether the visitor must provide this field to submit."
+              },
+              "label": {
+                "type": "string",
+                "description": "Optional display label overriding the client's default for this field."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "Values": {
+      "title": "IdentityIntakeValues",
+      "description": "The `values` a client submits via `submit_interaction` for kind `identity_intake`. Validated server-side: required fields present, email shape, phone normalized to E.164.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "The visitor's display name." },
+        "email": { "type": "string", "description": "The visitor's email address (validated server-side)." },
+        "phone": { "type": "string", "description": "The visitor's phone number (normalized server-side to E.164)." }
+      }
+    },
+
+    "Payload": {
+      "title": "IdentityIntakePayload",
+      "description": "The canonical validated payload the parked turn resumes with (identical on the form and conversational paths). On success the server also attaches the identity to the session (metadata `userName` / `contactEmail` / `contactPhone` — the same keys the OTP contact seam reads).",
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["submitted", "declined", "no_response"],
+          "description": "How the interaction resolved."
+        },
+        "values": {
+          "type": "object",
+          "description": "Present when `status` is `submitted`: the validated, normalized values.",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "email": { "type": "string" },
+            "phone": { "type": "string", "description": "E.164-normalized (`+15551234567`)." }
+          }
+        },
+        "message": {
+          "type": "string",
+          "description": "Guidance for the agent when `status` is `declined` / `no_response`."
+        }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Spec" },
+    { "$ref": "#/$defs/Values" },
+    { "$ref": "#/$defs/Payload" }
+  ]
+}
