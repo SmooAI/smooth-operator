@@ -87,8 +87,16 @@ jobs:
                   dotnet build dotnet/SmooAI.SmoothOperator.slnx -c Release --no-restore
                   dotnet test dotnet/SmooAI.SmoothOperator.slnx -c Release --no-build --verbosity normal
 
+            # On the manual-fallback dispatch path, tolerate a partial npm publish
+            # failure (e.g. create-smooth-extension's E403) so the Rust/PyPI steps
+            # below can still run — they are idempotent ("already exists" ⇒ success)
+            # and explicitly gated on `workflow_dispatch`. Without this, one broken
+            # npm package blocks every other registry forever (crates.io was stuck
+            # at 1.11.4 while npm shipped 1.21.x). Push-triggered runs still fail
+            # loudly so the breakage stays visible.
             - name: Version + publish npm (Changesets 🦋)
               id: changesets
+              continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
               uses: changesets/action@v1
               with:
                   commit: '🦋 New version release'
