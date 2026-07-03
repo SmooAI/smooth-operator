@@ -12,13 +12,66 @@
  */
 import { Peer } from './jsonrpc.js';
 import { PROTOCOL_VERSION, method } from './protocol.js';
-import type { Context, EventParams, HookOutcome, HookParams, InitializeParams, InitializeResult, ToolExecuteParams, ToolExecuteResult, ToolUpdateParams } from './protocol.js';
+import type {
+    Context,
+    EventParams,
+    HookOutcome,
+    HookParams,
+    InitializeParams,
+    InitializeResult,
+    ToolExecuteParams,
+    ToolExecuteResult,
+    ToolUpdateParams,
+    UiKind,
+    UiRequestParams,
+    UiRequestResult,
+} from './protocol.js';
 import { toJsonSchema, type ParameterSchema } from './schema.js';
 import { stdioTransport, type Transport } from './transport.js';
 
 /** The intercept hooks (awaited, host-orchestrated); every other `on(...)` name
  *  is a fire-and-forget observe event. Kept in sync with the engine's HookType. */
 const HOOK_NAMES = new Set(['tool_call', 'tool_result', 'before_agent_start', 'message_end', 'context', 'before_provider_request', 'input', 'user_bash']);
+
+/**
+ * The `ui/request` surface handed to tools (and to event handlers via
+ * `smooth.ui`). Each call is an ext→host request; the frontend renders it and
+ * replies. `select`/`confirm`/`input` return an answer (or `{ cancelled: true }`
+ * if dismissed); `notify`/`setStatus`/`setWidget`/`setTitle` resolve empty. A
+ * headless or uncapable host rejects with an `RpcError` of code -32001 (NoUI) —
+ * gate with `hasUI(kind)` to avoid it.
+ */
+export interface UiApi {
+    select(prompt: string, options: string[]): Promise<UiRequestResult>;
+    confirm(prompt: string): Promise<UiRequestResult>;
+    input(prompt: string, opts?: { default?: string }): Promise<UiRequestResult>;
+    notify(message: string, level?: 'info' | 'warn' | 'error'): Promise<void>;
+    setStatus(status: string): Promise<void>;
+    setWidget(widget: Record<string, unknown>): Promise<void>;
+    setTitle(title: string): Promise<void>;
+}
+
+/** Build a [`UiApi`] that speaks `ui/request` over `peer`. */
+function makeUi(peer: Peer): UiApi {
+    const req = (params: UiRequestParams) => peer.request<UiRequestResult>(method.UI_REQUEST, params);
+    return {
+        select: (prompt, options) => req({ kind: 'select', prompt, options }),
+        confirm: (prompt) => req({ kind: 'confirm', prompt }),
+        input: (prompt, opts) => req({ kind: 'input', prompt, ...(opts?.default !== undefined ? { default: opts.default } : {}) }),
+        notify: async (message, level) => {
+            await req({ kind: 'notify', message, ...(level ? { level } : {}) });
+        },
+        setStatus: async (status) => {
+            await req({ kind: 'set_status', status });
+        },
+        setWidget: async (widget) => {
+            await req({ kind: 'set_widget', widget });
+        },
+        setTitle: async (title) => {
+            await req({ kind: 'set_title', title });
+        },
+    };
+}
 
 /** Progress + cancellation handed to a tool while it runs. */
 export interface ToolContext {
@@ -30,6 +83,10 @@ export interface ToolContext {
     signal: AbortSignal;
     /** Stream a progress notification back to the host. */
     onUpdate(update: Omit<ToolUpdateParams, 'call_id'>): void;
+    /** Ask the frontend to render a dialog/widget. See [`UiApi`]. */
+    ui: UiApi;
+    /** True if the host's frontend can render this `ui/request` kind. */
+    hasUI(kind: UiKind): boolean;
 }
 
 /** What a tool's `execute` may return: a full result or just its `content`. */
@@ -64,6 +121,12 @@ export interface SmoothApi {
     registerTool(tool: ToolDef<any>): void;
     on(event: string, handler: EventHandler): void;
     log(level: 'debug' | 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
+    /** True if the host's frontend can render this `ui/request` kind. Only
+     * meaningful after `initialize` — returns false before the handshake. */
+    hasUI(kind: UiKind): boolean;
+    /** The `ui/request` surface. Available after the extension connects; throws
+     * if read before then. Gate with [`hasUI`]. */
+    readonly ui: UiApi;
 }
 
 export type ExtensionSetup = (smooth: SmoothApi) => void;
@@ -80,6 +143,8 @@ export class Extension {
     private version = '0.0.0';
     /** Set once connected so `log()` before connect is a safe no-op. */
     private live?: Peer;
+    /** UI kinds the host declared answerable at `initialize`. */
+    private hostUiCaps: string[] = [];
 
     constructor(setup: ExtensionSetup) {
         const api: SmoothApi = {
@@ -105,6 +170,11 @@ export class Extension {
             },
             log: (level, message, fields) => {
                 this.live?.notify(method.LOG, { level, message, ...(fields ? { fields } : {}) });
+            },
+            hasUI: (kind) => self.hostUiCaps.includes(kind),
+            get ui() {
+                if (!self.live) throw new Error('smooth.ui is only available after the extension connects');
+                return makeUi(self.live);
             },
         };
         // `self` alias so the getter/setter pair above closes over the instance.
@@ -145,7 +215,8 @@ export class Extension {
         });
     }
 
-    private initialize(_params: InitializeParams): InitializeResult {
+    private initialize(params: InitializeParams): InitializeResult {
+        this.hostUiCaps = params.ui_capabilities ?? [];
         const tools = [...this.tools.values()].map((t) => ({
             name: t.name,
             description: t.description,
@@ -170,6 +241,8 @@ export class Extension {
             context: params.context,
             signal,
             onUpdate: (update) => peer.notify(method.TOOL_UPDATE, { call_id: params.call_id, ...update }),
+            ui: makeUi(peer),
+            hasUI: (kind) => this.hostUiCaps.includes(kind),
         };
         const out = await tool.execute(params.arguments, ctx);
         return typeof out === 'string' ? { content: out } : out;

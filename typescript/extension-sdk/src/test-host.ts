@@ -5,13 +5,22 @@
  * (with progress + cancellation), events, ping and shutdown directly against a
  * `defineExtension(...)` object.
  */
-import { Peer } from './jsonrpc.js';
-import { PROTOCOL_VERSION, method } from './protocol.js';
-import type { Context, HookOutcome, InitializeParams, InitializeResult, ToolExecuteResult, ToolUpdateParams } from './protocol.js';
+import { Peer, RpcError } from './jsonrpc.js';
+import { PROTOCOL_VERSION, errorCode, method } from './protocol.js';
+import type { Context, HookOutcome, InitializeParams, InitializeResult, ToolExecuteResult, ToolUpdateParams, UiRequestParams, UiRequestResult } from './protocol.js';
 import type { Extension } from './extension.js';
 import { linkedPair } from './transport.js';
 
 let callSeq = 0;
+
+/** Answers the extension's `ui/request` calls. Return a result, or throw an
+ * `RpcError` (e.g. code -32001) to simulate a headless/uncapable frontend. */
+export type UiResponder = (params: UiRequestParams) => UiRequestResult | Promise<UiRequestResult>;
+
+export interface CreateTestHostOptions {
+    /** Answers `ui/request`. Default: reject every call with -32001 NoUI. */
+    onUiRequest?: UiResponder;
+}
 
 export interface CallToolOptions {
     /** Receives each `tool/update` the extension streams for this call. */
@@ -35,7 +44,7 @@ export interface TestHost {
 
 const DEFAULT_CONTEXT: Context = { token: 'test-epoch', tier: 'command' };
 
-export function createTestHost(extension: Extension): TestHost {
+export function createTestHost(extension: Extension, options: CreateTestHostOptions = {}): TestHost {
     const [hostT, extT] = linkedPair();
     const extHandle = extension.connect(extT);
     /** call_id → the caller's onUpdate, so streamed progress reaches the test. */
@@ -45,6 +54,11 @@ export function createTestHost(extension: Extension): TestHost {
     host.setNotificationHandler(method.TOOL_UPDATE, (params) => {
         const p = params as ToolUpdateParams;
         updateSinks.get(p.call_id)?.(p);
+    });
+    // Answer ext→host `ui/request`. Default mimics a headless frontend (NoUI).
+    host.setRequestHandler(method.UI_REQUEST, async (params) => {
+        if (!options.onUiRequest) throw new RpcError(errorCode.NoUI, 'no UI available (headless test host)');
+        return options.onUiRequest(params as UiRequestParams);
     });
     // Extension notifications the host just observes in tests.
     host.setNotificationHandler(method.LOG, () => {});

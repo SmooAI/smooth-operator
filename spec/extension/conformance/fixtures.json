@@ -281,6 +281,54 @@
     "instance": { "confirmed": true }
   },
 
+  "ui_request_input_params": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+    "description": "An input-kind UI request with a default value.",
+    "instance": { "kind": "input", "prompt": "Branch name?", "default": "main" }
+  },
+
+  "ui_request_notify_params": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+    "description": "A notify-kind UI request at warn level.",
+    "instance": { "kind": "notify", "message": "Build finished with warnings", "level": "warn" }
+  },
+
+  "ui_request_set_status_params": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+    "description": "A set_status-kind UI request.",
+    "instance": { "kind": "set_status", "status": "indexing…" }
+  },
+
+  "ui_request_set_widget_params": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+    "description": "A set_widget-kind UI request carrying a keyvalue render block.",
+    "instance": { "kind": "set_widget", "widget": { "kind": "keyvalue", "title": "Todos", "rows": [{ "key": "1", "value": "○ ship phase 3" }], "text": "1. [ ] ship phase 3" } }
+  },
+
+  "ui_request_set_title_params": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+    "description": "A set_title-kind UI request.",
+    "instance": { "kind": "set_title", "title": "todo — 3 open" }
+  },
+
+  "ui_request_result_select": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Result",
+    "description": "Reply to a select-kind UI request.",
+    "instance": { "value": "main" }
+  },
+
+  "ui_request_result_input": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Result",
+    "description": "Reply to an input-kind UI request.",
+    "instance": { "text": "feature-x" }
+  },
+
+  "ui_request_result_cancelled": {
+    "$schema_ref": "methods/ui-request.schema.json#/$defs/Result",
+    "description": "The user dismissed the UI without answering.",
+    "instance": { "cancelled": true }
+  },
+
   "kv_get_params": {
     "$schema_ref": "methods/kv.schema.json#/$defs/GetParams",
     "description": "Fetch a value by key.",
@@ -419,6 +467,26 @@
       "name": "envelope_request_missing_method",
       "$schema_ref": "methods/envelope.schema.json#/$defs/Request",
       "instance": { "jsonrpc": "2.0", "id": 1, "params": {} }
+    },
+    {
+      "name": "ui_request_unknown_kind",
+      "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+      "instance": { "kind": "toast", "message": "hi" }
+    },
+    {
+      "name": "ui_request_select_missing_options",
+      "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+      "instance": { "kind": "select", "prompt": "Pick one" }
+    },
+    {
+      "name": "ui_request_notify_missing_message",
+      "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+      "instance": { "kind": "notify", "level": "info" }
+    },
+    {
+      "name": "ui_request_confirm_extra_property",
+      "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
+      "instance": { "kind": "confirm", "prompt": "Sure?", "options": ["yes", "no"] }
     }
   ]
 }

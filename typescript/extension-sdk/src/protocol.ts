@@ -18,6 +18,7 @@ export const method = {
     HOOK: 'hook',
     TOOL_EXECUTE: 'tool/execute',
     TOOL_UPDATE: 'tool/update',
+    UI_REQUEST: 'ui/request',
     REGISTRY_UPDATE: 'registry/update',
     LOG: 'log',
     CANCEL: '$/cancel',
@@ -130,3 +131,28 @@ export type HookOutcome =
     | { action: 'continue' }
     | { action: 'block'; reason?: string }
     | { action: 'modify'; patch: Record<string, unknown> };
+
+/** The seven `ui/request` kinds (snake_case wire names). */
+export type UiKind = 'select' | 'confirm' | 'input' | 'notify' | 'set_status' | 'set_widget' | 'set_title';
+
+/** Params of `ui/request` (ext → host), discriminated by `kind`. */
+export type UiRequestParams =
+    | { kind: 'select'; prompt: string; options: string[] }
+    | { kind: 'confirm'; prompt: string }
+    | { kind: 'input'; prompt: string; default?: string }
+    | { kind: 'notify'; message: string; level?: 'info' | 'warn' | 'error' }
+    | { kind: 'set_status'; status: string }
+    | { kind: 'set_widget'; widget: Record<string, unknown> }
+    | { kind: 'set_title'; title: string };
+
+/**
+ * Reply to a `ui/request`. Which field is set depends on the request `kind`:
+ * `select` → `value`, `confirm` → `confirmed`, `input` → `text`; the rest are
+ * empty. Any kind may set `cancelled` if the user dismissed the UI.
+ */
+export interface UiRequestResult {
+    value?: string;
+    confirmed?: boolean;
+    text?: string;
+    cancelled?: boolean;
+}
