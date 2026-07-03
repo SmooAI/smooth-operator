@@ -154,6 +154,7 @@ fn spawn_turn(
                 enabled_tools: None,
                 auth_gate: None,
                 tool_configs: None,
+                extensions: None,
             },
             &sink,
         )

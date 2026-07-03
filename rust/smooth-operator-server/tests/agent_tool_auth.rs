@@ -138,6 +138,7 @@ async fn run(
             enabled_tools: None,
             auth_gate,
             tool_configs,
+            extensions: None,
         },
         &tx,
     )

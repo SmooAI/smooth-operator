@@ -38,6 +38,7 @@
 pub mod admin;
 pub mod config;
 pub mod embedder;
+pub mod extensions;
 pub mod handler;
 pub mod local;
 pub mod protocol;

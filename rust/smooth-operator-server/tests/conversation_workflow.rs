@@ -100,6 +100,7 @@ async fn run_turn(
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
+            extensions: None,
         },
         &tx,
     )
@@ -275,6 +276,7 @@ async fn run_turn_on(
             enabled_tools,
             auth_gate: None,
             tool_configs: None,
+            extensions: None,
         },
         &tx,
     )

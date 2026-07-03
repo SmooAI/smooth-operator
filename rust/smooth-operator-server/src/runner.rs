@@ -244,6 +244,16 @@ pub struct TurnRequest<'a> {
     /// Per-tool config (`tool_id` → config), delivered to host tools via the
     /// `ToolProviderContext`. `None`/empty ⇒ no per-tool config. Built-ins ignore it.
     pub tool_configs: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// **SEP extension host.** When `Some`, the turn hosts the discovered
+    /// extensions: their tools are registered into the [`ToolRegistry`] (and so
+    /// flow through the same per-agent `enabled_tools` filtering + `auth_gate`
+    /// below) and the host is attached to the agent via
+    /// [`Agent::with_extension_host`], activating its hooks/events and the
+    /// `ui/confirm` → confirmation-frame bridge. `None` (the default) ⇒ no host is
+    /// built, so behavior is byte-for-byte unchanged. Built per turn by
+    /// [`crate::extensions::build_extension_host`] (only when
+    /// `SMOOTH_EXTENSIONS_ALLOW` is non-empty).
+    pub extensions: Option<crate::extensions::ExtensionTurn>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -289,6 +299,7 @@ pub async fn run_streaming_turn(
         enabled_tools,
         auth_gate,
         tool_configs,
+        extensions,
     } = req;
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
@@ -390,6 +401,26 @@ pub async fn run_streaming_turn(
         }
     }
 
+    // SEP — register the hosted extensions' tools. Eager tools go in as ordinary
+    // registry entries so the per-agent `enabled_tools` retain below filters them
+    // exactly like built-ins (SMOODEV-590 parity). Deferred tools bypass that
+    // eager retain, so pre-filter them against the same allow-list here to keep
+    // `enabled_tools` authoritative over the full extension surface.
+    if let Some(ext) = &extensions {
+        for tool in ext.host.tools() {
+            tools.register_arc(tool);
+        }
+        for tool in ext.host.deferred_tools() {
+            let name = tool.schema().name;
+            if enabled_tools
+                .as_ref()
+                .is_none_or(|e| e.iter().any(|id| id == &name))
+            {
+                tools.register_deferred_arc(tool);
+            }
+        }
+    }
+
     // SEAM 3 — per-agent tool allow-list. When the agent's `tool_config` restricts
     // the tool set, drop every registered tool (built-in or host) whose snake_case
     // name isn't enabled. `None` (empty/absent tool_config) leaves the full set.
@@ -437,6 +468,12 @@ pub async fn run_streaming_turn(
 
     let agent = {
         let agent = Agent::new(config, tools).with_checkpoint_store(storage.checkpoints());
+        // SEP — attach the hosted extensions so the agent runs their hooks/events
+        // and routes `ui/confirm` through the delegate's confirmation-frame bridge.
+        let agent = match &extensions {
+            Some(ext) => agent.with_extension_host(Arc::clone(&ext.host)),
+            None => agent,
+        };
         // Inject the mock LLM provider for offline/deterministic tests; in
         // production a live client is built from `llm`.
         match llm_provider {
@@ -554,6 +591,14 @@ pub async fn run_streaming_turn(
         let _ = handle.await;
         (cfg.clear)(&cfg.session_id);
     }
+    // SEP — clear any `ui/confirm` responder the turn left parked (a hosted
+    // extension that requested a confirm the client never answered), then let the
+    // host drop, which kills its extension subprocesses. Mirrors the native
+    // confirmation teardown above.
+    if let Some(ext) = &extensions {
+        (ext.clear)(&ext.session_id);
+    }
+    drop(extensions);
 
     let (invoked_knowledge_search, usage) = translator.await.unwrap_or((false, None));
 
