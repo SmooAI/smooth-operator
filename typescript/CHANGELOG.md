@@ -1,5 +1,11 @@
 # @smooai/smooth-operator
 
+## 1.21.0
+
+### Minor Changes
+
+- 85e5643: Rich Interactions — generalize the just-shipped identity-intake seam into an extensible structured-interaction framework (`docs/Architecture/Rich Interactions.md`). One generic wire surface serves every interaction kind: `interaction_required` / `interaction_invalid` events + the single `submit_interaction` resume verb (with `interactionId` echo so stale submits can't resolve newer parks); per-kind precision lives in `spec/interactions/<kind>.schema.json` and the per-kind raise tools. Adding a kind (date picker, choice chips, file upload, …) = one `InteractionKind` impl (server-side validator + conversational-fallback directive + raise-tool schema) + a spec entry + a widget card — no new events, no client-library release. `identity_intake` (capability `identity_form`) ships as the first kind through the framework. Supersedes 1.19.0's typed `identity_intake_*` events (removed — zero external consumers). TypeScript client: regenerated types and the generic `submitInteraction()` verb (replaces `submitIdentityIntake()`).
+
 ## 1.20.0
 
 ### Minor Changes
