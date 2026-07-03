@@ -1,6 +1,6 @@
 {
     "name": "@smooai/smooth-extension-sdk",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "TypeScript SDK for building Smooth Extension Protocol (SEP) extensions: `defineExtension`, `defineTool`, a stdio JSON-RPC transport, an in-process test host, and a conformance runner. Extensions are subprocesses speaking JSON-RPC 2.0 ndjson to any SEP host (smooth-operator-core and its polyglot servers).",
     "license": "MIT",
     "type": "module",

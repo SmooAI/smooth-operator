@@ -1,6 +1,6 @@
 [package]
 name = "smooai-smooth-operator-adapter-backplane-nats"
-version = "1.11.3"
+version = "1.11.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
