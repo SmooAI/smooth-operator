@@ -8,8 +8,23 @@
  * `createTestHost`, and gate it against the shared fixtures with
  * `runConformance`.
  */
-export { defineExtension, defineTool, Extension } from './extension.js';
-export type { ExtensionSetup, SmoothApi, ToolDef, ToolContext, ToolReturn, EventHandler, HookResult, ConnectHandle, UiApi } from './extension.js';
+export { defineExtension, defineTool, defineCommand, Extension } from './extension.js';
+export type {
+    ExtensionSetup,
+    SmoothApi,
+    ToolDef,
+    ToolContext,
+    ToolReturn,
+    CommandDef,
+    CommandContext,
+    CommandReturn,
+    FlagDef,
+    SessionApi,
+    EventHandler,
+    HookResult,
+    ConnectHandle,
+    UiApi,
+} from './extension.js';
 export { createTestHost } from './test-host.js';
 export type { TestHost, CallToolOptions, CreateTestHostOptions, UiResponder } from './test-host.js';
 export { runConformance, DEFAULT_SPEC_DIR } from './conformance.js';
@@ -36,4 +51,15 @@ export type {
     UiKind,
     UiRequestParams,
     UiRequestResult,
+    ShortcutRegistration,
+    CommandRegistration,
+    CommandExecuteParams,
+    CommandExecuteResult,
+    CommandCompleteParams,
+    CommandCompleteResult,
+    Completion,
+    DeliverAs,
+    SessionSendMessageParams,
+    SessionSendUserMessageParams,
+    SessionAppendEntryParams,
 } from './protocol.js';

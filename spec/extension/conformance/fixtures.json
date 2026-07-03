@@ -11,16 +11,17 @@
       "session": { "id": "sess-abc123" },
       "mode": "tui",
       "ui_capabilities": ["select", "confirm", "input", "notify", "set_status", "set_widget", "set_title"],
+      "flags": { "plan": true },
       "capabilities_enabled": { "tools": true, "commands": true, "ui": true, "exec": true, "kv": true, "bus": true, "session": true }
     }
   },
 
   "initialize_result": {
     "$schema_ref": "methods/initialize.schema.json#/$defs/Result",
-    "description": "Echo extension's handshake reply: negotiated protocol version, identity, and one registered tool plus one event subscription.",
+    "description": "An extension's handshake reply: negotiated protocol version, identity, a tool, a slash-command, a declared flag, a keyboard shortcut, and event subscriptions.",
     "instance": {
       "protocol_version": 1,
-      "extension": { "name": "echo", "version": "0.1.0" },
+      "extension": { "name": "plan-mode", "version": "0.1.0" },
       "registrations": {
         "tools": [
           {
@@ -29,9 +30,10 @@
             "parameters": { "type": "object", "properties": { "phrase": { "type": "string" } }, "required": ["phrase"] }
           }
         ],
-        "commands": [],
-        "flags": [],
-        "subscriptions": ["turn_start"]
+        "commands": [{ "name": "plan", "description": "Toggle plan mode." }],
+        "flags": ["plan"],
+        "shortcuts": [{ "key": "ctrl+p", "command": "plan", "description": "Toggle plan mode" }],
+        "subscriptions": ["turn_start", "session_start", "session_shutdown"]
       }
     }
   },
@@ -236,8 +238,32 @@
 
   "session_send_message_params": {
     "$schema_ref": "methods/session.schema.json#/$defs/SendMessageParams",
-    "description": "Extension posting an assistant message into the session.",
-    "instance": { "text": "Done processing.", "role": "assistant" }
+    "description": "Extension posting an assistant message into the session. Carries the command-tier context so the host can validate the tier + epoch.",
+    "instance": { "context": { "token": "epoch-7", "tier": "command" }, "text": "Done processing.", "role": "assistant" }
+  },
+
+  "session_send_user_message_params": {
+    "$schema_ref": "methods/session.schema.json#/$defs/SendUserMessageParams",
+    "description": "Extension delivering a user message that steers the in-flight turn.",
+    "instance": { "context": { "token": "epoch-7", "tier": "command" }, "text": "Actually, focus on the tests first.", "deliver_as": "steer" }
+  },
+
+  "session_append_entry_params": {
+    "$schema_ref": "methods/session.schema.json#/$defs/AppendEntryParams",
+    "description": "Extension appending an LLM-invisible transcript entry (persisted, not sent to the model).",
+    "instance": { "context": { "token": "epoch-7", "tier": "command" }, "entry": { "kind": "plan_mode", "enabled": true } }
+  },
+
+  "command_complete_params": {
+    "$schema_ref": "methods/command-complete.schema.json#/$defs/Params",
+    "description": "Host asking the owning extension for argument completions on a partial slash-command.",
+    "instance": { "command": "plan", "context": { "token": "epoch-7", "tier": "command" }, "partial": "on" }
+  },
+
+  "command_complete_result": {
+    "$schema_ref": "methods/command-complete.schema.json#/$defs/Result",
+    "description": "Two argument completions offered by the extension.",
+    "instance": { "completions": [{ "value": "on", "description": "enable plan mode" }, { "value": "off", "description": "disable plan mode" }] }
   },
 
   "session_state_result": {
@@ -487,6 +513,16 @@
       "name": "ui_request_confirm_extra_property",
       "$schema_ref": "methods/ui-request.schema.json#/$defs/Params",
       "instance": { "kind": "confirm", "prompt": "Sure?", "options": ["yes", "no"] }
+    },
+    {
+      "name": "session_send_message_missing_context",
+      "$schema_ref": "methods/session.schema.json#/$defs/SendMessageParams",
+      "instance": { "text": "no context — the tier/epoch guard field is required" }
+    },
+    {
+      "name": "command_complete_result_completion_missing_value",
+      "$schema_ref": "methods/command-complete.schema.json#/$defs/Result",
+      "instance": { "completions": [{ "description": "missing the required value" }] }
     }
   ]
 }

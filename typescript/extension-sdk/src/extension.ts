@@ -13,12 +13,20 @@
 import { Peer } from './jsonrpc.js';
 import { PROTOCOL_VERSION, method } from './protocol.js';
 import type {
+    CommandCompleteParams,
+    CommandCompleteResult,
+    CommandExecuteParams,
+    CommandExecuteResult,
+    CommandRegistration,
+    Completion,
     Context,
+    DeliverAs,
     EventParams,
     HookOutcome,
     HookParams,
     InitializeParams,
     InitializeResult,
+    ShortcutRegistration,
     ToolExecuteParams,
     ToolExecuteResult,
     ToolUpdateParams,
@@ -73,6 +81,34 @@ function makeUi(peer: Peer): UiApi {
     };
 }
 
+/**
+ * Session-mutating ext→host actions. Available only from a COMMAND-tier context
+ * (command handlers) — the host rejects them from an event-tier context with
+ * -32003 ContextViolation. `sendMessage` posts a message, `sendUserMessage`
+ * delivers a user message (steer/follow_up/next_turn), `appendEntry` persists an
+ * LLM-invisible transcript entry.
+ */
+export interface SessionApi {
+    sendMessage(text: string, opts?: { role?: 'user' | 'assistant' }): Promise<void>;
+    sendUserMessage(text: string, opts?: { deliverAs?: DeliverAs }): Promise<void>;
+    appendEntry(entry: Record<string, unknown>): Promise<void>;
+}
+
+/** Build a [`SessionApi`] bound to `context` (must be command-tier) over `peer`. */
+function makeSession(peer: Peer, context: Context): SessionApi {
+    return {
+        sendMessage: async (text, opts) => {
+            await peer.request(method.SESSION_SEND_MESSAGE, { context, text, ...(opts?.role ? { role: opts.role } : {}) });
+        },
+        sendUserMessage: async (text, opts) => {
+            await peer.request(method.SESSION_SEND_USER_MESSAGE, { context, text, ...(opts?.deliverAs ? { deliver_as: opts.deliverAs } : {}) });
+        },
+        appendEntry: async (entry) => {
+            await peer.request(method.SESSION_APPEND_ENTRY, { context, entry });
+        },
+    };
+}
+
 /** Progress + cancellation handed to a tool while it runs. */
 export interface ToolContext {
     /** Correlates `onUpdate` calls with this execution. */
@@ -105,6 +141,48 @@ export function defineTool<TArgs = Record<string, unknown>>(def: ToolDef<TArgs>)
     return def;
 }
 
+/** What a command handler receives: the command-tier context plus the session,
+ *  ui, and args bound to it. Session actions are valid because a command runs at
+ *  command tier. */
+export interface CommandContext {
+    /** The dispatch context (command tier). */
+    context: Context;
+    /** Free-form arguments parsed from the invocation. */
+    args: Record<string, unknown> | undefined;
+    /** Session-mutating actions, bound to this command's context. */
+    session: SessionApi;
+    /** Ask the frontend to render a dialog/widget. See [`UiApi`]. */
+    ui: UiApi;
+    /** True if the host's frontend can render this `ui/request` kind. */
+    hasUI(kind: UiKind): boolean;
+    /** Structured log line into host tracing. */
+    log(level: 'debug' | 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
+}
+
+/** What a command's `execute` may return: text to surface, a full result, or
+ *  nothing. */
+export type CommandReturn = CommandExecuteResult | string | void;
+
+export interface CommandDef {
+    name: string;
+    description: string;
+    execute(ctx: CommandContext): Promise<CommandReturn> | CommandReturn;
+    /** Optional argument autocomplete: given the partial text, return candidates. */
+    complete?(partial: string, context: Context): Promise<Completion[]> | Completion[];
+}
+
+/** Identity helper for `registerCommand` call sites. */
+export function defineCommand(def: CommandDef): CommandDef {
+    return def;
+}
+
+/** A CLI/slash flag the extension declares. The host delivers its parsed value
+ *  in `initialize`; read it with `smooth.getFlag(name)`. */
+export interface FlagDef {
+    name: string;
+    description?: string;
+}
+
 /** A hook handler's friendly return: veto the operation, or replace its input
  *  with a patch (shallow-merged onto the input). Returning nothing = continue. */
 export type HookResult = { block: true; reason?: string } | { patch: Record<string, unknown> };
@@ -119,8 +197,17 @@ export interface SmoothApi {
     name: string;
     version: string;
     registerTool(tool: ToolDef<any>): void;
+    /** Register a slash-command surfaced in the host's `/` palette. */
+    registerCommand(command: CommandDef): void;
+    /** Declare a CLI/slash flag; read its delivered value with [`getFlag`]. */
+    registerFlag(flag: FlagDef): void;
+    /** Bind a keyboard shortcut (TUI frontends) to a registered command. */
+    registerShortcut(shortcut: ShortcutRegistration): void;
     on(event: string, handler: EventHandler): void;
     log(level: 'debug' | 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
+    /** The parsed value the host delivered for a declared flag (undefined before
+     * `initialize`, or when the host has no CLI surface). */
+    getFlag(name: string): unknown;
     /** True if the host's frontend can render this `ui/request` kind. Only
      * meaningful after `initialize` — returns false before the handshake. */
     hasUI(kind: UiKind): boolean;
@@ -138,6 +225,9 @@ export interface ConnectHandle {
 
 export class Extension {
     private readonly tools = new Map<string, ToolDef<any>>();
+    private readonly commands = new Map<string, CommandDef>();
+    private readonly flagDefs = new Map<string, FlagDef>();
+    private readonly shortcuts: ShortcutRegistration[] = [];
     private readonly events = new Map<string, EventHandler[]>();
     private name = 'extension';
     private version = '0.0.0';
@@ -145,6 +235,8 @@ export class Extension {
     private live?: Peer;
     /** UI kinds the host declared answerable at `initialize`. */
     private hostUiCaps: string[] = [];
+    /** Flag values the host delivered at `initialize` (name → value). */
+    private flagValues: Record<string, unknown> = {};
 
     constructor(setup: ExtensionSetup) {
         const api: SmoothApi = {
@@ -163,6 +255,15 @@ export class Extension {
             registerTool: (tool) => {
                 this.tools.set(tool.name, tool);
             },
+            registerCommand: (command) => {
+                this.commands.set(command.name, command);
+            },
+            registerFlag: (flag) => {
+                this.flagDefs.set(flag.name, flag);
+            },
+            registerShortcut: (shortcut) => {
+                this.shortcuts.push(shortcut);
+            },
             on: (event, handler) => {
                 const list = this.events.get(event) ?? [];
                 list.push(handler);
@@ -171,6 +272,7 @@ export class Extension {
             log: (level, message, fields) => {
                 this.live?.notify(method.LOG, { level, message, ...(fields ? { fields } : {}) });
             },
+            getFlag: (name) => self.flagValues[name],
             hasUI: (kind) => self.hostUiCaps.includes(kind),
             get ui() {
                 if (!self.live) throw new Error('smooth.ui is only available after the extension connects');
@@ -195,6 +297,8 @@ export class Extension {
         });
         peer.setRequestHandler(method.TOOL_EXECUTE, (params, signal) => this.executeTool(params as ToolExecuteParams, peer, signal));
         peer.setRequestHandler(method.HOOK, (params) => this.dispatchHook(params as HookParams));
+        peer.setRequestHandler(method.COMMAND_EXECUTE, (params) => this.executeCommand(params as CommandExecuteParams, peer));
+        peer.setRequestHandler(method.COMMAND_COMPLETE, (params) => this.completeCommand(params as CommandCompleteParams));
         peer.setNotificationHandler(method.EVENT, (params) => this.dispatchEvent(params as EventParams));
 
         transport.start((frame) => peer.receive(frame));
@@ -217,20 +321,52 @@ export class Extension {
 
     private initialize(params: InitializeParams): InitializeResult {
         this.hostUiCaps = params.ui_capabilities ?? [];
+        this.flagValues = params.flags ?? {};
         const tools = [...this.tools.values()].map((t) => ({
             name: t.name,
             description: t.description,
             parameters: toJsonSchema(t.parameters),
             ...(t.deferred ? { deferred: true } : {}),
         }));
+        const commands: CommandRegistration[] = [...this.commands.values()].map((c) => ({ name: c.name, description: c.description }));
+        const flags = [...this.flagDefs.keys()];
         // Only observe events go in `subscriptions` — hook names are intercepts
         // the host always calls, not events it filters by subscription.
         const subscriptions = [...this.events.keys()].filter((name) => !HOOK_NAMES.has(name));
         return {
             protocol_version: PROTOCOL_VERSION,
             extension: { name: this.name, version: this.version },
-            registrations: { tools, subscriptions },
+            registrations: {
+                tools,
+                ...(commands.length ? { commands } : {}),
+                ...(flags.length ? { flags } : {}),
+                ...(this.shortcuts.length ? { shortcuts: this.shortcuts } : {}),
+                subscriptions,
+            },
         };
+    }
+
+    private async executeCommand(params: CommandExecuteParams, peer: Peer): Promise<CommandExecuteResult> {
+        const command = this.commands.get(params.command);
+        if (!command) return { content: `unknown command: ${params.command}` };
+        const ctx: CommandContext = {
+            context: params.context,
+            args: params.arguments,
+            session: makeSession(peer, params.context),
+            ui: makeUi(peer),
+            hasUI: (kind) => this.hostUiCaps.includes(kind),
+            log: (level, message, fields) => peer.notify(method.LOG, { level, message, ...(fields ? { fields } : {}) }),
+        };
+        const out = await command.execute(ctx);
+        if (out === undefined) return {};
+        return typeof out === 'string' ? { content: out } : out;
+    }
+
+    private async completeCommand(params: CommandCompleteParams): Promise<CommandCompleteResult> {
+        const command = this.commands.get(params.command);
+        if (!command?.complete) return { completions: [] };
+        const completions = await command.complete(params.partial ?? '', params.context);
+        return { completions };
     }
 
     private async executeTool(params: ToolExecuteParams, peer: Peer, signal: AbortSignal): Promise<ToolExecuteResult> {

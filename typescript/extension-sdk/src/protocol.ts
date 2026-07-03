@@ -22,6 +22,11 @@ export const method = {
     REGISTRY_UPDATE: 'registry/update',
     LOG: 'log',
     CANCEL: '$/cancel',
+    COMMAND_EXECUTE: 'command/execute',
+    COMMAND_COMPLETE: 'command/complete',
+    SESSION_SEND_MESSAGE: 'session/send_message',
+    SESSION_SEND_USER_MESSAGE: 'session/send_user_message',
+    SESSION_APPEND_ENTRY: 'session/append_entry',
 } as const;
 
 /** JSON-RPC + SEP error codes (see spec/extension/envelope.md). */
@@ -62,6 +67,8 @@ export interface InitializeParams {
     session?: { id?: string };
     mode: 'tui' | 'web' | 'widget' | 'cli' | 'headless';
     ui_capabilities?: string[];
+    /** Parsed values for the flags the extension declares (name → value). */
+    flags?: Record<string, unknown>;
     capabilities_enabled?: Record<string, boolean>;
 }
 
@@ -78,10 +85,19 @@ export interface CommandRegistration {
     description: string;
 }
 
+export interface ShortcutRegistration {
+    /** A human-typed chord, e.g. `ctrl+p`; the frontend parses it. */
+    key: string;
+    /** The registered command this chord invokes (no leading `/`). */
+    command: string;
+    description?: string;
+}
+
 export interface Registrations {
     tools?: ToolRegistration[];
     commands?: CommandRegistration[];
     flags?: string[];
+    shortcuts?: ShortcutRegistration[];
     subscriptions?: string[];
 }
 
@@ -155,4 +171,52 @@ export interface UiRequestResult {
     confirmed?: boolean;
     text?: string;
     cancelled?: boolean;
+}
+
+/** Host → ext `command/execute`: run a registered slash-command (command tier). */
+export interface CommandExecuteParams {
+    command: string;
+    context: Context;
+    arguments?: Record<string, unknown>;
+}
+
+export interface CommandExecuteResult {
+    content?: string;
+}
+
+/** Host → ext `command/complete`: argument autocomplete for a slash-command. */
+export interface CommandCompleteParams {
+    command: string;
+    context: Context;
+    partial?: string;
+}
+
+export interface Completion {
+    value: string;
+    description?: string;
+}
+
+export interface CommandCompleteResult {
+    completions: Completion[];
+}
+
+/** How a `session/send_user_message` is delivered relative to the current turn. */
+export type DeliverAs = 'steer' | 'follow_up' | 'next_turn';
+
+/** Ext → host `session/send_message` params (command tier — carries `context`). */
+export interface SessionSendMessageParams {
+    context: Context;
+    text: string;
+    role?: 'user' | 'assistant';
+}
+
+export interface SessionSendUserMessageParams {
+    context: Context;
+    text: string;
+    deliver_as?: DeliverAs;
+}
+
+export interface SessionAppendEntryParams {
+    context: Context;
+    entry: Record<string, unknown>;
 }

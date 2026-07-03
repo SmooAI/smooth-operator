@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/command-complete.schema.json",
+  "title": "CommandComplete",
+  "description": "Method `command/complete` (host → ext, request). Asks the extension that owns a registered slash-command for argument completions given the partial text typed so far. Best-effort: an extension that does not implement completion replies with an empty `completions` array. The frontend surfaces the returned values in its autocomplete popup.",
+
+  "$defs": {
+    "Params": {
+      "title": "CommandCompleteParams",
+      "type": "object",
+      "required": ["command", "context"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "type": "string", "description": "Registered slash-command name, without the leading `/`." },
+        "context": {
+          "type": "object",
+          "required": ["token", "tier"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "type": "string" },
+            "tier": { "type": "string", "enum": ["event", "command"] }
+          }
+        },
+        "partial": { "type": "string", "description": "The partial argument text typed after the command name." }
+      }
+    },
+
+    "Completion": {
+      "title": "Completion",
+      "type": "object",
+      "required": ["value"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "string", "description": "The completion candidate to insert." },
+        "description": { "type": "string", "description": "Optional label shown alongside the candidate." }
+      }
+    },
+
+    "Result": {
+      "title": "CommandCompleteResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "completions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Completion" },
+          "description": "Argument completion candidates; empty when the extension offers none."
+        }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Completion" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

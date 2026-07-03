@@ -19,6 +19,6 @@ describe('runConformance against the echo.mjs subprocess', () => {
         const failed = report.steps.filter((s) => !s.ok);
         expect(failed, JSON.stringify(failed)).toHaveLength(0);
         expect(report.passed).toBe(true);
-        expect(report.steps.map((s) => s.name)).toEqual(['initialize', 'ping', 'tool/execute', 'shutdown']);
+        expect(report.steps.map((s) => s.name)).toEqual(['initialize', 'ping', 'tool/execute', 'command/execute', 'command/complete', 'shutdown']);
     });
 });

@@ -7,7 +7,17 @@
  */
 import { Peer, RpcError } from './jsonrpc.js';
 import { PROTOCOL_VERSION, errorCode, method } from './protocol.js';
-import type { Context, HookOutcome, InitializeParams, InitializeResult, ToolExecuteResult, ToolUpdateParams, UiRequestParams, UiRequestResult } from './protocol.js';
+import type {
+    CommandExecuteResult,
+    Context,
+    HookOutcome,
+    InitializeParams,
+    InitializeResult,
+    ToolExecuteResult,
+    ToolUpdateParams,
+    UiRequestParams,
+    UiRequestResult,
+} from './protocol.js';
 import type { Extension } from './extension.js';
 import { linkedPair } from './transport.js';
 
@@ -16,6 +26,12 @@ let callSeq = 0;
 /** Answers the extension's `ui/request` calls. Return a result, or throw an
  * `RpcError` (e.g. code -32001) to simulate a headless/uncapable frontend. */
 export type UiResponder = (params: UiRequestParams) => UiRequestResult | Promise<UiRequestResult>;
+
+/** A recorded ext→host `session/*` request the test can assert on. */
+export interface SessionCall {
+    method: string;
+    params: Record<string, unknown>;
+}
 
 export interface CreateTestHostOptions {
     /** Answers `ui/request`. Default: reject every call with -32001 NoUI. */
@@ -36,8 +52,14 @@ export interface TestHost {
     callTool(tool: string, args: Record<string, unknown>, opts?: CallToolOptions): Promise<ToolExecuteResult>;
     /** Drive a `hook` request and get back the extension's folded outcome. */
     callHook(hook: string, input: Record<string, unknown>, context?: Context): Promise<HookOutcome>;
+    /** Dispatch a `command/execute` with a command-tier context by default. */
+    runCommand(command: string, args?: Record<string, unknown>, context?: Context): Promise<CommandExecuteResult>;
+    /** Dispatch a `command/complete` for argument autocomplete. */
+    completeCommand(command: string, partial: string, context?: Context): Promise<{ completions: { value: string; description?: string }[] }>;
     ping(): Promise<Record<string, unknown>>;
     sendEvent(event: string, payload?: Record<string, unknown>, context?: Context): void;
+    /** Every `session/*` request the extension made, in order — for assertions. */
+    readonly sessionCalls: SessionCall[];
     shutdown(): Promise<void>;
     close(): void;
 }
@@ -63,6 +85,24 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
     // Extension notifications the host just observes in tests.
     host.setNotificationHandler(method.LOG, () => {});
     host.setNotificationHandler(method.REGISTRY_UPDATE, () => {});
+
+    // Service ext→host `session/*` requests, enforcing the same command-tier
+    // guard the real host does (event-tier → -32003) so a demo's session calls
+    // are exercised realistically. Every call is recorded for assertions.
+    const sessionCalls: SessionCall[] = [];
+    const sessionHandler = (params: unknown) => {
+        const p = (params ?? {}) as Record<string, unknown>;
+        const tier = (p.context as { tier?: string } | undefined)?.tier;
+        if (tier !== 'command') throw new RpcError(errorCode.ContextViolation, 'session action requires a command-tier context');
+        return p;
+    };
+    for (const m of [method.SESSION_SEND_MESSAGE, method.SESSION_SEND_USER_MESSAGE, method.SESSION_APPEND_ENTRY]) {
+        host.setRequestHandler(m, (params) => {
+            const recorded = sessionHandler(params);
+            sessionCalls.push({ method: m, params: recorded });
+            return {};
+        });
+    }
     hostT.start((frame) => host.receive(frame));
 
     return {
@@ -93,6 +133,17 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
         callHook(hook, input, context) {
             return host.request<HookOutcome>(method.HOOK, { hook, input, context: context ?? DEFAULT_CONTEXT });
         },
+        runCommand(command, args, context) {
+            return host.request<CommandExecuteResult>(method.COMMAND_EXECUTE, {
+                command,
+                context: context ?? DEFAULT_CONTEXT,
+                ...(args ? { arguments: args } : {}),
+            });
+        },
+        completeCommand(command, partial, context) {
+            return host.request(method.COMMAND_COMPLETE, { command, context: context ?? DEFAULT_CONTEXT, partial });
+        },
+        sessionCalls,
         ping() {
             return host.request<Record<string, unknown>>(method.PING, {});
         },
