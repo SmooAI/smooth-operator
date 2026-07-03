@@ -13,7 +13,12 @@
       "properties": {
         "event": {
           "type": "string",
-          "description": "Event name, e.g. `turn_start`, `turn_end`, `message_end`, `tool_call_update`, `session_start`, `events_lost`."
+          "description": "Event name. Names mirror pi's for near-mechanical porting: `agent_start`/`agent_end`, `turn_start`/`turn_end`, `message_start`/`message_update`/`message_end`, `tool_execution_start`/`tool_execution_update`/`tool_execution_end`, `model_select` (the engine emits this as `AgentEvent::ModelResolved`), `session_start`/`session_compact`/`session_shutdown`/`session_tree`. The out-of-band `events_lost` marker is delivered after shedding."
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Per-connection monotonic sequence number. A gap in the run signals that the bounded observe queue shed events; the following `events_lost` marker carries the exact count. Absent on the `events_lost` marker itself (it is out-of-band)."
         },
         "context": {
           "type": "object",
@@ -24,7 +29,7 @@
             "tier": { "type": "string", "enum": ["event", "command"] }
           }
         },
-        "payload": { "type": "object", "description": "Event-specific data; extensions read what they understand." }
+        "payload": { "type": "object", "description": "Event-specific data; extensions read what they understand. For `events_lost`: `{ \"lost\": <count> }`." }
       }
     }
   },

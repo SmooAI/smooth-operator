@@ -7,7 +7,7 @@
  */
 import { Peer } from './jsonrpc.js';
 import { PROTOCOL_VERSION, method } from './protocol.js';
-import type { Context, InitializeParams, InitializeResult, ToolExecuteResult, ToolUpdateParams } from './protocol.js';
+import type { Context, HookOutcome, InitializeParams, InitializeResult, ToolExecuteResult, ToolUpdateParams } from './protocol.js';
 import type { Extension } from './extension.js';
 import { linkedPair } from './transport.js';
 
@@ -25,6 +25,8 @@ export interface CallToolOptions {
 export interface TestHost {
     initialize(overrides?: Partial<InitializeParams>): Promise<InitializeResult>;
     callTool(tool: string, args: Record<string, unknown>, opts?: CallToolOptions): Promise<ToolExecuteResult>;
+    /** Drive a `hook` request and get back the extension's folded outcome. */
+    callHook(hook: string, input: Record<string, unknown>, context?: Context): Promise<HookOutcome>;
     ping(): Promise<Record<string, unknown>>;
     sendEvent(event: string, payload?: Record<string, unknown>, context?: Context): void;
     shutdown(): Promise<void>;
@@ -73,6 +75,9 @@ export function createTestHost(extension: Extension): TestHost {
             } finally {
                 updateSinks.delete(call_id);
             }
+        },
+        callHook(hook, input, context) {
+            return host.request<HookOutcome>(method.HOOK, { hook, input, context: context ?? DEFAULT_CONTEXT });
         },
         ping() {
             return host.request<Record<string, unknown>>(method.PING, {});
