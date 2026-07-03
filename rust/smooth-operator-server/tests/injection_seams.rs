@@ -137,6 +137,7 @@ async fn run_turn_with_key(
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
+            extensions: None,
         },
         &tx,
     )

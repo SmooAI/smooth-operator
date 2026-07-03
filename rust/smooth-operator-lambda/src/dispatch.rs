@@ -566,6 +566,7 @@ async fn send_message(
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
+            extensions: None,
         },
         &tx,
     )

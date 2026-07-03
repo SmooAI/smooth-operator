@@ -752,6 +752,17 @@ async fn handle_send_message(
     let conversation_id = session.conversation_id.clone();
 
     tokio::spawn(async move {
+        // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW
+        // is set; `None` otherwise, zero overhead). The delegate is bound to THIS
+        // turn's sink/request/session so a hosted extension's `ui/confirm` routes
+        // back over this connection.
+        let extensions = crate::extensions::build_extension_host(
+            &state_for_turn,
+            &session_id_owned,
+            &request_id_owned,
+            sink_owned.clone(),
+        )
+        .await;
         let result = runner::run_streaming_turn(
             TurnRequest {
                 storage: state_for_turn.storage.clone(),
@@ -792,6 +803,8 @@ async fn handle_send_message(
                 // SEAM 3 — authLevel gate + per-tool config delivery.
                 auth_gate,
                 tool_configs,
+                // SEP — the per-turn extension host (None unless allowlisted).
+                extensions,
             },
             &sink_owned,
         )
