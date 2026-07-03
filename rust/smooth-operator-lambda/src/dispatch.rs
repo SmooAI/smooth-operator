@@ -581,7 +581,8 @@ async fn send_message(
 
     match result {
         Ok(turn) => {
-            let response = runner::general_agent_response(&turn.reply);
+            let response =
+                runner::general_agent_response(&turn.reply, &turn.suggested_next_actions);
             poster
                 .post(&protocol::eventual_response(
                     request_id,
