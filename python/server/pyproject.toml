@@ -28,6 +28,15 @@ dev = [
     # in smooai-smooth-operator-core — no gateway needed.
 ]
 
+[tool.uv.sources]
+# The SEP ExtensionHost the server hosts extensions through (smooth_operator_core.
+# extension) landed on core main but is not yet on the PyPI release the version
+# constraint above resolves. Pin the engine to that merge commit until the next
+# core PyPI release, then drop this source and bump the constraint. (SEP host —
+# smooth-operator-core#33; the same engine-vs-PyPI ordering the Rust side handles
+# with a path/version dep.)
+smooai-smooth-operator-core = { git = "https://github.com/SmooAI/smooth-operator-core.git", subdirectory = "python/core", rev = "e5d1068578cd90bec975f367935bedf757f0da82" }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

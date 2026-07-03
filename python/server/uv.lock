@@ -416,13 +416,9 @@ wheels = [
 [[package]]
 name = "smooai-smooth-operator-core"
 version = "1.3.1"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/SmooAI/smooth-operator-core.git?subdirectory=python%2Fcore&rev=e5d1068578cd90bec975f367935bedf757f0da82#e5d1068578cd90bec975f367935bedf757f0da82" }
 dependencies = [
     { name = "openai" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/5d/4d49fc210e7bd7c7b4ea54cd4adc2d9a73d91dacadc8415770e72b51f434/smooai_smooth_operator_core-1.3.1.tar.gz", hash = "sha256:c178de3e16a4409e728fa6d04d1c49a3bb667fbbb40ab7478d62b45a3b98f846", size = 67848, upload-time = "2026-06-24T14:11:02.828Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/05/57ff4b5963a0b5519ddb477e3a25259f2dbca10bcfe3f4955b9db1888ae1/smooai_smooth_operator_core-1.3.1-py3-none-any.whl", hash = "sha256:da34f03e39e98dc12ac2404aed0d009b9acd2ff61d64c086c7dfa7c3a10348d4", size = 33217, upload-time = "2026-06-24T14:11:01.643Z" },
 ]
 
 [[package]]
@@ -449,7 +445,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openai", marker = "extra == 'gateway'", specifier = ">=1.40" },
-    { name = "smooai-smooth-operator-core", specifier = ">=1.3" },
+    { name = "smooai-smooth-operator-core", git = "https://github.com/SmooAI/smooth-operator-core.git?subdirectory=python%2Fcore&rev=e5d1068578cd90bec975f367935bedf757f0da82" },
     { name = "websockets", specifier = ">=12" },
 ]
 provides-extras = ["gateway"]
