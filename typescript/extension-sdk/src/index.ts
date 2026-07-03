@@ -9,7 +9,7 @@
  * `runConformance`.
  */
 export { defineExtension, defineTool, Extension } from './extension.js';
-export type { ExtensionSetup, SmoothApi, ToolDef, ToolContext, ToolReturn, EventHandler, ConnectHandle } from './extension.js';
+export type { ExtensionSetup, SmoothApi, ToolDef, ToolContext, ToolReturn, EventHandler, HookResult, ConnectHandle } from './extension.js';
 export { createTestHost } from './test-host.js';
 export type { TestHost, CallToolOptions } from './test-host.js';
 export { runConformance, DEFAULT_SPEC_DIR } from './conformance.js';
@@ -31,4 +31,6 @@ export type {
     ToolExecuteResult,
     ToolUpdateParams,
     EventParams,
+    HookParams,
+    HookOutcome,
 } from './protocol.js';

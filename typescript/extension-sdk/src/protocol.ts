@@ -112,6 +112,21 @@ export interface ToolUpdateParams {
 
 export interface EventParams {
     event: string;
+    /** Per-connection monotonic sequence; absent on the `events_lost` marker. */
+    seq?: number;
     context: Context;
     payload?: Record<string, unknown>;
 }
+
+/** Host → ext `hook` request: an awaited intercept the extension can veto/patch. */
+export interface HookParams {
+    hook: string;
+    context: Context;
+    input: Record<string, unknown>;
+}
+
+/** The extension's reply to a `hook`, tagged by `action`. */
+export type HookOutcome =
+    | { action: 'continue' }
+    | { action: 'block'; reason?: string }
+    | { action: 'modify'; patch: Record<string, unknown> };

@@ -12,9 +12,13 @@
  */
 import { Peer } from './jsonrpc.js';
 import { PROTOCOL_VERSION, method } from './protocol.js';
-import type { Context, EventParams, InitializeParams, InitializeResult, ToolExecuteParams, ToolExecuteResult, ToolUpdateParams } from './protocol.js';
+import type { Context, EventParams, HookOutcome, HookParams, InitializeParams, InitializeResult, ToolExecuteParams, ToolExecuteResult, ToolUpdateParams } from './protocol.js';
 import { toJsonSchema, type ParameterSchema } from './schema.js';
 import { stdioTransport, type Transport } from './transport.js';
+
+/** The intercept hooks (awaited, host-orchestrated); every other `on(...)` name
+ *  is a fire-and-forget observe event. Kept in sync with the engine's HookType. */
+const HOOK_NAMES = new Set(['tool_call', 'tool_result', 'before_agent_start', 'message_end', 'context', 'before_provider_request', 'input', 'user_bash']);
 
 /** Progress + cancellation handed to a tool while it runs. */
 export interface ToolContext {
@@ -44,8 +48,14 @@ export function defineTool<TArgs = Record<string, unknown>>(def: ToolDef<TArgs>)
     return def;
 }
 
-/** Handler for an observe `event`. Fire-and-forget; return value ignored. */
-export type EventHandler = (payload: Record<string, unknown> | undefined, ctx: Context) => void | Promise<void>;
+/** A hook handler's friendly return: veto the operation, or replace its input
+ *  with a patch (shallow-merged onto the input). Returning nothing = continue. */
+export type HookResult = { block: true; reason?: string } | { patch: Record<string, unknown> };
+
+/** Handler for an `on(name, ...)` registration. For an observe event the return
+ *  is ignored; for an intercept hook (see {@link HOOK_NAMES}) return a
+ *  {@link HookResult} to veto or patch. Mirrors pi's single `on`. */
+export type EventHandler = (data: Record<string, unknown> | undefined, ctx: Context) => void | HookResult | Promise<void | HookResult>;
 
 /** The builder passed to `defineExtension`'s setup. Mirrors pi's `ExtensionAPI`. */
 export interface SmoothApi {
@@ -114,6 +124,7 @@ export class Extension {
             return {};
         });
         peer.setRequestHandler(method.TOOL_EXECUTE, (params, signal) => this.executeTool(params as ToolExecuteParams, peer, signal));
+        peer.setRequestHandler(method.HOOK, (params) => this.dispatchHook(params as HookParams));
         peer.setNotificationHandler(method.EVENT, (params) => this.dispatchEvent(params as EventParams));
 
         transport.start((frame) => peer.receive(frame));
@@ -141,10 +152,13 @@ export class Extension {
             parameters: toJsonSchema(t.parameters),
             ...(t.deferred ? { deferred: true } : {}),
         }));
+        // Only observe events go in `subscriptions` — hook names are intercepts
+        // the host always calls, not events it filters by subscription.
+        const subscriptions = [...this.events.keys()].filter((name) => !HOOK_NAMES.has(name));
         return {
             protocol_version: PROTOCOL_VERSION,
             extension: { name: this.name, version: this.version },
-            registrations: { tools, subscriptions: [...this.events.keys()] },
+            registrations: { tools, subscriptions },
         };
     }
 
@@ -165,6 +179,23 @@ export class Extension {
         for (const handler of this.events.get(params.event) ?? []) {
             void handler(params.payload, params.context);
         }
+    }
+
+    /** Fold this extension's handlers for one `hook` into a single outcome: the
+     *  first `block` short-circuits; `patch`es shallow-merge onto the input and
+     *  thread to the next handler; no result = continue. The host chains the
+     *  outcome across extensions in load order. */
+    private async dispatchHook(params: HookParams): Promise<HookOutcome> {
+        let input = params.input;
+        let modified = false;
+        for (const handler of this.events.get(params.hook) ?? []) {
+            const result = await handler(input, params.context);
+            if (!result) continue;
+            if ('block' in result) return { action: 'block', ...(result.reason ? { reason: result.reason } : {}) };
+            input = { ...input, ...result.patch };
+            modified = true;
+        }
+        return modified ? { action: 'modify', patch: input } : { action: 'continue' };
     }
 }
 
