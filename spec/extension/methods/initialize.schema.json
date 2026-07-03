@@ -48,6 +48,10 @@
           "items": { "type": "string" },
           "description": "UI request kinds the frontend can render, e.g. `select`, `confirm`, `input`, `notify`, `set_status`, `set_widget`, `set_title`. Empty ⇒ headless."
         },
+        "flags": {
+          "type": "object",
+          "description": "Parsed values for the flags the extension declares (name → value). A host with a CLI surface fills this; hosts without one send it empty or omit it. The extension reads its flag values here at startup."
+        },
         "capabilities_enabled": {
           "type": "object",
           "description": "Which host capability groups the extension may call. A method in a disabled group is rejected with -32004 CapabilityDisabled.",
@@ -93,7 +97,8 @@
       "properties": {
         "tools": { "type": "array", "items": { "$ref": "#/$defs/ToolRegistration" } },
         "commands": { "type": "array", "items": { "$ref": "#/$defs/CommandRegistration" } },
-        "flags": { "type": "array", "items": { "type": "string" }, "description": "CLI/slash flags the extension owns." },
+        "flags": { "type": "array", "items": { "type": "string" }, "description": "CLI/slash flag names the extension owns; the host delivers their parsed values in `initialize` params `flags`." },
+        "shortcuts": { "type": "array", "items": { "$ref": "#/$defs/ShortcutRegistration" }, "description": "Keyboard shortcuts binding a chord to a registered command. Only frontends with a key surface (the TUI) honor them." },
         "subscriptions": {
           "type": "array",
           "items": { "type": "string" },
@@ -122,6 +127,18 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string", "description": "Slash-command name, without the leading `/`." },
+        "description": { "type": "string" }
+      }
+    },
+
+    "ShortcutRegistration": {
+      "title": "SepShortcutRegistration",
+      "type": "object",
+      "required": ["key", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "description": "Human-typed chord, e.g. `ctrl+p` or `f2`; the frontend parses it." },
+        "command": { "type": "string", "description": "The registered command name this chord invokes (no leading `/`)." },
         "description": { "type": "string" }
       }
     }

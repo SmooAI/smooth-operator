@@ -115,6 +115,8 @@ export async function runConformance(opts: RunConformanceOptions): Promise<Confo
         await check('initialize', method.INITIALIZE, initParams(fixtures), 'methods/initialize.schema.json#/$defs/Result');
         await check('ping', method.PING, {}, 'methods/ping.schema.json#/$defs/Result');
         await check('tool/execute', method.TOOL_EXECUTE, fixtures.tool_execute_params!.instance, 'methods/tool-execute.schema.json#/$defs/Result');
+        await check('command/execute', method.COMMAND_EXECUTE, fixtures.command_execute_params!.instance, 'methods/command-execute.schema.json#/$defs/Result');
+        await check('command/complete', method.COMMAND_COMPLETE, fixtures.command_complete_params!.instance, 'methods/command-complete.schema.json#/$defs/Result');
         await check('shutdown', method.SHUTDOWN, {}, 'methods/shutdown.schema.json#/$defs/Result');
     } finally {
         peer.close();

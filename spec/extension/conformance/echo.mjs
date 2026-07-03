@@ -38,6 +38,8 @@ rl.on('line', (line) => {
                             parameters: { type: 'object', properties: { phrase: { type: 'string' } }, required: ['phrase'] },
                         },
                     ],
+                    commands: [{ name: 'echo-cmd', description: 'Echo a slash-command back.' }],
+                    shortcuts: [{ key: 'ctrl+e', command: 'echo-cmd', description: 'Run echo-cmd' }],
                     subscriptions: ['turn_start', 'turn_end', 'message_end'],
                 },
             });
@@ -53,6 +55,14 @@ rl.on('line', (line) => {
 
         case 'tool/execute':
             reply(id, { content: params?.arguments?.phrase ?? '' });
+            break;
+
+        case 'command/execute':
+            reply(id, { content: `ran ${params?.command ?? ''}` });
+            break;
+
+        case 'command/complete':
+            reply(id, { completions: [{ value: `${params?.partial ?? ''}-done`, description: 'echo completion' }] });
             break;
 
         case 'shutdown':
