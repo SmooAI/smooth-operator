@@ -30,8 +30,9 @@ from smooth_operator_core import (
 )
 
 from . import protocol
-from .agent_config import AgentConfig
+from .agent_config import AgentConfig, filter_tools
 from .confirmation import ConfirmationRegistry
+from .extensions import build_extension_host
 from .session_store import MessageDirection, SessionStore
 from .workflow import (
     WORKFLOW_JUDGE_MODEL,
@@ -139,6 +140,20 @@ class TurnRunner:
         workflow = self._agent_config.conversation_workflow if self._agent_config else None
         current_step_id = await self._store.get_current_step_id(conversation_id) if workflow else None
 
+        # 0d. SEP — build the per-turn extension host (default-deny SMOOTH_EXTENSIONS_ALLOW;
+        #     None + zero overhead when unset). Its eager tools join the agent's tool set,
+        #     flowing through the SAME per-agent enabled_tools filter the built-ins got
+        #     (filter_tools by tool name), so an allow-list drops an ext tool exactly like
+        #     a built-in. The ext host's ui/confirm bridges onto the confirmation frame via
+        #     the ConfirmUiProvider (see extensions.py) — same registry the write HITL uses.
+        confirm_session = session_id or conversation_id
+        ext_turn = None
+        if self._confirmations is not None:
+            ext_turn = await build_extension_host(confirm_session, request_id, sink, self._confirmations)
+        agent_tools = list(self._tools)
+        if ext_turn is not None:
+            agent_tools.extend(filter_tools(ext_turn.host.tools(), self._agent_config))
+
         # 1. Build the agent. The knowledge base (when present) auto-injects the
         #    top hits into the system prompt — the engine handles retrieval + rerank
         #    internally, mirroring the C# `new SmoothAgent(..., Knowledge = ...)`.
@@ -146,8 +161,8 @@ class TurnRunner:
             "instructions": self._assemble_system_prompt(current_step_id, is_first_turn=not prior_messages),
             "knowledge": self._knowledge,
         }
-        if self._tools:
-            options_kwargs["tools"] = self._tools
+        if agent_tools:
+            options_kwargs["tools"] = agent_tools
         if self._model is not None:
             options_kwargs["model"] = self._model
 
@@ -157,8 +172,8 @@ class TurnRunner:
         # the session-keyed registry). With no patterns (the default) no gate is
         # installed → no tool ever parks → behavior identical to before HITL. The
         # gate keys its pending future by `session_id`, so a `confirm_tool_action`
-        # frame (also keyed by sessionId) routes back here.
-        confirm_session = session_id or conversation_id
+        # frame (also keyed by sessionId) routes back here. (`confirm_session` is
+        # resolved above, where the extension host is built.)
         if self._confirm_tools and self._confirmations is not None:
             patterns = self._confirm_tools
             registry = self._confirmations
@@ -204,16 +219,18 @@ class TurnRunner:
             role = "assistant" if message.direction == MessageDirection.OUTBOUND else "user"
             thread.add({"role": role, "content": message.text})
 
-        # 3. Persist the inbound user message.
-        await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
-
         # 4. Stream the turn: a stream_token per text delta, a stream_chunk per tool
         #    call / tool result (mirrors the Rust runner translating the engine's
         #    AgentEvent stream). The terminal DoneEvent carries the final
-        #    AgentRunResponse, whose `text` is authoritative for the reply.
+        #    AgentRunResponse, whose `text` is authoritative for the reply. The inbound
+        #    persist rides inside the try so the extension host is always torn down
+        #    (finally) once it has been spawned above.
         reply_parts: list[str] = []
         final_text: str | None = None
         try:
+            # 3. Persist the inbound user message.
+            await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
+
             async for event in agent.run_stream(user_message, thread=thread):
                 if isinstance(event, TextEvent):
                     if event.text:
@@ -237,6 +254,10 @@ class TurnRunner:
             # `(cfg.clear)(session_id)` at turn end). No-op when HITL is off.
             if self._confirmations is not None:
                 self._confirmations.clear(confirm_session)
+            # SEP — stop the extension subprocesses this turn spawned (and clear any
+            # ui/confirm still parked). No-op when no host was built (default deny).
+            if ext_turn is not None:
+                await ext_turn.teardown()
 
         # The DoneEvent's text wins (it's the engine's authoritative final), falling
         # back to the concatenated streamed deltas if it's empty.
