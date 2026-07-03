@@ -190,6 +190,11 @@ pub struct TurnResult {
     /// step when the judge did not advance (criteria not met, terminal step, or a
     /// judge failure — never freezes, never crashes the turn).
     pub next_step_id: Option<String>,
+    /// Quick-reply chips the model offered for the user's next message, parsed
+    /// from the reply's `<suggested_replies>` trailer (see
+    /// [`crate::suggestions`]). Empty when the model emitted none. Carried onto
+    /// the `eventual_response`'s `suggestedNextActions`.
+    pub suggested_next_actions: Vec<String>,
 }
 
 /// Everything one streaming turn needs. Bundled into a struct so the call sites
@@ -405,6 +410,10 @@ pub async fn run_streaming_turn(
             wt.current_step_id.as_deref(),
         ));
     }
+    // Suggested quick replies: teach the model the machine-parsed trailer
+    // contract (see `crate::suggestions`). Appended unconditionally — a model
+    // that emits no trailer costs nothing and yields empty suggestions.
+    sections.push(crate::suggestions::SUGGESTED_REPLIES_PROMPT_SECTION.to_string());
     let resolved_prompt = sections.join("\n\n");
     let config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
@@ -574,12 +583,16 @@ pub async fn run_streaming_turn(
         // The terminal `Completed` event carries the turn's accumulated cost +
         // token counts; capture them to surface on the `eventual_response`.
         let mut usage: Option<crate::protocol::TurnUsage> = None;
+        // Hold back tokens that could be the suggested-replies trailer so the
+        // raw `<suggested_replies>` marker never flashes in the live stream.
+        let mut suppressor = crate::suggestions::MarkerSuppressor::new();
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::TokenDelta { content } => {
-                    if !content.is_empty() {
+                    let safe = suppressor.push(&content);
+                    if !safe.is_empty() {
                         let _ = sink_clone
-                            .send(crate::protocol::stream_token(&request_id_owned, &content));
+                            .send(crate::protocol::stream_token(&request_id_owned, &safe));
                     }
                 }
                 AgentEvent::ReasoningDelta { content } => {
@@ -653,6 +666,11 @@ pub async fn run_streaming_turn(
                 _ => {}
             }
         }
+        // Flush a held partial that never became the trailer marker.
+        let tail = suppressor.finish();
+        if !tail.is_empty() {
+            let _ = sink_clone.send(crate::protocol::stream_token(&request_id_owned, &tail));
+        }
         (invoked_knowledge_search, usage)
     });
 
@@ -689,10 +707,11 @@ pub async fn run_streaming_turn(
 
     let (invoked_knowledge_search, usage) = translator.await.unwrap_or((false, None));
 
-    let reply = conversation
-        .last_assistant_content()
-        .unwrap_or_default()
-        .to_string();
+    // Strip the suggested-replies trailer from the final reply; the parsed
+    // suggestions ride the `eventual_response`'s `suggestedNextActions`.
+    let (reply, suggested_next_actions) = crate::suggestions::extract_suggested_replies(
+        conversation.last_assistant_content().unwrap_or_default(),
+    );
 
     // 5. Persist the outbound reply and capture its id for eventual_response.
     let message_id = if reply.is_empty() {
@@ -745,6 +764,7 @@ pub async fn run_streaming_turn(
         citations,
         usage,
         next_step_id,
+        suggested_next_actions,
     })
 }
 
@@ -963,17 +983,17 @@ async fn persist_message(
 
 /// Build the structured `GeneralAgentResponse`-shaped payload the protocol's
 /// `eventual_response` carries. The reference runtime doesn't produce the full
-/// structured analytics, so we surface the reply text in `responseParts` and
-/// supply neutral defaults for the analytic fields (clients render
-/// `responseParts`).
+/// structured analytics, so we surface the reply text in `responseParts`, the
+/// turn's parsed quick replies in `suggestedNextActions`, and neutral defaults
+/// for the analytic fields (clients render `responseParts`).
 #[must_use]
-pub fn general_agent_response(reply: &str) -> serde_json::Value {
+pub fn general_agent_response(reply: &str, suggested_next_actions: &[String]) -> serde_json::Value {
     json!({
         "responseParts": [reply],
         "customerHappinessScore": 0.5,
         "needsSatisfactionScore": 0.5,
         "requestSummary": "",
         "resolutionStatus": "in_progress",
-        "suggestedNextActions": [],
+        "suggestedNextActions": suggested_next_actions,
     })
 }

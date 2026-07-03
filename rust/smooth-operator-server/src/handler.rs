@@ -888,7 +888,8 @@ async fn handle_send_message(
                         }
                     }
                 }
-                let response = runner::general_agent_response(&turn.reply);
+                let response =
+                    runner::general_agent_response(&turn.reply, &turn.suggested_next_actions);
                 let _ = sink_owned.send(protocol::eventual_response(
                     &request_id_owned,
                     200,

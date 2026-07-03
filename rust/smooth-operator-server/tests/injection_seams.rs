@@ -266,9 +266,13 @@ async fn persona_overrides_const_prompt() {
     let persona = "You are Acme's brisk, no-nonsense concierge. Be terse.";
     let (_r, mock) = run_turn(None, Some(persona.to_string()), None).await;
     let prompt = system_prompt_seen(&mock);
-    assert_eq!(
-        prompt, persona,
-        "a resolved persona must be used verbatim as the system prompt"
+    assert!(
+        prompt.starts_with(persona),
+        "a resolved persona must lead the system prompt verbatim, got: {prompt}"
+    );
+    assert!(
+        prompt.contains("<suggested_replies>"),
+        "the suggested-replies contract section must still be appended: {prompt}"
     );
     assert!(
         !prompt.starts_with(CONST_PROMPT_OPENING),

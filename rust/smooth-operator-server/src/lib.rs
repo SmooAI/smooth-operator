@@ -46,6 +46,7 @@ pub mod reranker;
 pub mod runner;
 pub mod server;
 pub mod state;
+pub mod suggestions;
 
 pub use config::ServerConfig;
 pub use embedder::{build_embedder, EmbedderConfig};
