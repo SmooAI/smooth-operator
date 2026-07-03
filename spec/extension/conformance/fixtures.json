@@ -445,6 +445,97 @@
     "instance": { "jsonrpc": "2.0", "id": 7, "error": { "code": -32800, "message": "cancelled" } }
   },
 
+  "registrations_with_provider": {
+    "$schema_ref": "methods/initialize.schema.json#/$defs/Registrations",
+    "description": "An extension that contributes an LLM provider (Phase 7).",
+    "instance": {
+      "providers": [
+        {
+          "name": "corporate-proxy",
+          "base_url": "https://llm.internal.example/v1",
+          "api_key_env": "CORP_LLM_KEY",
+          "oauth": true,
+          "models": [
+            { "id": "corp-gpt-4o", "display_name": "Corporate GPT-4o" },
+            { "id": "corp-fast" }
+          ]
+        }
+      ]
+    }
+  },
+
+  "provider_complete_params": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/CompleteParams",
+    "description": "Host asks the extension to run a streaming completion; request_id keys the delta stream.",
+    "instance": {
+      "request_id": "req-abc123",
+      "provider": "corporate-proxy",
+      "model": "corp-gpt-4o",
+      "messages": [{ "role": "user", "content": "hello" }],
+      "tools": [{ "name": "search", "description": "search the web", "parameters": { "type": "object" } }],
+      "stream": true,
+      "thinking": "high",
+      "context": { "token": "epoch-7", "tier": "command" }
+    }
+  },
+
+  "provider_complete_result": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/CompleteResult",
+    "description": "The final reply to provider/complete, mapping onto the host's LlmResponse.",
+    "instance": {
+      "content": "Hello there.",
+      "finish_reason": "stop",
+      "usage": { "prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13 },
+      "resolved_model": "corp-gpt-4o-2026"
+    }
+  },
+
+  "provider_complete_result_tool_calls": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/CompleteResult",
+    "description": "A completion that requested a tool call.",
+    "instance": {
+      "content": "",
+      "tool_calls": [{ "id": "call_1", "name": "get_weather", "arguments": { "city": "SF" } }],
+      "finish_reason": "tool_calls",
+      "usage": { "prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28 }
+    }
+  },
+
+  "provider_delta_params": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/DeltaParams",
+    "description": "One streamed chunk: a serialized host StreamEvent keyed by request_id.",
+    "instance": { "request_id": "req-abc123", "event": { "type": "Delta", "content": "Hel" } }
+  },
+
+  "provider_oauth_login_params": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/OAuthParams",
+    "description": "Host asks the extension to run the OAuth login handshake for a provider.",
+    "instance": { "provider": "corporate-proxy", "context": { "token": "epoch-7", "tier": "command" } }
+  },
+
+  "provider_oauth_refresh_params": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/OAuthParams",
+    "description": "Host asks the extension to refresh credentials, presenting the current refresh token.",
+    "instance": { "provider": "corporate-proxy", "refresh_token": "rt-xyz", "context": { "token": "epoch-7", "tier": "command" } }
+  },
+
+  "provider_credentials": {
+    "$schema_ref": "methods/provider.schema.json#/$defs/Credentials",
+    "description": "Credentials the extension's OAuth handshake produced.",
+    "instance": { "api_key": "sk-corp-abc", "refresh_token": "rt-xyz", "expires_at": 1900000000 }
+  },
+
+  "session_set_model_params_provider": {
+    "$schema_ref": "methods/session.schema.json#/$defs/SetModelParams",
+    "description": "Switch to an extension-registered provider's model with a thinking level (Phase 7).",
+    "instance": {
+      "context": { "token": "epoch-7", "tier": "command" },
+      "model": "corp-gpt-4o",
+      "provider": "corporate-proxy",
+      "thinking": "medium"
+    }
+  },
+
   "$invalid": [
     {
       "name": "initialize_params_missing_protocol_version",
@@ -523,6 +614,26 @@
       "name": "command_complete_result_completion_missing_value",
       "$schema_ref": "methods/command-complete.schema.json#/$defs/Result",
       "instance": { "completions": [{ "description": "missing the required value" }] }
+    },
+    {
+      "name": "provider_complete_params_missing_request_id",
+      "$schema_ref": "methods/provider.schema.json#/$defs/CompleteParams",
+      "instance": { "provider": "corporate-proxy", "model": "corp-gpt-4o", "messages": [] }
+    },
+    {
+      "name": "provider_delta_missing_event",
+      "$schema_ref": "methods/provider.schema.json#/$defs/DeltaParams",
+      "instance": { "request_id": "req-abc123" }
+    },
+    {
+      "name": "provider_registration_missing_name",
+      "$schema_ref": "methods/initialize.schema.json#/$defs/ProviderRegistration",
+      "instance": { "base_url": "https://x/v1", "models": [{ "id": "m" }] }
+    },
+    {
+      "name": "provider_model_missing_id",
+      "$schema_ref": "methods/initialize.schema.json#/$defs/ProviderModel",
+      "instance": { "display_name": "No id" }
     }
   ]
 }

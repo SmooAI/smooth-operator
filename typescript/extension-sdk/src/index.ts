@@ -8,7 +8,7 @@
  * `createTestHost`, and gate it against the shared fixtures with
  * `runConformance`.
  */
-export { defineExtension, defineTool, defineCommand, Extension } from './extension.js';
+export { defineExtension, defineTool, defineCommand, defineProvider, Extension } from './extension.js';
 export type {
     ExtensionSetup,
     SmoothApi,
@@ -19,6 +19,9 @@ export type {
     CommandContext,
     CommandReturn,
     FlagDef,
+    ProviderDef,
+    ProviderContext,
+    ProviderCompleteRequest,
     SessionApi,
     EventHandler,
     HookResult,
@@ -62,4 +65,15 @@ export type {
     SessionSendMessageParams,
     SessionSendUserMessageParams,
     SessionAppendEntryParams,
+    SessionSetModelParams,
+    ProviderModel,
+    ProviderRegistration,
+    ProviderCompleteParams,
+    ProviderCompleteResult,
+    ProviderDeltaParams,
+    ProviderOAuthParams,
+    ProviderCredentials,
+    ProviderStreamEvent,
+    ProviderToolCall,
+    ProviderUsage,
 } from './protocol.js';
