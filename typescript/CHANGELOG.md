@@ -1,5 +1,11 @@
 # @smooai/smooth-operator
 
+## 1.19.0
+
+### Minor Changes
+
+- 3a9d29e: Identity intake — a channel-normalized lead/identity capture primitive (`docs/Architecture/Identity Intake.md`). New protocol surface: `supports` client-capability declaration on `create_conversation_session`, `identity_intake_required` / `identity_intake_invalid` events, and the `submit_identity_intake` resume action (with server-side validation: required fields, email shape, E.164 phone normalization). Rust reference implementation: `request_identity_intake` / `submit_identity_intake` agent tools in `smooai-smooth-operator` (park-and-resume on form-capable sessions; validated conversational turn-by-turn fallback on text-only channels — both resume with the same structured payload), server wiring (pending-intake registry, session identity attach onto the OTP contact keys) in `smooai-smooth-operator-server`. TypeScript client: regenerated spec types, `supports` on `createConversationSession`, and the `submitIdentityIntake()` resume verb. Parity for the TS/Python/Go/.NET servers is tracked as follow-ups; the spec + conformance fixtures are the complete contract.
+
 ## 1.18.0
 
 ### Minor Changes
