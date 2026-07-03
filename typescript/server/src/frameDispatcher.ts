@@ -17,6 +17,7 @@ import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js
 import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
+import { buildExtensionHost } from './extensions.js';
 import { availableChannels, isContactEmpty, type OtpContact, type OtpRefusal, type OtpService } from './otp.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
@@ -259,10 +260,17 @@ export class FrameDispatcher {
         const isFirstTurn = (await this.store.listMessages(session.conversationId, 1)).length === 0;
         const baseSystemPrompt = this.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
         const effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
+        // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW is
+        // set; undefined otherwise, zero overhead). The delegate is bound to THIS turn's
+        // sink/request/session so a hosted extension's `ui/confirm` routes back over this
+        // connection. Its eager tools join the base set BEFORE the enabled_tools filter,
+        // so a per-agent allow-list drops them exactly like a built-in (SMOODEV-590 parity).
+        const extHost = await buildExtensionHost({ confirmations: this.confirmations, sessionId, requestId: reqId, sink });
+        const baseTools = extHost ? [...this.tools, ...extHost.tools()] : this.tools;
         const enabledTools = agentConfig?.enabledTools;
         const filteredTools = enabledTools?.length
-            ? this.tools.filter((t) => enabledTools.some((e) => e.enabled && e.toolId === t.name))
-            : this.tools;
+            ? baseTools.filter((t) => enabledTools.some((e) => e.enabled && e.toolId === t.name))
+            : baseTools;
         // Enforce authLevel + deliver per-tool config at execution (mirrors the
         // monorepo tool-execution gate). No-op for tools without a gated entry / config.
         // The session's own OTP-verified bit is threaded in so a verified caller's
@@ -327,6 +335,13 @@ export class FrameDispatcher {
                 // error and keeps the connection alive (detail stays server-side).
                 console.error('[frameDispatcher] turn failed:', err);
                 sink(protocol.error(reqId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
+            } finally {
+                // SEP — kill this turn's extension subprocesses and drop any `ui/confirm`
+                // responder it left parked (mirrors the Rust `(ext.clear)` + host drop).
+                if (extHost) {
+                    this.confirmations?.clear(sessionId);
+                    await extHost.shutdownAll();
+                }
             }
         })();
         this.turns.add(turn);
