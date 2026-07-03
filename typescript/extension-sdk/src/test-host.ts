@@ -13,6 +13,10 @@ import type {
     HookOutcome,
     InitializeParams,
     InitializeResult,
+    ProviderCompleteResult,
+    ProviderCredentials,
+    ProviderDeltaParams,
+    ProviderStreamEvent,
     ToolExecuteResult,
     ToolUpdateParams,
     UiRequestParams,
@@ -47,6 +51,19 @@ export interface CallToolOptions {
     context?: Context;
 }
 
+export interface CompleteOptions {
+    /** Ask for streaming; each `provider/delta` reaches `onDelta`. */
+    stream?: boolean;
+    /** Receives each streamed `provider/delta` event for this request. */
+    onDelta?: (event: ProviderStreamEvent) => void;
+    /** Tool schemas to offer the model (opaque JSON). */
+    tools?: Record<string, unknown>[];
+    responseFormat?: Record<string, unknown>;
+    thinking?: string;
+    signal?: AbortSignal;
+    context?: Context;
+}
+
 export interface TestHost {
     initialize(overrides?: Partial<InitializeParams>): Promise<InitializeResult>;
     callTool(tool: string, args: Record<string, unknown>, opts?: CallToolOptions): Promise<ToolExecuteResult>;
@@ -58,6 +75,13 @@ export interface TestHost {
     completeCommand(command: string, partial: string, context?: Context): Promise<{ completions: { value: string; description?: string }[] }>;
     ping(): Promise<Record<string, unknown>>;
     sendEvent(event: string, payload?: Record<string, unknown>, context?: Context): void;
+    /** Drive `provider/complete` against a registered provider, collecting any
+     *  streamed `provider/delta` events via `opts.onDelta`. */
+    complete(provider: string, model: string, messages: Record<string, unknown>[], opts?: CompleteOptions): Promise<ProviderCompleteResult>;
+    /** Drive `provider/oauth_login` for a provider. */
+    oauthLogin(provider: string, context?: Context): Promise<ProviderCredentials>;
+    /** Drive `provider/oauth_refresh` for a provider. */
+    oauthRefresh(provider: string, refreshToken: string, context?: Context): Promise<ProviderCredentials>;
     /** Every `session/*` request the extension made, in order — for assertions. */
     readonly sessionCalls: SessionCall[];
     shutdown(): Promise<void>;
@@ -85,6 +109,13 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
     // Extension notifications the host just observes in tests.
     host.setNotificationHandler(method.LOG, () => {});
     host.setNotificationHandler(method.REGISTRY_UPDATE, () => {});
+    // Route `provider/delta` chunks to the in-flight completion's sink, keyed by
+    // request_id — the in-process mirror of the engine's ProviderStreams.
+    const deltaSinks = new Map<string, (event: ProviderStreamEvent) => void>();
+    host.setNotificationHandler(method.PROVIDER_DELTA, (params) => {
+        const p = params as ProviderDeltaParams;
+        deltaSinks.get(p.request_id)?.(p.event);
+    });
 
     // Service ext→host `session/*` requests, enforcing the same command-tier
     // guard the real host does (event-tier → -32003) so a demo's session calls
@@ -96,7 +127,7 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
         if (tier !== 'command') throw new RpcError(errorCode.ContextViolation, 'session action requires a command-tier context');
         return p;
     };
-    for (const m of [method.SESSION_SEND_MESSAGE, method.SESSION_SEND_USER_MESSAGE, method.SESSION_APPEND_ENTRY]) {
+    for (const m of [method.SESSION_SEND_MESSAGE, method.SESSION_SEND_USER_MESSAGE, method.SESSION_APPEND_ENTRY, method.SESSION_SET_MODEL]) {
         host.setRequestHandler(m, (params) => {
             const recorded = sessionHandler(params);
             sessionCalls.push({ method: m, params: recorded });
@@ -149,6 +180,39 @@ export function createTestHost(extension: Extension, options: CreateTestHostOpti
         },
         sendEvent(event, payload, context) {
             host.notify(method.EVENT, { event, context: context ?? { token: DEFAULT_CONTEXT.token, tier: 'event' }, ...(payload ? { payload } : {}) });
+        },
+        async complete(provider, model, messages, opts = {}) {
+            const request_id = `test-req-${++callSeq}`;
+            if (opts.onDelta) deltaSinks.set(request_id, opts.onDelta);
+            try {
+                return await host.request<ProviderCompleteResult>(
+                    method.PROVIDER_COMPLETE,
+                    {
+                        request_id,
+                        provider,
+                        model,
+                        messages,
+                        tools: opts.tools ?? [],
+                        stream: opts.stream ?? false,
+                        ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
+                        ...(opts.thinking ? { thinking: opts.thinking } : {}),
+                        context: opts.context ?? DEFAULT_CONTEXT,
+                    },
+                    opts.signal,
+                );
+            } finally {
+                deltaSinks.delete(request_id);
+            }
+        },
+        oauthLogin(provider, context) {
+            return host.request<ProviderCredentials>(method.PROVIDER_OAUTH_LOGIN, { provider, context: context ?? DEFAULT_CONTEXT });
+        },
+        oauthRefresh(provider, refreshToken, context) {
+            return host.request<ProviderCredentials>(method.PROVIDER_OAUTH_REFRESH, {
+                provider,
+                refresh_token: refreshToken,
+                context: context ?? DEFAULT_CONTEXT,
+            });
         },
         async shutdown() {
             await host.request(method.SHUTDOWN, {});

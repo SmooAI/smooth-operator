@@ -27,6 +27,11 @@ export const method = {
     SESSION_SEND_MESSAGE: 'session/send_message',
     SESSION_SEND_USER_MESSAGE: 'session/send_user_message',
     SESSION_APPEND_ENTRY: 'session/append_entry',
+    SESSION_SET_MODEL: 'session/set_model',
+    PROVIDER_COMPLETE: 'provider/complete',
+    PROVIDER_DELTA: 'provider/delta',
+    PROVIDER_OAUTH_LOGIN: 'provider/oauth_login',
+    PROVIDER_OAUTH_REFRESH: 'provider/oauth_refresh',
 } as const;
 
 /** JSON-RPC + SEP error codes (see spec/extension/envelope.md). */
@@ -93,12 +98,32 @@ export interface ShortcutRegistration {
     description?: string;
 }
 
+export interface ProviderModel {
+    /** Model id the host passes back in `provider/complete`. */
+    id: string;
+    /** Human-facing label for model pickers. */
+    display_name?: string;
+}
+
+export interface ProviderRegistration {
+    /** Provider name, unique within the host's merged model surface. */
+    name: string;
+    /** Informational upstream base URL (the extension does the real call). */
+    base_url?: string;
+    /** Env var the extension reads its API key from — informational to the host. */
+    api_key_env?: string;
+    /** Whether the extension implements `provider/oauth_login` + `oauth_refresh`. */
+    oauth?: boolean;
+    models?: ProviderModel[];
+}
+
 export interface Registrations {
     tools?: ToolRegistration[];
     commands?: CommandRegistration[];
     flags?: string[];
     shortcuts?: ShortcutRegistration[];
     subscriptions?: string[];
+    providers?: ProviderRegistration[];
 }
 
 export interface InitializeResult {
@@ -219,4 +244,84 @@ export interface SessionSendUserMessageParams {
 export interface SessionAppendEntryParams {
     context: Context;
     entry: Record<string, unknown>;
+}
+
+export interface SessionSetModelParams {
+    context: Context;
+    model: string;
+    /** Provider name when the model belongs to an extension-registered provider. */
+    provider?: string;
+    /** Reasoning/thinking level, e.g. `off`, `low`, `medium`, `high`. */
+    thinking?: string;
+}
+
+// --- provider/* (Phase 7) ------------------------------------------------
+
+/** A serialized host stream event, tagged by `type`. Emitted as `provider/delta`
+ *  `event` while a streaming `provider/complete` runs. */
+export type ProviderStreamEvent =
+    | { type: 'Delta'; content: string }
+    | { type: 'Reasoning'; content: string }
+    | { type: 'ToolCallStart'; index: number; id: string; name: string }
+    | { type: 'ToolCallArgumentsDelta'; index: number; arguments_chunk: string }
+    | { type: 'Usage'; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cached_tokens?: number }
+    | { type: 'Model'; name: string }
+    | { type: 'Done'; finish_reason: string };
+
+/** Host → ext `provider/complete`: run one completion. `messages`/`tools` are the
+ *  host's opaque serialized shapes. */
+export interface ProviderCompleteParams {
+    request_id: string;
+    provider: string;
+    model: string;
+    messages: Record<string, unknown>[];
+    tools?: Record<string, unknown>[];
+    stream?: boolean;
+    response_format?: Record<string, unknown>;
+    thinking?: string;
+    context?: Context;
+}
+
+export interface ProviderToolCall {
+    id: string;
+    name: string;
+    arguments: unknown;
+}
+
+export interface ProviderUsage {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cached_tokens?: number;
+}
+
+/** The final reply to `provider/complete`, mapping onto the host's LlmResponse. */
+export interface ProviderCompleteResult {
+    content?: string;
+    tool_calls?: ProviderToolCall[];
+    finish_reason?: string;
+    usage?: ProviderUsage;
+    reasoning_content?: string;
+    resolved_model?: string;
+}
+
+/** Ext → host `provider/delta` notification: one streamed chunk. */
+export interface ProviderDeltaParams {
+    request_id: string;
+    event: ProviderStreamEvent;
+}
+
+/** Host → ext `provider/oauth_login` / `provider/oauth_refresh`. */
+export interface ProviderOAuthParams {
+    provider: string;
+    refresh_token?: string;
+    context?: Context;
+}
+
+export interface ProviderCredentials {
+    api_key?: string;
+    access_token?: string;
+    refresh_token?: string;
+    expires_at?: number;
+    extra?: Record<string, unknown>;
 }

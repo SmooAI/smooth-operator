@@ -63,7 +63,8 @@
             "exec": { "type": "boolean" },
             "kv": { "type": "boolean" },
             "bus": { "type": "boolean" },
-            "session": { "type": "boolean" }
+            "session": { "type": "boolean" },
+            "providers": { "type": "boolean" }
           }
         }
       }
@@ -103,7 +104,33 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Event names the extension wants delivered. Doubles as the host's dispatch filter — unsubscribed events are never sent."
-        }
+        },
+        "providers": { "type": "array", "items": { "$ref": "#/$defs/ProviderRegistration" }, "description": "LLM providers the extension contributes to the host's model surface (Phase 7). Proxied via `provider/complete`." }
+      }
+    },
+
+    "ProviderRegistration": {
+      "title": "SepProviderRegistration",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Provider name, unique within the host's merged model surface." },
+        "base_url": { "type": "string", "description": "Informational upstream base URL (the extension does the real call). Omit to keep it private." },
+        "api_key_env": { "type": "string", "description": "Env var the extension reads its API key from — informational to the host. Omit for OAuth-only providers." },
+        "oauth": { "type": "boolean", "default": false, "description": "Whether the extension implements `provider/oauth_login` + `oauth_refresh`." },
+        "models": { "type": "array", "items": { "$ref": "#/$defs/ProviderModel" }, "description": "The models this provider exposes." }
+      }
+    },
+
+    "ProviderModel": {
+      "title": "SepProviderModel",
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Model id the host passes back in `provider/complete`." },
+        "display_name": { "type": "string", "description": "Human-facing label for model pickers." }
       }
     },
 

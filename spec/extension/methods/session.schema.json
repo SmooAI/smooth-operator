@@ -81,7 +81,9 @@
       "additionalProperties": false,
       "properties": {
         "context": { "$ref": "#/$defs/Context" },
-        "model": { "type": "string", "description": "Model identifier to switch the session to." }
+        "model": { "type": "string", "description": "Model identifier to switch the session to." },
+        "provider": { "type": "string", "description": "Provider name when the model belongs to an extension-registered provider (Phase 7). Omit to select on the host's default/native provider surface." },
+        "thinking": { "type": "string", "description": "Reasoning/thinking level for reasoning-capable models (e.g. `off`, `low`, `medium`, `high`)." }
       }
     },
     "SetModelResult": {

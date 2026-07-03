@@ -17,6 +17,32 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Event names the extension wants delivered. Doubles as the host's dispatch filter — unsubscribed events are never sent."
+        },
+        "providers": { "type": "array", "items": { "$ref": "#/$defs/ProviderRegistration" }, "description": "LLM providers the extension contributes (Phase 7). Runtime provider registration; merged by name." }
+      }
+    },
+
+    "ProviderRegistration": {
+      "title": "SepProviderRegistration",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Provider name, unique within the host's merged model surface." },
+        "base_url": { "type": "string" },
+        "api_key_env": { "type": "string" },
+        "oauth": { "type": "boolean", "default": false },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "display_name": { "type": "string" }
+            }
+          }
         }
       }
     },

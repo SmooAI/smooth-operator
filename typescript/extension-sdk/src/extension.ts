@@ -26,6 +26,13 @@ import type {
     HookParams,
     InitializeParams,
     InitializeResult,
+    ProviderCompleteParams,
+    ProviderCompleteResult,
+    ProviderCredentials,
+    ProviderModel,
+    ProviderOAuthParams,
+    ProviderRegistration,
+    ProviderStreamEvent,
     ShortcutRegistration,
     ToolExecuteParams,
     ToolExecuteResult,
@@ -92,6 +99,9 @@ export interface SessionApi {
     sendMessage(text: string, opts?: { role?: 'user' | 'assistant' }): Promise<void>;
     sendUserMessage(text: string, opts?: { deliverAs?: DeliverAs }): Promise<void>;
     appendEntry(entry: Record<string, unknown>): Promise<void>;
+    /** Switch the active model (Phase 7). `provider` targets an extension-
+     *  registered provider; `thinking` sets a reasoning level. */
+    setModel(model: string, opts?: { provider?: string; thinking?: string }): Promise<void>;
 }
 
 /** Build a [`SessionApi`] bound to `context` (must be command-tier) over `peer`. */
@@ -105,6 +115,14 @@ function makeSession(peer: Peer, context: Context): SessionApi {
         },
         appendEntry: async (entry) => {
             await peer.request(method.SESSION_APPEND_ENTRY, { context, entry });
+        },
+        setModel: async (model, opts) => {
+            await peer.request(method.SESSION_SET_MODEL, {
+                context,
+                model,
+                ...(opts?.provider ? { provider: opts.provider } : {}),
+                ...(opts?.thinking ? { thinking: opts.thinking } : {}),
+            });
         },
     };
 }
@@ -183,6 +201,58 @@ export interface FlagDef {
     description?: string;
 }
 
+// --- providers (Phase 7) -------------------------------------------------
+
+/** One LLM completion the host asked this provider to run. `messages`/`tools`
+ *  are the host's opaque serialized shapes. */
+export interface ProviderCompleteRequest {
+    /** Correlates streamed deltas with this request. */
+    requestId: string;
+    model: string;
+    messages: Record<string, unknown>[];
+    tools: Record<string, unknown>[];
+    /** OpenAI-compatible `response_format` when structured output is requested. */
+    responseFormat?: Record<string, unknown>;
+    /** Reasoning/thinking level (`off`/`low`/`medium`/`high`/provider token). */
+    thinking?: string;
+    /** True when the host wants streamed `delta`s. */
+    stream: boolean;
+}
+
+/** Progress + UI handed to a provider `complete`/oauth call. */
+export interface ProviderContext {
+    /** The dispatch context (epoch token + tier). */
+    context: Context;
+    /** Fires if the host `$/cancel`s the request. */
+    signal: AbortSignal;
+    /** Stream one chunk back to the host. Only meaningful when `stream` is set;
+     *  a no-op storm otherwise (the host drops deltas for a non-streamed call). */
+    delta(event: ProviderStreamEvent): void;
+    /** Ask the frontend to render a dialog (OAuth: open a URL, prompt for a code). */
+    ui: UiApi;
+    hasUI(kind: UiKind): boolean;
+    log(level: 'debug' | 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
+}
+
+export interface ProviderDef {
+    name: string;
+    baseUrl?: string;
+    apiKeyEnv?: string;
+    models: ProviderModel[];
+    /** Run one completion. Emit `ctx.delta(...)` while streaming, then return the
+     *  final result. */
+    complete(req: ProviderCompleteRequest, ctx: ProviderContext): Promise<ProviderCompleteResult> | ProviderCompleteResult;
+    /** Run the OAuth login handshake, driving user interaction via `ctx.ui`. */
+    oauthLogin?(ctx: ProviderContext): Promise<ProviderCredentials> | ProviderCredentials;
+    /** Exchange a refresh token for fresh credentials. */
+    oauthRefresh?(refreshToken: string, ctx: ProviderContext): Promise<ProviderCredentials> | ProviderCredentials;
+}
+
+/** Identity helper for `registerProvider` call sites. */
+export function defineProvider(def: ProviderDef): ProviderDef {
+    return def;
+}
+
 /** A hook handler's friendly return: veto the operation, or replace its input
  *  with a patch (shallow-merged onto the input). Returning nothing = continue. */
 export type HookResult = { block: true; reason?: string } | { patch: Record<string, unknown> };
@@ -203,6 +273,8 @@ export interface SmoothApi {
     registerFlag(flag: FlagDef): void;
     /** Bind a keyboard shortcut (TUI frontends) to a registered command. */
     registerShortcut(shortcut: ShortcutRegistration): void;
+    /** Contribute an LLM provider to the host's model surface (Phase 7). */
+    registerProvider(provider: ProviderDef): void;
     on(event: string, handler: EventHandler): void;
     log(level: 'debug' | 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
     /** The parsed value the host delivered for a declared flag (undefined before
@@ -228,6 +300,7 @@ export class Extension {
     private readonly commands = new Map<string, CommandDef>();
     private readonly flagDefs = new Map<string, FlagDef>();
     private readonly shortcuts: ShortcutRegistration[] = [];
+    private readonly providers = new Map<string, ProviderDef>();
     private readonly events = new Map<string, EventHandler[]>();
     private name = 'extension';
     private version = '0.0.0';
@@ -264,6 +337,9 @@ export class Extension {
             registerShortcut: (shortcut) => {
                 this.shortcuts.push(shortcut);
             },
+            registerProvider: (provider) => {
+                this.providers.set(provider.name, provider);
+            },
             on: (event, handler) => {
                 const list = this.events.get(event) ?? [];
                 list.push(handler);
@@ -299,6 +375,9 @@ export class Extension {
         peer.setRequestHandler(method.HOOK, (params) => this.dispatchHook(params as HookParams));
         peer.setRequestHandler(method.COMMAND_EXECUTE, (params) => this.executeCommand(params as CommandExecuteParams, peer));
         peer.setRequestHandler(method.COMMAND_COMPLETE, (params) => this.completeCommand(params as CommandCompleteParams));
+        peer.setRequestHandler(method.PROVIDER_COMPLETE, (params, signal) => this.providerComplete(params as ProviderCompleteParams, peer, signal));
+        peer.setRequestHandler(method.PROVIDER_OAUTH_LOGIN, (params, signal) => this.providerOAuth(params as ProviderOAuthParams, peer, signal, false));
+        peer.setRequestHandler(method.PROVIDER_OAUTH_REFRESH, (params, signal) => this.providerOAuth(params as ProviderOAuthParams, peer, signal, true));
         peer.setNotificationHandler(method.EVENT, (params) => this.dispatchEvent(params as EventParams));
 
         transport.start((frame) => peer.receive(frame));
@@ -333,6 +412,14 @@ export class Extension {
         // Only observe events go in `subscriptions` — hook names are intercepts
         // the host always calls, not events it filters by subscription.
         const subscriptions = [...this.events.keys()].filter((name) => !HOOK_NAMES.has(name));
+        const providers: ProviderRegistration[] = [...this.providers.values()].map((p) => ({
+            name: p.name,
+            ...(p.baseUrl ? { base_url: p.baseUrl } : {}),
+            ...(p.apiKeyEnv ? { api_key_env: p.apiKeyEnv } : {}),
+            // `oauth` is derived: an extension supports it iff it implements login.
+            ...(p.oauthLogin ? { oauth: true } : {}),
+            models: p.models,
+        }));
         return {
             protocol_version: PROTOCOL_VERSION,
             extension: { name: this.name, version: this.version },
@@ -341,9 +428,57 @@ export class Extension {
                 ...(commands.length ? { commands } : {}),
                 ...(flags.length ? { flags } : {}),
                 ...(this.shortcuts.length ? { shortcuts: this.shortcuts } : {}),
+                ...(providers.length ? { providers } : {}),
                 subscriptions,
             },
         };
+    }
+
+    /** Build the shared context for a provider request. `delta` is a no-op here —
+     *  only `providerComplete` streams, and it overrides `delta` with the bound
+     *  request_id. */
+    private providerContext(peer: Peer, context: Context, signal: AbortSignal): ProviderContext {
+        return {
+            context,
+            signal,
+            delta: () => {},
+            ui: makeUi(peer),
+            hasUI: (kind) => this.hostUiCaps.includes(kind),
+            log: (level, message, fields) => peer.notify(method.LOG, { level, message, ...(fields ? { fields } : {}) }),
+        };
+    }
+
+    private async providerComplete(params: ProviderCompleteParams, peer: Peer, signal: AbortSignal): Promise<ProviderCompleteResult> {
+        const provider = this.providers.get(params.provider);
+        if (!provider) throw new Error(`unknown provider: ${params.provider}`);
+        const base = this.providerContext(peer, params.context ?? { token: '', tier: 'command' }, signal);
+        // Bind the request_id into delta so handlers can just call `ctx.delta(event)`.
+        const ctx: ProviderContext = {
+            ...base,
+            delta: (event) => peer.notify(method.PROVIDER_DELTA, { request_id: params.request_id, event }),
+        };
+        const req: ProviderCompleteRequest = {
+            requestId: params.request_id,
+            model: params.model,
+            messages: params.messages,
+            tools: params.tools ?? [],
+            ...(params.response_format ? { responseFormat: params.response_format } : {}),
+            ...(params.thinking ? { thinking: params.thinking } : {}),
+            stream: params.stream ?? false,
+        };
+        return provider.complete(req, ctx);
+    }
+
+    private async providerOAuth(params: ProviderOAuthParams, peer: Peer, signal: AbortSignal, refresh: boolean): Promise<ProviderCredentials> {
+        const provider = this.providers.get(params.provider);
+        if (!provider) throw new Error(`unknown provider: ${params.provider}`);
+        const ctx = this.providerContext(peer, params.context ?? { token: '', tier: 'command' }, signal);
+        if (refresh) {
+            if (!provider.oauthRefresh) throw new Error(`provider ${params.provider} does not support oauth refresh`);
+            return provider.oauthRefresh(params.refresh_token ?? '', ctx);
+        }
+        if (!provider.oauthLogin) throw new Error(`provider ${params.provider} does not support oauth login`);
+        return provider.oauthLogin(ctx);
     }
 
     private async executeCommand(params: CommandExecuteParams, peer: Peer): Promise<CommandExecuteResult> {

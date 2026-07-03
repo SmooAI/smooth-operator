@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/provider.schema.json",
+  "title": "Provider",
+  "description": "The `provider/*` methods (Phase 7): declarative LLM providers an extension contributes, proxied through the host. `provider/complete` (host → ext, request) runs one completion — when `stream` is set the extension emits `provider/delta` (ext → host, notification) chunks keyed by `request_id` while it works, then replies with the final result. `provider/oauth_login` / `provider/oauth_refresh` (host → ext, request) run the auth handshake; the extension drives any user interaction back over the `ui/*` surface and returns the resulting credentials. `messages`/`tools` are opaque JSON — the host's serialized message/tool-schema shape (the host is the single source of truth). A `provider/delta` `event` is a serialized host stream event, e.g. `{\"type\":\"Delta\",\"content\":\"…\"}`.",
+
+  "$defs": {
+    "Context": {
+      "title": "Context",
+      "type": "object",
+      "required": ["token", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "token": { "type": "string" },
+        "tier": { "type": "string", "enum": ["event", "command"] }
+      }
+    },
+
+    "CompleteParams": {
+      "title": "ProviderCompleteParams",
+      "type": "object",
+      "required": ["request_id", "provider", "model", "messages"],
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "type": "string", "description": "Correlates the `provider/delta` stream with this request." },
+        "provider": { "type": "string", "description": "The registered provider name (bare, as the extension declared it)." },
+        "model": { "type": "string", "description": "Model id within the provider." },
+        "messages": { "type": "array", "items": { "type": "object" }, "description": "Serialized conversation messages (host `Message` shape)." },
+        "tools": { "type": "array", "items": { "type": "object" }, "description": "Serialized tool schemas offered to the model (host `ToolSchema` shape)." },
+        "stream": { "type": "boolean", "default": false, "description": "Ask the extension to stream `provider/delta` notifications." },
+        "response_format": { "type": "object", "description": "OpenAI-compatible `response_format` for structured output, if constrained." },
+        "thinking": { "type": "string", "description": "Reasoning/thinking level (e.g. `off`, `low`, `medium`, `high`, or a provider-specific token). Omit for the provider default." },
+        "context": { "$ref": "#/$defs/Context", "description": "Dispatch context the host attaches (informational to the extension)." }
+      }
+    },
+
+    "CompleteResult": {
+      "title": "ProviderCompleteResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": { "type": "string", "default": "", "description": "The assistant text." },
+        "tool_calls": {
+          "type": "array",
+          "description": "Tool calls the model requested.",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "arguments"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "arguments": { "description": "Tool arguments as parsed JSON (any JSON value)." }
+            }
+          }
+        },
+        "finish_reason": { "type": "string", "default": "stop", "description": "Why generation stopped, e.g. `stop`, `tool_calls`, `length`." },
+        "usage": {
+          "type": "object",
+          "description": "Token usage.",
+          "additionalProperties": true,
+          "properties": {
+            "prompt_tokens": { "type": "integer", "minimum": 0 },
+            "completion_tokens": { "type": "integer", "minimum": 0 },
+            "total_tokens": { "type": "integer", "minimum": 0 },
+            "cached_tokens": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "reasoning_content": { "type": "string", "description": "Reasoning/thinking content that must be replayed on subsequent requests for thinking-mode upstreams." },
+        "resolved_model": { "type": "string", "description": "Concrete upstream model the provider resolved this request to." }
+      }
+    },
+
+    "DeltaParams": {
+      "title": "ProviderDeltaParams",
+      "type": "object",
+      "required": ["request_id", "event"],
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "type": "string", "description": "The in-flight `provider/complete` request this chunk belongs to." },
+        "event": {
+          "type": "object",
+          "description": "A serialized host stream event. Tagged by `type`: `Delta`{content}, `Reasoning`{content}, `ToolCallStart`{index,id,name}, `ToolCallArgumentsDelta`{index,arguments_chunk}, `Usage`{…}, `Model`{name}, `Done`{finish_reason}.",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "OAuthParams": {
+      "title": "ProviderOAuthParams",
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "description": "The registered provider name to authenticate." },
+        "refresh_token": { "type": "string", "description": "Present on `provider/oauth_refresh`; the current refresh token to exchange." },
+        "context": { "$ref": "#/$defs/Context", "description": "Command-tier dispatch context the host attaches." }
+      }
+    },
+
+    "Credentials": {
+      "title": "ProviderCredentials",
+      "description": "Credentials an OAuth handshake produced. Every field optional so an api-key exchange and a full OAuth bundle both fit; opaque to the host beyond persistence.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api_key": { "type": "string" },
+        "access_token": { "type": "string" },
+        "refresh_token": { "type": "string" },
+        "expires_at": { "type": "integer", "description": "Absolute expiry, unix seconds. Omit for non-expiring/unknown." },
+        "extra": { "type": "object", "description": "Provider-specific extras (scopes, token_type, …)." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/CompleteParams" },
+    { "$ref": "#/$defs/CompleteResult" },
+    { "$ref": "#/$defs/DeltaParams" },
+    { "$ref": "#/$defs/OAuthParams" },
+    { "$ref": "#/$defs/Credentials" }
+  ]
+}
