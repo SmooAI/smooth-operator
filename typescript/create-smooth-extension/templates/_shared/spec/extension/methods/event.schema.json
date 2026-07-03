@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/event.schema.json",
+  "title": "Event",
+  "description": "Method `event` (host → ext, notification). Fire-and-forget observe: a lifecycle/turn/session event the extension subscribed to. Delivery is filtered by the extension's `subscriptions` — unsubscribed events are never sent. The host's outbound queue is bounded (1024); when it overflows the oldest observe events are shed and an `events_lost` marker event is delivered.",
+
+  "$defs": {
+    "Params": {
+      "title": "EventParams",
+      "type": "object",
+      "required": ["event", "context"],
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "type": "string",
+          "description": "Event name. Names mirror pi's for near-mechanical porting: `agent_start`/`agent_end`, `turn_start`/`turn_end`, `message_start`/`message_update`/`message_end`, `tool_execution_start`/`tool_execution_update`/`tool_execution_end`, `model_select` (the engine emits this as `AgentEvent::ModelResolved`), `session_start`/`session_compact`/`session_shutdown`/`session_tree`. The out-of-band `events_lost` marker is delivered after shedding."
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Per-connection monotonic sequence number. A gap in the run signals that the bounded observe queue shed events; the following `events_lost` marker carries the exact count. Absent on the `events_lost` marker itself (it is out-of-band)."
+        },
+        "context": {
+          "type": "object",
+          "required": ["token", "tier"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "type": "string" },
+            "tier": { "type": "string", "enum": ["event", "command"] }
+          }
+        },
+        "payload": { "type": "object", "description": "Event-specific data; extensions read what they understand. For `events_lost`: `{ \"lost\": <count> }`." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/command-execute.schema.json",
+  "title": "CommandExecute",
+  "description": "Method `command/execute` (host → ext, request). Runs a slash-command the extension registered at handshake (or later via `registry/update`). The extension may surface text back to the session via the result's `content`.",
+
+  "$defs": {
+    "Params": {
+      "title": "CommandExecuteParams",
+      "type": "object",
+      "required": ["command", "context"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "type": "string", "description": "Slash-command name, without the leading `/` (bare name, no `<extension>.` prefix)." },
+        "context": {
+          "type": "object",
+          "required": ["token", "tier"],
+          "additionalProperties": false,
+          "properties": {
+            "token": { "type": "string" },
+            "tier": { "type": "string", "enum": ["event", "command"] }
+          }
+        },
+        "arguments": { "type": "object", "description": "Free-form command arguments, e.g. parsed flags/positional text following the slash-command invocation." }
+      }
+    },
+
+    "Result": {
+      "title": "CommandExecuteResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": { "type": "string", "description": "Text to surface into the session as the command's output." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}

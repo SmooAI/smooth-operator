@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/cancel.schema.json",
+  "title": "Cancel",
+  "description": "Method `$/cancel` (notification, either direction). Requests cancellation of an in-flight request by its `id`. The receiver SHOULD stop work and reply to the original request with error -32800 Cancelled; if the request already completed, the cancel is a no-op.",
+
+  "$defs": {
+    "Params": {
+      "title": "CancelParams",
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": ["integer", "string"], "description": "The `id` of the request to cancel." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}

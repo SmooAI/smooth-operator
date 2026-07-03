@@ -1,0 +1,45 @@
+{
+    "name": "create-smooth-extension",
+    "version": "0.0.0",
+    "description": "Scaffold a new SEP (Smooth Extension Protocol) extension: `npm create smooth-extension`. Four templates (tool, permission-gate, command, provider-less), each a complete project that typechecks, builds (tsc), unit-tests with `createTestHost`, and passes `runConformance`.",
+    "license": "MIT",
+    "type": "module",
+    "engines": {
+        "node": ">=22"
+    },
+    "bin": {
+        "create-smooth-extension": "./dist/index.js"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/SmooAI/smooth-operator.git",
+        "directory": "typescript/create-smooth-extension"
+    },
+    "homepage": "https://github.com/SmooAI/smooth-operator/tree/main/typescript/create-smooth-extension",
+    "keywords": [
+        "smooth-operator",
+        "sep",
+        "extension",
+        "scaffold",
+        "create",
+        "generator",
+        "template"
+    ],
+    "files": [
+        "dist",
+        "templates"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+        "test": "vitest run"
+    },
+    "devDependencies": {
+        "@types/node": "^25.9.2",
+        "typescript": "^5.7.3",
+        "vitest": "^2.1.8"
+    }
+}

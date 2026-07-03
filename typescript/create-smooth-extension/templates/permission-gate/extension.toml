@@ -1,0 +1,13 @@
+name = "__NAME__"
+version = "0.1.0"
+protocol = 1
+
+# How the host launches this extension (a long-lived JSON-RPC subprocess).
+[run]
+command = "node"
+args = ["dist/index.js"]
+
+# This extension intercepts the `tool_call` hook. The `events` list doubles as
+# the host's dispatch filter — only the hooks/events named here are delivered.
+[capabilities]
+events = ["tool_call"]

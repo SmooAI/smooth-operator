@@ -110,6 +110,18 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@25.9.2)(jsdom@25.0.1)
 
+  typescript/create-smooth-extension:
+    devDependencies:
+      '@types/node':
+        specifier: ^25.9.2
+        version: 25.9.2
+      typescript:
+        specifier: ^5.7.3
+        version: 5.7.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@25.9.2)(jsdom@25.0.1)
+
   typescript/extension-sdk:
     dependencies:
       ajv:

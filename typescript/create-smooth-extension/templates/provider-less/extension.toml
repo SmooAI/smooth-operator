@@ -1,0 +1,13 @@
+name = "__NAME__"
+version = "0.1.0"
+protocol = 1
+
+# How the host launches this extension (a long-lived JSON-RPC subprocess).
+# No [run] env needed — this extension calls no external provider or API.
+[run]
+command = "node"
+args = ["dist/index.js"]
+
+# A single self-contained tool. No AI provider, network, or secret required.
+[capabilities]
+tools = true

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/session.schema.json",
+  "title": "Session",
+  "description": "The `session/*` methods (ext → host, requests): `session/send_message` posts a message into the session, `session/send_user_message` delivers a user message (steer/follow_up/next_turn), `session/append_entry` appends a raw transcript entry (persisted but NOT sent to the model), `session/set_model` switches the session's model, and `session/state` reads back session state. All require the **command** context tier — an extension attempting them from an event-tier context, or with a token minted before a reload bumped the epoch, is rejected with -32003 ContextViolation. Every params object therefore carries the `context` it was dispatched with, so the host can validate the tier and epoch.",
+
+  "$defs": {
+    "Context": {
+      "title": "Context",
+      "type": "object",
+      "required": ["token", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "token": { "type": "string" },
+        "tier": { "type": "string", "enum": ["event", "command"] }
+      }
+    },
+
+    "SendMessageParams": {
+      "title": "SessionSendMessageParams",
+      "type": "object",
+      "required": ["context", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "context": { "$ref": "#/$defs/Context" },
+        "text": { "type": "string", "description": "Message text to post into the session." },
+        "role": { "type": "string", "enum": ["user", "assistant"], "default": "assistant", "description": "Who the message is attributed to." }
+      }
+    },
+    "SendMessageResult": {
+      "title": "SessionSendMessageResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "SendUserMessageParams": {
+      "title": "SessionSendUserMessageParams",
+      "type": "object",
+      "required": ["context", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "context": { "$ref": "#/$defs/Context" },
+        "text": { "type": "string", "description": "User message text to deliver into the session." },
+        "deliver_as": {
+          "type": "string",
+          "enum": ["steer", "follow_up", "next_turn"],
+          "default": "follow_up",
+          "description": "When to deliver: `steer` interrupts the in-flight turn, `follow_up` queues after it, `next_turn` starts the next turn."
+        }
+      }
+    },
+    "SendUserMessageResult": {
+      "title": "SessionSendUserMessageResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "AppendEntryParams": {
+      "title": "SessionAppendEntryParams",
+      "type": "object",
+      "required": ["context", "entry"],
+      "additionalProperties": false,
+      "properties": {
+        "context": { "$ref": "#/$defs/Context" },
+        "entry": { "type": "object", "description": "Raw transcript entry to append; persisted but NOT sent to the model. Shape mirrors the host's own transcript entry format." }
+      }
+    },
+    "AppendEntryResult": {
+      "title": "SessionAppendEntryResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "SetModelParams": {
+      "title": "SessionSetModelParams",
+      "type": "object",
+      "required": ["context", "model"],
+      "additionalProperties": false,
+      "properties": {
+        "context": { "$ref": "#/$defs/Context" },
+        "model": { "type": "string", "description": "Model identifier to switch the session to." }
+      }
+    },
+    "SetModelResult": {
+      "title": "SessionSetModelResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+
+    "StateParams": {
+      "title": "SessionStateParams",
+      "type": "object",
+      "required": ["context"],
+      "additionalProperties": false,
+      "properties": {
+        "context": { "$ref": "#/$defs/Context" }
+      }
+    },
+    "StateResult": {
+      "title": "SessionStateResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": { "type": "object", "description": "Current session state, host-defined shape." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/SendMessageParams" },
+    { "$ref": "#/$defs/SendMessageResult" },
+    { "$ref": "#/$defs/SendUserMessageParams" },
+    { "$ref": "#/$defs/SendUserMessageResult" },
+    { "$ref": "#/$defs/AppendEntryParams" },
+    { "$ref": "#/$defs/AppendEntryResult" },
+    { "$ref": "#/$defs/SetModelParams" },
+    { "$ref": "#/$defs/SetModelResult" },
+    { "$ref": "#/$defs/StateParams" },
+    { "$ref": "#/$defs/StateResult" }
+  ]
+}

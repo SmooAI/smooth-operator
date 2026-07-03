@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/log.schema.json",
+  "title": "Log",
+  "description": "Method `log` (ext → host, notification). A structured log line the host folds into its own tracing at the given level. Fire-and-forget.",
+
+  "$defs": {
+    "Params": {
+      "title": "LogParams",
+      "type": "object",
+      "required": ["level", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "level": { "type": "string", "enum": ["trace", "debug", "info", "warn", "error"] },
+        "message": { "type": "string" },
+        "fields": { "type": "object", "description": "Optional structured key/value context." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" }
+  ]
+}

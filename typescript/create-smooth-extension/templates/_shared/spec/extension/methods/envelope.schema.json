@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/envelope.schema.json",
+  "title": "SepFrame",
+  "description": "The JSON-RPC 2.0 envelope for SEP. Every wire message is exactly one of: Request (id + method, a reply is expected), Notification (method, no id, fire-and-forget), SuccessResponse (id + result), or ErrorResponse (id + error). Both peers issue requests over the symmetric channel; each numbers its own `id` space. Per-method `params`/`result` shapes are defined one file each under `methods/`.",
+
+  "$defs": {
+    "Id": {
+      "description": "Request correlation id — an integer or string, unique per sender per connection.",
+      "type": ["integer", "string"]
+    },
+
+    "Request": {
+      "title": "SepRequest",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "type": "string", "const": "2.0" },
+        "id": { "$ref": "#/$defs/Id" },
+        "method": { "type": "string", "description": "Namespaced method name, e.g. `tool/execute`, `$/cancel`." },
+        "params": { "type": "object", "description": "Method parameters. Shape defined by the method's schema." }
+      }
+    },
+
+    "Notification": {
+      "title": "SepNotification",
+      "description": "A request with no `id`: fire-and-forget, no reply.",
+      "type": "object",
+      "required": ["jsonrpc", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "type": "string", "const": "2.0" },
+        "method": { "type": "string" },
+        "params": { "type": "object" }
+      }
+    },
+
+    "SuccessResponse": {
+      "title": "SepSuccessResponse",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "type": "string", "const": "2.0" },
+        "id": { "$ref": "#/$defs/Id" },
+        "result": { "description": "Method result. Shape defined by the method's schema." }
+      }
+    },
+
+    "ErrorResponse": {
+      "title": "SepErrorResponse",
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "type": "string", "const": "2.0" },
+        "id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }], "description": "Echoes the request id; null when the offending frame could not be parsed." },
+        "error": { "$ref": "#/$defs/Error" }
+      }
+    },
+
+    "Error": {
+      "title": "SepError",
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "integer",
+          "description": "JSON-RPC error code. Standard range plus SEP: -32000 Blocked, -32001 NoUI, -32002 NotTrusted, -32003 ContextViolation, -32004 CapabilityDisabled, -32800 Cancelled."
+        },
+        "message": { "type": "string", "description": "Human-readable error description." },
+        "data": { "description": "Optional structured error context.", "type": ["object", "array", "string", "number", "boolean", "null"] }
+      }
+    },
+
+    "Context": {
+      "title": "SepContext",
+      "description": "The two-tier dispatch context carried by every host→ext event/hook/tool/command. Session-mutating actions require the `command` tier or the host rejects them with -32003 ContextViolation.",
+      "type": "object",
+      "required": ["token", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "token": { "type": "string", "description": "Opaque epoch handle; invalidated across reloads so stale contexts can't act." },
+        "tier": { "type": "string", "enum": ["event", "command"], "description": "`event` = observe/read; `command` = may mutate the session." }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Notification" },
+    { "$ref": "#/$defs/SuccessResponse" },
+    { "$ref": "#/$defs/ErrorResponse" }
+  ]
+}

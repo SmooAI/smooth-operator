@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/extension/methods/ping.schema.json",
+  "title": "Ping",
+  "description": "Method `ping` (request, either direction). Liveness probe. The host sends it after 60s idle and treats two consecutively missed pongs as a crash. Params and result are empty objects.",
+
+  "$defs": {
+    "Params": {
+      "title": "PingParams",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "Result": {
+      "title": "PingResult",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Params" },
+    { "$ref": "#/$defs/Result" }
+  ]
+}
