@@ -15,7 +15,7 @@
  */
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { resolveConfig } from './config.js';
-import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController } from './conversation.js';
+import { type ChatMessage, type ChatPrompt, type Citation, type ConnectionStatus, ConversationController } from './conversation.js';
 import { SMOOTH_LOGO_SVG } from './logo.js';
 import { buildStyles } from './styles.js';
 
@@ -271,6 +271,13 @@ export class SmoothAgentChatElement extends HTMLElement {
             }
             this.messagesEl.appendChild(el);
 
+            // Render chat-native button prompts (SEP ui/confirm + ui/select,
+            // projected from write_confirmation_required). The click resumes the
+            // paused turn via the controller.
+            if (msg.prompt) {
+                this.messagesEl.appendChild(this.renderPrompt(msg.prompt));
+            }
+
             // Render a "Sources (N)" section under any assistant message whose
             // terminal eventual_response carried citations. Back-compatible: most
             // turns have none, so this is skipped.
@@ -279,6 +286,47 @@ export class SmoothAgentChatElement extends HTMLElement {
             }
         }
         this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    }
+
+    /**
+     * Render a chat-native button prompt (SEP `ui/confirm` / `ui/select`). Each
+     * option is a button; clicking one resumes the paused turn via
+     * {@link ConversationController.answerPrompt}. Once answered the buttons
+     * disable and the chosen label is shown, so the record stays in the
+     * transcript. Built with DOM APIs (no innerHTML) — prompt text is untrusted.
+     */
+    private renderPrompt(prompt: ChatPrompt): HTMLElement {
+        const wrap = document.createElement('div');
+        wrap.className = 'prompt';
+        wrap.setAttribute('part', 'prompt');
+
+        const text = document.createElement('div');
+        text.className = 'prompt-text';
+        text.textContent = prompt.text;
+        wrap.appendChild(text);
+
+        if (prompt.answered) {
+            const chosen = document.createElement('div');
+            chosen.className = 'prompt-answered';
+            chosen.textContent = `You chose: ${prompt.answered}`;
+            wrap.appendChild(chosen);
+            return wrap;
+        }
+
+        const buttons = document.createElement('div');
+        buttons.className = 'prompt-buttons';
+        for (const opt of prompt.options) {
+            const btn = document.createElement('button');
+            btn.className = 'prompt-button';
+            btn.type = 'button';
+            btn.textContent = opt.label;
+            btn.addEventListener('click', () => {
+                this.controller?.answerPrompt(prompt.requestId, opt.value);
+            });
+            buttons.appendChild(btn);
+        }
+        wrap.appendChild(buttons);
+        return wrap;
     }
 
     /**
