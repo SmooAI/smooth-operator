@@ -186,8 +186,15 @@ async fn run_turn_records_gen_ai_spans() {
         "gen_ai.conversation.id should be the conversation id; span fields: {:?}",
         chat.fields
     );
+    assert_eq!(
+        chat.fields.get("gen_ai.agent.name").map(String::as_str),
+        Some("smooth-agent-chat"),
+        "gen_ai.agent.name should name the agent persona; span fields: {:?}",
+        chat.fields
+    );
 
-    // (2) A tool span fired for the knowledge_search call.
+    // (2) A tool span fired for the knowledge_search call, carrying the tool
+    //     name AND the (redacted) arguments the model passed.
     let tool = spans
         .iter()
         .find(|s| s.name == "gen_ai.tool")
@@ -197,5 +204,14 @@ async fn run_turn_records_gen_ai_spans() {
         Some("knowledge_search"),
         "gen_ai.tool.name should name the fired tool; span fields: {:?}",
         tool.fields
+    );
+    let args = tool
+        .fields
+        .get("gen_ai.tool.call.arguments")
+        .map(String::as_str)
+        .unwrap_or_default();
+    assert!(
+        args.contains("return policy refund window"),
+        "gen_ai.tool.call.arguments should carry the model's query; got: {args:?}"
     );
 }

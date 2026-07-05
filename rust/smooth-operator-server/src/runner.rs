@@ -41,12 +41,19 @@ use smooth_operator::agent_config::{
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry, InteractionRequest};
 use smooth_operator::rerank::Reranker;
+use smooth_operator::telemetry::{
+    redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
+    GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME,
+    GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE,
+    SMOOAI_ORG_ID, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+};
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator::tools::{
     interaction_channel, InteractionAttach, KnowledgeResultSink, KnowledgeSearchTool,
     RequestInteractionTool, SubmitInteractionTool,
 };
 use smooth_operator::MAX_CITATIONS;
+use tracing::Instrument;
 
 /// How many auto-injected knowledge results the engine prepends as
 /// `[Relevant knowledge]` context. Mirrors smooth-operator-core's `Agent`
@@ -196,6 +203,21 @@ pub struct TurnResult {
     /// [`crate::suggestions`]). Empty when the model emitted none. Carried onto
     /// the `eventual_response`'s `suggestedNextActions`.
     pub suggested_next_actions: Vec<String>,
+}
+
+/// One tool call captured during the turn, used to emit a `gen_ai.tool` child
+/// span AFTER the run. Span emission is kept out of the spawned event translator
+/// so the spans flow under the subscriber that owns the turn span (the
+/// process-global OTLP subscriber in production) rather than a spawned task's
+/// context.
+struct ToolSpanRecord {
+    tool_name: String,
+    /// Serialized JSON args from the matching `ToolCallStart` (redacted at emit).
+    arguments: String,
+    duration_ms: u64,
+    is_error: bool,
+    /// The tool's error text when `is_error`, for the span's ERROR status.
+    error: Option<String>,
 }
 
 /// Everything one streaming turn needs. Bundled into a struct so the call sites
@@ -354,6 +376,11 @@ pub async fn run_streaming_turn(
         tool_configs,
         extensions,
     } = req;
+
+    // Capture the OTel turn-span attributes up front, since `llm` is moved into
+    // the `AgentConfig` and `org_id` into the `ToolProviderContext` below.
+    let model_for_span = llm.model.clone();
+    let org_id_for_span = org_id.clone();
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
     // Built once from the requester's `AccessContext` so the auto-injected
@@ -582,6 +609,24 @@ pub async fn run_streaming_turn(
         }
     };
 
+    // OpenTelemetry GenAI turn span (matches `KnowledgeChatRuntime::run_turn`).
+    // Wraps the whole engine run; the tool child spans and token usage are
+    // recorded onto it from the event translator below. `smooai.org_id` matches
+    // the monorepo TS chat handler's attribute so the studio groups by org.
+    let turn_span = tracing::info_span!(
+        SPAN_CHAT,
+        { GEN_AI_SYSTEM } = SYSTEM_NAME,
+        { GEN_AI_REQUEST_MODEL } = %model_for_span,
+        { GEN_AI_CONVERSATION_ID } = %conversation_id,
+        { GEN_AI_AGENT_NAME } = AGENT_NAME,
+        { SMOOAI_ORG_ID } = tracing::field::Empty,
+        { GEN_AI_USAGE_INPUT_TOKENS } = tracing::field::Empty,
+        { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
+    );
+    if let Some(org) = org_id_for_span.as_deref() {
+        turn_span.record(SMOOAI_ORG_ID, org);
+    }
+
     // 4. Run with the streaming channel and translate events as they arrive.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let request_id_owned = request_id.to_string();
@@ -591,6 +636,16 @@ pub async fn run_streaming_turn(
     // time while the agent loop runs concurrently.
     let translator = tokio::spawn(async move {
         let mut invoked_knowledge_search = false;
+        // Buffer each tool call's arguments from its `ToolCallStart` so the
+        // `gen_ai.tool` span materialized after the turn can carry them (redacted).
+        // Keyed by (iteration, tool_name) — the reference runner runs a turn's tool
+        // calls sequentially, so this pairs starts to completes.
+        let mut pending_tool_args: std::collections::HashMap<(u32, String), String> =
+            std::collections::HashMap::new();
+        // Collected tool-call records; the `gen_ai.tool` spans are emitted from the
+        // main body after the turn (NOT here) so they flow under the subscriber
+        // that owns the turn span — the process-global OTLP subscriber in prod.
+        let mut tool_records: Vec<ToolSpanRecord> = Vec::new();
         // The terminal `Completed` event carries the turn's accumulated cost +
         // token counts; capture them to surface on the `eventual_response`.
         let mut usage: Option<crate::protocol::TurnUsage> = None;
@@ -617,13 +672,15 @@ pub async fn run_streaming_turn(
                     }
                 }
                 AgentEvent::ToolCallStart {
+                    iteration,
                     tool_name,
                     arguments,
-                    ..
                 } => {
                     if tool_name == "knowledge_search" {
                         invoked_knowledge_search = true;
                     }
+                    // Stash the args for the child span emitted on completion.
+                    pending_tool_args.insert((iteration, tool_name.clone()), arguments.clone());
                     let _ = sink_clone.send(crate::protocol::stream_chunk(
                         &request_id_owned,
                         &tool_name,
@@ -633,11 +690,25 @@ pub async fn run_streaming_turn(
                     ));
                 }
                 AgentEvent::ToolCallComplete {
+                    iteration,
                     tool_name,
                     result,
                     is_error,
-                    ..
+                    duration_ms,
                 } => {
+                    // Capture the tool call for a `gen_ai.tool` span emitted after
+                    // the turn (see the collector loop below), pairing the
+                    // completion with the arguments buffered on its start.
+                    let arguments = pending_tool_args
+                        .remove(&(iteration, tool_name.clone()))
+                        .unwrap_or_default();
+                    tool_records.push(ToolSpanRecord {
+                        tool_name: tool_name.clone(),
+                        arguments,
+                        duration_ms,
+                        is_error,
+                        error: is_error.then(|| result.clone()),
+                    });
                     let _ = sink_clone.send(crate::protocol::stream_chunk(
                         &request_id_owned,
                         &tool_name,
@@ -682,12 +753,15 @@ pub async fn run_streaming_turn(
         if !tail.is_empty() {
             let _ = sink_clone.send(crate::protocol::stream_token(&request_id_owned, &tail));
         }
-        (invoked_knowledge_search, usage)
+        (invoked_knowledge_search, usage, tool_records)
     });
 
     // Drive the agent loop. `run_with_channel` consumes `tx`; when it returns,
     // the channel closes and the translator task drains and finishes.
-    let conversation = agent.run_with_channel(user_message, tx).await?;
+    let conversation = agent
+        .run_with_channel(user_message, tx)
+        .instrument(turn_span.clone())
+        .await?;
 
     // The turn is over: tear down the confirmation bridge. `run_with_channel`
     // borrows `&self`, so the agent (and the `ConfirmationHook` it owns via the
@@ -716,7 +790,37 @@ pub async fn run_streaming_turn(
     }
     drop(extensions);
 
-    let (invoked_knowledge_search, usage) = translator.await.unwrap_or((false, None));
+    let (invoked_knowledge_search, usage, tool_records) =
+        translator.await.unwrap_or((false, None, Vec::new()));
+
+    // Emit the OTel spans now, on this task, so they flow under the subscriber
+    // that owns `turn_span` (the process-global OTLP subscriber in production).
+    // Token usage on the turn span (omitted when the engine reported none, per
+    // the GenAI conventions); one `gen_ai.tool` child span per tool call with the
+    // redacted arguments, latency, and an ERROR status on failure.
+    if let Some(u) = usage.as_ref() {
+        if u.prompt_tokens > 0 || u.completion_tokens > 0 {
+            turn_span.record(GEN_AI_USAGE_INPUT_TOKENS, u.prompt_tokens);
+            turn_span.record(GEN_AI_USAGE_OUTPUT_TOKENS, u.completion_tokens);
+        }
+    }
+    for rec in &tool_records {
+        let tool_span = tracing::info_span!(
+            parent: &turn_span,
+            SPAN_TOOL,
+            { GEN_AI_TOOL_NAME } = %rec.tool_name,
+            { GEN_AI_TOOL_ARGUMENTS } = %redact_tool_arguments(&rec.arguments),
+            { OTEL_STATUS_CODE } = tracing::field::Empty,
+            { OTEL_STATUS_MESSAGE } = tracing::field::Empty,
+            duration_ms = rec.duration_ms,
+            is_error = rec.is_error,
+        );
+        if let Some(err) = rec.error.as_deref() {
+            tool_span.record(OTEL_STATUS_CODE, "ERROR");
+            tool_span.record(OTEL_STATUS_MESSAGE, err);
+        }
+        let _entered = tool_span.entered();
+    }
 
     // Strip the suggested-replies trailer from the final reply; the parsed
     // suggestions ride the `eventual_response`'s `suggestedNextActions`.
