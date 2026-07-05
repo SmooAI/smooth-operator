@@ -699,6 +699,7 @@ impl KnowledgeChatRuntime {
                 tool_name: None,
                 tool_calls: vec![],
                 reasoning_content: None,
+                images: vec![],
                 timestamp: m.created_at,
             });
         }
