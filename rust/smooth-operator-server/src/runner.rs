@@ -144,6 +144,10 @@ pub struct TurnRequest<'a> {
     pub request_id: &'a str,
     /// The inbound user message.
     pub user_message: &'a str,
+    /// Image/PDF media attached to THIS turn (multimodal). Emitted as OpenAI
+    /// `image_url` content parts on the user message via the engine's
+    /// `with_user_images`. Empty ⇒ a text-only turn (unchanged). Pearl th-3be564.
+    pub user_images: Vec<smooth_operator_core::conversation::ImageContent>,
     /// **The requester's document-level entitlements.** Retrieval (the
     /// auto-injected `[Relevant knowledge]` context AND the `knowledge_search`
     /// tool) reads through `storage.knowledge_for_access(&access)`, so a
@@ -225,6 +229,7 @@ pub async fn run_streaming_turn(
         conversation_id,
         request_id,
         user_message,
+        user_images,
         access,
         llm_provider,
         reranker,
@@ -279,7 +284,9 @@ pub async fn run_streaming_turn(
     let config = AgentConfig::new("smooth-agent-chat", resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
-        .with_prior_messages(prior);
+        .with_prior_messages(prior)
+        // Attach this turn's image/PDF media (empty ⇒ no-op, text-only turn).
+        .with_user_images(user_images);
 
     let mut tools = ToolRegistry::new();
     // Build the knowledge_search tool over the SAME ACL-filtered handle, with the
@@ -609,6 +616,7 @@ async fn load_prior_messages(
             tool_name: None,
             tool_calls: vec![],
             reasoning_content: None,
+            images: vec![],
             timestamp: m.created_at,
         });
     }

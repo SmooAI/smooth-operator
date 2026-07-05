@@ -531,6 +531,7 @@ async fn send_message(
             conversation_id: &session.conversation_id,
             request_id,
             user_message: &message,
+            user_images: Vec::new(),
             access,
             llm_provider: None,
             // Opt-in rerank stage (feature gap G8): `None` unless the operator

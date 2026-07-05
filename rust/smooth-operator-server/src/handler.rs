@@ -505,6 +505,11 @@ async fn handle_get_conversation_messages(
 /// knowledge-grounded turn, emit `stream_token` / `stream_chunk` as it goes, and
 /// finish with `eventual_response` (200). Errors (no gateway key, unknown
 /// session, agent failure) surface as clean `error` events.
+/// Vision model an image/PDF turn auto-routes to when the client didn't pick
+/// a model. `gemini-2.5-flash-lite` reads images AND PDFs natively and is
+/// cheap. Pearl th-3be564.
+const VISION_MODEL: &str = "gemini-2.5-flash-lite";
+
 async fn handle_send_message(
     state: &AppState,
     access: &AccessContext,
@@ -542,6 +547,22 @@ async fn handle_send_message(
             return;
         }
     };
+
+    // Multimodal: optional `images` array of `data:<mime>;base64,…` URLs the SPA
+    // built from picked/pasted/dropped image or PDF files. The engine emits them
+    // as OpenAI `image_url` content parts on this turn's user message. Absent or
+    // empty ⇒ a plain text turn (unchanged). Pearl th-3be564.
+    let user_images: Vec<smooth_operator_core::conversation::ImageContent> = parsed
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(smooth_operator_core::conversation::ImageContent::new)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let Some(session) = state.get_session(session_id) else {
         let _ = sink.send(protocol::error(
@@ -609,7 +630,18 @@ async fn handle_send_message(
     // send_message body carries a non-empty `model`, run THIS turn on it,
     // overriding the server's configured default model. Absent or blank ⇒ the
     // config default is kept, so behavior is unchanged when the field is unused.
-    let llm = apply_model_override(llm, parsed);
+    let mut llm = apply_model_override(llm, parsed);
+
+    // Vision auto-route: a turn carrying image/PDF media runs on a vision model
+    // UNLESS the client explicitly picked one (Smooth Modes). gemini-flash reads
+    // images and PDFs natively. Precedence: explicit model > vision > default.
+    let has_explicit_model = parsed
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|m| !m.trim().is_empty());
+    if !user_images.is_empty() && !has_explicit_model {
+        llm.model = VISION_MODEL.to_string();
+    }
 
     // Ack: processing started.
     let _ = sink.send(protocol::immediate_response(
@@ -686,6 +718,8 @@ async fn handle_send_message(
                 conversation_id: &conversation_id,
                 request_id: &request_id_owned,
                 user_message: &message,
+                // Multimodal media for this turn (empty ⇒ text-only). Pearl th-3be564.
+                user_images,
                 // The connection's resolved document-level entitlement: retrieval is
                 // filtered to what this requester may read (org-public only when the
                 // connection is anonymous).

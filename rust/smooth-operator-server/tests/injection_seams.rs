@@ -123,6 +123,7 @@ async fn run_turn_with_key(
             conversation_id: "conv-seam",
             request_id: "req-1",
             user_message: "hello",
+            user_images: Vec::new(),
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,

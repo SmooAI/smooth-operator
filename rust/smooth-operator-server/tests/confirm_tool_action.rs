@@ -139,6 +139,7 @@ fn spawn_turn(
                 conversation_id: CONVERSATION_ID,
                 request_id: REQUEST_ID,
                 user_message: "Tell me about alpha",
+                user_images: Vec::new(),
                 access: AccessContext::anonymous(),
                 llm_provider: Some(Arc::new(mock)),
                 reranker: None,
