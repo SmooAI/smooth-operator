@@ -56,7 +56,7 @@ async fn run_turn(deltas: &[&str]) -> (TurnResult, Vec<String>, String) {
             llm_provider: Some(mock.clone()),
             reranker: None,
             confirmation: None,
-            identity_intake: None,
+            interactions: None,
             tool_provider: None,
             system_prompt: None,
             org_id: None,

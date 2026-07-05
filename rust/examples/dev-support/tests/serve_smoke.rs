@@ -105,6 +105,9 @@ fn keyless_server_config(port: u16) -> ServerConfig {
         max_iterations: 4,
         max_tokens: 128,
         storage: StorageBackend::Memory,
+        confirm_tools: vec![],
+        judge_model: "claude-haiku-4-5".into(),
+        widget_auth_strict: false,
     }
 }
 
@@ -364,6 +367,19 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,
+            confirmation: None,
+            interactions: None,
+            tool_provider: None,
+            system_prompt: None,
+            org_id: None,
+            gateway_key: None,
+            workflow: None,
+            judge: None,
+            greeting_section: None,
+            enabled_tools: None,
+            auth_gate: None,
+            tool_configs: None,
+            extensions: None,
         },
         &tx,
     )

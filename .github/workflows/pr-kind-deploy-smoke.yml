@@ -57,6 +57,13 @@ jobs:
         with:
           repository: SmooAI/smooth-operator-core
           path: smooth-operator-core
+          # Pin to a known-good core SHA so a moving core@main can't silently
+          # break every PR here (this repo's Cargo.lock is resolved against this
+          # exact commit). Bump this together with `cargo update -p
+          # smooai-smooth-operator-core` when intentionally adopting a newer core.
+          # Interim until smooai-smooth-operator-core is published to crates.io and
+          # this cross-repo checkout goes away.
+          ref: 3c7b21dbde4f31519b2eab3d5343f154119fe655
           # Private repo: a PAT/app token with read access is needed when this
           # runs outside SmooAI/smooth-operator-core's own org-scoped GITHUB_TOKEN.
           # Provide it as a secret and uncomment:
