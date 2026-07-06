@@ -5,7 +5,7 @@
 replicaCount: 2
 
 image:
-  # Image build is cross-repo (see Dockerfile header + deploy/k8s/README.md).
+  # Image builds single-repo from crates.io (see Dockerfile header).
   # Point this at your registry once the image is built + pushed.
   repository: ghcr.io/smooai/smooth-operator
   # Prefer an immutable tag/digest in prod. ArgoCD Image Updater can manage this.

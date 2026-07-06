@@ -3,46 +3,16 @@
 # Multi-stage image for the smooth-operator WebSocket server.
 #
 # ──────────────────────────────────────────────────────────────────────────
-#  CROSS-REPO BUILD CONTEXT (read this before `docker build`)
+#  SINGLE-REPO BUILD CONTEXT
 # ──────────────────────────────────────────────────────────────────────────
-# The Rust workspace (`rust/Cargo.toml`) has a *path* dependency on a SIBLING
-# repository that lives OUTSIDE this repo:
+# The Rust workspace depends on `smooai-smooth-operator-core` from crates.io (a
+# plain `version` dep — see rust/Cargo.toml), so the build context is THIS repo
+# alone. cargo fetches the engine crate from the registry during the build.
 #
-#     smooai-smooth-operator-core = { path = "../../smooth-operator-core/rust/smooth-operator-core" }
+#     docker build -f Dockerfile -t smooth-operator:dev .
 #
-# Relative to the workspace at `rust/`, that resolves to
-# `<repo-parent>/smooth-operator-core/rust/smooth-operator-core`. A Docker build context
-# rooted at this repo alone therefore CANNOT see it and the build will fail at
-# the `cargo build` step with an unresolved path dependency.
-#
-# Until `smooai-smooth-operator-core` is published to crates.io (roadmap Phase 0,
-# which removes the path dep), the image MUST be built with a context that spans
-# BOTH repos. Lay them out as siblings (the standard `~/dev/smooai/` layout):
-#
-#     <parent>/
-#       ├── smooth-operator/        (this repo)
-#       └── smooth-operator-core/   (the engine; sibling)
-#
-# then build from the PARENT directory, pointing -f at this Dockerfile:
-#
-#     docker build \
-#       -f smooth-operator/Dockerfile \
-#       -t smooth-operator:dev \
-#       <parent>
-#
-# i.e. from `~/dev/smooai`:
-#
-#     docker build -f smooth-operator/Dockerfile -t smooth-operator:dev .
-#
-# Inside the build the two repos appear at `/src/smooth-operator` and
-# `/src/smooth-operator-core`, preserving the `../../smooth-operator-core/...` relative
-# path the workspace expects. See deploy/k8s/README.md for the full story.
-#
-# Once `smooai-smooth-operator-core` is on crates.io and `rust/Cargo.toml` switches
-# the workspace dep to a version, this Dockerfile can be simplified to a
-# single-repo context (`docker build -t … smooth-operator`) by dropping
-# the sibling COPY and the `WORKDIR /src/smooth-operator/rust` can build
-# directly.
+# (Previously the context had to span a sibling smooth-operator-core checkout for
+# a path dep; that's gone now the crate is published.)
 # ──────────────────────────────────────────────────────────────────────────
 
 # ── Builder ────────────────────────────────────────────────────────────────
@@ -63,11 +33,8 @@ RUN apt-get update \
 
 WORKDIR /src
 
-# Copy BOTH repos (the context spans the parent dir — see header). Order:
-# sibling engine first, then this repo, so the `../../smooth-operator-core` path dep
-# resolves from `/src/smooth-operator/rust`.
-COPY smooth-operator-core/ /src/smooth-operator-core/
-COPY smooth-operator/ /src/smooth-operator/
+# Single-repo context: copy this repo; the engine crate comes from crates.io.
+COPY . /src/smooth-operator/
 
 WORKDIR /src/smooth-operator/rust
 
