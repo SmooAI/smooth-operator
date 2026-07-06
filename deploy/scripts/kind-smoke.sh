@@ -16,12 +16,9 @@
 # ──────────────────────────────────────────────────────────────────────────
 #  CROSS-REPO BUILD CONTEXT
 # ──────────────────────────────────────────────────────────────────────────
-# The image build spans TWO repos: the Rust workspace path-deps on the sibling
-# `smooth-operator-core` repo, so the Docker context must be the PARENT dir that holds
-# BOTH repos, with -f pointing at this repo's Dockerfile. See the Dockerfile
-# header and deploy/k8s/README.md. Once `smooai-smooth-operator-core` ships to
-# crates.io (roadmap Phase 0) the path-dep — and this cross-repo context — go
-# away, and PARENT_DIR can collapse to this repo's root.
+# Single-repo build context: the engine crate `smooai-smooth-operator-core` is
+# fetched from crates.io during the Docker build, so the context is just this
+# repo's root, with -f pointing at this repo's Dockerfile.
 #
 # ──────────────────────────────────────────────────────────────────────────
 #  USAGE
@@ -37,7 +34,6 @@
 #   NAMESPACE              k8s namespace                     (default: smooth-agent-smoke)
 #   RELEASE                helm release name                 (default: smooth-agent)
 #   LOCAL_PORT             host port for the port-forward    (default: 18787)
-#   PARENT_DIR             cross-repo Docker build context   (default: parent of this repo)
 #   SKIP_BUILD             reuse loaded image, skip docker build + kind load
 #   USE_EXISTING_CLUSTER   use current context; skip kind create/delete
 #   KEEP_CLUSTER           do not delete the kind cluster on exit
@@ -58,11 +54,8 @@ IMAGE="${IMAGE:-smooth-operator:smoke}"
 NAMESPACE="${NAMESPACE:-smooth-agent-smoke}"
 RELEASE="${RELEASE:-smooth-agent}"
 LOCAL_PORT="${LOCAL_PORT:-18787}"
-# The cross-repo Docker context: the parent dir that holds BOTH this repo and the
-# sibling `smooth-operator-core` repo. Defaults to this repo's parent (the standard
-# ~/dev/smooai layout). Override PARENT_DIR for non-standard checkouts.
-PARENT_DIR="${PARENT_DIR:-$(cd "${REPO_ROOT}/.." && pwd)}"
-SIBLING_DIR="${PARENT_DIR}/smooth-operator-core"
+# Single-repo Docker context: the engine crate is fetched from crates.io, so the
+# build context is just this repo's root.
 DOCKERFILE="${REPO_ROOT}/Dockerfile"
 
 # Throwaway pgvector Postgres deployed into the cluster.
@@ -141,14 +134,13 @@ else
     kubectl cluster-info --context "kind-${CLUSTER_NAME}" >/dev/null
 fi
 
-# ── 2. Build + load the image (cross-repo context) ──────────────────────────
+# ── 2. Build + load the image ────────────────────────────────────────────────
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
     log "SKIP_BUILD=1 — assuming image '${IMAGE}' is already loaded into the cluster"
 else
     [[ -f "${DOCKERFILE}" ]] || die "Dockerfile not found at ${DOCKERFILE}"
-    [[ -d "${SIBLING_DIR}" ]] || die "sibling repo not found at ${SIBLING_DIR} — the cross-repo Docker context needs both repos as siblings (set PARENT_DIR). See the Dockerfile header."
-    log "Building image '${IMAGE}' from cross-repo context '${PARENT_DIR}' (-f ${DOCKERFILE})"
-    docker build -f "${DOCKERFILE}" -t "${IMAGE}" "${PARENT_DIR}"
+    log "Building image '${IMAGE}' from '${REPO_ROOT}' (-f ${DOCKERFILE})"
+    docker build -f "${DOCKERFILE}" -t "${IMAGE}" "${REPO_ROOT}"
 
     if [[ "${USE_EXISTING_CLUSTER:-0}" == "1" ]]; then
         warn "USE_EXISTING_CLUSTER=1 with a build: 'kind load' targets a kind cluster. If your context isn't kind, push '${IMAGE}' to a registry the cluster can pull instead."
