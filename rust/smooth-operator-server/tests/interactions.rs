@@ -177,6 +177,7 @@ fn spawn_turn(
                 conversation_id: CONVERSATION_ID,
                 request_id: REQUEST_ID,
                 user_message: "I'd like a quote",
+                model_max_output: None,
                 access: AccessContext::anonymous(),
                 llm_provider: Some(Arc::new(mock)),
                 reranker: None,

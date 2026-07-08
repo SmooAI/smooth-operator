@@ -206,6 +206,7 @@ async fn run_turn_as(storage: Arc<dyn StorageAdapter>, access: AccessContext) {
             conversation_id: "conv-org-scope",
             request_id: "req-1",
             user_message: "Tell me about alpha",
+            model_max_output: None,
             access,
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,

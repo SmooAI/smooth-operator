@@ -170,6 +170,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             conversation_id: "conv-otel-srv",
             request_id: "req-otel-srv",
             user_message: "what is the return policy?",
+            model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,

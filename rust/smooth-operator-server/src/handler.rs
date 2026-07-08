@@ -851,6 +851,10 @@ async fn handle_send_message(
             enabled_extensions.as_deref(),
         )
         .await;
+        // Clamp max_tokens to the resolved model's output ceiling (best-effort;
+        // None ⇒ unclamped). Reuses the cached /model/info fetch. EPIC th-1cc9fa.
+        let model_max_output =
+            crate::admin::model_output_ceiling(&state_for_turn, &llm.model).await;
         let result = runner::run_streaming_turn(
             TurnRequest {
                 storage: state_for_turn.storage.clone(),
@@ -859,6 +863,8 @@ async fn handle_send_message(
                 conversation_id: &conversation_id,
                 request_id: &request_id_owned,
                 user_message: &message,
+                // The resolved model's output ceiling (clamps max_tokens; None ⇒ unclamped).
+                model_max_output,
                 // The connection's resolved document-level entitlement: retrieval is
                 // filtered to what this requester may read (org-public only when the
                 // connection is anonymous).
