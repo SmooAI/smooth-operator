@@ -60,10 +60,16 @@ pub const DEFAULT_PORT: u16 = 8787;
 pub const DEFAULT_GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
 /// Default (cheap) model.
 pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
-/// Default agent-loop iteration cap.
-pub const DEFAULT_MAX_ITERATIONS: u32 = 6;
-/// Default `max_tokens` per LLM call.
-pub const DEFAULT_MAX_TOKENS: u32 = 512;
+/// Default agent-loop iteration cap. Was 6 (chat-widget sizing) — too tight for
+/// any multi-step turn. Raised to 20 for agentic use (EPIC th-1cc9fa).
+pub const DEFAULT_MAX_ITERATIONS: u32 = 20;
+/// Default `max_tokens` per LLM call. Was 512 (chat-widget sizing), which
+/// STARVES reasoning models — they spend it all on `reasoning_content` and
+/// return empty `content`. Raised to 8192 (EPIC th-1cc9fa). A cap only bounds
+/// runaway output; concise answers stay concise, and the per-model output
+/// ceiling clamp (`AgentConfig::with_model_ceiling`) keeps it under whatever the
+/// model can physically emit.
+pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Which storage backend the server runs on. Selected via `SMOOTH_AGENT_STORAGE`
 /// (`memory` / `postgres` / `dynamodb`); the **admin stores** (connector configs,
