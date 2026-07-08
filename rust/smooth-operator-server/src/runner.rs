@@ -652,9 +652,19 @@ pub async fn run_streaming_turn(
         // Hold back tokens that could be the suggested-replies trailer so the
         // raw `<suggested_replies>` marker never flashes in the live stream.
         let mut suppressor = crate::suggestions::MarkerSuppressor::new();
+        // Accumulate the RAW answer tokens (pre-suppressor, reasoning excluded)
+        // of THIS turn. This is the authoritative final text — identical to the
+        // assistant message the engine pushes — and it's the fallback for the
+        // `eventual_response` reply when `last_assistant_content()` comes back
+        // empty (the turn's terminal assistant entry is a tool-call or
+        // reasoning-only message, so its `content` is blank even though the real
+        // answer streamed here). Keeps the trailer so `extract_suggested_replies`
+        // strips it the same way it does the engine's content. (th-emptyreply)
+        let mut streamed_reply = String::new();
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::TokenDelta { content } => {
+                    streamed_reply.push_str(&content);
                     let safe = suppressor.push(&content);
                     if !safe.is_empty() {
                         let _ = sink_clone
@@ -753,7 +763,12 @@ pub async fn run_streaming_turn(
         if !tail.is_empty() {
             let _ = sink_clone.send(crate::protocol::stream_token(&request_id_owned, &tail));
         }
-        (invoked_knowledge_search, usage, tool_records)
+        (
+            invoked_knowledge_search,
+            usage,
+            tool_records,
+            streamed_reply,
+        )
     });
 
     // Drive the agent loop. `run_with_channel` consumes `tx`; when it returns,
@@ -790,8 +805,9 @@ pub async fn run_streaming_turn(
     }
     drop(extensions);
 
-    let (invoked_knowledge_search, usage, tool_records) =
-        translator.await.unwrap_or((false, None, Vec::new()));
+    let (invoked_knowledge_search, usage, tool_records, streamed_reply) = translator
+        .await
+        .unwrap_or((false, None, Vec::new(), String::new()));
 
     // Emit the OTel spans now, on this task, so they flow under the subscriber
     // that owns `turn_span` (the process-global OTLP subscriber in production).
@@ -824,9 +840,18 @@ pub async fn run_streaming_turn(
 
     // Strip the suggested-replies trailer from the final reply; the parsed
     // suggestions ride the `eventual_response`'s `suggestedNextActions`.
-    let (reply, suggested_next_actions) = crate::suggestions::extract_suggested_replies(
-        conversation.last_assistant_content().unwrap_or_default(),
-    );
+    //
+    // Prefer the engine's terminal assistant content, but fall back to this
+    // turn's accumulated streamed answer when that content is empty — reasoning
+    // models (e.g. groq-gpt-oss-120b) can end a turn on a tool-call or
+    // reasoning-only assistant entry whose `content` is blank, which would ship
+    // an EMPTY `eventual_response` (and drop the suggestions) even though the
+    // full answer streamed to the client. (th-emptyreply)
+    let final_text = match conversation.last_assistant_content() {
+        Some(c) if !c.trim().is_empty() => c,
+        _ => streamed_reply.as_str(),
+    };
+    let (reply, suggested_next_actions) = crate::suggestions::extract_suggested_replies(final_text);
 
     // 5. Persist the outbound reply and capture its id for eventual_response.
     let message_id = if reply.is_empty() {
