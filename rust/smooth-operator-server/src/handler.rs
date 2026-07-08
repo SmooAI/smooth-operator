@@ -71,6 +71,9 @@ pub async fn handle_frame(
         Some("get_conversation_messages") => {
             handle_get_conversation_messages(state, &parsed, request_id, sink).await;
         }
+        Some("list_conversations") => {
+            handle_list_conversations(state, auth_org, &parsed, request_id, sink).await;
+        }
         Some("send_message") => {
             handle_send_message(state, access, &parsed, request_id, sink).await;
         }
@@ -226,8 +229,20 @@ async fn handle_create_session(
         .map(str::to_string);
 
     let now = chrono::Utc::now();
-    // Derive the org this session (conversation + participants) belongs to, in
-    // priority order:
+
+    // Resume: when the caller passes a `conversationId` for a conversation that
+    // exists, bind this new session to it (reuse its id + org, skip
+    // `create_conversation`) so subsequent `send_message` appends to it and the
+    // runner replays its history by `thread_id`. Absent/unknown id → mint a fresh
+    // conversation (byte-for-byte unchanged behavior).
+    let resume = match parsed.get("conversationId").and_then(Value::as_str) {
+        Some(cid) if !cid.is_empty() => state.storage.get_conversation(cid).await.ok().flatten(),
+        _ => None,
+    };
+
+    // Derive the org this session (conversation + participants) belongs to. When
+    // resuming, it's the existing conversation's org (keeps the session
+    // self-consistent). Otherwise, in priority order:
     //   1. the widget policy's `organization_id` — a multi-tenant host that knows
     //      the agent's org (widget visitors authenticate via origin/authContext,
     //      not a JWT, so their org rides on the agent's policy);
@@ -237,11 +252,18 @@ async fn handle_create_session(
     //      admin API's org-scoping (document sets, indexing runs) still lines up
     //      with the seeded knowledge. This keeps the no-auth/local flavor
     //      behavior unchanged.
-    let org_id = widget_org
-        .or_else(|| auth_org.map(str::to_string))
-        .unwrap_or_else(|| crate::server::SEED_ORG_ID.to_string());
+    let org_id = if let Some(ref c) = resume {
+        c.organization_id.clone()
+    } else {
+        widget_org
+            .or_else(|| auth_org.map(str::to_string))
+            .unwrap_or_else(|| crate::server::SEED_ORG_ID.to_string())
+    };
 
-    let conversation_id = uuid::Uuid::new_v4().to_string();
+    let conversation_id = resume
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session_id = uuid::Uuid::new_v4().to_string();
     let user_participant_id = uuid::Uuid::new_v4().to_string();
     let agent_participant_id = uuid::Uuid::new_v4().to_string();
@@ -265,7 +287,9 @@ async fn handle_create_session(
         )
         .await;
 
-    let conversation = Conversation {
+    // Only mint a conversation on a fresh session — a resume reuses the existing
+    // one (and its persisted history), so `create_conversation` is skipped.
+    let conversation = resume.is_none().then(|| Conversation {
         id: conversation_id.clone(),
         platform: Platform::Web,
         name: format!("Session {session_id}"),
@@ -275,7 +299,7 @@ async fn handle_create_session(
         analytics_json: None,
         created_at: now,
         updated_at: now,
-    };
+    });
 
     let user_participant = Participant {
         id: user_participant_id.clone(),
@@ -385,13 +409,15 @@ async fn handle_create_session(
 
     tokio::spawn(async move {
         let rid = request_id_owned.as_deref();
-        if let Err(e) = storage.create_conversation(conversation).await {
-            let _ = sink_clone.send(protocol::error(
-                rid,
-                "INTERNAL_ERROR",
-                &format!("create conversation failed: {e}"),
-            ));
-            return;
+        if let Some(conversation) = conversation {
+            if let Err(e) = storage.create_conversation(conversation).await {
+                let _ = sink_clone.send(protocol::error(
+                    rid,
+                    "INTERNAL_ERROR",
+                    &format!("create conversation failed: {e}"),
+                ));
+                return;
+            }
         }
         if let Err(e) = storage.add_participant(user_participant).await {
             let _ = sink_clone.send(protocol::error(
@@ -542,6 +568,115 @@ async fn handle_get_conversation_messages(
             ));
         }
     }
+}
+
+/// `list_conversations` — the conversation-sidebar / resume substrate. Returns
+/// the org's conversations that have at least one message, most-recent-first,
+/// each with a short title preview + message count. Empty conversations (every
+/// page-load currently mints one) are filtered out so the sidebar isn't buried
+/// in blanks. Reply is an `immediate_response` carrying `{ conversations: [ {
+/// conversationId, title, updatedAt, messageCount } ] }`.
+///
+/// Optional input: `limit` (default 50) — the max conversations returned after
+/// filtering + sorting.
+async fn handle_list_conversations(
+    state: &AppState,
+    auth_org: Option<&str>,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    const DEFAULT_LIMIT: usize = 50;
+    let limit = parsed
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_LIMIT);
+
+    // Org scope: the authenticated principal's org, else the seed org — matching
+    // the create-session derivation's fallback for the local/no-auth flavor.
+    let org_id = auth_org.unwrap_or(crate::server::SEED_ORG_ID);
+
+    let conversations = match state.storage.list_conversations_by_org(org_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "STORAGE_ERROR",
+                &format!("failed to list conversations: {e}"),
+            ));
+            return;
+        }
+    };
+
+    // Peek each conversation's messages for a preview + count, dropping empties.
+    // ponytail: per-conversation peek capped at MSG_CAP — fine for a local
+    // daemon's ~100 convos. If this ever fronts a multi-thousand-conversation
+    // org, push count + first-inbound down into the storage adapter as one query.
+    const MSG_CAP: usize = 200;
+    let mut rows: Vec<(i64, Value)> = Vec::new();
+    for conv in conversations {
+        let mut query = smooth_operator::adapter::MessageQuery::new(&conv.id, MSG_CAP);
+        query.descending = false; // oldest-first: the first inbound is the title source
+        let Ok(page) = state.storage.list_messages_by_conversation(query).await else {
+            continue;
+        };
+        if page.messages.is_empty() {
+            continue;
+        }
+        rows.push((
+            conv.updated_at.timestamp_millis(),
+            json!({
+                "conversationId": conv.id,
+                "title": conversation_title(&page.messages, &conv.name),
+                "updatedAt": conv.updated_at.to_rfc3339(),
+                "messageCount": page.messages.len(),
+            }),
+        ));
+    }
+
+    // Most-recent-first, then cap.
+    rows.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+    let conversations: Vec<Value> = rows.into_iter().take(limit).map(|(_, v)| v).collect();
+
+    let _ = sink.send(protocol::immediate_response(
+        request_id,
+        200,
+        "Conversations",
+        json!({ "conversations": conversations }),
+    ));
+}
+
+/// Derive a sidebar title: a truncated preview of the FIRST inbound (user)
+/// message, falling back to the conversation's `name`. `messages` is oldest-first.
+fn conversation_title(messages: &[smooth_operator::domain::Message], fallback: &str) -> String {
+    messages
+        .iter()
+        .find(|m| matches!(m.direction, smooth_operator::domain::Direction::Inbound))
+        .and_then(message_text)
+        .map_or_else(|| fallback.to_string(), |t| truncate_preview(&t, 60))
+}
+
+/// Flat text of a message: the content's `text` mirror, else the first text item.
+/// `None` when blank.
+fn message_text(m: &smooth_operator::domain::Message) -> Option<String> {
+    m.content
+        .text
+        .clone()
+        .or_else(|| m.content.items.iter().find_map(|i| i.text.clone()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Truncate to `max` characters (char-safe), appending `…` when clipped.
+fn truncate_preview(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let clipped: String = s.chars().take(max).collect();
+    format!("{}…", clipped.trim_end())
 }
 
 /// `send_message` — ack with `immediate_response` (202), run a streaming
