@@ -508,6 +508,30 @@ async fn fetch_model_costs(config: &crate::config::ServerConfig) -> anyhow::Resu
     Ok(map_model_info(&payload))
 }
 
+/// The `model`'s hard output ceiling (`max_output_tokens`) from the gateway's
+/// `/model/info`, for clamping `max_tokens` on the chat path (EPIC th-1cc9fa).
+///
+/// Reuses the same process-wide [`AppState::model_costs_cache`] the
+/// `/admin/model-costs` route fills, so this costs at most one `/model/info`
+/// fetch per process. **Best-effort**: any gateway error, an unknown model, or a
+/// model whose gateway entry has no ceiling ⇒ `None` ⇒ the engine leaves
+/// `max_tokens` unclamped (graceful, no behaviour change).
+pub(crate) async fn model_output_ceiling(state: &AppState, model: &str) -> Option<u32> {
+    let map = match state.model_costs_cache.get() {
+        Some(cached) => cached.clone(),
+        None => {
+            let fetched = fetch_model_costs(&state.config).await.ok()?;
+            let _ = state.model_costs_cache.set(fetched.clone());
+            fetched
+        }
+    };
+    map.get(model)
+        .and_then(|m| m.get("maxOutputTokens"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+}
+
 /// Map the gateway's `/v1/model/info` payload
 /// (`{ data: [{ model_name, model_info: { input_cost_per_token,
 /// output_cost_per_token, model_tier, use_cases } }] }`) to the
@@ -539,6 +563,11 @@ fn map_model_info(payload: &Value) -> Value {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // The model's hard output ceiling — used by the chat path to clamp
+        // `max_tokens` to what the model can physically emit (EPIC th-1cc9fa).
+        let max_output = info
+            .and_then(|i| i.get("max_output_tokens"))
+            .and_then(Value::as_u64);
         out.insert(
             name.to_string(),
             serde_json::json!({
@@ -546,6 +575,7 @@ fn map_model_info(payload: &Value) -> Value {
                 "outputCostPerToken": output,
                 "tier": tier,
                 "useCases": use_cases,
+                "maxOutputTokens": max_output,
             }),
         );
     }
@@ -1084,7 +1114,8 @@ mod tests {
                         "input_cost_per_token": 0.000015,
                         "output_cost_per_token": 0.000075,
                         "model_tier": "frontier",
-                        "use_cases": ["reasoning", "coding"]
+                        "use_cases": ["reasoning", "coding"],
+                        "max_output_tokens": 65536
                     }
                 },
                 {
@@ -1105,10 +1136,13 @@ mod tests {
         assert!((opus["outputCostPerToken"].as_f64().unwrap() - 0.000075).abs() < 1e-12);
         assert_eq!(opus["tier"], "frontier");
         assert_eq!(opus["useCases"], serde_json::json!(["reasoning", "coding"]));
+        assert_eq!(opus["maxOutputTokens"], 65536);
 
         let haiku = &out["claude-haiku-4-5"];
         assert_eq!(haiku["tier"], "fast");
         assert_eq!(haiku["useCases"], serde_json::json!(["chat"]));
+        // No max_output_tokens in the payload -> null (engine leaves it unclamped).
+        assert_eq!(haiku["maxOutputTokens"], serde_json::Value::Null);
     }
 
     #[test]

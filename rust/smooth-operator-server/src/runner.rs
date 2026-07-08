@@ -148,6 +148,10 @@ pub struct TurnRequest<'a> {
     /// `image_url` content parts on the user message via the engine's
     /// `with_user_images`. Empty ⇒ a text-only turn (unchanged). Pearl th-3be564.
     pub user_images: Vec<smooth_operator_core::conversation::ImageContent>,
+    /// The resolved model's hard output ceiling (`max_output_tokens`) from the
+    /// gateway, or `None` when unknown. Clamps `max_tokens` to what the model can
+    /// emit via the engine's `with_model_ceiling`. `None` ⇒ unclamped (EPIC th-1cc9fa).
+    pub model_max_output: Option<u32>,
     /// **The requester's document-level entitlements.** Retrieval (the
     /// auto-injected `[Relevant knowledge]` context AND the `knowledge_search`
     /// tool) reads through `storage.knowledge_for_access(&access)`, so a
@@ -230,6 +234,7 @@ pub async fn run_streaming_turn(
         request_id,
         user_message,
         user_images,
+        model_max_output,
         access,
         llm_provider,
         reranker,
@@ -286,7 +291,9 @@ pub async fn run_streaming_turn(
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior)
         // Attach this turn's image/PDF media (empty ⇒ no-op, text-only turn).
-        .with_user_images(user_images);
+        .with_user_images(user_images)
+        // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
+        .with_model_ceiling(model_max_output);
 
     let mut tools = ToolRegistry::new();
     // Build the knowledge_search tool over the SAME ACL-filtered handle, with the

@@ -710,6 +710,10 @@ async fn handle_send_message(
     let conversation_id = session.conversation_id.clone();
 
     tokio::spawn(async move {
+        // Clamp max_tokens to the resolved model's output ceiling (best-effort;
+        // None ⇒ unclamped). Reuses the cached /model/info fetch. EPIC th-1cc9fa.
+        let model_max_output =
+            crate::admin::model_output_ceiling(&state_for_turn, &llm.model).await;
         let result = runner::run_streaming_turn(
             TurnRequest {
                 storage: state_for_turn.storage.clone(),
@@ -720,6 +724,8 @@ async fn handle_send_message(
                 user_message: &message,
                 // Multimodal media for this turn (empty ⇒ text-only). Pearl th-3be564.
                 user_images,
+                // The resolved model's output ceiling (clamps max_tokens; None ⇒ unclamped).
+                model_max_output,
                 // The connection's resolved document-level entitlement: retrieval is
                 // filtered to what this requester may read (org-public only when the
                 // connection is anonymous).

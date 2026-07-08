@@ -124,6 +124,7 @@ async fn run_turn_with_key(
             request_id: "req-1",
             user_message: "hello",
             user_images: Vec::new(),
+            model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,

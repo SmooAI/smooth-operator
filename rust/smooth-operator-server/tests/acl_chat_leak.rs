@@ -124,6 +124,7 @@ async fn run_turn_as(
             request_id: "req-1",
             user_message: "Tell me about alpha",
             user_images: Vec::new(),
+            model_max_output: None,
             access,
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,
