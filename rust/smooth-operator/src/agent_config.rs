@@ -309,6 +309,18 @@ pub struct AgentBehaviorConfig {
     /// allowlist is non-empty. See [`enabled_extension_ids`](Self::enabled_extension_ids).
     #[serde(default)]
     pub enabled_extensions: Vec<EnabledExtension>,
+    /// `model` — per-agent gateway model id override. `Some(id)` runs this agent's
+    /// turns on `id` instead of the server default (`SMOOTH_AGENT_MODEL`); `None`
+    /// (or an empty/whitespace column) falls back to that global default. An
+    /// explicit per-turn `send_message.model` (Smooth Modes) still wins over this.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `max_iterations` — per-agent agent-loop iteration cap. `Some(n)` overrides
+    /// the server default (`SMOOTH_AGENT_MAX_ITERATIONS`) for this agent's turns;
+    /// `None` falls back to that global default. Parsed values are clamped to
+    /// `1..=64` (see [`from_row_values`](Self::from_row_values)).
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
 }
 
 impl AgentBehaviorConfig {
@@ -322,6 +334,8 @@ impl AgentBehaviorConfig {
             && self.conversation_workflow.is_none()
             && self.enabled_tools.is_empty()
             && self.enabled_extensions.is_empty()
+            && self.model.is_none()
+            && self.max_iterations.is_none()
     }
 
     /// Build the per-agent system prompt from `instructions` (+ optional persona),
@@ -431,7 +445,14 @@ impl AgentBehaviorConfig {
     /// - `conversation_workflow` — jsonb `{ goal, steps: [...] }`,
     /// - `tool_config` — jsonb `{ enabledTools: [{ toolId, enabled, authLevel, config }] }`,
     /// - `extension_config` — jsonb `{ enabledExtensions: [{ extensionId, enabled, config }] }`,
-    /// - `visibility` — text `public` | `internal` (defaults `public`).
+    /// - `visibility` — text `public` | `internal` (defaults `public`),
+    /// - `model` — text gateway model id (blank / whitespace ⇒ `None`, ignored),
+    /// - `max_iterations` — integer loop cap, clamped to `1..=64` (out-of-range
+    ///   values are clamped with a `tracing::warn`, never dropped).
+    // Positional row-mapping constructor: one arg per `agents` column, mirroring
+    // the sibling lanes' resolver contract. A struct-of-args would break every
+    // host caller for no real gain. ponytail: flat arg list, matches the columns.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_row_values(
         instructions: Option<serde_json::Value>,
@@ -441,6 +462,8 @@ impl AgentBehaviorConfig {
         tool_config: Option<serde_json::Value>,
         extension_config: Option<serde_json::Value>,
         visibility: Option<String>,
+        model: Option<String>,
+        max_iterations: Option<i64>,
     ) -> Self {
         let visibility = visibility
             .as_deref()
@@ -484,6 +507,15 @@ impl AgentBehaviorConfig {
             .map(|arr| arr.iter().filter_map(parse_enabled_extension).collect())
             .unwrap_or_default();
 
+        // Blank / whitespace-only model column ⇒ no override (fall back to global).
+        let model = model
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // Clamp the loop cap to a sane range rather than trusting the row blindly:
+        // a 0 would stall the turn, a huge value would let it run away.
+        let max_iterations = max_iterations.map(clamp_max_iterations);
+
         Self {
             visibility,
             instructions,
@@ -492,8 +524,29 @@ impl AgentBehaviorConfig {
             conversation_workflow,
             enabled_tools,
             enabled_extensions,
+            model,
+            max_iterations,
         }
     }
+}
+
+/// Minimum / maximum per-agent `max_iterations` (inclusive). A turn needs at
+/// least one loop; 64 is a generous ceiling that keeps a runaway agent bounded.
+const MAX_ITERATIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=64;
+
+/// Clamp a raw `max_iterations` row value into [`MAX_ITERATIONS_RANGE`],
+/// `tracing::warn`-ing when the raw value was out of range (so a mis-set row is
+/// visible in logs rather than silently honored or dropped).
+#[must_use]
+fn clamp_max_iterations(raw: i64) -> u32 {
+    if !MAX_ITERATIONS_RANGE.contains(&raw) {
+        tracing::warn!(
+            max_iterations = raw,
+            "per-agent max_iterations out of range 1..=64; clamping"
+        );
+    }
+    // `clamp` yields a value in 1..=64, which always fits u32.
+    raw.clamp(*MAX_ITERATIONS_RANGE.start(), *MAX_ITERATIONS_RANGE.end()) as u32
 }
 
 /// Parse one `enabledTools` entry, tolerating missing/typed-wrong fields:
@@ -1003,11 +1056,15 @@ mod tests {
                 ]
             })),
             Some("internal".into()),
+            Some("claude-opus-4-8".into()),
+            Some(12),
         );
         assert_eq!(
             cfg.instructions.as_deref(),
             Some("You are the Posture assistant. NOT a generic support agent.")
         );
+        assert_eq!(cfg.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(cfg.max_iterations, Some(12));
         assert_eq!(cfg.persona.as_deref(), Some("Warm."));
         assert_eq!(cfg.greeting.as_deref(), Some("Hey there"));
         assert_eq!(cfg.visibility, Visibility::Internal);
@@ -1049,6 +1106,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         // No tool_config → unrestricted (full server tool set).
         assert!(cfg.enabled_tool_ids().is_none());
@@ -1058,6 +1117,8 @@ mod tests {
     fn enabled_extension_ids_empty_when_no_extension_config() {
         let cfg = AgentBehaviorConfig::from_row_values(
             Some(json!({ "prompt": "hi" })),
+            None,
+            None,
             None,
             None,
             None,
@@ -1083,11 +1144,15 @@ mod tests {
             Some(json!("tool_config not an object")),
             Some(json!("extension_config not an object")),
             Some("garbage-visibility".into()),
+            Some("   ".into()),
+            None,
         );
         assert!(
             cfg.is_empty(),
             "malformed row must degrade to empty config: {cfg:?}"
         );
+        // Blank model column ⇒ no override (contributes to is_empty()).
+        assert!(cfg.model.is_none());
         // Unknown visibility string → default public (never an error).
         assert_eq!(cfg.visibility, Visibility::Public);
     }
@@ -1102,9 +1167,57 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         assert!(cfg.conversation_workflow.is_none());
         assert_eq!(cfg.instructions.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn from_row_values_reads_model_and_clamps_iterations() {
+        // In range: kept verbatim.
+        let ok = AgentBehaviorConfig::from_row_values(
+            Some(json!({ "prompt": "hi" })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("groq/qwen".into()),
+            Some(8),
+        );
+        assert_eq!(ok.model.as_deref(), Some("groq/qwen"));
+        assert_eq!(ok.max_iterations, Some(8));
+
+        // Zero / negative clamps up to 1; huge clamps down to 64.
+        let low = AgentBehaviorConfig::from_row_values(
+            Some(json!({ "prompt": "hi" })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("  ".into()), // blank model ⇒ None
+            Some(0),
+        );
+        assert_eq!(low.model, None);
+        assert_eq!(low.max_iterations, Some(1));
+
+        let high = AgentBehaviorConfig::from_row_values(
+            Some(json!({ "prompt": "hi" })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(10_000),
+        );
+        assert_eq!(high.max_iterations, Some(64));
     }
 
     #[test]
