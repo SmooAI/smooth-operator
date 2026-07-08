@@ -30,8 +30,9 @@ public sealed class TurnRunner
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry? _confirmations;
+    private readonly TurnLimits _limits;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, TurnLimits? limits = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -45,6 +46,9 @@ public sealed class TurnRunner
         _confirmTools = confirmTools ?? Array.Empty<string>();
         // The session-keyed pending-confirmation registry the gate parks on (null → HITL off).
         _confirmations = confirmations;
+        // Per-turn output-token budget + agentic-iteration cap, plus the resolved model's hard output
+        // ceiling. Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20; EPIC th-1cc9fa).
+        _limits = limits ?? TurnLimits.Default;
     }
 
     /// <summary>True when <paramref name="toolName"/> matches a confirmation-gated pattern (substring,
@@ -89,7 +93,17 @@ public sealed class TurnRunner
         //    Registered tools (default none) are passed straight to the engine's agentic loop; the
         //    streaming block below already translates the resulting tool-call/result events into
         //    stream_chunks, so enabling tools is purely a matter of supplying them here.
-        var options = new AgentOptions { Instructions = _systemPrompt, Knowledge = _knowledge };
+        // MaxOutputTokens is clamped to the model's ModelMaxOutputTokens ceiling by the engine so a
+        // budget never exceeds what the model can physically emit (EPIC th-1cc9fa). The raised defaults
+        // (8192 / 20) give reasoning models room to think AND answer, and iterations to actually use tools.
+        var options = new AgentOptions
+        {
+            Instructions = _systemPrompt,
+            Knowledge = _knowledge,
+            MaxIterations = _limits.MaxIterations,
+            MaxOutputTokens = _limits.MaxTokens,
+            ModelMaxOutputTokens = _limits.ModelMaxOutputTokens,
+        };
         foreach (var tool in _tools)
         {
             options.Tools.Add(tool);

@@ -100,6 +100,20 @@ if (confirmTools.Length > 0)
     builder.Services.AddSingleton(new ConfirmTools(confirmTools));
 }
 
+// ── Per-turn limits: raised output-token budget + agentic-iteration cap (EPIC th-1cc9fa), plus the
+//    resolved model's HARD output ceiling clamped from the gateway's /model/info so a budget can
+//    never exceed what the model can physically emit (a reasoning model would otherwise burn the
+//    budget and return empty, or the upstream 400s). The ceiling fetch is best-effort at boot — this
+//    single-model server resolves it once rather than the Rust server's per-turn lazy cache; any
+//    gateway problem ⇒ null ⇒ unclamped. SMOOTH_MAX_TOKENS / SMOOTH_MAX_ITERATIONS override the
+//    defaults. ──
+var maxTokens = int.TryParse(Get("SMOOTH_MAX_TOKENS"), out var mt) && mt > 0 ? mt : TurnLimits.DefaultMaxTokens;
+var maxIterations = int.TryParse(Get("SMOOTH_MAX_ITERATIONS"), out var mi) && mi > 0 ? mi : TurnLimits.DefaultMaxIterations;
+int? modelCeiling = string.IsNullOrEmpty(gatewayKey)
+    ? null
+    : await ModelInfo.FetchCeilingAsync(EmbeddingHttpClient(gatewayUrl, gatewayKey), model);
+builder.Services.AddSingleton(new TurnLimits(maxTokens, maxIterations, modelCeiling));
+
 builder.Services.AddSmoothOperatorServer();
 
 var app = builder.Build();
