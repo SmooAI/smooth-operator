@@ -24,7 +24,7 @@ repository = "https://github.com/SmooAI/smooth-operator"
 # (SmooAI/smooth-operator-core). No more sibling path-dep / cross-repo Docker
 # context — the published crate is the single source. Bump this version to adopt
 # a newer core (then `cargo update -p smooai-smooth-operator-core`).
-smooai-smooth-operator-core = "0.16"
+smooai-smooth-operator-core = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "d03fa10", version = "0.16" }
 # Intra-workspace dep on the reference lib carries its version so the adapters /
 # ingestion / server that depend on it are publishable (path = local dev,
 # version = the crates.io requirement).

@@ -122,6 +122,7 @@ async fn empty_terminal_content_falls_back_to_streamed_reply() {
             conversation_id: CONVERSATION_ID,
             request_id: REQUEST_ID,
             user_message: "How mature are our processes?",
+            model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(scripted_mock())),
             reranker: None,

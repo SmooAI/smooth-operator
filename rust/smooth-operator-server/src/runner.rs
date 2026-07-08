@@ -237,6 +237,10 @@ pub struct TurnRequest<'a> {
     pub request_id: &'a str,
     /// The inbound user message.
     pub user_message: &'a str,
+    /// The resolved model's hard output ceiling (`max_output_tokens`) from the
+    /// gateway, or `None` when unknown. Clamps `max_tokens` to what the model can
+    /// emit via the engine's `with_model_ceiling`. `None` ⇒ unclamped (EPIC th-1cc9fa).
+    pub model_max_output: Option<u32>,
     /// **The requester's document-level entitlements.** Retrieval (the
     /// auto-injected `[Relevant knowledge]` context AND the `knowledge_search`
     /// tool) reads through `storage.knowledge_for_access(&access)`, so a
@@ -359,6 +363,7 @@ pub async fn run_streaming_turn(
         conversation_id,
         request_id,
         user_message,
+        model_max_output,
         access,
         llm_provider,
         reranker,
@@ -447,7 +452,9 @@ pub async fn run_streaming_turn(
     let config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
-        .with_prior_messages(prior);
+        .with_prior_messages(prior)
+        // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
+        .with_model_ceiling(model_max_output);
 
     let mut tools = ToolRegistry::new();
     // Build the knowledge_search tool over the SAME ACL-filtered handle, with the

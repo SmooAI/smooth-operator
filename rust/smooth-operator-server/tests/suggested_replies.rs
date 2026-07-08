@@ -52,6 +52,7 @@ async fn run_turn(deltas: &[&str]) -> (TurnResult, Vec<String>, String) {
             conversation_id: CONVERSATION_ID,
             request_id: REQUEST_ID,
             user_message: "How mature are our processes?",
+            model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(mock.clone()),
             reranker: None,
