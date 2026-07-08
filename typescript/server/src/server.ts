@@ -24,6 +24,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { ANONYMOUS_ACCESS } from './auth.js';
 import { Backplane, InMemoryBackplane } from './backplane.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
+import type { ModelCeilingResolver } from './modelCeiling.js';
 import type { Frame } from './protocol.js';
 import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
 import type { AuthVerifier } from './auth.js';
@@ -51,6 +52,14 @@ export interface ServerOptions {
      * client replies with `confirm_tool_action`.
      */
     confirmTools?: string[];
+    /** Model id for turns (default the engine's own default); forwarded to each connection's dispatcher. */
+    model?: string;
+    /**
+     * Best-effort per-model output-ceiling resolver (from the gateway's `/model/info`).
+     * When set, each turn clamps `max_tokens` to what the model can physically emit
+     * (EPIC th-1cc9fa). Absent (tests, keyless local) ⇒ unclamped, behaviour unchanged.
+     */
+    modelCeiling?: ModelCeilingResolver;
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -108,6 +117,8 @@ export function buildServer(options: ServerOptions): {
             systemPrompt: options.systemPrompt,
             tools: options.tools,
             confirmTools: options.confirmTools,
+            model: options.model,
+            modelCeiling: options.modelCeiling,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);
@@ -167,13 +178,22 @@ export async function serve(options: ServerOptions & { host?: string; port?: num
  * embeddable in-process. The TS analog of the Rust `serve_local` / `LocalServer`
  * and the C# in-memory host. Everything in memory, loopback bind, no auth.
  */
-export async function serveLocal(options: { chatClient: ChatClientLike; host?: string; port?: number; knowledge?: AccessKnowledge }): Promise<RunningServer> {
+export async function serveLocal(options: {
+    chatClient: ChatClientLike;
+    host?: string;
+    port?: number;
+    knowledge?: AccessKnowledge;
+    model?: string;
+    modelCeiling?: ModelCeilingResolver;
+}): Promise<RunningServer> {
     return serve({
         chatClient: options.chatClient,
         store: new InMemorySessionStore(),
         auth: new NoAuthVerifier(),
         backplane: new InMemoryBackplane(),
         knowledge: options.knowledge,
+        model: options.model,
+        modelCeiling: options.modelCeiling,
         host: options.host ?? '127.0.0.1',
         port: options.port ?? 0,
     });

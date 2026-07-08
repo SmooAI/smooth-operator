@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
+import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
@@ -52,6 +53,10 @@ export interface FrameDispatcherOptions {
      * connection). Created on demand if not supplied.
      */
     confirmations?: ConfirmationRegistry;
+    /** Model id for turns (default {@link DEFAULT_MODEL}); forwarded to the {@link TurnRunner}. */
+    model?: string;
+    /** Best-effort per-model output-ceiling resolver; forwarded to the {@link TurnRunner} (EPIC th-1cc9fa). */
+    modelCeiling?: ModelCeilingResolver;
 }
 
 export class FrameDispatcher {
@@ -63,6 +68,8 @@ export class FrameDispatcher {
     private readonly tools: Tool[];
     private readonly confirmTools: string[];
     private readonly confirmations: ConfirmationRegistry;
+    private readonly model?: string;
+    private readonly modelCeiling?: ModelCeilingResolver;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
 
@@ -75,6 +82,8 @@ export class FrameDispatcher {
         this.tools = options.tools ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations ?? new ConfirmationRegistry();
+        this.model = options.model;
+        this.modelCeiling = options.modelCeiling;
     }
 
     /**
@@ -213,6 +222,8 @@ export class FrameDispatcher {
             confirmTools: this.confirmTools,
             confirmations: this.confirmations,
             sessionId,
+            model: this.model,
+            modelCeiling: this.modelCeiling,
         });
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a

@@ -15,6 +15,7 @@ import { approve, deny, SmoothAgent } from '@smooai/smooth-operator-core';
 import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool } from '@smooai/smooth-operator-core';
 
 import type { ConfirmationRegistry } from './confirmation.js';
+import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Citation, Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
@@ -29,6 +30,25 @@ export interface TurnResult {
 const AUTO_CONTEXT_LIMIT = 3;
 const MAX_PRIOR_MESSAGES = 50;
 const CITATION_SNIPPET_MAX_CHARS = 280;
+
+/**
+ * Default model when the host doesn't set one. Matches the engine's own default so
+ * behaviour is unchanged; also the model the per-turn output ceiling is looked up for.
+ */
+export const DEFAULT_MODEL = 'claude-haiku-4-5';
+/**
+ * Default agent-loop iteration cap. Was the engine's chat-widget-sized 6 — too tight
+ * for any multi-step turn. Raised to 20 for agentic use (EPIC th-1cc9fa).
+ */
+export const DEFAULT_MAX_ITERATIONS = 20;
+/**
+ * Default `max_tokens` per LLM call. Was 512 (chat-widget sizing), which STARVES
+ * reasoning models — they spend the whole budget on `reasoning_content` and return
+ * empty `content`. Raised to 8192 (EPIC th-1cc9fa). Safe now that the per-model output
+ * ceiling clamps this down per request: a cap only bounds runaway output, it doesn't
+ * lengthen concise answers.
+ */
+export const DEFAULT_MAX_TOKENS = 8192;
 
 const DEFAULT_SYSTEM_PROMPT =
     'You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don\'t know.';
@@ -55,6 +75,14 @@ export interface TurnRunnerOptions {
     confirmations?: ConfirmationRegistry;
     /** The session id a parked confirmation is keyed by (so a `confirm_tool_action` frame routes here). */
     sessionId?: string;
+    /** Model id for the turn (default {@link DEFAULT_MODEL}); also the model whose output ceiling is looked up. */
+    model?: string;
+    /**
+     * Best-effort per-model output-ceiling resolver (from the gateway's `/model/info`).
+     * When set, each turn clamps `max_tokens` to `min(DEFAULT_MAX_TOKENS, ceiling)` via
+     * the engine's `modelMaxOutput`. Absent (tests, keyless local) ⇒ unclamped (EPIC th-1cc9fa).
+     */
+    modelCeiling?: ModelCeilingResolver;
 }
 
 export class TurnRunner {
@@ -66,6 +94,8 @@ export class TurnRunner {
     private readonly confirmTools: string[];
     private readonly confirmations?: ConfirmationRegistry;
     private readonly sessionId?: string;
+    private readonly model: string;
+    private readonly modelCeiling?: ModelCeilingResolver;
 
     constructor(options: TurnRunnerOptions) {
         this.chatClient = options.chatClient;
@@ -76,6 +106,8 @@ export class TurnRunner {
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations;
         this.sessionId = options.sessionId;
+        this.model = options.model ?? DEFAULT_MODEL;
+        this.modelCeiling = options.modelCeiling;
     }
 
     /** True when `name` matches a confirmation-gated pattern (substring, like the Rust hook). */
@@ -112,9 +144,22 @@ export class TurnRunner {
         // 2. Build the agent + replay prior history as the thread (before persisting
         //    this turn's inbound message). The engine consumes history as OpenAI-format
         //    messages passed to runStream.
-        const agentOptions: AgentOptions = { instructions: this.systemPrompt };
+        const agentOptions: AgentOptions = {
+            instructions: this.systemPrompt,
+            model: this.model,
+            maxTokens: DEFAULT_MAX_TOKENS,
+            maxIterations: DEFAULT_MAX_ITERATIONS,
+        };
         if (this.knowledge) agentOptions.knowledge = this.knowledge;
         if (this.tools.length > 0) agentOptions.tools = this.tools;
+
+        // Clamp max_tokens to the resolved model's output ceiling (best-effort; a
+        // missing/unknown ceiling ⇒ unclamped). Reuses the cached /model/info fetch.
+        // EPIC th-1cc9fa — the consumer half of the engine's model-output clamp.
+        if (this.modelCeiling) {
+            const ceiling = await this.modelCeiling(this.model);
+            if (ceiling !== undefined) agentOptions.modelMaxOutput = ceiling;
+        }
 
         // Write-confirmation HITL: when configured with tool patterns AND a registry
         // is present, install a HumanGate that parks the turn before a gated tool runs
