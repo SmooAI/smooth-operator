@@ -75,6 +75,11 @@ type TurnRunner struct {
 	currentStepID string
 	// judgeModel is the cheap model id the workflow judge uses ("" → DefaultJudgeModel).
 	judgeModel string
+	// modelCeiling is the active model's hard output ceiling (its max_output_tokens),
+	// sourced from the gateway's /model/info. The turn's max_tokens is clamped to
+	// min(DefaultMaxTokens, *modelCeiling) so it never exceeds what the model can emit.
+	// nil (the default) leaves the raised default unclamped (EPIC th-1cc9fa).
+	modelCeiling *int
 }
 
 // NewTurnRunner builds a runner over the engine chat client + session store. An empty
@@ -87,7 +92,7 @@ type TurnRunner struct {
 // and tools already filtered by the caller. workflow/currentStepID/judgeModel (all
 // zero-valued by default) drive the post-turn workflow judge; a nil workflow disables it,
 // so behavior is unchanged for freeform agents. SMOODEV-590.
-func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, workflow *ConversationWorkflow, currentStepID, judgeModel string) *TurnRunner {
+func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, workflow *ConversationWorkflow, currentStepID, judgeModel string, modelCeiling *int) *TurnRunner {
 	if systemPrompt == "" {
 		systemPrompt = defaultSystemPrompt
 	}
@@ -102,6 +107,7 @@ func NewTurnRunner(client core.ChatClient, store SessionStore, systemPrompt stri
 		workflow:      workflow,
 		currentStepID: currentStepID,
 		judgeModel:    judgeModel,
+		modelCeiling:  modelCeiling,
 	}
 }
 
@@ -161,6 +167,12 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	//    citations built above. r.systemPrompt is already assembled (base + per-agent
 	//    config + current workflow step) by the caller.
 	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge}
+	// Raised, no-longer-starving turn defaults (8192 / 20), with max_tokens clamped to
+	// the model's output ceiling when known (nil ⇒ the raised default). Setting these
+	// explicitly (rather than relying on the engine defaults) keeps the server robust
+	// to the pinned engine version and mirrors the Rust server config (EPIC th-1cc9fa).
+	opts.MaxTokens = clampMaxTokens(DefaultMaxTokens, r.modelCeiling)
+	opts.MaxIterations = DefaultMaxIterations
 
 	// Write-confirmation HITL: when configured with tool patterns AND a registry is
 	// present, install a HumanGate that parks the turn before a gated tool runs (emit

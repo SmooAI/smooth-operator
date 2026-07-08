@@ -34,7 +34,7 @@ func TestTurnUsesAgentInstructions(t *testing.T) {
 	mock := core.NewMockLlmProvider().PushText("Hello from Bob.")
 
 	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Instructions: "You are Bob, a laconic support agent."}, "", true)
-	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "")
+	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "", nil)
 	if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi", func(map[string]any) {}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestTurnDefaultPromptWithoutConfig(t *testing.T) {
 	mock := core.NewMockLlmProvider().PushText("hi")
 
 	prompt := assembleSystemPrompt(defaultSystemPrompt, nil, "", true)
-	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "")
+	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "", nil)
 	if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi", func(map[string]any) {}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestTurnInjectsWorkflowStepAndAdvances(t *testing.T) {
 	mock := core.NewMockLlmProvider().PushText("Nice to meet you, Alice.").PushText(`{"verdict":"yes"}`)
 
 	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Workflow: wf}, "", true)
-	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, wf, "", "")
+	runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, wf, "", "", nil)
 	result, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi, I'm Alice", func(map[string]any) {})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -96,7 +96,7 @@ func TestTurnWorkflowStaysOnStepWhenNotMet(t *testing.T) {
 	wf := sampleWorkflow()
 	mock := core.NewMockLlmProvider().PushText("How can I help?").PushText(`{"verdict":"no"}`)
 
-	runner := NewTurnRunner(mock, store, "", nil, nil, nil, nil, wf, "", "")
+	runner := NewTurnRunner(mock, store, "", nil, nil, nil, nil, wf, "", "", nil)
 	result, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi", func(map[string]any) {})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -115,7 +115,7 @@ func TestTurnWorkflowJudgeFailureDoesNotFailTurn(t *testing.T) {
 	// Only the turn reply is queued; the judge call gets an empty-queue error.
 	mock := core.NewMockLlmProvider().PushText("Hi there.")
 
-	runner := NewTurnRunner(mock, store, "", nil, nil, nil, nil, wf, "", "")
+	runner := NewTurnRunner(mock, store, "", nil, nil, nil, nil, wf, "", "", nil)
 	result, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hi", func(map[string]any) {})
 	if err != nil {
 		t.Fatalf("a judge failure must not fail the turn: %v", err)
@@ -143,7 +143,7 @@ func TestPerAgentIsolation(t *testing.T) {
 		cfg, _ := resolver.Resolve(context.Background(), agentID)
 		prompt := assembleSystemPrompt(defaultSystemPrompt, cfg, session.CurrentStepID, true)
 		mock := core.NewMockLlmProvider().PushText("ok")
-		runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "")
+		runner := NewTurnRunner(mock, store, prompt, nil, nil, nil, nil, nil, "", "", nil)
 		if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r", "hi", func(map[string]any) {}); err != nil {
 			t.Fatalf("run %s: %v", agentID, err)
 		}

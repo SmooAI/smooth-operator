@@ -36,7 +36,7 @@ func (f *fakeOtp) VerifyOtp(_ context.Context, _ /*sessionID*/, code string) Otp
 // otpDispatcher builds a bare dispatcher wired only with a store + OTP service — enough to
 // drive verify_otp / offer-flow handlers directly (no client/tools needed).
 func otpDispatcher(store SessionStore, svc OtpService) *FrameDispatcher {
-	return NewFrameDispatcher(store, nil, AccessContext{}, "", nil, nil, nil, nil, nil, "", nil, nil, svc)
+	return NewFrameDispatcher(store, nil, AccessContext{}, "", nil, nil, nil, nil, nil, "", nil, nil, svc, nil)
 }
 
 // capture returns a sink that appends every emitted event, and the slice it fills.
