@@ -150,8 +150,8 @@ importers:
   typescript/server:
     dependencies:
       '@smooai/smooth-operator-core':
-        specifier: ^0.10.1
-        version: 0.10.1(ws@8.21.0)
+        specifier: ^0.20.4
+        version: 0.20.4(ws@8.21.0)
       ws:
         specifier: ^8.18.0
         version: 8.21.0
@@ -1108,8 +1108,8 @@ packages:
   '@rushstack/eslint-patch@1.16.1':
     resolution: {integrity: sha512-TvZbIpeKqGQQ7X0zSCvPH9riMSFQFSggnfBjFZ1mEoILW+UuXCKwOoPcgjMwiUtRqFZ8jWhPJc4um14vC6I4ag==}
 
-  '@smooai/smooth-operator-core@0.10.1':
-    resolution: {integrity: sha512-D/v2DhWJti11VQUmnmOJcOD/usjDhkcaD0fOAqi/n6n66TRv2pWy7xJ9YfPNL/GIjIMeEtgKJISqGQsKWMk2eg==}
+  '@smooai/smooth-operator-core@0.20.4':
+    resolution: {integrity: sha512-uESx0egfEYMnZmSWitppEterF/gQmramIRPNCtSfY73xXEKFEE1Xkb2ZyTXdZcDce6F5JZmaNwawP0DuYOLr9w==}
 
   '@swc/counter@0.1.3':
     resolution: {integrity: sha512-e2BR4lsJkkRlKZ/qCHPw9ZaSxc0MVUd7gtbtaB7aMvHeJVYe8sOB8DBZkP2DtISHGSku9sCK6T6cnY0CtXrOCQ==}
@@ -4172,7 +4172,7 @@ snapshots:
 
   '@rushstack/eslint-patch@1.16.1': {}
 
-  '@smooai/smooth-operator-core@0.10.1(ws@8.21.0)':
+  '@smooai/smooth-operator-core@0.20.4(ws@8.21.0)':
     dependencies:
       openai: 4.104.0(ws@8.21.0)
       smol-toml: 1.7.0

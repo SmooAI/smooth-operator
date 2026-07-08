@@ -19,6 +19,7 @@ import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
 import { buildExtensionHost } from './extensions.js';
 import { availableChannels, isContactEmpty, type OtpContact, type OtpRefusal, type OtpService } from './otp.js';
+import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
@@ -81,6 +82,10 @@ export interface FrameDispatcherOptions {
      * connection). Created on demand if not supplied.
      */
     confirmations?: ConfirmationRegistry;
+    /** Model id for turns (default {@link DEFAULT_MODEL}); forwarded to the {@link TurnRunner}. */
+    model?: string;
+    /** Best-effort per-model output-ceiling resolver; forwarded to the {@link TurnRunner} (EPIC th-1cc9fa). */
+    modelCeiling?: ModelCeilingResolver;
 }
 
 export class FrameDispatcher {
@@ -96,6 +101,8 @@ export class FrameDispatcher {
     private readonly judgeModel?: string;
     private readonly sessionAuthenticator?: SessionAuthenticator;
     private readonly otpService?: OtpService;
+    private readonly model?: string;
+    private readonly modelCeiling?: ModelCeilingResolver;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
 
@@ -112,6 +119,8 @@ export class FrameDispatcher {
         this.judgeModel = options.judgeModel;
         this.sessionAuthenticator = options.sessionAuthenticator;
         this.otpService = options.otpService;
+        this.model = options.model;
+        this.modelCeiling = options.modelCeiling;
     }
 
     /**
@@ -294,6 +303,8 @@ export class FrameDispatcher {
             workflow: agentConfig?.conversationWorkflow,
             currentStepId: session.currentStepId,
             judgeModel: this.judgeModel,
+            model: this.model,
+            modelCeiling: this.modelCeiling,
         });
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
