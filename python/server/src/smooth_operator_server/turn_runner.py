@@ -13,7 +13,7 @@ for later phases (the MVP wires the knowledge base straight through).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable
 
 from smooth_operator_core import (
@@ -31,10 +31,36 @@ from smooth_operator_core import (
 
 from . import protocol
 from .confirmation import ConfirmationRegistry
+from .model_info import model_output_ceiling
 from .session_store import MessageDirection, SessionStore
 
 #: Max prior turns replayed into the thread for memory (bounds context growth).
 MAX_PRIOR_MESSAGES = 50
+
+#: The engine's default model when the server pins none (matches
+#: ``AgentOptions.model`` in smooth-operator-core). Used to look up the output
+#: ceiling for the model the turn will actually send.
+DEFAULT_MODEL = "claude-haiku-4-5"
+
+#: Per-call ``max_tokens`` sent to the gateway. Raised from the old chat-widget
+#: default of 512 — that STARVES reasoning models (they exhaust the budget on
+#: reasoning and return empty). Mirrors the Rust server's ``DEFAULT_MAX_TOKENS``
+#: 512→8192 (EPIC th-1cc9fa). The engine still clamps this DOWN to the model's real
+#: output ceiling (:func:`model_output_ceiling`), so raising it is safe.
+DEFAULT_MAX_TOKENS = 8192
+
+#: Agent-loop iteration cap per turn. Raised from 6 — a tool-using reasoning turn
+#: routinely needs more than six model round-trips. Mirrors the Rust server's
+#: ``DEFAULT_MAX_ITERATIONS`` 6→20 (EPIC th-1cc9fa).
+DEFAULT_MAX_ITERATIONS = 20
+
+#: Whether the installed smooth-operator-core supports the ceiling clamp field.
+#: The server pins the PUBLISHED core (see ``pyproject.toml``); a core predating the
+#: clamp has no ``model_max_output`` on ``AgentOptions``, so passing it would raise
+#: ``TypeError``. Feature-detect: thread the ceiling only when the field exists, so
+#: this stays green on the pinned core and activates automatically once a core with
+#: the clamp is released. (Release-ordering: core PR ships + publishes first.)
+_CORE_SUPPORTS_CEILING = any(f.name == "model_max_output" for f in fields(AgentOptions))
 
 #: Top-K knowledge hits surfaced as auto-context citations (what grounded the
 #: answer). Matches the engine's auto-context injection and the TS/C#/Rust servers.
@@ -120,11 +146,24 @@ class TurnRunner:
         options_kwargs: dict[str, Any] = {
             "instructions": self._system_prompt,
             "knowledge": self._knowledge,
+            # Raised, anti-starvation sizing (see the module constants). The engine
+            # clamps max_tokens DOWN to the model's real output ceiling below.
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "max_iterations": DEFAULT_MAX_ITERATIONS,
         }
         if self._tools:
             options_kwargs["tools"] = self._tools
         if self._model is not None:
             options_kwargs["model"] = self._model
+
+        # Clamp max_tokens to what the resolved model can physically emit: look up
+        # its output ceiling from the gateway (best-effort; None ⇒ unclamped) and
+        # thread it into the engine's clamp. Feature-detected against the pinned
+        # core (see `_CORE_SUPPORTS_CEILING`).
+        if _CORE_SUPPORTS_CEILING:
+            ceiling = await model_output_ceiling(self._model or DEFAULT_MODEL)
+            if ceiling is not None:
+                options_kwargs["model_max_output"] = ceiling
 
         # Write-confirmation HITL: when configured with tool patterns AND a registry
         # is present, install a HumanGate that parks the turn before a gated tool
