@@ -25,6 +25,7 @@ public sealed class FrameDispatcher
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry _confirmations;
+    private readonly TurnLimits _limits;
 
     // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
     // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
@@ -41,7 +42,8 @@ public sealed class FrameDispatcher
         IReranker? reranker = null,
         IReadOnlyList<AITool>? tools = null,
         IReadOnlyList<string>? confirmTools = null,
-        ConfirmationRegistry? confirmations = null)
+        ConfirmationRegistry? confirmations = null,
+        TurnLimits? limits = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -57,6 +59,9 @@ public sealed class FrameDispatcher
         // Session-keyed pending-confirmation registry shared with each spawned turn so a
         // confirm_tool_action frame resolves the verdict a parked turn awaits. One per connection.
         _confirmations = confirmations ?? new ConfirmationRegistry();
+        // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
+        // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
+        _limits = limits ?? TurnLimits.Default;
     }
 
     /// <summary>
@@ -208,7 +213,7 @@ public sealed class FrameDispatcher
         // 2. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools, _confirmTools, _confirmations);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, _tools, _confirmTools, _confirmations, _limits);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's

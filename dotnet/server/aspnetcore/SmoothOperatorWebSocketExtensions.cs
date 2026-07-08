@@ -81,7 +81,10 @@ public static class SmoothOperatorWebSocketExtensions
             // Tool-name patterns gated behind write-confirmation HITL (default none — the DI analog of
             // Python's ServerState.confirm_tools). Each connection gets its own ConfirmationRegistry
             // (a confirm_tool_action frame and the parked turn it resumes are always on the same one).
-            confirmTools: services.GetService<ConfirmTools>()?.Patterns);
+            confirmTools: services.GetService<ConfirmTools>()?.Patterns,
+            // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
+            // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
+            limits: services.GetService<TurnLimits>());
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
