@@ -8,7 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     # The engine the server runs in-process per turn. `SmoothAgent.run_stream(...)`
     # is mapped onto the protocol's stream_token / stream_chunk / eventual_response.
-    "smooai-smooth-operator-core>=1.3",
+    "smooai-smooth-operator-core>=1.3.2",
     # asyncio WebSocket transport (server side).
     "websockets>=12",
 ]
@@ -27,15 +27,6 @@ dev = [
     # The turn round-trip test drives the engine on MockLlmProvider, which ships
     # in smooai-smooth-operator-core — no gateway needed.
 ]
-
-[tool.uv.sources]
-# The SEP ExtensionHost the server hosts extensions through (smooth_operator_core.
-# extension) landed on core main but is not yet on the PyPI release the version
-# constraint above resolves. Pin the engine to that merge commit until the next
-# core PyPI release, then drop this source and bump the constraint. (SEP host —
-# smooth-operator-core#33; the same engine-vs-PyPI ordering the Rust side handles
-# with a path/version dep.)
-smooai-smooth-operator-core = { git = "https://github.com/SmooAI/smooth-operator-core.git", subdirectory = "python/core", rev = "e5d1068578cd90bec975f367935bedf757f0da82" }
 
 [build-system]
 requires = ["hatchling"]
