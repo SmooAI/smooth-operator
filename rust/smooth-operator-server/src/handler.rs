@@ -648,11 +648,10 @@ async fn handle_send_message(
         }
     };
 
-    // Per-turn model override (Smooth Modes / `/smooth-mode` preset): when the
-    // send_message body carries a non-empty `model`, run THIS turn on it,
-    // overriding the server's configured default model. Absent or blank ⇒ the
-    // config default is kept, so behavior is unchanged when the field is unused.
-    let llm = apply_model_override(llm, parsed);
+    // NB: the model overrides (per-agent config default, then per-turn Smooth
+    // Modes) are applied below, AFTER the per-agent `AgentBehaviorConfig` resolves
+    // (SEAM 3) — see `apply_agent_model_override` + `apply_model_override`. Nothing
+    // between here and there reads `llm.model`.
 
     // Ack: processing started.
     let _ = sink.send(protocol::immediate_response(
@@ -730,6 +729,21 @@ async fn handle_send_message(
     // (SEAM 2) is used, unchanged. Isolated per agent by construction.
     let agent_cfg: Option<AgentBehaviorConfig> =
         state.agent_config.resolve(&session.agent_id).await;
+
+    // SEAM 3 — model precedence, applied low → high so the winner clobbers last:
+    //   1. server default (`SMOOTH_AGENT_MODEL`, already in `llm`),
+    //   2. the per-AGENT `model` override (when configured),
+    //   3. the per-TURN `send_message.model` (Smooth Modes) — always wins.
+    let llm = apply_agent_model_override(llm, agent_cfg.as_ref());
+    let llm = apply_model_override(llm, parsed);
+
+    // SEAM 3 — per-agent agent-loop cap: the resolved `max_iterations`, else the
+    // server default (`SMOOTH_AGENT_MAX_ITERATIONS`). Computed here (not in the
+    // spawned turn) so the `Copy` value is simply moved into the task below.
+    let max_iterations = agent_cfg
+        .as_ref()
+        .and_then(|c| c.max_iterations)
+        .unwrap_or(state.config.max_iterations);
 
     // SEAM 2/3 — resolve the system prompt in priority order:
     //   1. the per-AGENT instructions (+ personality), when set,
@@ -841,7 +855,7 @@ async fn handle_send_message(
             TurnRequest {
                 storage: state_for_turn.storage.clone(),
                 llm,
-                max_iterations: state_for_turn.config.max_iterations,
+                max_iterations,
                 conversation_id: &conversation_id,
                 request_id: &request_id_owned,
                 user_message: &message,
@@ -1032,6 +1046,22 @@ fn handle_confirm_tool_action(
 /// stays as resolved — only the model id changes.
 fn apply_model_override(mut llm: LlmConfig, body: &Value) -> LlmConfig {
     if let Some(model) = body.get("model").and_then(Value::as_str) {
+        let model = model.trim();
+        if !model.is_empty() {
+            llm.model = model.to_string();
+        }
+    }
+    llm
+}
+
+/// Apply a per-agent `model` override (from the resolved [`AgentBehaviorConfig`])
+/// to a config. `Some(model)` sets this agent's default gateway model, overriding
+/// the server default; `None` (no per-agent config, or no `model` set) leaves the
+/// config unchanged. `from_row_values` already rejects blank models, but a defensive
+/// trim keeps this a no-op on whitespace. An explicit per-turn `send_message.model`
+/// is layered on top by [`apply_model_override`] and wins.
+fn apply_agent_model_override(mut llm: LlmConfig, cfg: Option<&AgentBehaviorConfig>) -> LlmConfig {
+    if let Some(model) = cfg.and_then(|c| c.model.as_deref()) {
         let model = model.trim();
         if !model.is_empty() {
             llm.model = model.to_string();
@@ -1491,5 +1521,55 @@ mod tests {
             apply_model_override(base_llm(), &wrong_type).model,
             "claude-haiku-4-5"
         );
+    }
+
+    fn cfg_with_model(model: Option<&str>) -> AgentBehaviorConfig {
+        AgentBehaviorConfig {
+            model: model.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_model_override_present_replaces_default() {
+        let cfg = cfg_with_model(Some("claude-sonnet-5"));
+        assert_eq!(
+            apply_agent_model_override(base_llm(), Some(&cfg)).model,
+            "claude-sonnet-5"
+        );
+    }
+
+    #[test]
+    fn agent_model_override_absent_keeps_default() {
+        // No per-agent config at all.
+        assert_eq!(
+            apply_agent_model_override(base_llm(), None).model,
+            "claude-haiku-4-5"
+        );
+        // Config present but no model set.
+        let cfg = cfg_with_model(None);
+        assert_eq!(
+            apply_agent_model_override(base_llm(), Some(&cfg)).model,
+            "claude-haiku-4-5"
+        );
+    }
+
+    #[test]
+    fn per_turn_model_wins_over_per_agent() {
+        // Precedence as wired in `process_send_message`: agent override first,
+        // then the per-turn body override on top — the turn model must win.
+        let cfg = cfg_with_model(Some("claude-sonnet-5"));
+        let body = json!({ "model": "claude-opus-4-8" });
+        let llm = apply_model_override(apply_agent_model_override(base_llm(), Some(&cfg)), &body);
+        assert_eq!(llm.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn per_agent_model_used_when_turn_body_absent() {
+        // No per-turn model → the per-agent default stands.
+        let cfg = cfg_with_model(Some("claude-sonnet-5"));
+        let body = json!({ "message": "hi" });
+        let llm = apply_model_override(apply_agent_model_override(base_llm(), Some(&cfg)), &body);
+        assert_eq!(llm.model, "claude-sonnet-5");
     }
 }

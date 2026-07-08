@@ -16,11 +16,31 @@ the same).
 | --- | --- | --- |
 | `SMOOTH_AGENT_BIND` | `127.0.0.1` | Bind address. Set `0.0.0.0` in k8s/containers so the Service/Ingress can reach the pod. |
 | `SMOOTH_AGENT_PORT` | `8787` | TCP port (the WS endpoint is `ws://host:port/ws`). |
-| `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id requested from the gateway. |
+| `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Default model id requested from the gateway. **Fallback only** — a per-agent `agents.model` overrides it, and a per-turn `send_message.model` (Smooth Modes) overrides that. See below. |
 | `SMOOTH_AGENT_SEED_KB` | *(unset)* | `1` seeds a couple of distinctive demo docs on startup. |
-| `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
+| `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Default agent-loop iteration cap per turn. **Fallback only** — a per-agent `agents.max_iterations` (clamped to `1..=64`) overrides it. See below. |
 | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |
 | `RUST_LOG` | `info,smooth_operator=info` | Log verbosity (independent of OTLP export). |
+
+### Per-agent `model` / `max_iterations` overrides
+
+`SMOOTH_AGENT_MODEL` and `SMOOTH_AGENT_MAX_ITERATIONS` are **deployment-wide
+defaults**. A multi-tenant host that installs an `AgentConfigResolver` (e.g. the
+Postgres adapter over the monorepo `agents` table) can set these **per agent**, so
+two agents in the same deployment can run on different models or loop caps:
+
+- **`agents.model`** (text) — the gateway model id for this agent's turns. Blank /
+  whitespace ⇒ ignored (fall back to `SMOOTH_AGENT_MODEL`).
+- **`agents.max_iterations`** (integer) — this agent's loop cap. Clamped to
+  `1..=64` (out-of-range values are clamped with a `warn`).
+
+Resolution order (highest wins): a **per-turn** `send_message.model` (Smooth
+Modes) → the **per-agent** `agents.model` → `SMOOTH_AGENT_MODEL`. For the loop cap
+there is no per-turn knob: **per-agent** `agents.max_iterations` → `SMOOTH_AGENT_MAX_ITERATIONS`.
+A missing column / absent row / unset value falls back exactly as before, so a
+standalone deploy is unchanged. The host controls the `SELECT`; the reference
+Postgres adapter reads both columns tolerantly (a DB predating them degrades to
+the global default).
 
 ## LLM gateway (and embeddings / rerank)
 

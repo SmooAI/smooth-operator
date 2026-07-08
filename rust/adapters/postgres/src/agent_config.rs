@@ -54,7 +54,7 @@ impl PgAgentConfigResolver {
 
         let row = match client
             .query_opt(
-                "SELECT instructions, personality, greeting, conversation_workflow, tool_config, extension_config, visibility \
+                "SELECT instructions, personality, greeting, conversation_workflow, tool_config, extension_config, visibility, model, max_iterations \
                  FROM agents WHERE id = $1",
                 &[&id],
             )
@@ -82,6 +82,18 @@ impl PgAgentConfigResolver {
         let extension_config: Option<serde_json::Value> =
             row.try_get("extension_config").ok().flatten();
         let visibility: Option<String> = row.try_get("visibility").ok().flatten();
+        // Per-agent model + loop-cap overrides (SMOODEV-2172). Same forward-compat
+        // read as `extension_config`: a standalone deploy whose `agents` table
+        // predates these columns errors on the read, `.ok()` swallows it, and we
+        // fall back to the global `SMOOTH_AGENT_MODEL` / `SMOOTH_AGENT_MAX_ITERATIONS`
+        // defaults. `max_iterations` is read as `i32` (drizzle `integer` = int4) and
+        // widened; `from_row_values` clamps it to `1..=64`.
+        let model: Option<String> = row.try_get("model").ok().flatten();
+        let max_iterations: Option<i64> = row
+            .try_get::<_, Option<i32>>("max_iterations")
+            .ok()
+            .flatten()
+            .map(i64::from);
 
         let config = AgentBehaviorConfig::from_row_values(
             instructions,
@@ -91,6 +103,8 @@ impl PgAgentConfigResolver {
             tool_config,
             extension_config,
             visibility,
+            model,
+            max_iterations,
         );
         // Discriminator is ROW EXISTENCE, not `is_empty()`: `query_opt`'s `None`
         // (handled above via `row?`) is the only "no per-agent config" case. A row
