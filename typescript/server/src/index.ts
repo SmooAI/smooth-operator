@@ -27,8 +27,11 @@ export type { AccessKnowledge, FrameDispatcherOptions } from './frameDispatcher.
 
 export { ConfirmationRegistry } from './confirmation.js';
 
-export { TurnRunner } from './turnRunner.js';
+export { DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, TurnRunner } from './turnRunner.js';
 export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
+
+export { createGatewayModelCeilingResolver, extractModelCeilings } from './modelCeiling.js';
+export type { FetchLike, ModelCeilingResolver } from './modelCeiling.js';
 
 export { InMemorySessionStore } from './sessionStore.js';
 export type { MessageDirection, SessionStore, StoredMessage, StoredSession } from './sessionStore.js';
