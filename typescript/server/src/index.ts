@@ -27,7 +27,7 @@ export type { AccessKnowledge, FrameDispatcherOptions } from './frameDispatcher.
 
 export { ConfirmationRegistry } from './confirmation.js';
 
-export { DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
+export { DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
 export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
 
 export { assembleSystemPrompt, parseAgentConfig, StaticAgentConfigResolver } from './agentConfig.js';
@@ -49,6 +49,9 @@ export {
     resolveCurrentStep,
 } from './workflow.js';
 export type { ConversationWorkflow, ConversationWorkflowStep, JudgeStepInput, WorkflowJudgeVerdict } from './workflow.js';
+
+export { createGatewayModelCeilingResolver, extractModelCeilings } from './modelCeiling.js';
+export type { FetchLike, ModelCeilingResolver } from './modelCeiling.js';
 
 export { InMemorySessionStore } from './sessionStore.js';
 export type { MessageDirection, SessionStore, StoredMessage, StoredSession } from './sessionStore.js';
