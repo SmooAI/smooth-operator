@@ -1,6 +1,6 @@
 [package]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.21.4"
+version = "1.22.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
