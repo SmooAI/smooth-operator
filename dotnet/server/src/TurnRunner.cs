@@ -32,8 +32,9 @@ public sealed class TurnRunner
     private readonly ConfirmationRegistry? _confirmations;
     private readonly AgentConfig _agentConfig;
     private readonly IWorkflowJudge? _judge;
+    private readonly TurnLimits _limits;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -53,6 +54,9 @@ public sealed class TurnRunner
         // Post-turn workflow judge (null ⇒ no workflow advancement even if a workflow is configured;
         // the current step is still rendered, it just never advances). Wired by the host.
         _judge = judge;
+        // Per-turn output-token budget + agentic-iteration cap, plus the resolved model's hard output
+        // ceiling. Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20; EPIC th-1cc9fa).
+        _limits = limits ?? TurnLimits.Default;
     }
 
     /// <summary>
@@ -143,7 +147,17 @@ public sealed class TurnRunner
         // empty history means this is the agent's first reply, so the greeting section is rendered.
         var priorMessages = await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false);
         var resolvedPrompt = BuildSystemPrompt(currentStepId, isFirstTurn: priorMessages.Count == 0);
-        var options = new AgentOptions { Instructions = resolvedPrompt, Knowledge = _knowledge };
+        // MaxOutputTokens is clamped to the model's ModelMaxOutputTokens ceiling by the engine so a
+        // budget never exceeds what the model can physically emit (EPIC th-1cc9fa). The raised defaults
+        // (8192 / 20) give reasoning models room to think AND answer, and iterations to actually use tools.
+        var options = new AgentOptions
+        {
+            Instructions = resolvedPrompt,
+            Knowledge = _knowledge,
+            MaxIterations = _limits.MaxIterations,
+            MaxOutputTokens = _limits.MaxTokens,
+            ModelMaxOutputTokens = _limits.ModelMaxOutputTokens,
+        };
         foreach (var tool in _tools)
         {
             options.Tools.Add(tool);

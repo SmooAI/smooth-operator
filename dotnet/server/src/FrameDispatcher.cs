@@ -30,6 +30,7 @@ public sealed class FrameDispatcher
     private readonly IWorkflowJudge? _judge;
     private readonly ISessionAuthenticator _authenticator;
     private readonly IOtpService? _otpService;
+    private readonly TurnLimits _limits;
 
     // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
     // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
@@ -50,7 +51,8 @@ public sealed class FrameDispatcher
         IAgentConfigResolver? agentConfigResolver = null,
         IWorkflowJudge? judge = null,
         ISessionAuthenticator? authenticator = null,
-        IOtpService? otpService = null)
+        IOtpService? otpService = null,
+        TurnLimits? limits = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -77,6 +79,9 @@ public sealed class FrameDispatcher
         _authenticator = authenticator ?? new StoreSessionAuthenticator(_store);
         // Host OTP seam. Absent ⇒ no OTP is ever offered and verify_otp fails closed (unchanged).
         _otpService = otpService;
+        // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
+        // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
+        _limits = limits ?? TurnLimits.Default;
     }
 
     /// <summary>
@@ -265,7 +270,7 @@ public sealed class FrameDispatcher
         // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge, _limits);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's

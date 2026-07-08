@@ -101,7 +101,10 @@ public static class SmoothOperatorWebSocketExtensions
             authenticator: services.GetService<ISessionAuthenticator>(),
             // Host OTP seam: a registered IOtpService turns a refused end_user tool into an OTP offer
             // and answers verify_otp. Absent ⇒ no OTP offered, verify_otp fails closed (unchanged).
-            otpService: services.GetService<IOtpService>());
+            otpService: services.GetService<IOtpService>(),
+            // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
+            // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
+            limits: services.GetService<TurnLimits>());
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
