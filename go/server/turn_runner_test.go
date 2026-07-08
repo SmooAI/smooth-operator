@@ -18,7 +18,7 @@ func runTurn(t *testing.T, knowledge core.Knowledge, reply, userMessage string) 
 		t.Fatalf("create session: %v", err)
 	}
 	mock := core.NewMockLlmProvider().PushText(reply)
-	runner := NewTurnRunner(mock, store, "", knowledge, nil, nil, nil, nil, "", "")
+	runner := NewTurnRunner(mock, store, "", knowledge, nil, nil, nil, nil, "", "", nil)
 	result, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", userMessage, func(map[string]any) {})
 	if err != nil {
 		t.Fatalf("run turn: %v", err)

@@ -48,6 +48,10 @@ type FrameDispatcher struct {
 	// end_user tool on a session with a contact triggers the OTP-offer flow, and verify_otp
 	// validates codes through it. th-8078dd.
 	otpService OtpService
+	// modelCeiling is the active model's hard output ceiling (max_output_tokens) from
+	// the gateway's /model/info, forwarded to every turn runner to clamp max_tokens.
+	// nil → the raised default is unclamped (EPIC th-1cc9fa).
+	modelCeiling *int
 	// turns tracks in-flight spawned send_message turns so the connection loop can wait
 	// for them to finish (and flush their eventual_response) on teardown — the
 	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
@@ -59,7 +63,7 @@ type FrameDispatcher struct {
 // knowledge retriever (default nil) and tools (default none) are threaded into every
 // turn the runner builds. confirmTools + confirmations wire write-confirmation HITL;
 // pass nil/empty + a registry to disable.
-func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string, authRequiringTools map[string]bool, sessionAuth SessionAuthenticator, otpService OtpService) *FrameDispatcher {
+func NewFrameDispatcher(store SessionStore, client core.ChatClient, access AccessContext, systemPrompt string, knowledge core.Knowledge, tools []core.Tool, confirmTools []string, confirmations *ConfirmationRegistry, agentConfigs AgentConfigResolver, judgeModel string, authRequiringTools map[string]bool, sessionAuth SessionAuthenticator, otpService OtpService, modelCeiling *int) *FrameDispatcher {
 	if confirmations == nil {
 		confirmations = NewConfirmationRegistry()
 	}
@@ -77,6 +81,7 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 		authRequiringTools: authRequiringTools,
 		sessionAuth:        sessionAuth,
 		otpService:         otpService,
+		modelCeiling:       modelCeiling,
 	}
 }
 
@@ -256,7 +261,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// Tear the extension host down when the turn finishes: unpark any hung
 		// ui/confirm and shut the subprocesses down. No-op when no host was built.
 		defer extTurn.Close(ctx)
-		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel)
+		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
 		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean

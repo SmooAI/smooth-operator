@@ -63,6 +63,13 @@ type Server struct {
 	// validates codes through it. th-8078dd.
 	otpService OtpService
 
+	// modelCeiling is the active model's hard output ceiling (max_output_tokens) from
+	// the gateway's /model/info (default nil → the raised per-turn max_tokens default is
+	// unclamped). A host resolves it via modelOutputCeiling and installs it with
+	// WithModelCeiling so every turn's max_tokens is capped to what the model can emit
+	// (EPIC th-1cc9fa).
+	modelCeiling *int
+
 	// drainCtx is the single shutdown source for the whole server (one source,
 	// default uncancelled). Each connection loop selects on its Done() so an
 	// in-flight turn can finish before the loop exits (graceful SIGTERM drain).
@@ -111,6 +118,14 @@ func WithKnowledge(k core.Knowledge) Option { return func(srv *Server) { srv.kno
 // confirm_tool_action. Empty preserves byte-for-byte behavior from before HITL.
 func WithConfirmTools(tools []string) Option {
 	return func(srv *Server) { srv.confirmTools = tools }
+}
+
+// WithModelCeiling sets the active model's hard output ceiling (max_output_tokens),
+// used to clamp every turn's max_tokens to what the model can physically emit
+// (default nil → the raised default is unclamped). Resolve it from the gateway's
+// /model/info via modelOutputCeiling. EPIC th-1cc9fa.
+func WithModelCeiling(ceiling *int) Option {
+	return func(srv *Server) { srv.modelCeiling = ceiling }
 }
 
 // WithAgentConfigResolver installs the per-agent config source (instructions, workflow,
@@ -289,7 +304,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// the parked turn it resumes are always on the same connection (the session id keys
 	// within it), so the registry need not be server-wide.
 	confirmations := NewConfirmationRegistry()
-	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth, s.otpService)
+	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth, s.otpService, s.modelCeiling)
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits
