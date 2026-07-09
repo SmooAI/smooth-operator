@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::access_control::AccessContext;
+use smooth_operator::adapter::ConversationUpdate;
 use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel};
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
@@ -73,6 +74,9 @@ pub async fn handle_frame(
         }
         Some("list_conversations") => {
             handle_list_conversations(state, auth_org, &parsed, request_id, sink).await;
+        }
+        Some("rename_conversation") => {
+            handle_rename_conversation(state, &parsed, request_id, sink).await;
         }
         Some("send_message") => {
             handle_send_message(state, access, &parsed, request_id, sink).await;
@@ -648,14 +652,23 @@ async fn handle_list_conversations(
     ));
 }
 
-/// Derive a sidebar title: a truncated preview of the FIRST inbound (user)
-/// message, falling back to the conversation's `name`. `messages` is oldest-first.
-fn conversation_title(messages: &[smooth_operator::domain::Message], fallback: &str) -> String {
+/// Derive a sidebar title. A **meaningful** conversation `name` — an auto-title
+/// or a manual rename, i.e. anything not the default `Session <uuid>` — wins, so
+/// titles set by [`maybe_auto_title`] / [`handle_rename_conversation`] surface in
+/// the sidebar. Otherwise fall back to a truncated preview of the FIRST inbound
+/// (user) message, then the default name. `messages` is oldest-first.
+///
+/// Back-compat: every pre-titling conversation carried the default name, so this
+/// is byte-for-byte the old message-preview behavior for them.
+fn conversation_title(messages: &[smooth_operator::domain::Message], name: &str) -> String {
+    if !name.starts_with(DEFAULT_NAME_PREFIX) && !name.trim().is_empty() {
+        return truncate_preview(name, TITLE_MAX);
+    }
     messages
         .iter()
         .find(|m| matches!(m.direction, smooth_operator::domain::Direction::Inbound))
         .and_then(message_text)
-        .map_or_else(|| fallback.to_string(), |t| truncate_preview(&t, 60))
+        .map_or_else(|| name.to_string(), |t| truncate_preview(&t, TITLE_MAX))
 }
 
 /// Flat text of a message: the content's `text` mirror, else the first text item.
@@ -677,6 +690,223 @@ fn truncate_preview(s: &str, max: usize) -> String {
     }
     let clipped: String = s.chars().take(max).collect();
     format!("{}…", clipped.trim_end())
+}
+
+/// The default conversation name minted at create-session time
+/// (`Session <uuid>`). The auto-titler only fires while a conversation still
+/// carries this prefix, so a manual rename (or a prior successful auto-title) is
+/// never clobbered.
+const DEFAULT_NAME_PREFIX: &str = "Session ";
+
+/// Fast/cheap model used to auto-title a conversation from its first exchange.
+const AUTO_TITLE_MODEL: &str = "groq-gpt-oss-20b";
+
+/// Max characters of a title (both auto-generated and manually set).
+const TITLE_MAX: usize = 60;
+
+/// `rename_conversation` — set a conversation's `name` to a caller-supplied
+/// title. Per the daemon-sidebar rename affordance the client sends
+/// `{ action, requestId, conversationId, title }`. The title is sanitized/trimmed
+/// and rejected when empty; on success the conversation row's `name` is persisted
+/// (which `list_conversations` surfaces as the sidebar title, since it prefers
+/// `name` over the first-message preview). Replies with an `immediate_response`
+/// (200) carrying `{ conversationId, title }`.
+async fn handle_rename_conversation(
+    state: &AppState,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    let Some(conversation_id) = parsed.get("conversationId").and_then(Value::as_str) else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "VALIDATION_ERROR",
+            "rename_conversation requires a 'conversationId'",
+        ));
+        return;
+    };
+
+    let title = sanitize_title(
+        parsed
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    if title.is_empty() {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "VALIDATION_ERROR",
+            "rename_conversation requires a non-empty 'title'",
+        ));
+        return;
+    }
+
+    // The conversation must exist — give a clean 404 rather than a generic
+    // storage error.
+    match state.storage.get_conversation(conversation_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "CONVERSATION_NOT_FOUND",
+                &format!("conversation '{conversation_id}' not found"),
+            ));
+            return;
+        }
+        Err(e) => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "STORAGE_ERROR",
+                &format!("failed to load conversation: {e}"),
+            ));
+            return;
+        }
+    }
+
+    let update = ConversationUpdate {
+        name: Some(title.clone()),
+        ..Default::default()
+    };
+    match state
+        .storage
+        .update_conversation(conversation_id, update)
+        .await
+    {
+        Ok(_) => {
+            let _ = sink.send(protocol::immediate_response(
+                request_id,
+                200,
+                "Conversation renamed",
+                json!({ "conversationId": conversation_id, "title": title }),
+            ));
+        }
+        Err(e) => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "STORAGE_ERROR",
+                &format!("failed to rename conversation: {e}"),
+            ));
+        }
+    }
+}
+
+/// Best-effort auto-title: after the first assistant turn on a conversation
+/// still carrying the default `Session <uuid>` name, ask a small/cheap model for
+/// a short title and persist it as the conversation `name`. **Non-blocking &
+/// fail-safe** — spawned detached off the turn path and any failure (no key,
+/// gateway error, empty output, storage error) simply leaves the default name.
+/// The default-name guard means a manual [`handle_rename_conversation`] rename is
+/// never overwritten, and once a title lands the conversation is no longer
+/// default-named so it won't re-fire.
+pub async fn maybe_auto_title(
+    state: &AppState,
+    conversation_id: &str,
+    user_message: &str,
+    reply: &str,
+) {
+    // Only title conversations still on their default name.
+    let conversation = match state.storage.get_conversation(conversation_id).await {
+        Ok(Some(c)) => c,
+        _ => return,
+    };
+    if !conversation.name.starts_with(DEFAULT_NAME_PREFIX) {
+        return;
+    }
+
+    // Resolve the org's gateway key (per-org resolver, else the env key). No key
+    // ⇒ no title (same gate as a live turn).
+    let key = smooth_operator::gateway_key::resolve_gateway_key(
+        &state.gateway_key_resolver,
+        &conversation.organization_id,
+        state.config.gateway_key.as_deref(),
+    )
+    .await;
+    let Some(key) = key else { return };
+
+    let Some(raw) = generate_title(&state.config.gateway_url, &key, user_message, reply).await
+    else {
+        return;
+    };
+    let title = sanitize_title(&raw);
+    if title.is_empty() {
+        return;
+    }
+
+    // Re-check the guard right before writing: a manual rename could have landed
+    // while the model was thinking. Best-effort — a lost race just means the
+    // manual name wins, which is the desired precedence.
+    if let Ok(Some(c)) = state.storage.get_conversation(conversation_id).await {
+        if !c.name.starts_with(DEFAULT_NAME_PREFIX) {
+            return;
+        }
+    }
+    let update = ConversationUpdate {
+        name: Some(title),
+        ..Default::default()
+    };
+    let _ = state
+        .storage
+        .update_conversation(conversation_id, update)
+        .await;
+}
+
+/// Call the gateway's `/chat/completions` with the small title model over the
+/// first exchange, returning the model's raw title text (unsanitized). `None` on
+/// any transport / non-2xx / decode failure or a missing content field — the
+/// caller treats that as "no title". Inputs are truncated so the prompt stays
+/// cheap regardless of how long the exchange ran.
+async fn generate_title(
+    gateway_url: &str,
+    key: &str,
+    user_message: &str,
+    reply: &str,
+) -> Option<String> {
+    let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
+    let user_snippet: String = user_message.chars().take(500).collect();
+    let reply_snippet: String = reply.chars().take(500).collect();
+    let prompt = format!(
+        "Give this conversation a short 3-6 word title. Reply with ONLY the title, no quotes.\n\nUser: {user_snippet}\nAssistant: {reply_snippet}"
+    );
+    let body = json!({
+        "model": AUTO_TITLE_MODEL,
+        "max_tokens": 32,
+        "temperature": 0.3,
+        "messages": [{ "role": "user", "content": prompt }],
+    });
+    let resp: Value = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    resp.get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Sanitize a conversation title (auto-generated or manually supplied): collapse
+/// all whitespace/newlines to single spaces, strip wrapping quotes / markdown
+/// emphasis the model sometimes adds (`"`, `'`, `*`, `` ` ``, `#`), and cap at
+/// [`TITLE_MAX`] chars (char-safe). Returns an empty string for blank/whitespace
+/// input so callers can reject it.
+fn sanitize_title(raw: &str) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim_matches(|c: char| matches!(c, '"' | '\'' | '*' | '`' | '#' | ' '));
+    trimmed
+        .chars()
+        .take(TITLE_MAX)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// `send_message` — ack with `immediate_response` (202), run a streaming
@@ -1085,6 +1315,18 @@ async fn handle_send_message(
                     &turn.citations,
                     turn.usage,
                 ));
+
+                // Best-effort auto-title (fires only while the conversation is
+                // still default-named ⇒ effectively the first turn). Detached so
+                // the small-model call never delays this turn; a failure just
+                // leaves the default `Session <uuid>` name.
+                let title_state = state_for_turn.clone();
+                let title_conv = conversation_id.clone();
+                let title_user = message.clone();
+                let title_reply = turn.reply.clone();
+                tokio::spawn(async move {
+                    maybe_auto_title(&title_state, &title_conv, &title_user, &title_reply).await;
+                });
             }
             Err(e) => {
                 let _ = sink_owned.send(protocol::error(
@@ -1703,6 +1945,41 @@ mod tests {
         let body = json!({ "model": "claude-opus-4-8" });
         let llm = apply_model_override(apply_agent_model_override(base_llm(), Some(&cfg)), &body);
         assert_eq!(llm.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn sanitize_title_strips_quotes_markdown_and_collapses_whitespace() {
+        // Wrapping double quotes + trailing newline.
+        assert_eq!(
+            sanitize_title("\"Reset password help\"\n"),
+            "Reset password help"
+        );
+        // Markdown bold wrapping.
+        assert_eq!(sanitize_title("**Billing question**"), "Billing question");
+        // Code-fence backticks + collapse internal newlines/spaces.
+        assert_eq!(
+            sanitize_title("`Order   status\ncheck`"),
+            "Order status check"
+        );
+        // Leading markdown heading marker.
+        assert_eq!(sanitize_title("# Refund request"), "Refund request");
+        // Inner apostrophe is preserved (only wrapping quotes stripped).
+        assert_eq!(sanitize_title("What's my balance"), "What's my balance");
+    }
+
+    #[test]
+    fn sanitize_title_blank_is_empty() {
+        assert_eq!(sanitize_title(""), "");
+        assert_eq!(sanitize_title("   \n\t "), "");
+        // Only wrapping symbols ⇒ empty (callers reject).
+        assert_eq!(sanitize_title("\"\"  "), "");
+    }
+
+    #[test]
+    fn sanitize_title_caps_length() {
+        let long = "word ".repeat(40); // 200 chars
+        let out = sanitize_title(&long);
+        assert!(out.chars().count() <= TITLE_MAX, "capped: {out:?}");
     }
 
     #[test]

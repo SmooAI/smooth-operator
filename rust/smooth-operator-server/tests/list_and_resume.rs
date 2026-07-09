@@ -133,13 +133,16 @@ async fn list_returns_nonempty_conversations_most_recent_first() {
     let state = AppState::new(storage.clone(), base_config());
     let org = SEED_ORG_ID;
 
-    // Oldest with messages.
-    let older = seed_conversation(&storage, org, "Older", 100).await;
+    // Oldest with messages. Default-named (`Session …`) so the sidebar title is
+    // derived from the first inbound preview — the case this test asserts. (A
+    // non-default name would win instead; that path is covered by the auto-title
+    // / rename suite.)
+    let older = seed_conversation(&storage, org, "Session older", 100).await;
     seed_message(&storage, org, &older, true, "First question about billing").await;
     seed_message(&storage, org, &older, false, "Here's the billing answer").await;
 
     // Newest with messages.
-    let newer = seed_conversation(&storage, org, "Newer", 10).await;
+    let newer = seed_conversation(&storage, org, "Session newer", 10).await;
     seed_message(&storage, org, &newer, true, "How do I reset my password?").await;
 
     let ev = drive(
@@ -224,7 +227,8 @@ async fn list_truncates_long_first_inbound_preview() {
     let org = SEED_ORG_ID;
 
     let long = "x".repeat(200);
-    let conv = seed_conversation(&storage, org, "Long", 5).await;
+    // Default-named so the title comes from the (truncated) first inbound preview.
+    let conv = seed_conversation(&storage, org, "Session long", 5).await;
     seed_message(&storage, org, &conv, true, &long).await;
 
     let ev = drive(
