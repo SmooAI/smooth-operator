@@ -668,6 +668,16 @@ pub async fn run_streaming_turn(
         // answer streamed here). Keeps the trailer so `extract_suggested_replies`
         // strips it the same way it does the engine's content. (th-emptyreply)
         let mut streamed_reply = String::new();
+        // Accumulate the RAW reasoning tokens of THIS turn as a LAST-RESORT
+        // fallback. Some gateways/models (groq gpt-oss-120b via LiteLLM) put the
+        // WHOLE answer on the reasoning channel with `content` empty — the engine
+        // drops reasoning from `response.content`, so both `last_assistant_content`
+        // and `streamed_reply` come back empty and the turn would ship an EMPTY
+        // `eventual_response` even though the answer streamed (as `stream_reasoning`)
+        // and persisted. Only consulted when NO answer content exists anywhere, so
+        // a normal reasoning model (which always emits `content`) never surfaces
+        // its thinking as the answer. (th-emptyreply2)
+        let mut streamed_reasoning = String::new();
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::TokenDelta { content } => {
@@ -682,6 +692,7 @@ pub async fn run_streaming_turn(
                     // Reasoning rides its own protocol message so the client shows
                     // it as "thinking", never as the answer (th-4d8682).
                     if !content.is_empty() {
+                        streamed_reasoning.push_str(&content);
                         let _ = sink_clone.send(crate::protocol::stream_reasoning(
                             &request_id_owned,
                             &content,
@@ -775,6 +786,7 @@ pub async fn run_streaming_turn(
             usage,
             tool_records,
             streamed_reply,
+            streamed_reasoning,
         )
     });
 
@@ -812,9 +824,10 @@ pub async fn run_streaming_turn(
     }
     drop(extensions);
 
-    let (invoked_knowledge_search, usage, tool_records, streamed_reply) = translator
-        .await
-        .unwrap_or((false, None, Vec::new(), String::new()));
+    let (invoked_knowledge_search, usage, tool_records, streamed_reply, streamed_reasoning) =
+        translator
+            .await
+            .unwrap_or((false, None, Vec::new(), String::new(), String::new()));
 
     // Emit the OTel spans now, on this task, so they flow under the subscriber
     // that owns `turn_span` (the process-global OTLP subscriber in production).
@@ -848,15 +861,24 @@ pub async fn run_streaming_turn(
     // Strip the suggested-replies trailer from the final reply; the parsed
     // suggestions ride the `eventual_response`'s `suggestedNextActions`.
     //
-    // Prefer the engine's terminal assistant content, but fall back to this
-    // turn's accumulated streamed answer when that content is empty — reasoning
-    // models (e.g. groq-gpt-oss-120b) can end a turn on a tool-call or
-    // reasoning-only assistant entry whose `content` is blank, which would ship
-    // an EMPTY `eventual_response` (and drop the suggestions) even though the
-    // full answer streamed to the client. (th-emptyreply)
+    // Prefer the engine's terminal assistant content, but fall back — in order —
+    // to this turn's accumulated streamed answer, then its accumulated reasoning,
+    // whenever the higher source is empty:
+    //   1. `last_assistant_content()` — the normal path;
+    //   2. `streamed_reply` — the turn's content tokens, for when the terminal
+    //      assistant entry is a tool-call/reasoning-only message with blank
+    //      `content` even though the answer streamed (th-emptyreply);
+    //   3. `streamed_reasoning` — LAST resort, for gateways/models (groq
+    //      gpt-oss-120b via LiteLLM) that put the WHOLE answer on the reasoning
+    //      channel with `content` empty; without this the turn ships an EMPTY
+    //      `eventual_response` even though the answer streamed as `stream_reasoning`
+    //      and persisted. Only reached when NO content exists anywhere, so a normal
+    //      reasoning model (which always emits `content`) never surfaces its
+    //      thinking as the answer. (th-emptyreply2)
     let final_text = match conversation.last_assistant_content() {
         Some(c) if !c.trim().is_empty() => c,
-        _ => streamed_reply.as_str(),
+        _ if !streamed_reply.trim().is_empty() => streamed_reply.as_str(),
+        _ => streamed_reasoning.as_str(),
     };
     let (reply, suggested_next_actions) = crate::suggestions::extract_suggested_replies(final_text);
 
