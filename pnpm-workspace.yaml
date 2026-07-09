@@ -22,3 +22,7 @@ packages:
     - typescript/extension-sdk
     - typescript/create-smooth-extension
     - console
+    # `examples/web-chat` is a private, runnable reference client (Vite + React)
+    # that drives a live server over the WS protocol via the published SDK — the
+    # interactive counterpart to the read-only `console/` admin app.
+    - examples/web-chat
