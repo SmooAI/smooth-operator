@@ -54,12 +54,38 @@ export interface StoredMessage {
     text: string;
 }
 
+/**
+ * A conversation's roll-up for the `list_conversations` action: enough for a
+ * client to render a resumable-thread list without pulling every message. The
+ * dispatcher turns `firstInboundText`/`updatedAt`/`messageCount` into the wire
+ * `{conversationId, title, updatedAt, messageCount}`.
+ */
+export interface ConversationSummary {
+    conversationId: string;
+    /** ISO-8601 timestamp of the conversation's last activity (create or last appended message). */
+    updatedAt: string;
+    /** Total messages in the conversation. The dispatcher drops empties (`0`). */
+    messageCount: number;
+    /** Text of the FIRST inbound (user) message — the dispatcher's title source. Undefined when none. */
+    firstInboundText?: string;
+}
+
 export interface SessionStore {
-    createSession(agentId: string, userName?: string, userEmail?: string): Promise<StoredSession>;
+    /**
+     * Create a session. When `conversationId` names an EXISTING conversation, the
+     * new session binds to it (resume: reuses the id + its persisted message log,
+     * so subsequent turns append and history replays). An absent or unknown id mints
+     * a fresh conversation (unchanged behavior).
+     */
+    createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string): Promise<StoredSession>;
     getSession(sessionId: string): Promise<StoredSession | null>;
+    /** A conversation by id, or null if unknown — the resume-binding existence check. */
+    getConversation(conversationId: string): Promise<{ conversationId: string } | null>;
     appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage>;
     /** The most recent `limit` messages for a conversation, oldest first. */
     listMessages(conversationId: string, limit: number): Promise<StoredMessage[]>;
+    /** Roll-up of every known conversation (most-recent ordering + empty-filtering is the dispatcher's job). */
+    listConversations(): Promise<ConversationSummary[]>;
     /**
      * SMOODEV-590 — persist the conversation's current workflow step id (set by the
      * post-turn judge). A no-op for an unknown session. Optional so existing stores
@@ -79,11 +105,17 @@ export interface SessionStore {
 export class InMemorySessionStore implements SessionStore {
     private readonly sessions = new Map<string, StoredSession>();
     private readonly messages = new Map<string, StoredMessage[]>();
+    /** Per-conversation last-activity epoch ms — set on create + every append; the `updatedAt` source. */
+    private readonly convUpdatedAt = new Map<string, number>();
 
-    async createSession(agentId: string, _userName?: string, userEmail?: string): Promise<StoredSession> {
+    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string): Promise<StoredSession> {
+        // Resume: bind to an existing conversation (reuse its id + persisted log) when
+        // the caller passes a known conversationId. Unknown/absent → mint a fresh one.
+        const resume = conversationId && this.messages.has(conversationId);
+        const convId = resume ? conversationId : randomUUID();
         const session: StoredSession = {
             sessionId: randomUUID(),
-            conversationId: randomUUID(),
+            conversationId: convId,
             agentId: agentId && agentId.length > 0 ? agentId : randomUUID(),
             agentName: 'smooth-agent',
             userParticipantId: randomUUID(),
@@ -93,12 +125,20 @@ export class InMemorySessionStore implements SessionStore {
             ...(userEmail ? { contactEmail: userEmail } : {}),
         };
         this.sessions.set(session.sessionId, session);
-        this.messages.set(session.conversationId, []);
+        // Only initialize the message log on a fresh conversation — a resume keeps its history.
+        if (!resume) {
+            this.messages.set(convId, []);
+            this.convUpdatedAt.set(convId, Date.now());
+        }
         return session;
     }
 
     async getSession(sessionId: string): Promise<StoredSession | null> {
         return this.sessions.get(sessionId) ?? null;
+    }
+
+    async getConversation(conversationId: string): Promise<{ conversationId: string } | null> {
+        return this.messages.has(conversationId) ? { conversationId } : null;
     }
 
     async appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage> {
@@ -109,6 +149,7 @@ export class InMemorySessionStore implements SessionStore {
             this.messages.set(conversationId, list);
         }
         list.push(message);
+        this.convUpdatedAt.set(conversationId, Date.now());
         return message;
     }
 
@@ -116,6 +157,20 @@ export class InMemorySessionStore implements SessionStore {
         const list = this.messages.get(conversationId);
         if (!list) return [];
         return limit >= list.length ? [...list] : list.slice(list.length - limit);
+    }
+
+    async listConversations(): Promise<ConversationSummary[]> {
+        const out: ConversationSummary[] = [];
+        for (const [conversationId, list] of this.messages) {
+            const firstInbound = list.find((m) => m.direction === 'inbound');
+            out.push({
+                conversationId,
+                updatedAt: new Date(this.convUpdatedAt.get(conversationId) ?? 0).toISOString(),
+                messageCount: list.length,
+                ...(firstInbound ? { firstInboundText: firstInbound.text } : {}),
+            });
+        }
+        return out;
     }
 
     async setCurrentStep(sessionId: string, currentStepId: string): Promise<void> {
