@@ -14,6 +14,8 @@ export {
     ProtocolError,
     TurnTimeoutError,
     type SmoothAgentClientOptions,
+    type ConversationSummary,
+    type ListConversationsResponse,
 } from './client.js';
 export {
     WebSocketTransport,

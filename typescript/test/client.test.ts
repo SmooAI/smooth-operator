@@ -301,6 +301,48 @@ describe('SmoothAgentClient request correlation', () => {
         expect(session).toMatchObject({ sessionId: 'sess-9', agentName: 'Aria' });
     });
 
+    it('createConversationSession forwards conversationId for resume', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+
+        const promise = client.createConversationSession({ agentId: 'agent-1', conversationId: 'conv-existing' });
+        const reqId = transport.lastSent<{ requestId: string }>().requestId;
+        expect(transport.lastSent()).toMatchObject({ action: 'create_conversation_session', conversationId: 'conv-existing' });
+
+        transport.emit({
+            type: 'immediate_response',
+            requestId: reqId,
+            status: 200,
+            data: { sessionId: 's-r', conversationId: 'conv-existing', agentId: 'agent-1', agentName: 'Aria', userParticipantId: 'u', agentParticipantId: 'a' },
+        });
+        await expect(promise).resolves.toMatchObject({ conversationId: 'conv-existing' });
+    });
+
+    it('listConversations resolves with the conversation rows', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+
+        const promise = client.listConversations({ limit: 10 });
+        const reqId = transport.lastSent<{ requestId: string }>().requestId;
+        expect(transport.lastSent()).toMatchObject({ action: 'list_conversations', limit: 10 });
+
+        transport.emit({
+            type: 'immediate_response',
+            requestId: reqId,
+            status: 200,
+            data: {
+                conversations: [
+                    { conversationId: 'c1', title: 'Returns policy', updatedAt: '2026-07-09T00:00:00Z', messageCount: 4 },
+                    { conversationId: 'c2', title: 'Shipping', updatedAt: '2026-07-08T00:00:00Z', messageCount: 2 },
+                ],
+            },
+        });
+
+        const res = await promise;
+        expect(res.conversations).toHaveLength(2);
+        expect(res.conversations[0]).toMatchObject({ conversationId: 'c1', messageCount: 4 });
+    });
+
     it('ping resolves with the pong timestamp', async () => {
         const { client, transport } = makeClient();
         await client.connect();

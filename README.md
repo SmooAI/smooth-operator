@@ -296,6 +296,7 @@ smooth-operator/
 ├── dotnet/       # SmooAI.SmoothOperator — client (+ Microsoft.Extensions.AI facade) and the C# server
 ├── python/       # smooth-operator (import smooth_operator) — async client
 ├── console/      # Next.js management console for the auth-gated /admin/* API
+├── examples/     # Runnable reference apps — examples/web-chat (Vite + React live chat client)
 ├── adapters/     # Storage adapters: postgres (pgvector) and dynamodb (S3 Vectors)
 ├── deploy/
 │   ├── k8s/      # Kubernetes (Helm + ArgoCD) — Postgres + pgvector + Redis/NATS backplane
@@ -320,6 +321,7 @@ Don't want to operate it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** runs s
 | [`docs/TOOLS.md`](docs/TOOLS.md) | The built-in tool catalog + authoring your own |
 | [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md) | Document-level ACLs over org isolation |
 | [`docs/ADMIN-API.md`](docs/ADMIN-API.md) | The auth-gated `/admin/*` API the console consumes |
+| [`examples/web-chat/`](examples/web-chat/README.md) | A runnable Vite + React chat client that drives a live server via the SDK (streaming, tool viz, sidebar) |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | OpenTelemetry `gen_ai.*` tracing |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | The three deploy flavors + the shared `SmooAI/deploy` package |
 | [`docs/Planning/Roadmap.md`](docs/Planning/Roadmap.md) | Phased build plan + current status |

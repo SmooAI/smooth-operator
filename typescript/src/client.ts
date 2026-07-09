@@ -66,6 +66,24 @@ export interface SmoothAgentClientOptions {
     turnTimeout?: number;
 }
 
+/** One row returned by {@link SmoothAgentClient.listConversations} — enough to
+ * render a sidebar entry and resume the conversation on click. */
+export interface ConversationSummary {
+    /** Pass to {@link SmoothAgentClient.createConversationSession} as `conversationId` to resume. */
+    conversationId: string;
+    /** Short preview title derived from the first message (may be empty). */
+    title: string;
+    /** ISO-8601 last-activity timestamp (rows come most-recent first). */
+    updatedAt: string;
+    /** Number of messages in the conversation. */
+    messageCount: number;
+}
+
+/** Payload of the `list_conversations` `immediate_response`. */
+export interface ListConversationsResponse {
+    conversations: ConversationSummary[];
+}
+
 /** Events that terminate a streaming turn (success or error). */
 const TURN_TERMINAL = new Set(['eventual_response', 'error']);
 
@@ -300,12 +318,34 @@ export class SmoothAgentClient {
 
     // ───────────────────────────── Actions ─────────────────────────────────
 
-    /** Start a new conversation session. Resolves with the session descriptor. */
+    /**
+     * Start a new conversation session — or **resume** an existing one by passing
+     * its `conversationId`. On resume the server binds the new session to that
+     * conversation (reusing its id + org + persisted history) so subsequent
+     * `send_message`s append to it; pair it with {@link getMessages} to load the
+     * transcript. Resolves with the session descriptor.
+     */
     async createConversationSession(
-        req: Omit<CreateConversationSessionRequest, 'action' | 'requestId'>,
+        req: Omit<CreateConversationSessionRequest, 'action' | 'requestId'> & { conversationId?: string },
     ): Promise<CreateConversationSessionResponse> {
         const event = await this.request({ action: 'create_conversation_session', ...req });
         return extractImmediateData<CreateConversationSessionResponse>(event);
+    }
+
+    /**
+     * List the org's conversations that have at least one message, most-recent
+     * first — the substrate for a conversation sidebar / resume picker. Each row
+     * carries a short title preview, `updatedAt`, and a message count. Pass
+     * `limit` to cap the result (server default 50).
+     *
+     * `list_conversations` has no dedicated action schema in `spec/` yet, so it is
+     * not a member of the generated `ClientAction` union — hence the local cast.
+     * ponytail: promote to a real spec/actions schema if a second consumer needs
+     * it typed end-to-end.
+     */
+    async listConversations(req: { limit?: number } = {}): Promise<ListConversationsResponse> {
+        const event = await this.request({ action: 'list_conversations', ...req } as unknown as Omit<ClientAction, 'requestId'>);
+        return extractImmediateData<ListConversationsResponse>(event);
     }
 
     /** Fetch a session snapshot by ID. */
