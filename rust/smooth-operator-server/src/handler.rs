@@ -807,9 +807,14 @@ pub async fn maybe_auto_title(
     // Only title conversations still on their default name.
     let conversation = match state.storage.get_conversation(conversation_id).await {
         Ok(Some(c)) => c,
-        _ => return,
+        _ => {
+            tracing::warn!(conversation_id, "auto-title: conversation not found");
+            return;
+        }
     };
     if !conversation.name.starts_with(DEFAULT_NAME_PREFIX) {
+        // Expected on every turn after the first (or after a manual rename) — debug.
+        tracing::debug!(conversation_id, name = %conversation.name, "auto-title: name not default, skip");
         return;
     }
 
@@ -821,16 +826,22 @@ pub async fn maybe_auto_title(
         state.config.gateway_key.as_deref(),
     )
     .await;
-    let Some(key) = key else { return };
+    let Some(key) = key else {
+        tracing::warn!(org = %conversation.organization_id, "auto-title: no gateway key resolved");
+        return;
+    };
 
     let Some(raw) = generate_title(&state.config.gateway_url, &key, user_message, reply).await
     else {
+        tracing::warn!("auto-title: generate_title returned None (gateway/parse)");
         return;
     };
     let title = sanitize_title(&raw);
     if title.is_empty() {
+        tracing::warn!(raw = %raw, "auto-title: sanitized title empty");
         return;
     }
+    tracing::debug!(conversation_id, title = %title, "auto-title: writing title");
 
     // Re-check the guard right before writing: a manual rename could have landed
     // while the model was thinking. Best-effort — a lost race just means the
@@ -850,6 +861,29 @@ pub async fn maybe_auto_title(
         .await;
 }
 
+/// The title model (`groq-gpt-oss-20b`) is a reasoning model: reasoning tokens
+/// count against `max_tokens`, so a tight cap (the original 32) gets fully
+/// consumed by reasoning and leaves the content empty — the auto-titler then
+/// silently produced nothing. Give reasoning headroom; the title itself is
+/// capped to `TITLE_MAX` chars by [`sanitize_title`] regardless.
+const AUTO_TITLE_MAX_TOKENS: u32 = 512;
+
+/// Build the `/chat/completions` request body for the auto-titler. Extracted so
+/// the token budget (the thing that broke) is unit-testable without a gateway.
+fn title_request_body(user_message: &str, reply: &str) -> Value {
+    let user_snippet: String = user_message.chars().take(500).collect();
+    let reply_snippet: String = reply.chars().take(500).collect();
+    let prompt = format!(
+        "Give this conversation a short 3-6 word title. Reply with ONLY the title, no quotes.\n\nUser: {user_snippet}\nAssistant: {reply_snippet}"
+    );
+    json!({
+        "max_tokens": AUTO_TITLE_MAX_TOKENS,
+        "model": AUTO_TITLE_MODEL,
+        "temperature": 0.3,
+        "messages": [{ "role": "user", "content": prompt }],
+    })
+}
+
 /// Call the gateway's `/chat/completions` with the small title model over the
 /// first exchange, returning the model's raw title text (unsanitized). `None` on
 /// any transport / non-2xx / decode failure or a missing content field — the
@@ -862,21 +896,10 @@ async fn generate_title(
     reply: &str,
 ) -> Option<String> {
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
-    let user_snippet: String = user_message.chars().take(500).collect();
-    let reply_snippet: String = reply.chars().take(500).collect();
-    let prompt = format!(
-        "Give this conversation a short 3-6 word title. Reply with ONLY the title, no quotes.\n\nUser: {user_snippet}\nAssistant: {reply_snippet}"
-    );
-    let body = json!({
-        "model": AUTO_TITLE_MODEL,
-        "max_tokens": 32,
-        "temperature": 0.3,
-        "messages": [{ "role": "user", "content": prompt }],
-    });
     let resp: Value = reqwest::Client::new()
         .post(&url)
         .bearer_auth(key)
-        .json(&body)
+        .json(&title_request_body(user_message, reply))
         .send()
         .await
         .ok()?
@@ -1980,6 +2003,20 @@ mod tests {
         let long = "word ".repeat(40); // 200 chars
         let out = sanitize_title(&long);
         assert!(out.chars().count() <= TITLE_MAX, "capped: {out:?}");
+    }
+
+    #[test]
+    fn title_request_body_gives_reasoning_headroom() {
+        // Regression: the title model is a reasoning model, so max_tokens must
+        // leave room for reasoning + the title. The original 32 was fully eaten
+        // by reasoning tokens and yielded empty content. Guard a generous budget.
+        let body = title_request_body("What is the capital of France?", "Paris.");
+        let max = body["max_tokens"].as_u64().expect("max_tokens present");
+        assert!(max >= 256, "auto-title needs reasoning headroom, got {max}");
+        assert_eq!(body["model"], AUTO_TITLE_MODEL);
+        let prompt = body["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("capital of France"), "prompt carries the user message");
+        assert!(prompt.contains("Paris."), "prompt carries the reply");
     }
 
     #[test]
