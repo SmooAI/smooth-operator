@@ -28,7 +28,7 @@ smooai-smooth-operator-core = { git = "https://github.com/SmooAI/smooth-operator
 # Intra-workspace dep on the reference lib carries its version so the adapters /
 # ingestion / server that depend on it are publishable (path = local dev,
 # version = the crates.io requirement).
-smooth-operator = { package = "smooai-smooth-operator", path = "smooth-operator", version = "1.22.6" }
+smooth-operator = { package = "smooai-smooth-operator", path = "smooth-operator", version = "1.22.7" }
 
 async-trait = "0.1"
 anyhow = "1"
