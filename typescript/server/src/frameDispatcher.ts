@@ -177,6 +177,9 @@ export class FrameDispatcher {
                 case 'get_session':
                     await this.handleGetSession(frame, requestId, sink);
                     break;
+                case 'list_conversations':
+                    await this.handleListConversations(frame, requestId, sink);
+                    break;
                 case 'send_message':
                     await this.handleSendMessage(frame, requestId, sink, signal);
                     break;
@@ -203,10 +206,16 @@ export class FrameDispatcher {
     }
 
     private async handleCreateSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
+        // Resume: a `conversationId` naming an existing conversation binds the new
+        // session to it (reuses id + history); absent/unknown → a fresh conversation.
+        // The response echoes `conversationId` either way, so a resuming client sees
+        // the same id it passed. Mirrors the Rust reference's resume branch.
+        const conversationId = typeof frame.conversationId === 'string' && frame.conversationId.length > 0 ? frame.conversationId : undefined;
         const session = await this.store.createSession(
             typeof frame.agentId === 'string' ? frame.agentId : '',
             typeof frame.userName === 'string' ? frame.userName : undefined,
             typeof frame.userEmail === 'string' ? frame.userEmail : undefined,
+            conversationId,
         );
         sink(
             protocol.immediateResponse(requestId, 200, 'Session created', {
@@ -235,6 +244,35 @@ export class FrameDispatcher {
                 agentName: session.agentName,
             }),
         );
+    }
+
+    /**
+     * `list_conversations` — return the resumable conversations, most-recent first.
+     *
+     * Mirrors the Rust reference: roll up every conversation, drop the empty ones
+     * (`messageCount === 0`), derive a clean `title` from the FIRST inbound (user)
+     * message, sort by `updatedAt` descending, and cap to `limit` (default 50). Each
+     * entry is `{conversationId, title, updatedAt, messageCount}`. A client resumes one
+     * by passing its `conversationId` to `create_conversation_session`.
+     */
+    private async handleListConversations(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
+        const DEFAULT_LIMIT = 50;
+        const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
+        const limit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_LIMIT;
+
+        const summaries = await this.store.listConversations();
+        const conversations = summaries
+            .filter((c) => c.messageCount > 0)
+            .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+            .slice(0, limit)
+            .map((c) => ({
+                conversationId: c.conversationId,
+                title: conversationTitle(c.firstInboundText, `Conversation ${c.conversationId}`),
+                updatedAt: c.updatedAt,
+                messageCount: c.messageCount,
+            }));
+
+        sink(protocol.immediateResponse(requestId, 200, 'Conversations', { conversations }));
     }
 
     private async handleSendMessage(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink, signal?: AbortSignal): Promise<void> {
@@ -471,4 +509,39 @@ export class FrameDispatcher {
             sink(protocol.otpInvalid(requestId, outcome.error, outcome.attemptsRemaining, outcome.message));
         }
     }
+}
+
+const TITLE_MAX = 60;
+
+/**
+ * Derive a `list_conversations` entry title from the first inbound message text,
+ * falling back to `fallback` (the conversation name) when there is none. The
+ * preview is cleaned (leading markdown/control chars stripped) and clipped to
+ * {@link TITLE_MAX} characters with an ellipsis. Mirrors the Rust reference's
+ * `conversation_title` + `truncate_preview`, with the contract's leading-markdown
+ * strip so the client renders clean text.
+ */
+export function conversationTitle(firstInboundText: string | undefined, fallback: string): string {
+    const cleaned = firstInboundText !== undefined ? cleanPreview(firstInboundText) : '';
+    if (cleaned.length === 0) return fallback;
+    return truncatePreview(cleaned, TITLE_MAX);
+}
+
+/**
+ * Strip leading markdown/control noise (blockquote `>`, cursor `▎`, heading `#`,
+ * emphasis `*`, list/rule dashes, backticks) and control chars so a raw message
+ * body renders as plain text, then trim. Only leading chars are touched — inline
+ * markdown mid-text is left alone.
+ */
+function cleanPreview(s: string): string {
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/^[\s>#*`~_\-▎ -]+/u, '').trim();
+}
+
+/** Clip to `max` chars, appending an ellipsis when truncated (matches the Rust `truncate_preview`). */
+function truncatePreview(s: string, max: number): string {
+    const trimmed = s.trim();
+    const chars = [...trimmed];
+    if (chars.length <= max) return trimmed;
+    return `${chars.slice(0, max).join('').trimEnd()}…`;
 }
