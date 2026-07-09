@@ -22,6 +22,16 @@ public enum MessageDirection
 public sealed record StoredMessage(string Id, string ConversationId, MessageDirection Direction, string Text);
 
 /// <summary>
+/// One row of the conversation-list / resume surface: identity, last activity, message count,
+/// and the first inbound (user) message text — enough for the dispatcher to build a sidebar
+/// title without a second store roundtrip. The C# analog of the Rust <c>list_conversations</c>'
+/// per-conversation peek and the Go <c>ConversationSummary</c>; title formatting (markdown strip,
+/// truncation, ISO timestamp) is the dispatcher's job. <c>FirstInboundText</c> is <c>null</c> when
+/// the conversation has no inbound message (the title falls back to a generic name). th-d5b446.
+/// </summary>
+public sealed record ConversationSummary(string ConversationId, DateTimeOffset UpdatedAt, int MessageCount, string? FirstInboundText);
+
+/// <summary>
 /// Persistence for sessions + conversation message logs — the C# analog of the Rust
 /// <c>StorageAdapter</c>'s session/conversation/message surface (and, like it, async). The
 /// bundled <see cref="InMemorySessionStore"/> is the reference store; a Postgres adapter
@@ -30,6 +40,23 @@ public sealed record StoredMessage(string Id, string ConversationId, MessageDire
 public interface ISessionStore
 {
     Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Mint a session bound to an existing conversation when <paramref name="conversationId"/> is
+    /// non-empty AND known (reuses its message log so subsequent turns append to it and the runner
+    /// replays its history); an empty or unknown <paramref name="conversationId"/> mints a fresh
+    /// conversation — identical to <see cref="CreateSessionAsync"/>. The resume substrate behind
+    /// <c>create_conversation_session</c>'s optional <c>conversationId</c>. th-d5b446.
+    /// </summary>
+    Task<StoredSession> ResumeSessionAsync(string agentId, string? userName, string? userEmail, string? conversationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// A summary per conversation that has at least one message (empty conversations — every
+    /// page-load currently mints one — are filtered out), in no particular order; the dispatcher
+    /// sorts most-recent-first and caps. The C# analog of the Rust storage list-conversations +
+    /// per-conversation peek and the Go <c>ListConversations</c>. th-d5b446.
+    /// </summary>
+    Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default);
 
     Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default);
 
@@ -86,23 +113,61 @@ public sealed class InMemorySessionStore : ISessionStore
     private readonly Dictionary<string, string> _workflowSteps = new();
     private readonly HashSet<string> _authenticated = new();
 
-    public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default)
-    {
-        var session = new StoredSession(
-            SessionId: Guid.NewGuid().ToString(),
-            ConversationId: Guid.NewGuid().ToString(),
-            AgentId: string.IsNullOrEmpty(agentId) ? Guid.NewGuid().ToString() : agentId,
-            AgentName: "smooth-agent",
-            UserParticipantId: Guid.NewGuid().ToString(),
-            AgentParticipantId: Guid.NewGuid().ToString(),
-            UserEmail: string.IsNullOrEmpty(userEmail) ? null : userEmail);
+    // Each conversation's last activity (creation, then every append) — the sort key + updatedAt
+    // field for ListConversations. th-d5b446.
+    private readonly Dictionary<string, DateTimeOffset> _updatedAt = new();
 
+    public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default) =>
+        ResumeSessionAsync(agentId, userName, userEmail, null, cancellationToken);
+
+    public Task<StoredSession> ResumeSessionAsync(string agentId, string? userName, string? userEmail, string? conversationId, CancellationToken cancellationToken = default)
+    {
         lock (_gate)
         {
+            // Resume when the caller names a known conversation (reuse its id + message log);
+            // absent/unknown → a fresh conversation (byte-for-byte the old CreateSession behavior).
+            var resume = !string.IsNullOrEmpty(conversationId) && _messages.ContainsKey(conversationId);
+            var convId = resume ? conversationId! : Guid.NewGuid().ToString();
+
+            var session = new StoredSession(
+                SessionId: Guid.NewGuid().ToString(),
+                ConversationId: convId,
+                AgentId: string.IsNullOrEmpty(agentId) ? Guid.NewGuid().ToString() : agentId,
+                AgentName: "smooth-agent",
+                UserParticipantId: Guid.NewGuid().ToString(),
+                AgentParticipantId: Guid.NewGuid().ToString(),
+                UserEmail: string.IsNullOrEmpty(userEmail) ? null : userEmail);
+
             _sessions[session.SessionId] = session;
-            _messages[session.ConversationId] = new List<StoredMessage>();
+            // Only mint an empty log + creation timestamp on a fresh conversation — a resume keeps
+            // its history and its last-activity time (bumped by the next append, not by re-binding).
+            if (!resume)
+            {
+                _messages[convId] = new List<StoredMessage>();
+                _updatedAt[convId] = DateTimeOffset.UtcNow;
+            }
+            return Task.FromResult(session);
         }
-        return Task.FromResult(session);
+    }
+
+    public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            var summaries = new List<ConversationSummary>();
+            foreach (var (convId, list) in _messages)
+            {
+                if (list.Count == 0)
+                {
+                    continue; // drop the empty conversations every page-load mints.
+                }
+                var firstInbound = list.FirstOrDefault(m => m.Direction == MessageDirection.Inbound)?.Text;
+                var updatedAt = _updatedAt.TryGetValue(convId, out var t) ? t : DateTimeOffset.UtcNow;
+                summaries.Add(new ConversationSummary(convId, updatedAt, list.Count, firstInbound));
+            }
+            IReadOnlyList<ConversationSummary> result = summaries;
+            return Task.FromResult(result);
+        }
     }
 
     public Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default)
@@ -124,6 +189,7 @@ public sealed class InMemorySessionStore : ISessionStore
                 _messages[conversationId] = list;
             }
             list.Add(message);
+            _updatedAt[conversationId] = DateTimeOffset.UtcNow; // last activity → ListConversations sort key.
         }
         return Task.FromResult(message);
     }

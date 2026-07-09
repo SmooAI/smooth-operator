@@ -122,6 +122,55 @@ public abstract class SessionStoreContractTests
     }
 
     [SkippableFact]
+    public async Task ResumeSession_KnownConversation_ReusesIdAndKeepsHistory()
+    {
+        var store = await CreateStoreAsync();
+        var first = await store.CreateSessionAsync("agent", "Alice", null);
+        await store.AppendMessageAsync(first.ConversationId, MessageDirection.Inbound, "prior turn");
+
+        // Resuming binds a NEW session to the SAME conversation, preserving its log.
+        var resumed = await store.ResumeSessionAsync("agent", "Alice", null, first.ConversationId);
+        Assert.Equal(first.ConversationId, resumed.ConversationId);
+        Assert.NotEqual(first.SessionId, resumed.SessionId);
+        Assert.Single(await store.ListMessagesAsync(resumed.ConversationId, 50));
+
+        // A resumed session is a real, fetchable session.
+        Assert.NotNull(await store.GetSessionAsync(resumed.SessionId));
+    }
+
+    [SkippableFact]
+    public async Task ResumeSession_UnknownOrEmptyConversation_MintsFresh()
+    {
+        var store = await CreateStoreAsync();
+
+        var unknown = await store.ResumeSessionAsync("agent", null, null, Guid.NewGuid().ToString());
+        Assert.True(Guid.TryParse(unknown.ConversationId, out _));
+
+        var empty = await store.ResumeSessionAsync("agent", null, null, null);
+        Assert.True(Guid.TryParse(empty.ConversationId, out _));
+        Assert.NotEqual(unknown.ConversationId, empty.ConversationId);
+    }
+
+    [SkippableFact]
+    public async Task ListConversations_OnlyNonEmpty_WithCountAndFirstInbound()
+    {
+        var store = await CreateStoreAsync();
+
+        // Empty conversation → excluded.
+        await store.CreateSessionAsync("agent", null, null);
+        // Non-empty conversation → one summary, first inbound captured.
+        var withMessages = await store.CreateSessionAsync("agent", null, null);
+        await store.AppendMessageAsync(withMessages.ConversationId, MessageDirection.Inbound, "first user line");
+        await store.AppendMessageAsync(withMessages.ConversationId, MessageDirection.Outbound, "agent reply");
+
+        var summaries = await store.ListConversationsAsync();
+        var summary = Assert.Single(summaries, s => s.ConversationId == withMessages.ConversationId);
+        Assert.Equal(2, summary.MessageCount);
+        Assert.Equal("first user line", summary.FirstInboundText);
+        Assert.DoesNotContain(summaries, s => s.ConversationId != withMessages.ConversationId && s.MessageCount == 0);
+    }
+
+    [SkippableFact]
     public async Task CreateSession_CapturesUserEmail_ForOtpContact()
     {
         var store = await CreateStoreAsync();

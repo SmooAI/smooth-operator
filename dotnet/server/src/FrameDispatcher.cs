@@ -153,6 +153,9 @@ public sealed class FrameDispatcher
                 case "get_session":
                     await HandleGetSessionAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
+                case "list_conversations":
+                    await HandleListConversationsAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "send_message":
                     await HandleSendMessageAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
@@ -181,10 +184,16 @@ public sealed class FrameDispatcher
 
     private async Task HandleCreateSessionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
-        var session = await _store.CreateSessionAsync(
+        // Resume: a `conversationId` naming an existing conversation binds the new session to it
+        // (reuse id + persisted history); absent/unknown → a fresh conversation (unchanged). The
+        // response echoes session.ConversationId either way, so a resuming client sees the same id
+        // it passed. Mirrors the Rust reference's resume branch. th-d5b446.
+        var conversationId = frame["conversationId"]?.GetValue<string>();
+        var session = await _store.ResumeSessionAsync(
             frame["agentId"]?.GetValue<string>() ?? string.Empty,
             frame["userName"]?.GetValue<string>(),
             frame["userEmail"]?.GetValue<string>(),
+            string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
 
         var data = new JsonObject
@@ -216,6 +225,87 @@ public sealed class FrameDispatcher
             ["agentName"] = session.AgentName,
         };
         sink(ProtocolEvents.ImmediateResponse(requestId, 200, "OK", data));
+    }
+
+    // Fallback title for a conversation that has messages but no inbound (user) message to preview.
+    // The C# store carries no per-conversation name (unlike the Rust reference's conversation.name),
+    // so a generic label stands in. th-d5b446.
+    private const string DefaultConversationName = "Conversation";
+    private const int TitleMaxChars = 60;
+    private const int DefaultListLimit = 50;
+
+    /// <summary>
+    /// <c>list_conversations</c> — the conversation-sidebar / resume substrate. Returns the store's
+    /// conversations that have at least one message (empty ones, minted every page-load, are filtered
+    /// out), most-recent-first, each with a short first-inbound title preview + message count. Reply is
+    /// an <c>immediate_response</c> carrying <c>{ conversations: [ { conversationId, title, updatedAt,
+    /// messageCount } ] }</c>. Optional input: <c>limit</c> (default 50). Mirrors the Rust
+    /// <c>handle_list_conversations</c>. th-d5b446.
+    /// </summary>
+    private async Task HandleListConversationsAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    {
+        var limit = DefaultListLimit;
+        if (frame["limit"] is JsonValue lv && lv.TryGetValue<int>(out var l) && l > 0)
+        {
+            limit = l;
+        }
+
+        var summaries = await _store.ListConversationsAsync(cancellationToken).ConfigureAwait(false);
+
+        var conversations = new JsonArray();
+        foreach (var c in summaries.Where(s => s.MessageCount > 0).OrderByDescending(s => s.UpdatedAt).Take(limit))
+        {
+            conversations.Add(new JsonObject
+            {
+                ["conversationId"] = c.ConversationId,
+                ["title"] = ConversationTitle(c.FirstInboundText, DefaultConversationName),
+                ["updatedAt"] = c.UpdatedAt.ToUniversalTime().UtcDateTime.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                ["messageCount"] = c.MessageCount,
+            });
+        }
+
+        sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Conversations", new JsonObject { ["conversations"] = conversations }));
+    }
+
+    /// <summary>Sidebar title: a trimmed, ~60-char preview of the first inbound message with leading
+    /// markdown/control chars stripped, falling back to <paramref name="fallback"/> when there is no
+    /// inbound text. Mirrors the Rust <c>conversation_title</c> (plus the contract's leading-markdown
+    /// strip) and the Go/TS parity helpers. th-d5b446.</summary>
+    public static string ConversationTitle(string? firstInboundText, string fallback)
+    {
+        var cleaned = StripLeadingMarkup(firstInboundText ?? string.Empty);
+        return cleaned.Length == 0 ? fallback : TruncatePreview(cleaned, TitleMaxChars);
+    }
+
+    /// <summary>Trim leading whitespace, control chars, and markdown syntax markers (heading <c>#</c>,
+    /// bullets <c>*-</c>, quote <c>&gt;</c>, emphasis <c>_~</c>, code <c>`</c>, cursor <c>▎</c>) off a
+    /// preview, so "### Hi" / "- do X" title as "Hi" / "do X".</summary>
+    private static string StripLeadingMarkup(string s)
+    {
+        var i = 0;
+        while (i < s.Length && (char.IsWhiteSpace(s[i]) || char.IsControl(s[i]) || "#*>-_~`▎".IndexOf(s[i]) >= 0))
+        {
+            i++;
+        }
+        return s[i..];
+    }
+
+    /// <summary>Trim and clip to <paramref name="max"/> Unicode scalar values (char-safe, so surrogate
+    /// pairs aren't split), appending an ellipsis when clipped. Mirrors the Rust <c>truncate_preview</c>.</summary>
+    private static string TruncatePreview(string s, int max)
+    {
+        s = s.Trim();
+        var runes = s.EnumerateRunes().ToArray();
+        if (runes.Length <= max)
+        {
+            return s;
+        }
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < max; i++)
+        {
+            sb.Append(runes[i].ToString());
+        }
+        return sb.ToString().TrimEnd() + "…";
     }
 
     private async Task HandleSendMessageAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)

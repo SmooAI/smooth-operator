@@ -76,11 +76,20 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default)
+    public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default) =>
+        ResumeSessionAsync(agentId, userName, userEmail, null, cancellationToken);
+
+    public async Task<StoredSession> ResumeSessionAsync(string agentId, string? userName, string? userEmail, string? conversationId, CancellationToken cancellationToken = default)
     {
+        // Resume when the caller names a known conversation (reuse its id so subsequent turns append
+        // to its persisted log and the runner replays its history); absent/unknown → a fresh id
+        // (byte-for-byte the old CreateSession behavior). th-d5b446.
+        var resume = !string.IsNullOrEmpty(conversationId)
+            && await ConversationExistsAsync(conversationId!, cancellationToken).ConfigureAwait(false);
+
         var session = new StoredSession(
             SessionId: Guid.NewGuid().ToString(),
-            ConversationId: Guid.NewGuid().ToString(),
+            ConversationId: resume ? conversationId! : Guid.NewGuid().ToString(),
             AgentId: string.IsNullOrEmpty(agentId) ? Guid.NewGuid().ToString() : agentId,
             AgentName: "smooth-agent",
             UserParticipantId: Guid.NewGuid().ToString(),
@@ -102,6 +111,46 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         command.Parameters.AddWithValue("email", (object?)session.UserEmail ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return session;
+    }
+
+    private async Task<bool> ConversationExistsAsync(string conversationId, CancellationToken cancellationToken)
+    {
+        const string sql = "SELECT 1 FROM conversation_sessions WHERE conversation_id = @cid LIMIT 1";
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("cid", conversationId);
+        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return result is not null;
+    }
+
+    public async Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default)
+    {
+        // One row per conversation with at least one message: count, last-activity time (max message
+        // created_at), and the FIRST inbound message text (lowest seq, direction inbound) as the title
+        // source. Empty conversations are naturally excluded (no rows). Sorting + capping is the
+        // dispatcher's job. The C# analog of the Rust list-conversations + per-conversation peek. th-d5b446.
+        const string sql = """
+            SELECT m.conversation_id,
+                   COUNT(*)              AS message_count,
+                   MAX(m.created_at)     AS updated_at,
+                   (SELECT i.content->>'text' FROM conversation_messages i
+                     WHERE i.conversation_id = m.conversation_id AND i.direction = 'inbound'
+                     ORDER BY i.seq ASC LIMIT 1) AS first_inbound
+            FROM conversation_messages m
+            GROUP BY m.conversation_id
+            """;
+        await using var command = _dataSource.CreateCommand(sql);
+
+        var results = new List<ConversationSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            results.Add(new ConversationSummary(
+                ConversationId: reader.GetString(0),
+                UpdatedAt: reader.GetFieldValue<DateTimeOffset>(2),
+                MessageCount: (int)reader.GetInt64(1),
+                FirstInboundText: reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+        return results;
     }
 
     public async Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default)
