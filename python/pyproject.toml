@@ -1,6 +1,6 @@
 [project]
 name = "smooai-smooth-operator"
-version = "1.22.4"
+version = "1.22.5"
 description = "Python protocol types and native async WebSocket client for the smooth-operator protocol. Generated from the language-neutral JSON Schemas in spec/."
 readme = "README.md"
 license = { text = "MIT" }
