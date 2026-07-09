@@ -15,6 +15,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from threading import Lock
 
@@ -53,6 +54,24 @@ class StoredMessage:
     text: str
 
 
+@dataclass(frozen=True)
+class ConversationSummary:
+    """One conversation's roll-up for the ``list_conversations`` action — enough to
+    render a resumable-thread list without pulling every message. The dispatcher turns
+    ``first_inbound_text`` / ``updated_at`` / ``message_count`` into the wire
+    ``{conversationId, title, updatedAt, messageCount}``. The Python analog of the Go
+    ``ConversationSummary`` and the TS ``ConversationSummary``. th-d5b446."""
+
+    conversation_id: str
+    #: Last-activity timestamp (create, then every append) — the sort key + ``updatedAt``.
+    updated_at: datetime
+    #: Total messages in the conversation. The dispatcher drops empties (``0``).
+    message_count: int
+    #: Text of the FIRST inbound (user) message — the dispatcher's title source.
+    #: ``None`` when the conversation has no inbound message (title falls back to a name).
+    first_inbound_text: str | None = None
+
+
 #: The reference agent's display name (mirrors the Rust ``AGENT_NAME`` and the C#
 #: ``InMemorySessionStore`` default).
 AGENT_NAME = "smooth-agent"
@@ -63,10 +82,25 @@ class SessionStore(ABC):
     adapter and the C# ``ISessionStore``)."""
 
     @abstractmethod
-    async def create_session(self, agent_id: str, user_name: str | None, user_email: str | None) -> StoredSession: ...
+    async def create_session(
+        self, agent_id: str, user_name: str | None, user_email: str | None, conversation_id: str | None = None
+    ) -> StoredSession:
+        """Mint a session. When ``conversation_id`` names an EXISTING conversation, the
+        new session binds to it (resume: reuses the id + its persisted message log, so
+        subsequent turns append and history replays). An absent or unknown id mints a
+        fresh conversation (unchanged behavior). th-d5b446."""
+        ...
 
     @abstractmethod
     async def get_session(self, session_id: str) -> StoredSession | None: ...
+
+    @abstractmethod
+    async def list_conversations(self) -> list[ConversationSummary]:
+        """A summary per conversation that has at least one message (empty conversations —
+        every page-load currently mints one — are dropped), in no particular order; the
+        dispatcher sorts most-recent-first and caps. The Python analog of the Rust
+        ``list_conversations_by_org`` + per-conversation peek. th-d5b446."""
+        ...
 
     @abstractmethod
     async def append_message(self, conversation_id: str, direction: MessageDirection, text: str) -> StoredMessage: ...
@@ -111,25 +145,38 @@ class InMemorySessionStore(SessionStore):
         self._gate = Lock()
         self._sessions: dict[str, StoredSession] = {}
         self._messages: dict[str, list[StoredMessage]] = {}
+        #: Per-conversation last-activity time (create, then every append) — the sort key
+        #: + updated_at source for list_conversations. th-d5b446.
+        self._updated_at: dict[str, datetime] = {}
         #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
         self._current_step: dict[str, str] = {}
         #: Per-session OTP-verified bit (absent/False = unverified). Set by a
         #: successful ``verify_otp``; read by the ``end_user`` auth gate.
         self._authenticated: dict[str, bool] = {}
 
-    async def create_session(self, agent_id: str, user_name: str | None, user_email: str | None) -> StoredSession:
-        session = StoredSession(
-            session_id=str(uuid.uuid4()),
-            conversation_id=str(uuid.uuid4()),
-            agent_id=agent_id if agent_id else str(uuid.uuid4()),
-            agent_name=AGENT_NAME,
-            user_participant_id=str(uuid.uuid4()),
-            agent_participant_id=str(uuid.uuid4()),
-            contact_email=(user_email.strip() or None) if isinstance(user_email, str) else None,
-        )
+    async def create_session(
+        self, agent_id: str, user_name: str | None, user_email: str | None, conversation_id: str | None = None
+    ) -> StoredSession:
         with self._gate:
+            # Resume: bind to an existing conversation (reuse its id + persisted log) when
+            # the caller passes a known conversationId. Unknown/absent → mint a fresh one.
+            resume = bool(conversation_id) and conversation_id in self._messages
+            conv_id = conversation_id if resume else str(uuid.uuid4())
+            session = StoredSession(
+                session_id=str(uuid.uuid4()),
+                conversation_id=conv_id,
+                agent_id=agent_id if agent_id else str(uuid.uuid4()),
+                agent_name=AGENT_NAME,
+                user_participant_id=str(uuid.uuid4()),
+                agent_participant_id=str(uuid.uuid4()),
+                contact_email=(user_email.strip() or None) if isinstance(user_email, str) else None,
+            )
             self._sessions[session.session_id] = session
-            self._messages[session.conversation_id] = []
+            # Only seed an empty log + timestamp on a fresh conversation — a resume keeps
+            # its history (and prior last-activity time).
+            if not resume:
+                self._messages[conv_id] = []
+                self._updated_at[conv_id] = datetime.now(timezone.utc)
         return session
 
     async def get_session(self, session_id: str) -> StoredSession | None:
@@ -140,7 +187,26 @@ class InMemorySessionStore(SessionStore):
         message = StoredMessage(str(uuid.uuid4()), conversation_id, direction, text)
         with self._gate:
             self._messages.setdefault(conversation_id, []).append(message)
+            self._updated_at[conversation_id] = datetime.now(timezone.utc)
         return message
+
+    async def list_conversations(self) -> list[ConversationSummary]:
+        with self._gate:
+            out: list[ConversationSummary] = []
+            for conv_id, log in self._messages.items():
+                if not log:  # drop empties — every page-load mints one
+                    continue
+                # Messages are stored oldest-first, so the first inbound is the title source.
+                first_inbound = next((m.text for m in log if m.direction is MessageDirection.INBOUND), None)
+                out.append(
+                    ConversationSummary(
+                        conversation_id=conv_id,
+                        updated_at=self._updated_at.get(conv_id, datetime.now(timezone.utc)),
+                        message_count=len(log),
+                        first_inbound_text=first_inbound,
+                    )
+                )
+            return out
 
     async def list_messages(self, conversation_id: str, limit: int) -> list[StoredMessage]:
         with self._gate:

@@ -113,6 +113,8 @@ class FrameDispatcher:
                 sink(protocol.pong(request_id))
             elif action == "create_conversation_session":
                 await self._handle_create_session(frame, request_id, sink)
+            elif action == "list_conversations":
+                await self._handle_list_conversations(frame, request_id, sink)
             elif action == "get_session":
                 await self._handle_get_session(frame, request_id, sink)
             elif action == "send_message":
@@ -132,10 +134,17 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "INTERNAL_ERROR", "Internal error processing the request."))
 
     async def _handle_create_session(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        # Resume: a `conversationId` naming an existing conversation binds the new session
+        # to it (reuses id + history); absent/unknown → a fresh conversation. The response
+        # echoes conversationId either way, so a resuming client sees the id it passed.
+        # Mirrors the Rust/Go/TS reference. th-d5b446.
+        raw_conv_id = frame.get("conversationId")
+        conversation_id = raw_conv_id if isinstance(raw_conv_id, str) and raw_conv_id else None
         session = await self._store.create_session(
             frame.get("agentId") or "",
             frame.get("userName"),
             frame.get("userEmail"),
+            conversation_id,
         )
         data = {
             "sessionId": session.session_id,
@@ -165,6 +174,35 @@ class FrameDispatcher:
             "agentParticipantId": session.agent_participant_id,
         }
         sink(protocol.immediate_response(request_id, 200, "Session", data))
+
+    async def _handle_list_conversations(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``list_conversations`` — the conversation-sidebar / resume substrate. Returns
+        the store's conversations that have at least one message (empties, minted every
+        page-load, are dropped), most-recent-first, each ``{conversationId, title,
+        updatedAt, messageCount}`` where ``title`` is a first-inbound preview. Optional
+        input: ``limit`` (default 50). A client resumes one by passing its
+        ``conversationId`` to ``create_conversation_session``. Mirrors the Rust/Go/TS
+        reference. th-d5b446."""
+        raw_limit = frame.get("limit")
+        limit = (
+            raw_limit
+            if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0
+            else _DEFAULT_LIST_LIMIT
+        )
+
+        summaries = await self._store.list_conversations()
+        # Most-recent-first (empties already dropped by the store), then cap.
+        summaries.sort(key=lambda c: c.updated_at, reverse=True)
+        conversations = [
+            {
+                "conversationId": c.conversation_id,
+                "title": _conversation_title(c.first_inbound_text, f"Conversation {c.conversation_id}"),
+                "updatedAt": c.updated_at.isoformat(),
+                "messageCount": c.message_count,
+            }
+            for c in summaries[:limit]
+        ]
+        sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": conversations}))
 
     async def _handle_send_message(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # requestId is load-bearing for streaming correlation; generate one if the
@@ -405,3 +443,48 @@ class FrameDispatcher:
                 {"sessionId": session_id, "approved": approved},
             )
         )
+
+
+#: Default cap for list_conversations when the caller doesn't ask for a specific limit.
+_DEFAULT_LIST_LIMIT = 50
+
+#: Max characters in a conversation title preview before it's clipped with an ellipsis.
+_TITLE_MAX = 60
+
+#: Leading markdown/control markers stripped off a preview so a raw message body renders
+#: as clean text (heading #, bullets *-, quote >, emphasis _~, code `, cursor ▎). Only
+#: LEADING chars are touched — inline markdown mid-text is left alone.
+_LEADING_MARKUP = "#*>-_~`▎ "
+
+
+def _conversation_title(first_inbound_text: str | None, fallback: str) -> str:
+    """Derive a ``list_conversations`` entry title from the first inbound message text,
+    falling back to ``fallback`` (a conversation name) when there is none. The preview is
+    cleaned (leading markdown/control chars stripped) and clipped to ``_TITLE_MAX`` chars
+    with an ellipsis. Mirrors the Rust ``conversation_title`` + ``truncate_preview``, plus
+    the contract's leading-markdown strip (matching Go/TS). th-d5b446."""
+    cleaned = _strip_leading_markup(first_inbound_text or "")
+    if not cleaned:
+        return fallback
+    return _truncate_preview(cleaned, _TITLE_MAX)
+
+
+def _strip_leading_markup(s: str) -> str:
+    """Trim leading whitespace, control chars, and markdown markers off a preview so
+    ``"### Hi"`` / ``"- do X"`` title as ``"Hi"`` / ``"do X"``."""
+    i = 0
+    for ch in s:
+        if ch.isspace() or (ch.isprintable() is False) or ch in _LEADING_MARKUP:
+            i += 1
+        else:
+            break
+    return s[i:].strip()
+
+
+def _truncate_preview(s: str, max_chars: int) -> str:
+    """Trim ``s`` and clip it to ``max_chars`` (char-safe), appending an ellipsis when
+    clipped. Mirrors the Rust ``truncate_preview``."""
+    s = s.strip()
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars].rstrip() + "…"
