@@ -1,5 +1,19 @@
 # @smooai/smooth-operator
 
+## 1.22.11
+
+### Patch Changes
+
+- fix(rust): require core `^0.16.1` so `with_model_ceiling` resolves from crates.io
+
+  Server 1.22.10 calls `AgentConfig::with_model_ceiling` / `LlmClient::with_model_ceiling`,
+  but its published manifest required core `^0.16` — and crates.io topped out at core
+  **0.16.0**, which predates those methods. So any external `cargo build` against the
+  published server resolved the broken 0.16.0 and failed to compile (the chips/empty-reply
+  reasoning-channel fix was un-buildable off crates.io). Core **0.16.1** is now published
+  with the API; pin the floor at `0.16.1` and drop the stopgap `git`/`rev` pin so the
+  published server resolves the fixed engine.
+
 ## 1.22.10
 
 ### Patch Changes

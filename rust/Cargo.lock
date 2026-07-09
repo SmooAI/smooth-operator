@@ -2038,7 +2038,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -3077,7 +3077,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.41",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3114,7 +3114,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -3974,7 +3974,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-backplane-nats"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4022,7 +4022,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-backplane-redis"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4038,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-dynamodb"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4059,7 +4059,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4072,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-postgres"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4093,8 +4093,9 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "0.16.0"
-source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=d03fa10#d03fa1087d8b81689322409b885b0467fdbc8c7c"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b46339a69d4d8d2b7eda66ebdb1151a4d56bc3c3410f61576120f0fa2e17bc76"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4162,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4209,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.22.10"
+version = "1.22.11"
 dependencies = [
  "anyhow",
  "async-trait",
