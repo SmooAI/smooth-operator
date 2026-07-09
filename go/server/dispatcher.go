@@ -3,7 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 	"sync"
+	"time"
+	"unicode"
 
 	core "github.com/SmooAI/smooth-operator-core/go/core"
 	"github.com/google/uuid"
@@ -100,6 +104,11 @@ type inboundFrame struct {
 	AgentID   string `json:"agentId"`
 	UserName  string `json:"userName"`
 	UserEmail string `json:"userEmail"`
+	// create_conversation_session — optional: resume an existing conversation (bind the new
+	// session to it) when known; absent/unknown → a fresh conversation (unchanged). th-d5b446.
+	ConversationID string `json:"conversationId"`
+	// list_conversations — optional max conversations returned (default 50). th-d5b446.
+	Limit int `json:"limit"`
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
@@ -127,6 +136,8 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 		d.handleCreateSession(ctx, frame, sink)
 	case "get_session":
 		d.handleGetSession(ctx, frame, sink)
+	case "list_conversations":
+		d.handleListConversations(ctx, frame, sink)
 	case "send_message":
 		d.handleSendMessage(ctx, frame, sink)
 	case "confirm_tool_action":
@@ -141,7 +152,10 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 }
 
 func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inboundFrame, sink EventSink) {
-	session, err := d.store.CreateSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail)
+	// Resume when the caller passes a known conversationId (bind the new session to it so
+	// subsequent turns append to its log and the runner replays its history); absent/unknown
+	// → a fresh conversation (byte-for-byte unchanged). th-d5b446.
+	session, _, err := d.store.ResumeSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail, frame.ConversationID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -174,6 +188,84 @@ func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFra
 		"agentName":      session.AgentName,
 	}
 	sink(immediateResponse(frame.RequestID, 200, "OK", data))
+}
+
+// defaultListLimit caps list_conversations when the caller doesn't ask for a specific limit.
+const defaultListLimit = 50
+
+// defaultConversationName is the title fallback for a conversation with messages but no
+// inbound (user) message to preview. The Go store carries no per-conversation name (unlike
+// the Rust reference's conversation.name), so a generic label stands in.
+const defaultConversationName = "Conversation"
+
+// handleListConversations — the conversation-sidebar / resume substrate. Returns the store's
+// conversations that have at least one message (empty conversations, minted every page-load,
+// are filtered out by the store), most-recent-first, each with a short title preview + message
+// count. Reply is an immediate_response carrying { conversations: [ { conversationId, title,
+// updatedAt, messageCount } ] }. Optional input: limit (default 50). Mirrors the Rust
+// list_conversations. th-d5b446.
+func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inboundFrame, sink EventSink) {
+	limit := defaultListLimit
+	if frame.Limit > 0 {
+		limit = frame.Limit
+	}
+
+	summaries, err := d.store.ListConversations(ctx)
+	if err != nil {
+		sink(errorEvent(frame.RequestID, "STORAGE_ERROR", "Failed to list conversations."))
+		return
+	}
+
+	// Most-recent-first (stable so equal timestamps keep insertion order), then cap.
+	sort.SliceStable(summaries, func(i, j int) bool {
+		return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt)
+	})
+	if len(summaries) > limit {
+		summaries = summaries[:limit]
+	}
+
+	conversations := make([]map[string]any, 0, len(summaries))
+	for _, c := range summaries {
+		conversations = append(conversations, map[string]any{
+			"conversationId": c.ConversationID,
+			"title":          conversationTitle(c.FirstInbound, defaultConversationName),
+			"updatedAt":      c.UpdatedAt.UTC().Format(time.RFC3339),
+			"messageCount":   c.MessageCount,
+		})
+	}
+	sink(immediateResponse(frame.RequestID, 200, "Conversations", map[string]any{"conversations": conversations}))
+}
+
+// conversationTitle derives a sidebar title: a trimmed, ~60-char preview of the first inbound
+// message with leading markdown/control chars stripped, falling back to fallback when there's
+// no inbound text. Mirrors the Rust conversation_title (plus the contract's leading-markdown
+// strip). th-d5b446.
+func conversationTitle(firstInbound, fallback string) string {
+	t := stripLeadingMarkup(firstInbound)
+	if t == "" {
+		return fallback
+	}
+	return truncatePreview(t, 60)
+}
+
+// stripLeadingMarkup trims leading whitespace, control chars, and markdown syntax markers
+// (heading #, bullets *-, quote >, emphasis _~, code `) off a preview so a message like
+// "### Hi" or "- do X" titles as "Hi" / "do X".
+func stripLeadingMarkup(s string) string {
+	return strings.TrimLeftFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune("#*>-_~`", r)
+	})
+}
+
+// truncatePreview trims s and clips it to max runes (char-safe), appending an ellipsis when
+// clipped. Mirrors the Rust truncate_preview.
+func truncatePreview(s string, max int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return strings.TrimRight(string(r[:max]), " ") + "…"
 }
 
 func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFrame, sink EventSink) {
