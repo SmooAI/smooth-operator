@@ -54,7 +54,14 @@ Rules:
 #[must_use]
 pub fn extract_suggested_replies(reply: &str) -> (String, Vec<String>) {
     let Some(start) = reply.rfind(MARKER_OPEN) else {
-        return (reply.to_string(), Vec::new());
+        // Some models (gpt-oss-120b) ignore the marker contract and instead end
+        // the reply with a markdown "Suggested replies:" list. Parse that as a
+        // fallback so chips still populate; otherwise leave the reply untouched.
+        // ponytail: responseParts is cleaned here; the raw list can still flash in
+        // the live token stream (MarkerSuppressor only hides <suggested_replies>) —
+        // pearl th-gptoss-chips-stream if that becomes visible enough to matter.
+        return extract_markdown_suggested_replies(reply)
+            .unwrap_or_else(|| (reply.to_string(), Vec::new()));
     };
     let after_open = start + MARKER_OPEN.len();
     let (body, end) = match reply[after_open..].find(MARKER_CLOSE) {
@@ -85,6 +92,70 @@ pub fn extract_suggested_replies(reply: &str) -> (String, Vec<String>) {
         })
         .unwrap_or_default();
     (clean, suggestions)
+}
+
+/// Fallback for models that ignore the `<suggested_replies>` marker and instead
+/// end the reply with a markdown `Suggested replies:` list (observed on
+/// gpt-oss-120b, TP agent's default model). Returns the cleaned reply (list
+/// stripped) + parsed items, or `None` when there is no such trailing list.
+/// Conservative: fires only when a `suggested replies:` header is followed by a
+/// pure bullet/numbered list to the end of the reply, so a normal list in the
+/// body is never mistaken for chips.
+fn extract_markdown_suggested_replies(reply: &str) -> Option<(String, Vec<String>)> {
+    let (start, header_len) = ["suggested replies:", "suggested_replies:"]
+        .iter()
+        .filter_map(|h| rfind_ci(reply, h).map(|p| (p, h.len())))
+        .max_by_key(|&(p, _)| p)?;
+    // The header must own its line — the list starts on the NEXT line. Anything
+    // else after the header on the same line means it's prose, not a trailer.
+    let after = &reply[start + header_len..];
+    let nl = after.find('\n')?;
+    let mut items = Vec::new();
+    for line in after[nl + 1..].lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Every non-empty line must be a bullet (-, *, •) or "N." / "N)" item;
+        // any prose line means this isn't a clean chip trailer.
+        let bulleted = t.trim_start_matches(['-', '*', '•']);
+        let item = if bulleted.len() < t.len() {
+            bulleted.trim_start()
+        } else if let Some(i) = t
+            .find(['.', ')'])
+            .filter(|&i| i > 0 && t[..i].bytes().all(|b| b.is_ascii_digit()))
+        {
+            t[i + 1..].trim_start()
+        } else {
+            return None;
+        };
+        let item = item.trim().trim_matches(['"', '\'', '`']).trim();
+        if item.is_empty() {
+            return None;
+        }
+        items.push(item.to_string());
+    }
+    if items.is_empty() {
+        return None;
+    }
+    let clean = reply[..start].trim_end().to_string();
+    Some((clean, items.into_iter().take(MAX_SUGGESTIONS).collect()))
+}
+
+/// Case-insensitive `rfind` returning a byte offset into `haystack` (ASCII
+/// needle ⇒ the offset is always a char boundary). Avoids allocating a
+/// lowercased copy, which would desync offsets on non-ASCII text.
+fn rfind_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
+    let (hb, nb) = (haystack.as_bytes(), needle_lower.as_bytes());
+    if nb.is_empty() || hb.len() < nb.len() {
+        return None;
+    }
+    (0..=hb.len() - nb.len()).rev().find(|&i| {
+        hb[i..i + nb.len()]
+            .iter()
+            .zip(nb)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
 }
 
 /// Streaming hold-back so the trailer never flashes in the live token stream.
@@ -192,6 +263,52 @@ mod tests {
         let (clean, sug) = extract_suggested_replies("Q?\n<suggested_replies>[\"a\", \"b\"");
         assert_eq!(clean, "Q?");
         assert!(sug.is_empty(), "truncated JSON parses to nothing");
+    }
+
+    #[test]
+    fn gptoss_markdown_list_becomes_chips() {
+        // Real gpt-oss-120b shape: ignores the marker, ends with a quoted list.
+        let (clean, sug) = extract_suggested_replies(
+            "Could you tell me your current process maturity level?\n\nsuggested_replies:\n- \"I'm at the initial stage.\"\n- \"We have defined processes.\"\n- \"Our processes are mature.\"\n- \"Explain the maturity model?\"",
+        );
+        assert_eq!(
+            clean,
+            "Could you tell me your current process maturity level?"
+        );
+        assert_eq!(
+            sug,
+            vec![
+                "I'm at the initial stage.",
+                "We have defined processes.",
+                "Our processes are mature.",
+                "Explain the maturity model?"
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_list_handles_numbered_and_header_casing() {
+        let (clean, sug) =
+            extract_suggested_replies("Pick one.\n\n**Suggested Replies:**\n1. Yes\n2) No");
+        assert_eq!(clean, "Pick one.\n\n**"); // trailing "**" before the header is left as-is
+        assert_eq!(sug, vec!["Yes", "No"]);
+    }
+
+    #[test]
+    fn markdown_fallback_ignores_a_body_list_without_the_header() {
+        let reply = "Here are the steps:\n- do a\n- do b";
+        let (clean, sug) = extract_suggested_replies(reply);
+        assert_eq!(clean, reply); // no "suggested replies:" header ⇒ untouched
+        assert!(sug.is_empty());
+    }
+
+    #[test]
+    fn markdown_fallback_bails_when_header_is_followed_by_prose() {
+        // A header followed by a non-list line is not a clean chip trailer.
+        let reply = "Suggested replies: I don't have any right now.";
+        let (clean, sug) = extract_suggested_replies(reply);
+        assert_eq!(clean, reply);
+        assert!(sug.is_empty());
     }
 
     #[test]

@@ -1,5 +1,20 @@
 # @smooai/smooth-operator
 
+## 1.22.12
+
+### Patch Changes
+
+- Harden chat streaming + fix gpt-oss suggested-reply chips.
+
+  - `chat_stream` now retries retryable HTTP statuses (429/5xx) before reading any
+    stream bytes, mirroring the non-streaming `chat()` path. A transient gateway
+    5xx (groq/LiteLLM 502/503) previously propagated as an `AGENT_ERROR` and the
+    chat widget rendered an empty reply. Bumps the core dep to 0.16.2 (where the
+    retry lives).
+  - `extract_suggested_replies` now also parses a trailing markdown
+    `Suggested replies:` list, so models that ignore the `<suggested_replies>`
+    marker (gpt-oss-120b) still populate chips.
+
 ## 1.22.11
 
 ### Patch Changes
