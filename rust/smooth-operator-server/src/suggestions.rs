@@ -153,6 +153,16 @@ pub const MAX_RESPONSE_PARTS: usize = 6;
 /// the parts and rejoins. A list of already-distinct parts passes through as-is.
 #[must_use]
 pub fn dedupe_response_parts(parts: Vec<String>) -> Vec<String> {
+    let mut kept = dedupe_near_identical(parts);
+    kept.truncate(MAX_RESPONSE_PARTS);
+    kept
+}
+
+/// Near-identical dedupe WITHOUT the cap: trim, drop empty / all-punctuation, and
+/// drop any part ≥ 0.9 similar to one already kept (compared against every kept
+/// part, so an A/B/A/B rotation collapses). The count it removes is the runaway
+/// signal [`collapse_repetition`] keys on — separate from the display cap.
+fn dedupe_near_identical(parts: Vec<String>) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
     let mut kept_words: Vec<Vec<String>> = Vec::new();
     for part in parts {
@@ -169,35 +179,61 @@ pub fn dedupe_response_parts(parts: Vec<String>) -> Vec<String> {
         }
         kept.push(part.to_string());
         kept_words.push(words);
-        if kept.len() == MAX_RESPONSE_PARTS {
-            break;
-        }
     }
     kept
 }
 
-/// Collapse a runaway repetition loop in a finalized reply. Splits on blank-line
-/// paragraph breaks (a normal list is one paragraph, so the cap never truncates
-/// it), runs [`dedupe_response_parts`], and rejoins. Returns the reply unchanged
-/// when nothing was dropped, so a healthy reply is never reshaped.
-///
-/// ponytail: paragraph granularity — a loop that repeats on SINGLE newlines with
-/// no blank line stays one paragraph and slips through. Blank-line separated
-/// loops (the observed shape) collapse. Prompt + gateway penalty are the primary
-/// fixes; this is the deterministic backstop for the common case.
+/// Collapse a runaway repetition loop in a finalized reply. Segments the reply
+/// into sentences — breaking after `.`/`!`/`?` and on newlines, since the
+/// observed loop runs its filler sentences together with no separator at all
+/// ("…how is your data managed?We'll continue once you let me know…Take your
+/// time…") — and, only when MANY segments are near-identical (a degenerate loop,
+/// never a healthy reply), keeps the distinct ones and rejoins. Returns the reply
+/// byte-for-byte unchanged unless a runaway loop is actually found.
 #[must_use]
 pub fn collapse_repetition(reply: &str) -> String {
-    let paras: Vec<String> = reply.split("\n\n").map(str::to_string).collect();
-    if paras.len() < 2 {
+    let sentences = split_sentences(reply);
+    let distinct = dedupe_near_identical(sentences.clone());
+    // Fire only on a genuine loop: > MAX_RESPONSE_PARTS segments dropped as
+    // near-duplicates. A healthy reply (even a long, all-distinct one) drops ~none
+    // and passes through untouched; a couple of coincidentally-similar sentences
+    // never trip it.
+    if sentences.len().saturating_sub(distinct.len()) <= MAX_RESPONSE_PARTS {
         return reply.to_string();
     }
-    let deduped = dedupe_response_parts(paras.clone());
-    // Nothing dropped ⇒ preserve the reply byte-for-byte (paras.clone() would
-    // have trimmed/reshaped otherwise).
-    if deduped.len() == paras.len() && deduped.iter().zip(&paras).all(|(a, b)| a == b.trim()) {
-        return reply.to_string();
+    let mut kept = distinct;
+    kept.truncate(MAX_RESPONSE_PARTS);
+    kept.join(" ")
+}
+
+/// Split a reply into sentence-ish segments: break after a `.`/`!`/`?` run and on
+/// any newline. Crude on purpose (abbreviations over-split) — that only matters
+/// in the loop branch, since a healthy reply drops no near-duplicates and is
+/// returned unchanged regardless of how it segmented.
+fn split_sentences(reply: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in reply.chars() {
+        if c == '\n' {
+            push_trimmed(&mut out, &mut cur);
+            continue;
+        }
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            push_trimmed(&mut out, &mut cur);
+        }
     }
-    deduped.join("\n\n")
+    push_trimmed(&mut out, &mut cur);
+    out
+}
+
+/// Push `cur` (trimmed) as a segment if non-empty, then clear it.
+fn push_trimmed(out: &mut Vec<String>, cur: &mut String) {
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    cur.clear();
 }
 
 /// Lowercase alphanumeric word tokens of `s`, for content-similarity comparison.
@@ -434,10 +470,43 @@ mod tests {
     }
 
     #[test]
+    fn collapse_repetition_collapses_runtogether_sentence_loop() {
+        // The real production shape: filler sentences run together with NO
+        // separator (no blank line, often no space) — a rotation of a few
+        // templates repeated ~50 times in one reply string.
+        let fillers = [
+            "Whenever you're ready, just let me know how your data is managed.",
+            "Take your time—just let me know which description fits best.",
+            "We'll continue once you let me know how your data is managed.",
+            "Sure thing—just let me know how your data is managed.",
+        ];
+        let reply: String = (0..50).map(|i| fillers[i % fillers.len()]).collect();
+        let out = collapse_repetition(&reply);
+        // Collapsed to the handful of distinct templates, well under the raw loop.
+        assert!(out.len() < reply.len() / 5, "collapsed: {out}");
+        for f in fillers {
+            assert!(
+                out.contains(f.trim_end_matches('.')),
+                "kept a template: {out}"
+            );
+        }
+    }
+
+    #[test]
     fn collapse_repetition_collapses_paragraph_loop() {
         let reply = vec!["Take your time — no rush!"; 40].join("\n\n");
         let out = collapse_repetition(&reply);
         assert_eq!(out, "Take your time — no rush!");
+    }
+
+    #[test]
+    fn collapse_repetition_leaves_long_distinct_reply_byte_identical() {
+        // A genuinely long, all-distinct reply (> MAX_RESPONSE_PARTS sentences)
+        // must pass through untouched — the cap only bites a runaway loop.
+        let reply = "First, gather the data. Then clean it. Next, model it. \
+Validate the results carefully. Ship a small pilot. Measure the outcome. \
+Iterate on the weak spots. Finally, roll it out to everyone.";
+        assert_eq!(collapse_repetition(reply), reply);
     }
 
     #[test]
