@@ -1169,6 +1169,9 @@ async fn persist_message(
 /// for the analytic fields (clients render `responseParts`).
 #[must_use]
 pub fn general_agent_response(reply: &str, suggested_next_actions: &[String]) -> serde_json::Value {
+    // Deterministic backstop: a degenerate repetition loop can flood the reply
+    // with near-identical filler; collapse it before it reaches the widget.
+    let reply = crate::suggestions::collapse_repetition(reply);
     json!({
         "responseParts": [reply],
         "customerHappinessScore": 0.5,

@@ -142,6 +142,82 @@ fn extract_markdown_suggested_replies(reply: &str) -> Option<(String, Vec<String
     Some((clean, items.into_iter().take(MAX_SUGGESTIONS).collect()))
 }
 
+/// Maximum message parts kept on a turn's `responseParts`. A healthy reply is
+/// 1–2 parts; this caps a degenerate repetition loop (see [`collapse_repetition`]).
+pub const MAX_RESPONSE_PARTS: usize = 6;
+
+/// Deterministic backstop against a degenerate LLM completion spamming the chat
+/// widget: trim + drop empties, drop any part near-identical to one already kept
+/// (so an A/B/A/B filler rotation collapses, not just consecutive repeats), then
+/// cap at [`MAX_RESPONSE_PARTS`]. Pure; the [`collapse_repetition`] glue supplies
+/// the parts and rejoins. A list of already-distinct parts passes through as-is.
+#[must_use]
+pub fn dedupe_response_parts(parts: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    let mut kept_words: Vec<Vec<String>> = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let words = normalized_words(part);
+        if words.is_empty() {
+            continue; // all-punctuation part carries no content
+        }
+        if kept_words.iter().any(|prev| near_identical(prev, &words)) {
+            continue;
+        }
+        kept.push(part.to_string());
+        kept_words.push(words);
+        if kept.len() == MAX_RESPONSE_PARTS {
+            break;
+        }
+    }
+    kept
+}
+
+/// Collapse a runaway repetition loop in a finalized reply. Splits on blank-line
+/// paragraph breaks (a normal list is one paragraph, so the cap never truncates
+/// it), runs [`dedupe_response_parts`], and rejoins. Returns the reply unchanged
+/// when nothing was dropped, so a healthy reply is never reshaped.
+///
+/// ponytail: paragraph granularity — a loop that repeats on SINGLE newlines with
+/// no blank line stays one paragraph and slips through. Blank-line separated
+/// loops (the observed shape) collapse. Prompt + gateway penalty are the primary
+/// fixes; this is the deterministic backstop for the common case.
+#[must_use]
+pub fn collapse_repetition(reply: &str) -> String {
+    let paras: Vec<String> = reply.split("\n\n").map(str::to_string).collect();
+    if paras.len() < 2 {
+        return reply.to_string();
+    }
+    let deduped = dedupe_response_parts(paras.clone());
+    // Nothing dropped ⇒ preserve the reply byte-for-byte (paras.clone() would
+    // have trimmed/reshaped otherwise).
+    if deduped.len() == paras.len() && deduped.iter().zip(&paras).all(|(a, b)| a == b.trim()) {
+        return reply.to_string();
+    }
+    deduped.join("\n\n")
+}
+
+/// Lowercase alphanumeric word tokens of `s`, for content-similarity comparison.
+fn normalized_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Two parts are "near-identical" when their word sets overlap ≥ 0.9 (Jaccard).
+/// Cheap set intersection over already-tokenized words — no fuzzy-match crate.
+fn near_identical(a: &[String], b: &[String]) -> bool {
+    use std::collections::BTreeSet;
+    let (sa, sb): (BTreeSet<&String>, BTreeSet<&String>) = (a.iter().collect(), b.iter().collect());
+    let inter = sa.intersection(&sb).count();
+    let union = sa.union(&sb).count();
+    union > 0 && (inter as f64) / (union as f64) >= 0.9
+}
+
 /// Case-insensitive `rfind` returning a byte offset into `haystack` (ASCII
 /// needle ⇒ the offset is always a char boundary). Avoids allocating a
 /// lowercased copy, which would desync offsets on non-ASCII text.
@@ -309,6 +385,59 @@ mod tests {
         let (clean, sug) = extract_suggested_replies(reply);
         assert_eq!(clean, reply);
         assert!(sug.is_empty());
+    }
+
+    #[test]
+    fn dedupe_collapses_runaway_repetition_and_caps() {
+        // The real incident: ~50 near-identical filler parts in one turn.
+        let fillers = [
+            "Whenever you're ready, just let me know!",
+            "Take your time — no rush at all.",
+            "Sure thing! Just let me know when you're set.",
+        ];
+        let parts: Vec<String> = (0..50)
+            .map(|i| fillers[i % fillers.len()].to_string())
+            .collect();
+        let out = dedupe_response_parts(parts);
+        assert_eq!(out.len(), 3, "collapses to the distinct fillers");
+        assert!(out.len() <= MAX_RESPONSE_PARTS);
+    }
+
+    #[test]
+    fn dedupe_caps_at_six_distinct_parts() {
+        let parts: Vec<String> = (0..20)
+            .map(|i| format!("Distinct point number {i}."))
+            .collect();
+        let out = dedupe_response_parts(parts);
+        assert_eq!(out.len(), MAX_RESPONSE_PARTS);
+    }
+
+    #[test]
+    fn dedupe_passes_normal_reply_through() {
+        let parts = vec![
+            "Here's what I found.".to_string(),
+            "Want me to dig deeper?".to_string(),
+        ];
+        assert_eq!(dedupe_response_parts(parts.clone()), parts);
+    }
+
+    #[test]
+    fn dedupe_drops_empty_and_punctuation_only_parts() {
+        let parts = vec!["Hello.".to_string(), "  ".to_string(), "…".to_string()];
+        assert_eq!(dedupe_response_parts(parts), vec!["Hello.".to_string()]);
+    }
+
+    #[test]
+    fn collapse_repetition_leaves_normal_reply_byte_identical() {
+        let reply = "Here's the plan.\n\n- item one\n- item two\n- item three";
+        assert_eq!(collapse_repetition(reply), reply);
+    }
+
+    #[test]
+    fn collapse_repetition_collapses_paragraph_loop() {
+        let reply = vec!["Take your time — no rush!"; 40].join("\n\n");
+        let out = collapse_repetition(&reply);
+        assert_eq!(out, "Take your time — no rush!");
     }
 
     #[test]

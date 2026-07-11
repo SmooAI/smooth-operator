@@ -2015,7 +2015,10 @@ mod tests {
         assert!(max >= 256, "auto-title needs reasoning headroom, got {max}");
         assert_eq!(body["model"], AUTO_TITLE_MODEL);
         let prompt = body["messages"][0]["content"].as_str().unwrap();
-        assert!(prompt.contains("capital of France"), "prompt carries the user message");
+        assert!(
+            prompt.contains("capital of France"),
+            "prompt carries the user message"
+        );
         assert!(prompt.contains("Paris."), "prompt carries the reply");
     }
 
