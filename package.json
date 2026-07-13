@@ -14,7 +14,7 @@
         "typecheck": "pnpm -r typecheck",
         "version:sync": "node scripts/sync-versions.mjs",
         "version:bump": "pnpm changeset version && pnpm run version:sync",
-        "ci:publish": "pnpm --filter @smooai/smooth-operator build && pnpm changeset publish",
+        "ci:publish": "pnpm --filter @smooai/smooth-operator --filter @smooai/smooth-extension-sdk --filter @smooai/create-smooth-extension build && pnpm changeset publish",
         "publish:dry": "pnpm --filter @smooai/smooth-operator publish --dry-run --no-git-checks"
     },
     "devDependencies": {
