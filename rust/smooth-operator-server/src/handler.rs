@@ -1192,6 +1192,18 @@ async fn handle_send_message(
             current_step_id: state.session_current_step(session_id),
         });
 
+    // Captured for the post-turn per-step attempt cap (moved into the spawn): the
+    // workflow (to compute a force-advance target), the step we started this turn
+    // on, and the carried consecutive-hold count. See `apply_step_cap`.
+    let (cap_workflow, cap_step_before, cap_attempts) = match workflow.as_ref() {
+        Some(wt) => (
+            Some(wt.workflow.clone()),
+            wt.current_step_id.clone(),
+            state.session_step_attempts(session_id),
+        ),
+        None => (None, None, 0),
+    };
+
     // The judge LLM surface — only built when there's a workflow to advance. A
     // test-injected chat provider (the mock) doubles as the judge offline; in
     // production the judge runs on the server's default (cheap) model with the
@@ -1298,10 +1310,24 @@ async fn handle_send_message(
         match result {
             Ok(turn) => {
                 // Persist the workflow step pointer the judge landed on, so the
-                // next turn resumes on the right step. No-op when the agent has no
-                // workflow (`next_step_id` is `None`).
+                // next turn resumes on the right step, applying the per-step
+                // attempt cap so a step the judge never advances can't loop forever
+                // (th-d57a1d). No-op when the agent has no workflow (`next_step_id`
+                // is `None`).
                 if let Some(step) = turn.next_step_id.as_deref() {
-                    state_for_turn.set_session_current_step(&session_id_owned, Some(step));
+                    let (persist_step, persist_attempts) = match cap_workflow.as_ref() {
+                        Some(wf) => smooth_operator::agent_config::apply_step_cap(
+                            wf,
+                            cap_step_before.as_deref(),
+                            step,
+                            cap_attempts,
+                            smooth_operator::agent_config::WORKFLOW_STEP_ATTEMPT_CAP,
+                        ),
+                        None => (step.to_string(), 0),
+                    };
+                    state_for_turn
+                        .set_session_current_step(&session_id_owned, Some(persist_step.as_str()));
+                    state_for_turn.set_session_step_attempts(&session_id_owned, persist_attempts);
                 }
                 // If the auth gate refused an `end_user` tool for lack of a
                 // verified session this turn, and a host OTP service is installed

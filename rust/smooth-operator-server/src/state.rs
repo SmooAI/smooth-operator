@@ -480,6 +480,39 @@ impl AppState {
         }
     }
 
+    /// The consecutive-non-advancing turn count for this session's current
+    /// workflow step, read from `metadata.stepAttempts`. `0` when unset. Feeds the
+    /// per-step attempt cap ([`smooth_operator::agent_config::apply_step_cap`]) so a
+    /// step the judge never advances can't loop forever. Same durability as the
+    /// step pointer (lives with the session, on the pod that owns it).
+    #[must_use]
+    pub fn session_step_attempts(&self, session_id: &str) -> u32 {
+        self.sessions
+            .read()
+            .ok()
+            .and_then(|map| {
+                map.get(session_id)?
+                    .metadata
+                    .as_ref()?
+                    .get("stepAttempts")?
+                    .as_u64()
+            })
+            .unwrap_or(0) as u32
+    }
+
+    /// Persist the per-step attempt counter onto the in-memory session's
+    /// `metadata.stepAttempts`. No-op for an unknown session. Coexists with the
+    /// `currentStepId` pointer in the same metadata map.
+    pub fn set_session_step_attempts(&self, session_id: &str, attempts: u32) {
+        if let Ok(mut map) = self.sessions.write() {
+            if let Some(session) = map.get_mut(session_id) {
+                let mut meta = session.metadata.take().unwrap_or_default();
+                meta.insert("stepAttempts".to_string(), serde_json::Value::from(attempts));
+                session.metadata = Some(meta);
+            }
+        }
+    }
+
     /// Whether this session's caller has completed OTP identity verification,
     /// read from the session's `metadata.otpVerified`. `false` for an unknown or
     /// unverified session. Threaded into the `end_user` auth gate so a verified

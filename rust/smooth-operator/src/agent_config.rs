@@ -745,6 +745,50 @@ pub fn advance_after_verdict(
     Some(current.id.clone())
 }
 
+/// Default per-step attempt cap: after this many consecutive non-advancing turns
+/// on the same step, [`apply_step_cap`] force-advances so a step whose criteria
+/// the judge never accepts can't loop forever (public-agent pathological visitor;
+/// th-d57a1d). The counter resets whenever the step advances.
+pub const WORKFLOW_STEP_ATTEMPT_CAP: u32 = 3;
+
+/// Enforce the per-step attempt cap on top of the judge's verdict.
+///
+/// `judged_next` is the step id [`advance_after_verdict`] already produced this
+/// turn; `step_before` is the step the session was on at turn start; `attempts`
+/// is the consecutive-non-advancing count carried from the prior turn. Returns
+/// the `(step_id, attempts)` to persist:
+///   - the judge advanced this turn → reset the counter to 0,
+///   - otherwise increment; once it reaches `max_attempts` force-advance to the
+///     next step (counter resets), unless the step is terminal (nothing to
+///     advance to → stay, counter keeps climbing but is harmless).
+///
+/// Comparing against the *resolved* current step (not raw `step_before`) makes a
+/// fresh `None` pointer count its first turn on step 1 as a real attempt, so
+/// every step tolerates exactly `max_attempts` non-advancing turns.
+#[must_use]
+pub fn apply_step_cap(
+    workflow: &ConversationWorkflow,
+    step_before: Option<&str>,
+    judged_next: &str,
+    attempts: u32,
+    max_attempts: u32,
+) -> (String, u32) {
+    let current = resolve_current_step(workflow, step_before).map(|s| s.id.as_str());
+    if current != Some(judged_next) {
+        // The judge advanced (or moved) the step this turn → reset the counter.
+        return (judged_next.to_string(), 0);
+    }
+    let next_attempts = attempts + 1;
+    if next_attempts >= max_attempts {
+        if let Some(cur) = resolve_current_step(workflow, Some(judged_next)) {
+            if let Some(next) = next_step(workflow, cur) {
+                return (next.id.clone(), 0);
+            }
+        }
+    }
+    (judged_next.to_string(), next_attempts)
+}
+
 // ---------------------------------------------------------------------------
 // Provider seam
 // ---------------------------------------------------------------------------
@@ -994,6 +1038,57 @@ mod tests {
         assert_eq!(
             advance_after_verdict(&w, None, WorkflowJudgeVerdict::Yes).as_deref(),
             Some("collect")
+        );
+    }
+
+    #[test]
+    fn step_cap_yes_advances_immediately_and_resets() {
+        let w = wf();
+        // Judge advanced greet→collect this turn: reset the counter regardless of
+        // the carried attempts.
+        assert_eq!(
+            apply_step_cap(&w, Some("greet"), "collect", 2, WORKFLOW_STEP_ATTEMPT_CAP),
+            ("collect".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn step_cap_single_hold_stays_and_counts() {
+        let w = wf();
+        // Judge held on greet (judged_next == current): one non-advancing turn.
+        assert_eq!(
+            apply_step_cap(&w, Some("greet"), "greet", 0, WORKFLOW_STEP_ATTEMPT_CAP),
+            ("greet".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn step_cap_force_advances_on_third_consecutive_hold() {
+        let w = wf();
+        // Two holds already counted; the third reaches the cap → force-advance.
+        assert_eq!(
+            apply_step_cap(&w, Some("greet"), "greet", 2, WORKFLOW_STEP_ATTEMPT_CAP),
+            ("collect".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn step_cap_fresh_pointer_counts_first_turn_on_step_one() {
+        let w = wf();
+        // None resolves to "greet"; a hold on the very first turn counts as attempt 1.
+        assert_eq!(
+            apply_step_cap(&w, None, "greet", 0, WORKFLOW_STEP_ATTEMPT_CAP),
+            ("greet".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn step_cap_terminal_step_cannot_advance() {
+        let w = wf();
+        // Terminal step at the cap has nowhere to go → stay, keep counting.
+        assert_eq!(
+            apply_step_cap(&w, Some("summary"), "summary", 2, WORKFLOW_STEP_ATTEMPT_CAP),
+            ("summary".to_string(), 3)
         );
     }
 
