@@ -1,7 +1,7 @@
 {
-    "name": "create-smooth-extension",
+    "name": "@smooai/create-smooth-extension",
     "version": "0.2.0",
-    "description": "Scaffold a new SEP (Smooth Extension Protocol) extension: `npm create smooth-extension`. Four templates (tool, permission-gate, command, provider-less), each a complete project that typechecks, builds (tsc), unit-tests with `createTestHost`, and passes `runConformance`.",
+    "description": "Scaffold a new SEP (Smooth Extension Protocol) extension: `npm create @smooai/smooth-extension`. Four templates (tool, permission-gate, command, provider-less), each a complete project that typechecks, builds (tsc), unit-tests with `createTestHost`, and passes `runConformance`.",
     "license": "MIT",
     "type": "module",
     "engines": {

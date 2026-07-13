@@ -48,7 +48,7 @@ jobs:
             # Scope to the TypeScript packages the lane owns; `console` (the private
             # admin app) is a workspace member too but out of scope for this lane.
             - name: Typecheck
-              run: pnpm --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-server" --filter "@smooai/smooth-extension-sdk" --filter "create-smooth-extension" typecheck
+              run: pnpm --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-server" --filter "@smooai/smooth-extension-sdk" --filter "@smooai/create-smooth-extension" typecheck
 
             - name: Test
-              run: pnpm --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-server" --filter "@smooai/smooth-extension-sdk" --filter "create-smooth-extension" test
+              run: pnpm --filter "@smooai/smooth-operator" --filter "@smooai/smooth-operator-server" --filter "@smooai/smooth-extension-sdk" --filter "@smooai/create-smooth-extension" test
