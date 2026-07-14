@@ -880,7 +880,25 @@ pub async fn run_streaming_turn(
         _ if !streamed_reply.trim().is_empty() => streamed_reply.as_str(),
         _ => streamed_reasoning.as_str(),
     };
-    let (reply, suggested_next_actions) = crate::suggestions::extract_suggested_replies(final_text);
+    let (reply, mut suggested_next_actions) = crate::suggestions::extract_suggested_replies(final_text);
+
+    // Deterministic workflow chips (th-d57a1d): when the agent is on a workflow
+    // step that declares `suggestedReplies`, those canonical scale answers
+    // OVERRIDE any model-invented chips. This makes chips fire on every such
+    // step (reliable, not model-dependent) AND — crucially — a tapped chip is the
+    // clean input the judge reliably advances on, so the assessment stops
+    // stalling on terse free-text. Free-form steps declare none → model behavior
+    // is unchanged. Uses THIS turn's current step (before the judge advances),
+    // since the reply is pursuing that step's question.
+    if let Some(wt) = workflow.as_ref() {
+        if let Some(step) = resolve_current_step(&wt.workflow, wt.current_step_id.as_deref()) {
+            if let Some(chips) = step.suggested_replies.as_ref() {
+                if !chips.is_empty() {
+                    suggested_next_actions = chips.clone();
+                }
+            }
+        }
+    }
 
     // 5. Persist the outbound reply and capture its id for eventual_response.
     let message_id = if reply.is_empty() {

@@ -54,12 +54,14 @@ fn workflow() -> ConversationWorkflow {
                 intent: "Greet and confirm the caller's name".into(),
                 criteria: "The user's name has been captured".into(),
                 next: None,
+                suggested_replies: None,
             },
             ConversationWorkflowStep {
                 id: "collect".into(),
                 intent: "Ask what tooling they use today".into(),
                 criteria: "At least one current tool named".into(),
                 next: None,
+                suggested_replies: None,
             },
         ],
     }
