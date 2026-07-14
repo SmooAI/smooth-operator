@@ -48,6 +48,14 @@ pub struct ConversationWorkflowStep {
     /// steps (advancement then falls through to the next array element).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
+    /// Optional canonical quick-reply chips for this step. When present, the
+    /// server emits them verbatim as `suggestedNextActions` on this step's turn,
+    /// overriding any model-invented chips — deterministic, judge-advancing input
+    /// (th-d57a1d: a tapped scale answer is the clean input the judge reliably
+    /// advances on). Free-form steps (name/role/org) omit this. Mirrors
+    /// `suggestedReplies` on the TS `ConversationWorkflowStep`.
+    #[serde(default, rename = "suggestedReplies", skip_serializing_if = "Option::is_none")]
+    pub suggested_replies: Option<Vec<String>>,
 }
 
 /// A structured conversation workflow: a goal + ordered steps. Mirrors
@@ -851,18 +859,21 @@ mod tests {
                     intent: "Greet and confirm name".into(),
                     criteria: "User's name captured".into(),
                     next: None,
+                    suggested_replies: None,
                 },
                 ConversationWorkflowStep {
                     id: "collect".into(),
                     intent: "Collect current tooling".into(),
                     criteria: "At least one tool named".into(),
                     next: Some("summary".into()),
+                    suggested_replies: None,
                 },
                 ConversationWorkflowStep {
                     id: "summary".into(),
                     intent: "Summarize".into(),
                     criteria: "Summary delivered".into(),
                     next: None,
+                    suggested_replies: None,
                 },
             ],
         }
@@ -892,6 +903,44 @@ mod tests {
     }
 
     #[test]
+    fn suggested_replies_deserializes_from_camelcase_jsonb() {
+        // The agents-table jsonb uses camelCase `suggestedReplies`; a rename
+        // mismatch would silently drop chips to None (serde default), which is
+        // exactly the th-d57a1d failure this field prevents. Guard both the
+        // present case and that an absent field stays None (free-form step) and
+        // round-trips without emitting the key.
+        let w: ConversationWorkflow = serde_json::from_value(json!({
+            "goal": "Assess",
+            "steps": [
+                {
+                    "id": "dim1",
+                    "intent": "Rate dimension 1",
+                    "criteria": "A 1-5 rating given",
+                    "suggestedReplies": ["1", "2", "3", "4", "5"]
+                },
+                { "id": "name", "intent": "Ask name", "criteria": "Name given" }
+            ]
+        }))
+        .expect("workflow with suggestedReplies parses");
+        assert_eq!(
+            w.steps[0].suggested_replies,
+            Some(vec![
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string(),
+                "4".to_string(),
+                "5".to_string()
+            ])
+        );
+        assert!(w.steps[1].suggested_replies.is_none());
+        let round = serde_json::to_value(&w.steps[1]).unwrap();
+        assert!(
+            round.get("suggestedReplies").is_none(),
+            "None must omit the field"
+        );
+    }
+
+    #[test]
     fn next_step_prefers_explicit_then_sequential_then_terminal() {
         let w = wf();
         // greet has no `next` → sequential → collect
@@ -915,18 +964,21 @@ mod tests {
                     intent: "i".into(),
                     criteria: "c".into(),
                     next: Some("c".into()), // skip b
+                    suggested_replies: None,
                 },
                 ConversationWorkflowStep {
                     id: "b".into(),
                     intent: "i".into(),
                     criteria: "c".into(),
                     next: None,
+                    suggested_replies: None,
                 },
                 ConversationWorkflowStep {
                     id: "c".into(),
                     intent: "i".into(),
                     criteria: "c".into(),
                     next: None,
+                    suggested_replies: None,
                 },
             ],
         };
@@ -943,12 +995,14 @@ mod tests {
                     intent: "i".into(),
                     criteria: "c".into(),
                     next: Some("nonexistent".into()),
+                    suggested_replies: None,
                 },
                 ConversationWorkflowStep {
                     id: "b".into(),
                     intent: "i".into(),
                     criteria: "c".into(),
                     next: None,
+                    suggested_replies: None,
                 },
             ],
         };
