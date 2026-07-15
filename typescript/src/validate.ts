@@ -41,6 +41,7 @@ const EVENT_SCHEMA_FILE: Record<EventType, string> = {
     eventual_response: 'events/eventual-response.schema.json',
     stream_chunk: 'events/stream-chunk.schema.json',
     stream_token: 'events/stream-token.schema.json',
+    stream_preamble: 'events/stream-preamble.schema.json',
     keepalive: 'events/keepalive.schema.json',
     write_confirmation_required: 'events/write-confirmation-required.schema.json',
     otp_verification_required: 'events/otp-verification-required.schema.json',
