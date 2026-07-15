@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::access_control::AccessContext;
-use smooth_operator::adapter::ConversationUpdate;
+use smooth_operator::adapter::{ConversationUpdate, StorageAdapter};
 use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel};
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
@@ -936,6 +936,78 @@ fn sanitize_title(raw: &str) -> String {
 /// knowledge-grounded turn, emit `stream_token` / `stream_chunk` as it goes, and
 /// finish with `eventual_response` (200). Errors (no gateway key, unknown
 /// session, agent failure) surface as clean `error` events.
+/// Keys under `conversation.metadata_json` where the durable workflow step
+/// pointer + per-step attempt count live. They belong on the CONVERSATION
+/// (shared storage, addressed by the stable `conversation_id`) — NOT the
+/// per-connection `session_id` or the per-pod in-memory session map, both of
+/// which reset on a widget reconnect or a pod hop and froze the pointer at step 0
+/// so the judge/cap could never advance it (th-c12df5 / th-d57a1d).
+const WF_STEP_META_KEY: &str = "workflowCurrentStepId";
+const WF_ATTEMPTS_META_KEY: &str = "workflowStepAttempts";
+
+/// Read the durable `(current_step_id, attempts)` off the conversation's
+/// metadata. Missing / unreadable → `(None, 0)`, so the runner resolves to the
+/// workflow's first step exactly as a fresh conversation should.
+async fn load_workflow_step(
+    storage: &dyn StorageAdapter,
+    conversation_id: &str,
+) -> (Option<String>, u32) {
+    let meta = match storage.get_conversation(conversation_id).await {
+        Ok(Some(c)) => c.metadata_json,
+        _ => None,
+    };
+    let Some(Value::Object(m)) = meta else {
+        return (None, 0);
+    };
+    let step = m
+        .get(WF_STEP_META_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let attempts = m
+        .get(WF_ATTEMPTS_META_KEY)
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    (step, attempts)
+}
+
+/// Persist the step pointer + attempt count onto the conversation metadata,
+/// read-modify-write so sibling metadata keys survive. Best-effort: a storage
+/// error is logged, not fatal — the turn already succeeded, and the worst case is
+/// the next turn re-resolves the prior step (the attempt cap still bounds it).
+async fn persist_workflow_step(
+    storage: &dyn StorageAdapter,
+    conversation_id: &str,
+    step_id: &str,
+    attempts: u32,
+) {
+    let existing = match storage.get_conversation(conversation_id).await {
+        Ok(Some(c)) => c.metadata_json,
+        _ => None,
+    };
+    let mut obj = match existing {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert(WF_STEP_META_KEY.to_string(), Value::from(step_id));
+    obj.insert(WF_ATTEMPTS_META_KEY.to_string(), Value::from(attempts));
+    if let Err(e) = storage
+        .update_conversation(
+            conversation_id,
+            ConversationUpdate {
+                metadata_json: Some(Value::Object(obj)),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            conversation_id,
+            "failed to persist workflow step pointer; next turn may re-resolve the prior step"
+        );
+    }
+}
+
 async fn handle_send_message(
     state: &AppState,
     access: &AccessContext,
@@ -1183,14 +1255,25 @@ async fn handle_send_message(
     // there's no gate — the OTP flow can't trigger.
     let otp_gate = auth_gate.clone();
 
-    // The agent's conversation workflow (if any) + the step this session is on.
-    let workflow = agent_cfg
+    // The agent's conversation workflow (if any) + the durable step this
+    // CONVERSATION is on. The pointer + attempt count load from shared storage
+    // (conversation metadata, keyed by the stable `conversation_id`) so they
+    // survive widget reconnects and pod hops — the per-pod in-memory session map
+    // reset them to step 0 every turn, freezing the workflow at the first step so
+    // the judge/cap could never advance it (th-c12df5). Only read when the agent
+    // actually has a workflow.
+    let wf_cfg = agent_cfg
         .as_ref()
-        .and_then(|c| c.conversation_workflow.clone())
-        .map(|wf| runner::WorkflowTurn {
-            workflow: wf,
-            current_step_id: state.session_current_step(session_id),
-        });
+        .and_then(|c| c.conversation_workflow.clone());
+    let (loaded_step_id, loaded_attempts) = if wf_cfg.is_some() {
+        load_workflow_step(state.storage.as_ref(), &session.conversation_id).await
+    } else {
+        (None, 0)
+    };
+    let workflow = wf_cfg.map(|wf| runner::WorkflowTurn {
+        workflow: wf,
+        current_step_id: loaded_step_id,
+    });
 
     // Captured for the post-turn per-step attempt cap (moved into the spawn): the
     // workflow (to compute a force-advance target), the step we started this turn
@@ -1199,7 +1282,7 @@ async fn handle_send_message(
         Some(wt) => (
             Some(wt.workflow.clone()),
             wt.current_step_id.clone(),
-            state.session_step_attempts(session_id),
+            loaded_attempts,
         ),
         None => (None, None, 0),
     };
@@ -1312,8 +1395,10 @@ async fn handle_send_message(
                 // Persist the workflow step pointer the judge landed on, so the
                 // next turn resumes on the right step, applying the per-step
                 // attempt cap so a step the judge never advances can't loop forever
-                // (th-d57a1d). No-op when the agent has no workflow (`next_step_id`
-                // is `None`).
+                // (th-d57a1d). Written to the CONVERSATION's shared metadata (keyed
+                // by the stable `conversation_id`) so it survives reconnects/pod
+                // hops (th-c12df5). No-op when the agent has no workflow
+                // (`next_step_id` is `None`).
                 if let Some(step) = turn.next_step_id.as_deref() {
                     let (persist_step, persist_attempts) = match cap_workflow.as_ref() {
                         Some(wf) => smooth_operator::agent_config::apply_step_cap(
@@ -1325,9 +1410,13 @@ async fn handle_send_message(
                         ),
                         None => (step.to_string(), 0),
                     };
-                    state_for_turn
-                        .set_session_current_step(&session_id_owned, Some(persist_step.as_str()));
-                    state_for_turn.set_session_step_attempts(&session_id_owned, persist_attempts);
+                    persist_workflow_step(
+                        state_for_turn.storage.as_ref(),
+                        &conversation_id,
+                        &persist_step,
+                        persist_attempts,
+                    )
+                    .await;
                 }
                 // If the auth gate refused an `end_user` tool for lack of a
                 // verified session this turn, and a host OTP service is installed
@@ -1906,6 +1995,67 @@ fn build_judge_provider(state: &AppState, turn_llm: &LlmConfig) -> Arc<dyn LlmPr
 mod tests {
     use super::*;
     use smooth_operator_core::llm::{ApiFormat, RetryPolicy};
+
+    /// The durable workflow pointer round-trips through conversation metadata and
+    /// a FRESH load resumes on it — the whole point of moving it off the per-pod
+    /// in-memory session map, which reset to step 0 on every reconnect / pod hop
+    /// and froze the workflow at the first step (th-c12df5). Sibling metadata keys
+    /// survive the read-modify-write; an unknown conversation defaults, never panics.
+    #[tokio::test]
+    async fn workflow_step_persists_to_conversation_metadata_and_resumes() {
+        use smooth_operator::domain::{Conversation, Platform};
+        use smooth_operator_adapter_memory::InMemoryStorageAdapter;
+
+        let storage = InMemoryStorageAdapter::new();
+        let conv_id = "conv-step-1";
+        let ts = chrono::Utc::now();
+        storage
+            .create_conversation(Conversation {
+                id: conv_id.into(),
+                platform: Platform::Web,
+                name: "wf".into(),
+                organization_id: "org-1".into(),
+                idempotency_key: conv_id.into(),
+                // A sibling metadata key that must survive the step writes.
+                metadata_json: Some(json!({ "keep": "me" })),
+                analytics_json: None,
+                created_at: ts,
+                updated_at: ts,
+            })
+            .await
+            .expect("seed conversation");
+
+        // Fresh conversation → no pointer yet.
+        assert_eq!(load_workflow_step(&storage, conv_id).await, (None, 0));
+
+        // Persist an advanced step; a NEW stateless load (as a reconnect / a
+        // different pod would do) resumes on it.
+        persist_workflow_step(&storage, conv_id, "collect", 2).await;
+        assert_eq!(
+            load_workflow_step(&storage, conv_id).await,
+            (Some("collect".to_string()), 2)
+        );
+
+        // Overwrite advances the pointer + resets attempts.
+        persist_workflow_step(&storage, conv_id, "summary", 0).await;
+        assert_eq!(
+            load_workflow_step(&storage, conv_id).await,
+            (Some("summary".to_string()), 0)
+        );
+
+        // Sibling metadata survived the read-modify-write.
+        let conv = storage.get_conversation(conv_id).await.unwrap().unwrap();
+        assert_eq!(
+            conv.metadata_json
+                .unwrap()
+                .get("keep")
+                .and_then(Value::as_str),
+            Some("me")
+        );
+
+        // Unknown conversation → defaults, never panics.
+        assert_eq!(load_workflow_step(&storage, "nope").await, (None, 0));
+    }
 
     /// A baseline config whose `model` is the server default, so each override
     /// test asserts against a known starting model.
