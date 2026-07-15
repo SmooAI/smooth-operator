@@ -507,7 +507,10 @@ impl AppState {
         if let Ok(mut map) = self.sessions.write() {
             if let Some(session) = map.get_mut(session_id) {
                 let mut meta = session.metadata.take().unwrap_or_default();
-                meta.insert("stepAttempts".to_string(), serde_json::Value::from(attempts));
+                meta.insert(
+                    "stepAttempts".to_string(),
+                    serde_json::Value::from(attempts),
+                );
                 session.metadata = Some(meta);
             }
         }

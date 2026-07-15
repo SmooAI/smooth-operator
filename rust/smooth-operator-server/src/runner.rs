@@ -880,7 +880,8 @@ pub async fn run_streaming_turn(
         _ if !streamed_reply.trim().is_empty() => streamed_reply.as_str(),
         _ => streamed_reasoning.as_str(),
     };
-    let (reply, mut suggested_next_actions) = crate::suggestions::extract_suggested_replies(final_text);
+    let (reply, mut suggested_next_actions) =
+        crate::suggestions::extract_suggested_replies(final_text);
 
     // Deterministic workflow chips (th-d57a1d): when the agent is on a workflow
     // step that declares `suggestedReplies`, those canonical scale answers
