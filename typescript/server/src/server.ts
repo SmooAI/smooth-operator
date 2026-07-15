@@ -29,7 +29,7 @@ import type { OtpService } from './otp.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
 import type { Frame } from './protocol.js';
-import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
+import type { ChatClientLike, Tool, ToolHook } from '@smooai/smooth-operator-core';
 import type { AuthVerifier } from './auth.js';
 import { NoAuthVerifier } from './auth.js';
 import { InMemorySessionStore, type SessionStore } from './sessionStore.js';
@@ -48,6 +48,17 @@ export interface ServerOptions {
      * them straight to the agent. Empty by default, so behaviour is unchanged.
      */
     tools?: Tool[];
+    /**
+     * Consumer-supplied tool-call surveillance {@link ToolHook}s (default none). The
+     * builder seam a host uses to plug surveillance/redaction into EVERY turn's tool
+     * registry: each hook's `preCall` runs before a tool executes (a throw blocks it)
+     * and its `postCall` runs after with a mutable result it may redact. Forwarded
+     * verbatim through the dispatcher to each turn's engine `toolHooks`. Unlike
+     * {@link tools}, hooks bypass the per-agent enabled-tools filter — they see every
+     * call. Empty ⇒ behaviour unchanged. Mirrors the Rust `LocalServerBuilder`'s hook
+     * seam feeding the per-turn `ToolRegistry`.
+     */
+    toolHooks?: ToolHook[];
     /**
      * Tool-name patterns gated behind write-confirmation HITL (default empty → no
      * gating, behavior unchanged). When a turn calls a tool whose name contains one of
@@ -139,6 +150,7 @@ export function buildServer(options: ServerOptions): {
             access,
             systemPrompt: options.systemPrompt,
             tools: options.tools,
+            toolHooks: options.toolHooks,
             confirmTools: options.confirmTools,
             agentConfig: options.agentConfig,
             judgeModel: options.judgeModel,
@@ -212,6 +224,14 @@ export async function serveLocal(options: {
     knowledge?: AccessKnowledge;
     model?: string;
     modelCeiling?: ModelCeilingResolver;
+    /** Tools the agent may call during a turn (default none). */
+    tools?: Tool[];
+    /**
+     * Consumer-supplied tool-call surveillance {@link ToolHook}s (default none) — the
+     * embed seam a host (the smooth daemon) uses to install Narc/redaction on every
+     * turn's tool registry. Forwarded straight to {@link ServerOptions.toolHooks}.
+     */
+    toolHooks?: ToolHook[];
 }): Promise<RunningServer> {
     return serve({
         chatClient: options.chatClient,
@@ -219,6 +239,8 @@ export async function serveLocal(options: {
         auth: new NoAuthVerifier(),
         backplane: new InMemoryBackplane(),
         knowledge: options.knowledge,
+        tools: options.tools,
+        toolHooks: options.toolHooks,
         model: options.model,
         modelCeiling: options.modelCeiling,
         host: options.host ?? '127.0.0.1',
