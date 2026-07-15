@@ -1284,6 +1284,9 @@ async fn handle_send_message(
                 interactions,
                 // SEAM 1 — host tool provider (None by default ⇒ built-ins only).
                 tool_provider,
+                // Host tool hooks applied to every turn's registry (empty by
+                // default). Big Smooth injects its auto-mode gate + narc judge here.
+                tool_hooks: state_for_turn.tool_hooks.clone(),
                 // SEAM 2 — resolved per-org persona (None ⇒ const prompt).
                 system_prompt,
                 org_id: Some(org_id),

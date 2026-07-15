@@ -177,6 +177,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             confirmation: None,
             interactions: None,
             tool_provider: None,
+            tool_hooks: vec![],
             system_prompt: None,
             org_id: Some("org-telemetry".to_string()),
             gateway_key: None,

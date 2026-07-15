@@ -26,9 +26,11 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::json;
 use smooth_operator_core::llm_provider::LlmProvider;
+use smooth_operator_core::tool::ToolHook;
 use smooth_operator_core::{
     human_channel, Agent, AgentConfig, AgentEvent, ConfirmationHook, HumanRequest, HumanResponse,
-    KnowledgeBase, KnowledgeResult, LlmConfig, Message as EngineMessage, Role, ToolRegistry,
+    KnowledgeBase, KnowledgeResult, LlmConfig, Message as EngineMessage, Role, ToolCall,
+    ToolRegistry, ToolResult,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -54,6 +56,33 @@ use smooth_operator::tools::{
 };
 use smooth_operator::MAX_CITATIONS;
 use tracing::Instrument;
+
+/// Adapter so a host-supplied `Arc<dyn ToolHook>` can be installed via
+/// [`ToolRegistry::add_hook`], which takes `impl ToolHook + 'static` by value.
+/// The engine has no blanket `impl ToolHook for Arc<dyn ToolHook>` and the orphan
+/// rule forbids adding one here, so this newtype forwards every hook method to the
+/// shared inner hook. Cloning is Arc-cheap; the registry re-wraps it in its own
+/// `Arc` internally.
+struct SharedToolHook(Arc<dyn ToolHook>);
+
+#[async_trait::async_trait]
+impl ToolHook for SharedToolHook {
+    async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
+        self.0.pre_call(call).await
+    }
+    async fn post_call(&self, call: &ToolCall, result: &mut ToolResult) -> anyhow::Result<()> {
+        self.0.post_call(call, result).await
+    }
+    async fn pre_network(&self, url: &str, method: &str) -> anyhow::Result<()> {
+        self.0.pre_network(url, method).await
+    }
+    async fn pre_shell(&self, command: &str) -> anyhow::Result<()> {
+        self.0.pre_shell(command).await
+    }
+    async fn pre_write(&self, path: &str) -> anyhow::Result<()> {
+        self.0.pre_write(path).await
+    }
+}
 
 /// How many auto-injected knowledge results the engine prepends as
 /// `[Relevant knowledge]` context. Mirrors smooth-operator-core's `Agent`
@@ -276,6 +305,15 @@ pub struct TurnRequest<'a> {
     /// registry as exactly the built-ins, so default behavior is byte-for-byte
     /// unchanged. A host installs one via [`AppState::with_tools`](crate::state::AppState::with_tools).
     pub tool_provider: Option<Arc<dyn ToolProvider>>,
+    /// **Host tool-hook injection.** Engine [`ToolHook`]s the host installs on
+    /// every turn's [`ToolRegistry`] (via
+    /// [`AppState::with_tool_hooks`](crate::state::AppState::with_tool_hooks) →
+    /// [`LocalServerBuilder::tool_hooks`](crate::local::LocalServerBuilder::tool_hooks)).
+    /// Registered FIRST — before the per-agent `auth_gate` and confirmation hooks —
+    /// so a host permission/surveillance hook (e.g. Big Smooth's auto-mode gate +
+    /// narc judge) gets first say on every call. Empty (the default) ⇒ no extra
+    /// hooks, byte-for-byte unchanged.
+    pub tool_hooks: Vec<Arc<dyn ToolHook>>,
     /// **SEAM 2 — per-org agent persona.** The resolved system prompt for this
     /// turn. When `Some`, it REPLACES the built-in [`KNOWLEDGE_CHAT_SYSTEM_PROMPT`]
     /// as the agent's system prompt (the host resolves it from per-org settings,
@@ -370,6 +408,7 @@ pub async fn run_streaming_turn(
         confirmation,
         interactions,
         tool_provider,
+        tool_hooks,
         system_prompt,
         org_id,
         gateway_key,
@@ -560,6 +599,14 @@ pub async fn run_streaming_turn(
     // name isn't enabled. `None` (empty/absent tool_config) leaves the full set.
     if let Some(enabled) = enabled_tools {
         tools.retain(|name| enabled.iter().any(|id| id == name));
+    }
+
+    // Host tool-hook injection. Register the host's ToolHooks FIRST — before the
+    // per-agent auth gate and the confirmation hook — so a host permission /
+    // surveillance hook (Big Smooth's auto-mode gate + narc judge) gets first say
+    // on every call. Empty (the default) ⇒ no-op, unchanged behavior.
+    for hook in tool_hooks {
+        tools.add_hook(SharedToolHook(hook));
     }
 
     // SEAM 3 — per-agent authLevel gate. When installed, a tool call whose

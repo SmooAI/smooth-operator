@@ -33,6 +33,7 @@ use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
 use tokio_util::sync::CancellationToken;
 
 use smooth_operator_core::llm_provider::LlmProvider;
+use smooth_operator_core::tool::ToolHook;
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
 
 use crate::config::ServerConfig;
@@ -63,6 +64,13 @@ pub struct AppState {
     /// installs one via [`with_tools`](Self::with_tools) to contribute its own
     /// per-org tool catalog without forking the runner.
     pub tool_provider: Option<Arc<dyn ToolProvider>>,
+    /// **Host tool-hook seam.** Engine [`ToolHook`]s the host installs on every
+    /// turn's `ToolRegistry` (registered before the per-agent auth gate and
+    /// confirmation hooks, so a host permission/surveillance hook gets first say).
+    /// Empty by default (no extra hooks); a host installs some via
+    /// [`with_tool_hooks`](Self::with_tool_hooks). This is the seam Big Smooth uses
+    /// to inject its auto-mode permission gate + narc judge into every turn.
+    pub tool_hooks: Vec<Arc<dyn ToolHook>>,
     /// Embeddable-widget auth hook: resolves an agent's origin-allowlist +
     /// public-key policy for `<smooth-agent-chat>` connections. Defaults to
     /// [`PermissiveWidgetAuth`] (no enforcement) until a host installs a real
@@ -239,6 +247,7 @@ impl AppState {
             connector_configs: Arc::new(InMemoryConnectorConfigStore::new()),
             settings: Arc::new(InMemorySettingsStore::new()),
             tool_provider: None,
+            tool_hooks: Vec::new(),
             widget_auth: Arc::new(PermissiveWidgetAuth),
             agent_config: Arc::new(StaticAgentConfigResolver::default()),
             backplane: Arc::new(InMemoryBackplane::new()),
@@ -311,6 +320,17 @@ impl AppState {
     #[must_use]
     pub fn with_tools(mut self, provider: Arc<dyn ToolProvider>) -> Self {
         self.tool_provider = Some(provider);
+        self
+    }
+
+    /// Install host [`ToolHook`]s (builder) applied to every turn's tool registry,
+    /// before the per-agent auth gate and confirmation hooks — so a host
+    /// permission/surveillance hook gets first say on every call. Empty (the
+    /// default) ⇒ no extra hooks. Big Smooth uses this to inject its auto-mode
+    /// permission gate + narc judge.
+    #[must_use]
+    pub fn with_tool_hooks(mut self, hooks: Vec<Arc<dyn ToolHook>>) -> Self {
+        self.tool_hooks = hooks;
         self
     }
 
@@ -507,7 +527,10 @@ impl AppState {
         if let Ok(mut map) = self.sessions.write() {
             if let Some(session) = map.get_mut(session_id) {
                 let mut meta = session.metadata.take().unwrap_or_default();
-                meta.insert("stepAttempts".to_string(), serde_json::Value::from(attempts));
+                meta.insert(
+                    "stepAttempts".to_string(),
+                    serde_json::Value::from(attempts),
+                );
                 session.metadata = Some(meta);
             }
         }

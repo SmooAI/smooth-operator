@@ -130,6 +130,7 @@ async fn run_turn_as(
             confirmation: None,
             interactions: None,
             tool_provider: None,
+            tool_hooks: vec![],
             system_prompt: None,
             org_id: None,
             gateway_key: None,
