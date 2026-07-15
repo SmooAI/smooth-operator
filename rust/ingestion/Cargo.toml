@@ -1,6 +1,6 @@
 [package]
 name = "smooai-smooth-operator-ingestion"
-version = "1.22.16"
+version = "1.22.17"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
