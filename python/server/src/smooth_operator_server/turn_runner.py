@@ -71,6 +71,15 @@ DEFAULT_MAX_ITERATIONS = 20
 #: the clamp is released. (Release-ordering: core PR ships + publishes first.)
 _CORE_SUPPORTS_CEILING = any(f.name == "model_max_output" for f in fields(AgentOptions))
 
+#: Whether the installed smooth-operator-core supports tool-call lifecycle hooks
+#: (``AgentOptions.tool_hooks`` / the ``ToolHook`` seam). Same release-ordering as
+#: the ceiling clamp: the server pins the PUBLISHED core, so a core predating hooks
+#: has no ``tool_hooks`` field and passing it would raise ``TypeError``. Thread hooks
+#: through only when the field exists — stays green on the pinned core, activates
+#: automatically once a core with the seam is released. (Core PR ships + publishes
+#: first.)
+_CORE_SUPPORTS_HOOKS = any(f.name == "tool_hooks" for f in fields(AgentOptions))
+
 #: Top-K knowledge hits surfaced as auto-context citations (what grounded the
 #: answer). Matches the engine's auto-context injection and the TS/C#/Rust servers.
 AUTO_CONTEXT_LIMIT = 3
@@ -116,6 +125,7 @@ class TurnRunner:
         confirmations: ConfirmationRegistry | None = None,
         agent_config: AgentConfig | None = None,
         judge_model: str | None = None,
+        tool_hooks: list[Any] | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
@@ -133,6 +143,11 @@ class TurnRunner:
         self._confirm_tools = confirm_tools or []
         #: The session-keyed pending-confirmation registry the gate parks on.
         self._confirmations = confirmations
+        #: Tool-call lifecycle hooks (``ToolHook``) installed on every turn's engine —
+        #: surveillance / redaction (e.g. a Narc-style secret scrubber) that sees every
+        #: tool call. Empty (the default) ⇒ no hooks. Threaded into ``AgentOptions``
+        #: only when the installed core supports the seam (see ``_CORE_SUPPORTS_HOOKS``).
+        self._tool_hooks = tool_hooks or []
 
     def _is_gated(self, tool_name: str) -> bool:
         """True when ``tool_name`` matches a confirmation-gated pattern (substring,
@@ -195,6 +210,13 @@ class TurnRunner:
             options_kwargs["tools"] = agent_tools
         if self._model is not None:
             options_kwargs["model"] = self._model
+
+        # Install tool-call lifecycle hooks (ToolHook) on the per-turn engine. Every
+        # hook's pre_call gates each tool (raise → block) and its post_call may redact
+        # the result in place. Feature-detected against the pinned core (see
+        # `_CORE_SUPPORTS_HOOKS`); empty hooks ⇒ nothing threaded, behavior unchanged.
+        if self._tool_hooks and _CORE_SUPPORTS_HOOKS:
+            options_kwargs["tool_hooks"] = self._tool_hooks
 
         # Clamp max_tokens to what the resolved model can physically emit: look up
         # its output ceiling from the gateway (best-effort; None ⇒ unclamped) and
