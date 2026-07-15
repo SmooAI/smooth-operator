@@ -29,6 +29,9 @@ type FrameDispatcher struct {
 	// turn's auto-context citations.
 	knowledge core.Knowledge
 	tools     []core.Tool
+	// hooks are engine ToolHooks threaded into every turn the runner builds (nil →
+	// none). Set by the server after construction, alongside tools.
+	hooks []core.ToolHook
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (empty → HITL off). Threaded into every turn the runner builds.
 	confirmTools []string
@@ -354,6 +357,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// ui/confirm and shut the subprocesses down. No-op when no host was built.
 		defer extTurn.Close(ctx)
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
+		runner.hooks = d.hooks
 		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean
