@@ -24,6 +24,7 @@ public sealed class FrameDispatcher
     private readonly AccessContext _access;
     private readonly string? _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
+    private readonly IReadOnlyList<IToolHook> _toolHooks;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry _confirmations;
     private readonly IAgentConfigResolver? _agentConfigResolver;
@@ -52,7 +53,8 @@ public sealed class FrameDispatcher
         IWorkflowJudge? judge = null,
         ISessionAuthenticator? authenticator = null,
         IOtpService? otpService = null,
-        TurnLimits? limits = null)
+        TurnLimits? limits = null,
+        IReadOnlyList<IToolHook>? toolHooks = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -61,6 +63,9 @@ public sealed class FrameDispatcher
         _systemPrompt = systemPrompt;
         _reranker = reranker;
         _tools = tools ?? Array.Empty<AITool>();
+        // Tool-call hooks (surveillance / redaction) forwarded to every turn's registry (empty → no
+        // hooks, unchanged). Mirrors the Rust operative installing NarcHook on its ToolRegistry.
+        _toolHooks = toolHooks ?? Array.Empty<IToolHook>();
         // Tool-name patterns gated behind write-confirmation HITL (empty → no gating, behavior
         // unchanged). When a turn calls a tool whose name contains one of these, the server parks the
         // turn and emits write_confirmation_required until the client replies with confirm_tool_action.
@@ -360,7 +365,7 @@ public sealed class FrameDispatcher
         // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge, _limits);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge, _limits, _toolHooks);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's

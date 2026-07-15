@@ -28,13 +28,14 @@ public sealed class TurnRunner
     private readonly IReranker? _reranker;
     private readonly string _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
+    private readonly IReadOnlyList<IToolHook> _toolHooks;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry? _confirmations;
     private readonly AgentConfig _agentConfig;
     private readonly IWorkflowJudge? _judge;
     private readonly TurnLimits _limits;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, IReadOnlyList<IToolHook>? toolHooks = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -43,6 +44,10 @@ public sealed class TurnRunner
         _systemPrompt = systemPrompt ??
             "You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don't know.";
         _tools = tools ?? Array.Empty<AITool>();
+        // Tool-call hooks (surveillance / redaction) applied to every turn's tool registry. Empty (the
+        // default) ⇒ no hooks, behavior unchanged. Mirrors the Rust server installing NarcHook on the
+        // operative's ToolRegistry.
+        _toolHooks = toolHooks ?? Array.Empty<IToolHook>();
         // Tool-name substrings that require human approval before they run (empty → HITL off,
         // behavior unchanged). Matched by substring like the Rust/Python gate.
         _confirmTools = confirmTools ?? Array.Empty<string>();
@@ -161,6 +166,10 @@ public sealed class TurnRunner
         foreach (var tool in _tools)
         {
             options.Tools.Add(tool);
+        }
+        foreach (var hook in _toolHooks)
+        {
+            options.ToolHooks.Add(hook);
         }
 
         // Write-confirmation HITL: when configured with tool patterns AND a registry is present,

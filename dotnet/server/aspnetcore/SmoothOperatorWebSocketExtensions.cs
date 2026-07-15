@@ -104,7 +104,11 @@ public static class SmoothOperatorWebSocketExtensions
             otpService: services.GetService<IOtpService>(),
             // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
             // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
-            limits: services.GetService<TurnLimits>());
+            limits: services.GetService<TurnLimits>(),
+            // Tool-call hooks (surveillance / redaction) applied to every turn's registry. A host that
+            // registered an IReadOnlyList<IToolHook> gets them; absent one ⇒ no hooks (unchanged). The
+            // DI analog of the Rust operative installing NarcHook on its ToolRegistry.
+            toolHooks: services.GetService<IReadOnlyList<IToolHook>>());
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
