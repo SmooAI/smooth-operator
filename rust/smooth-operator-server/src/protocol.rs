@@ -80,6 +80,23 @@ pub fn stream_reasoning(request_id: &str, token: &str) -> Value {
     })
 }
 
+/// `stream_preamble` — a single streamed token of the fast-model *preamble*: a
+/// short "what I'm about to do" sentence generated in parallel with the main turn
+/// to cover the reasoning model's time-to-first-token. Shaped exactly like
+/// `stream_token`, but on a distinct `type` so clients render it as an *ephemeral*
+/// status line that the real answer replaces — never folded into the answer.
+/// Clients that don't know the type simply ignore it. Pearl th-9a5794.
+#[must_use]
+pub fn stream_preamble(request_id: &str, token: &str) -> Value {
+    json!({
+        "type": "stream_preamble",
+        "requestId": request_id,
+        "token": token,
+        "data": { "requestId": request_id, "token": token },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `stream_chunk` — a per-node state snapshot. `node` is mirrored at the
 /// envelope level and inside `data` (per `stream-chunk.schema.json`). `state`
 /// only carries safe-to-expose fields.
@@ -408,6 +425,17 @@ mod tests {
         // …but shaped exactly like stream_token so they render it the same way.
         assert_eq!(ev["token"], "let me think");
         assert_eq!(ev["data"]["token"], "let me think");
+        assert_eq!(ev["data"]["requestId"], "r1");
+    }
+
+    #[test]
+    fn stream_preamble_is_distinct_type_but_mirrors_token() {
+        let ev = stream_preamble("r1", "Let me pull up your recent conversations.");
+        // Distinct type so clients render it as an ephemeral status line…
+        assert_eq!(ev["type"], "stream_preamble");
+        // …but shaped exactly like stream_token so they can reuse the render path.
+        assert_eq!(ev["token"], "Let me pull up your recent conversations.");
+        assert_eq!(ev["data"]["token"], "Let me pull up your recent conversations.");
         assert_eq!(ev["data"]["requestId"], "r1");
     }
 

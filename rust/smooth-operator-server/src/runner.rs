@@ -28,7 +28,8 @@ use serde_json::json;
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::{
     human_channel, Agent, AgentConfig, AgentEvent, ConfirmationHook, HumanRequest, HumanResponse,
-    KnowledgeBase, KnowledgeResult, LlmConfig, Message as EngineMessage, Role, ToolRegistry,
+    KnowledgeBase, KnowledgeResult, LlmClient, LlmConfig, Message as EngineMessage, Role,
+    ToolRegistry,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -82,6 +83,18 @@ const MAX_PRIOR_MESSAGES: usize = 50;
 /// (a timeout). Bounds a stuck turn so a client that never confirms can't pin a
 /// task forever. Generous (5 min) because a human is in the loop.
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `max_tokens` for the fast-model preamble — one short sentence. Pearl th-9a5794.
+const PREAMBLE_MAX_TOKENS: u32 = 64;
+
+/// System prompt for the fast-model preamble (see `SMOOTH_AGENT_PREAMBLE_MODEL`).
+/// One short present-tense sentence describing intent — no answer (it's generated
+/// WITHOUT the tool result), no greeting, no promises.
+const PREAMBLE_SYSTEM_PROMPT: &str = "You are the assistant's voice while it works. \
+In ONE short present-tense sentence (max ~12 words), tell the user what you're about to do to help with their message. \
+Do NOT answer the question, do NOT greet, do NOT promise a specific result or outcome. \
+Example: \"Let me pull up your recent conversations.\" \
+Reply with only that sentence — no quotes, no preamble, no markdown.";
 
 /// Registers a parked turn's [`HumanResponse`] sender under a session id (so a
 /// later `confirm_tool_action` can take it). Typically `AppState::register_confirmation`.
@@ -387,6 +400,25 @@ pub async fn run_streaming_turn(
     let model_for_span = llm.model.clone();
     let org_id_for_span = org_id.clone();
 
+    // Optional fast-model preamble. When `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a
+    // small fast model (e.g. `groq-gpt-oss-20b`) runs in PARALLEL with the main
+    // turn and streams ONE ephemeral "what I'm about to do" sentence
+    // (`stream_preamble`), covering the reasoning model's time-to-first-token.
+    // Built from a clone of `llm` (same gateway/key) with the model + a tight
+    // token cap overridden. Unset/empty ⇒ off, so default behavior is unchanged.
+    // Skipped when a test provider is injected (no live gateway). Pearl th-9a5794.
+    let preamble_llm = (llm_provider.is_none())
+        .then(|| std::env::var("SMOOTH_AGENT_PREAMBLE_MODEL").ok())
+        .flatten()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .map(|model| {
+            let mut cfg = llm.clone();
+            cfg.model = model;
+            cfg.max_tokens = PREAMBLE_MAX_TOKENS;
+            cfg
+        });
+
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
     // Built once from the requester's `AccessContext` so the auto-injected
     // context query, the agent's `knowledge_search` tool, and the citation
@@ -639,6 +671,42 @@ pub async fn run_streaming_turn(
     let request_id_owned = request_id.to_string();
     let sink_clone = sink.clone();
 
+    // First-answer-token guard for the optional preamble: the translator flips it
+    // on the first `TokenDelta` so a slow preamble never pops in AFTER the real
+    // answer has already begun streaming. Pearl th-9a5794.
+    let answer_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let answer_started_translator = Arc::clone(&answer_started);
+
+    // Fire the fast-model preamble in PARALLEL with the agent loop (no-op unless
+    // `SMOOTH_AGENT_PREAMBLE_MODEL` is set → `preamble_llm` is `Some`). Best-effort:
+    // any error/slowness is swallowed on its own task, and the guard drops it if the
+    // real answer already started — so it can never block or corrupt the turn.
+    // Pearl th-9a5794.
+    if let Some(pre_cfg) = preamble_llm {
+        let sink_preamble = sink.clone();
+        let request_id_preamble = request_id.to_string();
+        let user_preamble = user_message.to_string();
+        let answer_started_preamble = Arc::clone(&answer_started);
+        tokio::spawn(async move {
+            let client = LlmClient::new(pre_cfg);
+            let sys = EngineMessage::system(PREAMBLE_SYSTEM_PROMPT);
+            let user = EngineMessage::user(user_preamble);
+            match client.chat(&[&sys, &user], &[]).await {
+                Ok(resp) => {
+                    let text = resp.content.trim();
+                    if !text.is_empty()
+                        && !answer_started_preamble.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let _ = sink_preamble
+                            .send(crate::protocol::stream_preamble(&request_id_preamble, text));
+                    }
+                }
+                // Best-effort: a failed/slow preamble must never surface or block.
+                Err(e) => tracing::debug!(error = %e, "preamble generation failed (ignored)"),
+            }
+        });
+    }
+
     // Spawn the event translator so we forward tokens to the client in real
     // time while the agent loop runs concurrently.
     let translator = tokio::spawn(async move {
@@ -681,6 +749,9 @@ pub async fn run_streaming_turn(
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::TokenDelta { content } => {
+                    // Mark the answer as started so a still-in-flight preamble is
+                    // dropped rather than popping in after the reply. Pearl th-9a5794.
+                    answer_started_translator.store(true, std::sync::atomic::Ordering::Relaxed);
                     streamed_reply.push_str(&content);
                     let safe = suppressor.push(&content);
                     if !safe.is_empty() {

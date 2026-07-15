@@ -34,6 +34,7 @@ import type {
     SendMessageRequest,
     SendMessageResponse,
     StreamChunk,
+    StreamPreamble,
     StreamToken,
     SubmitInteractionRequest,
     VerifyOtpRequest,
@@ -69,6 +70,7 @@ export const EVENT_TYPES = [
     'eventual_response',
     'stream_chunk',
     'stream_token',
+    'stream_preamble',
     'keepalive',
     'write_confirmation_required',
     'otp_verification_required',
@@ -109,6 +111,7 @@ export type ServerEvent =
     | EventualResponse
     | StreamChunk
     | StreamToken
+    | StreamPreamble
     | Keepalive
     | WriteConfirmationRequired
     | OtpVerificationRequired
@@ -128,6 +131,7 @@ export interface ServerEventByType {
     eventual_response: EventualResponse;
     stream_chunk: StreamChunk;
     stream_token: StreamToken;
+    stream_preamble: StreamPreamble;
     keepalive: Keepalive;
     write_confirmation_required: WriteConfirmationRequired;
     otp_verification_required: OtpVerificationRequired;
