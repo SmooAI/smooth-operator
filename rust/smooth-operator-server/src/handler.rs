@@ -1046,6 +1046,13 @@ async fn handle_send_message(
         }
     };
 
+    // Optional multimodal attachments. Fail-soft: absent ⇒ text-only; a malformed
+    // `images` array is dropped rather than rejecting the turn (per the schema).
+    let images: Vec<smooth_operator::tool_provider::UserImage> = parsed
+        .get("images")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
     let Some(session) = state.get_session(session_id) else {
         let _ = sink.send(protocol::error(
             Some(request_id),
@@ -1385,6 +1392,8 @@ async fn handle_send_message(
                 tool_configs,
                 // SEP — the per-turn extension host (None unless allowlisted).
                 extensions,
+                // Optional multimodal attachments (empty ⇒ text-only, unchanged).
+                images,
             },
             &sink_owned,
         )
@@ -1452,6 +1461,7 @@ async fn handle_send_message(
                     false,
                     &turn.citations,
                     turn.usage,
+                    turn.directive,
                 ));
 
                 // Best-effort auto-title (fires only while the conversation is

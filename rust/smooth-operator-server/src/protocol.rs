@@ -138,6 +138,12 @@ pub struct TurnUsage {
 /// client can accumulate live session cost. Absent when the engine reported no
 /// usage (e.g. an offline mock turn), keeping the event back-compatible with
 /// clients that predate cost reporting.
+///
+/// `directive`, when `Some`, attaches an opaque client-side directive a host tool
+/// emitted this turn as a sibling `data.data.directive` value. The protocol layer
+/// never interprets the shape (the host client owns it, like `response`). Absent
+/// when the turn produced no directive, keeping the event back-compatible with
+/// clients that predate directives.
 #[must_use]
 pub fn eventual_response(
     request_id: &str,
@@ -147,6 +153,7 @@ pub fn eventual_response(
     needs_escalation: bool,
     citations: &[smooth_operator::domain::Citation],
     usage: Option<TurnUsage>,
+    directive: Option<Value>,
 ) -> Value {
     let mut inner = json!({
         "messageId": message_id,
@@ -164,6 +171,10 @@ pub fn eventual_response(
             "promptTokens": usage.prompt_tokens,
             "completionTokens": usage.completion_tokens,
         });
+    }
+    // Optional + back-compat: only emit `directive` when a host tool wrote one.
+    if let Some(directive) = directive {
+        inner["directive"] = directive;
     }
     json!({
         "type": "eventual_response",
@@ -435,7 +446,10 @@ mod tests {
         assert_eq!(ev["type"], "stream_preamble");
         // …but shaped exactly like stream_token so they can reuse the render path.
         assert_eq!(ev["token"], "Let me pull up your recent conversations.");
-        assert_eq!(ev["data"]["token"], "Let me pull up your recent conversations.");
+        assert_eq!(
+            ev["data"]["token"],
+            "Let me pull up your recent conversations."
+        );
         assert_eq!(ev["data"]["requestId"], "r1");
     }
 
@@ -458,6 +472,7 @@ mod tests {
             false,
             &[],
             None,
+            None,
         );
         assert_eq!(ev["type"], "eventual_response");
         assert_eq!(ev["status"], 200);
@@ -477,6 +492,7 @@ mod tests {
             false,
             &[],
             None,
+            None,
         );
         assert!(
             ev["data"]["data"].get("citations").is_none(),
@@ -494,6 +510,7 @@ mod tests {
             json!({"responseParts": ["hi"]}),
             false,
             &[],
+            None,
             None,
         );
         assert!(
@@ -517,6 +534,7 @@ mod tests {
             false,
             &[],
             Some(usage),
+            None,
         );
         let u = &ev["data"]["data"]["usage"];
         assert!(
@@ -555,6 +573,7 @@ mod tests {
             false,
             &citations,
             None,
+            None,
         );
         let cites = &ev["data"]["data"]["citations"];
         assert!(cites.is_array(), "citations should be an array");
@@ -581,6 +600,41 @@ mod tests {
             "a urless citation should omit `url`, not emit null"
         );
         assert_eq!(cites[1]["id"], "doc-2");
+    }
+
+    #[test]
+    fn eventual_response_omits_directive_when_none() {
+        // Back-compat: no `directive` key at all when no host tool wrote one.
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            ev["data"]["data"].get("directive").is_none(),
+            "directive must be absent when None for back-compat"
+        );
+    }
+
+    #[test]
+    fn eventual_response_attaches_directive_when_present() {
+        let directive = json!({"kind": "Navigate", "path": "/crm/contacts/42"});
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+            None,
+            Some(directive.clone()),
+        );
+        assert_eq!(ev["data"]["data"]["directive"], directive);
     }
 
     #[test]
