@@ -571,6 +571,8 @@ async fn send_message(
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            // The lambda flavor is text-only; no multimodal attachments.
+            images: vec![],
         },
         &tx,
     )
@@ -593,6 +595,7 @@ async fn send_message(
                     false,
                     &turn.citations,
                     turn.usage,
+                    turn.directive,
                 ))
                 .await?;
         }

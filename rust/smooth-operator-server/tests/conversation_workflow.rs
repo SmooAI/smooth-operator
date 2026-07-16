@@ -105,6 +105,7 @@ async fn run_turn(
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )
@@ -283,6 +284,7 @@ async fn run_turn_on(
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )

@@ -216,6 +216,12 @@ pub struct TurnResult {
     /// [`crate::suggestions`]). Empty when the model emitted none. Carried onto
     /// the `eventual_response`'s `suggestedNextActions`.
     pub suggested_next_actions: Vec<String>,
+    /// An optional client-side directive a host tool emitted this turn (drained
+    /// from the [`ToolProviderContext::directive_sink`]). Opaque
+    /// `serde_json::Value` (last-write-wins) — carried onto the
+    /// `eventual_response`'s `directive` field. `None` when no host tool wrote
+    /// one (or no tool provider was installed), keeping the event back-compatible.
+    pub directive: Option<serde_json::Value>,
 }
 
 /// One tool call captured during the turn, used to emit a `gen_ai.tool` child
@@ -345,6 +351,12 @@ pub struct TurnRequest<'a> {
     /// [`crate::extensions::build_extension_host`] (only when
     /// `SMOOTH_EXTENSIONS_ALLOW` is non-empty).
     pub extensions: Option<crate::extensions::ExtensionTurn>,
+    /// Image attachments for a multimodal turn. When non-empty, the runner maps
+    /// each onto a core `ImageContent` and attaches them to the engine's user
+    /// message via `AgentConfig::with_user_images`, and also carries them into the
+    /// [`ToolProviderContext`] so a host tool can see them. Empty (the default)
+    /// ⇒ a text-only turn, byte-for-byte unchanged.
+    pub images: Vec<smooth_operator::tool_provider::UserImage>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -393,6 +405,7 @@ pub async fn run_streaming_turn(
         auth_gate,
         tool_configs,
         extensions,
+        images,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
@@ -437,6 +450,11 @@ pub async fn run_streaming_turn(
     // Sink the knowledge_search tool records its structured results into, for
     // citations built from the sources the agent's searches surfaced.
     let tool_sources: KnowledgeResultSink = Arc::new(Mutex::new(Vec::new()));
+    // Slot a host tool writes a client-side directive into this turn. Drained
+    // after the run into `TurnResult::directive` (Null ⇒ absent). Only threaded
+    // into the `ToolProviderContext` when a provider is installed, so with no
+    // host tools it stays `Null` and the `eventual_response` omits `directive`.
+    let directive_sink = Arc::new(Mutex::new(serde_json::Value::Null));
 
     // 1. Load prior turns for memory BEFORE persisting the new inbound message,
     //    so prior_messages is exactly the history-up-to-now.
@@ -481,12 +499,26 @@ pub async fn run_streaming_turn(
     // that emits no trailer costs nothing and yields empty suggestions.
     sections.push(crate::suggestions::SUGGESTED_REPLIES_PROMPT_SECTION.to_string());
     let resolved_prompt = sections.join("\n\n");
-    let config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
+    let mut config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior)
         // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
         .with_model_ceiling(model_max_output);
+    // Multimodal turn: attach the turn's images to the engine's user message as
+    // OpenAI `image_url` content parts. Empty (the default) leaves the turn
+    // text-only — byte-for-byte unchanged.
+    if !images.is_empty() {
+        config = config.with_user_images(
+            images
+                .iter()
+                .map(|img| smooth_operator_core::conversation::ImageContent {
+                    url: img.url.clone(),
+                    detail: img.detail.clone(),
+                })
+                .collect(),
+        );
+    }
 
     let mut tools = ToolRegistry::new();
     // Build the knowledge_search tool over the SAME ACL-filtered handle, with the
@@ -553,8 +585,13 @@ pub async fn run_streaming_turn(
         // Thread the per-turn handles the runner already has — the conversation
         // this turn runs in and the resolved per-org gateway key — so a host's
         // conversation-persisting / retrieval tools aren't degraded to no-ops.
-        let mut ctx =
-            ToolProviderContext::new(org_id, access.clone()).with_conversation_id(conversation_id);
+        let mut ctx = ToolProviderContext::new(org_id, access.clone())
+            .with_conversation_id(conversation_id)
+            // Directive-over-SEP: give host tools the slot to write a client-side
+            // directive; drained after the turn onto `eventual_response.directive`.
+            .with_directive_sink(Arc::clone(&directive_sink))
+            // Multimodal: let a host tool see the turn's image attachments.
+            .with_images(images.clone());
         if let Some(key) = gateway_key {
             ctx = ctx.with_gateway_key(key);
         }
@@ -997,6 +1034,21 @@ pub async fn run_streaming_turn(
     };
     let citations = collect_citations(&auto_sources, &tool_sources);
 
+    // Drain the directive sink (mirrors the citation drain above). A host tool
+    // that ran this turn may have written a client-side directive; `Null` ⇒ none
+    // was written, so `eventual_response` omits `directive` (back-compat).
+    let directive = match Arc::try_unwrap(directive_sink) {
+        Ok(mutex) => mutex
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        Err(arc) => arc.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+    };
+    let directive = if directive.is_null() {
+        None
+    } else {
+        Some(directive)
+    };
+
     // 6. Conversation-workflow advancement (SMOODEV-590 parity). When the agent
     //    has a workflow, ask the cheap judge whether THIS turn satisfied the
     //    current step's criteria and compute the next step id. Failure-tolerant:
@@ -1024,6 +1076,7 @@ pub async fn run_streaming_turn(
         usage,
         next_step_id,
         suggested_next_actions,
+        directive,
     })
 }
 

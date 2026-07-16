@@ -329,6 +329,19 @@ export interface SendMessageRequest {
      * Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model.
      */
     model?: string;
+    /**
+     * Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
+     */
+    images?: {
+        /**
+         * A `data:image/...;base64,...` URL or a remote `https` image URL. Emitted to the model as an OpenAI `image_url` content part.
+         */
+        url: string;
+        /**
+         * Optional OpenAI vision detail hint. Omitted when absent.
+         */
+        detail?: 'low' | 'high' | 'auto';
+    }[];
 }
 
 // ── from actions/send-message.schema.json ──
@@ -349,6 +362,10 @@ export interface SendMessageResponse {
      * Human-readable reason when `needsEscalation` is true.
      */
     escalationReason?: string;
+    /**
+     * An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+     */
+    directive?: {} | null;
 }
 /**
  * Structured agent response.
@@ -1017,6 +1034,10 @@ export interface EventualResponse {
                  */
                 score: number;
             }[];
+            /**
+             * An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+             */
+            directive?: {} | null;
         };
     };
     /**
