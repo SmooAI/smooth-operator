@@ -1,6 +1,6 @@
 <p align="center"><img src="../assets/smooth-logo.svg" alt="Smooth" width="360" /></p>
 
-<p align="center"><strong>The Rust flagship</strong> — the reference smooth-operator service: runtime, storage adapters, WebSocket server, and Lambda, all on the <a href="https://github.com/SmooAI/smooth-operator-core">smooth-operator-core</a> engine.</p>
+<p align="center"><strong>The Rust flagship.</strong> A chat loop is a weekend project; a production agent <em>server</em> is not. This is that server — the reference smooth-operator implementation: runtime, storage adapters, WebSocket service, and Lambda, all on the <a href="https://github.com/SmooAI/smooth-operator-core">smooth-operator-core</a> engine.</p>
 
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
@@ -33,8 +33,6 @@ The flagship crate is **`smooai-smooth-operator`** (lib `smooth_operator`). The 
 ## 30-second quickstart — embed the runtime
 
 ```bash
-# crates.io publish pending — use a git or path dependency today, e.g.:
-#   smooai-smooth-operator = { git = "https://github.com/SmooAI/smooth-operator" }
 cargo add smooai-smooth-operator smooai-smooth-operator-adapter-memory tokio --features tokio/full
 ```
 
