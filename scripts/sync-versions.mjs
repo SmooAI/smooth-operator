@@ -125,24 +125,61 @@ const publishedRustCrates = new Set(
         .filter(Boolean),
 );
 
-/** @type {{ name: string, url: URL, apply: (text: string) => string }[]} */
+/**
+ * Extract a version string from a manifest for before→after logging. Best-effort:
+ * the first `version = "..."`, `<Version>...</Version>`, or `Version = "..."` token.
+ * @param {string} text
+ * @returns {string}
+ */
+function readVersion(text) {
+    const m = text.match(/<Version>([^<]*)<\/Version>/) || text.match(/^version = "([^"]*)"/m) || text.match(/Version = "([^"]*)"/);
+    return m ? m[1] : '?';
+}
+
+/**
+ * @type {{ name: string, url: URL, apply: (text: string) => string, anchor: RegExp }[]}
+ *
+ * `anchor` is the pattern that MUST be present in the source manifest for the stamp
+ * to be meaningful. If it's absent, the manifest layout changed out from under us and
+ * `apply` would silently no-op (leaving a stale version that publishes out of lockstep),
+ * so we fail loudly instead. `anchor` matching but the version already equal is fine —
+ * that's a legitimate no-op, not a missing anchor.
+ */
 const targets = [
-    // NOTE: the .NET Core package (SmooAI.SmoothOperator.Core) moved OUT of this
-    // repo — commit 1f566ce ("repoint C# server to published NuGet Core 1.3.0 +
-    // remove in-tree engine") deleted dotnet/core/src/SmooAI.SmoothOperator.Core.csproj
-    // and the package is now versioned + published from the smooth-operator-core
-    // repo. The remaining dotnet/ binding has no <Version> (pack-time versioned),
-    // so there is no .csproj to stamp here. (Previously this target ENOENT-crashed
-    // the release after the dotnet restructure.)
+    // The published .NET SERVER package (SmooAI.SmoothOperator.Server). Stamp its
+    // <Version> ELEMENT only — NOT the `SmooAI.SmoothOperator.Core Version="…"`
+    // PackageReference attribute (that engine ships on its own cadence from the
+    // smooth-operator-core repo). The `<Version>…</Version>` element form never
+    // collides with the `Version="…"` attribute form. The .NET Core package that
+    // used to live here (dotnet/core) moved OUT (commit 1f566ce) and is versioned
+    // in that repo, so there is nothing else .NET to stamp here.
+    {
+        name: 'dotnet/server/src/SmooAI.SmoothOperator.Server.csproj',
+        url: new URL('../dotnet/server/src/SmooAI.SmoothOperator.Server.csproj', import.meta.url),
+        anchor: /<Version>[^<]*<\/Version>/,
+        apply: (text) => text.replace(/<Version>[^<]*<\/Version>/, `<Version>${version}</Version>`),
+    },
     {
         name: 'python/pyproject.toml',
         url: new URL('../python/pyproject.toml', import.meta.url),
+        anchor: /^version = "[^"]*"$/m,
         // Stamp the `[project] version`, NOT the `name`.
+        apply: (text) => text.replace(/^version = "[^"]*"$/m, `version = "${version}"`),
+    },
+    {
+        // The published PyPI SERVER package (smooai-smooth-operator-server). Same
+        // first-`version =`-line rule as the client pyproject — the
+        // `smooai-smooth-operator-core>=…` dependency line is inside a list, not a
+        // bare `version = "…"` line, so it is never touched.
+        name: 'python/server/pyproject.toml',
+        url: new URL('../python/server/pyproject.toml', import.meta.url),
+        anchor: /^version = "[^"]*"$/m,
         apply: (text) => text.replace(/^version = "[^"]*"$/m, `version = "${version}"`),
     },
     {
         name: 'go/version.go',
         url: new URL('../go/version.go', import.meta.url),
+        anchor: /const Version = "[^"]*"/,
         apply: (text) => text.replace(/const Version = "[^"]*"/, `const Version = "${version}"`),
     },
     // Rust: the workspace manifest carries the ref-lib dep version requirement, and
@@ -150,6 +187,7 @@ const targets = [
     {
         name: 'rust/Cargo.toml',
         url: new URL('../rust/Cargo.toml', import.meta.url),
+        anchor: /smooai-smooth-operator(?!-core)[\w-]*/,
         // ONLY the `smooth-operator = { package = "smooai-smooth-operator", … }` dep
         // req — leave `smooai-smooth-operator-core`'s 0.14 and unrelated deps alone.
         apply: (text) =>
@@ -165,6 +203,7 @@ const targets = [
     ...rustMembers.map((rel) => ({
         name: rel,
         url: new URL(`../${rel}`, import.meta.url),
+        anchor: /^version = "[^"]*"\s*$/m,
         apply: stampRustCargoToml,
     })),
     // The lockfile MUST be re-synced after the [package] bumps above, or
@@ -172,6 +211,7 @@ const targets = [
     {
         name: 'rust/Cargo.lock',
         url: new URL('../rust/Cargo.lock', import.meta.url),
+        anchor: /^\[\[package\]\]/m,
         apply: stampRustCargoLock,
     },
 ];
@@ -179,11 +219,14 @@ const targets = [
 let changed = 0;
 for (const target of targets) {
     const before = readFileSync(target.url, 'utf8');
+    if (target.anchor && !target.anchor.test(before)) {
+        throw new Error(`version-sync: anchor ${target.anchor} missing in ${target.name} — manifest layout changed; refusing to publish an out-of-lockstep version.`);
+    }
     const after = target.apply(before);
     if (after !== before) {
         writeFileSync(target.url, after);
         changed++;
-        console.log(`synced ${version} → ${target.name}`);
+        console.log(`synced ${target.name}: ${readVersion(before)} → ${version}`);
     } else {
         console.log(`already at ${version}: ${target.name}`);
     }

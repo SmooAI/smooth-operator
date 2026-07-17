@@ -4,20 +4,23 @@
 #   1. PRs land with a `.changeset/*.md` describing the bump.
 #   2. This workflow opens/updates a "🦋 New version release" PR that runs
 #      `version:bump` = `changeset version` (bumps @smooai/smooth-operator) +
-#      `version:sync` (stamps the SAME version onto the .NET csproj — see
-#      scripts/sync-versions.mjs).
-#   3. Merging that PR re-runs this workflow, which publishes npm (changeset
-#      publish) and then NuGet — every artifact at the one shared version.
+#      `version:sync` (stamps the SAME version onto the .NET csproj / PyPI server /
+#      crates / Go — see scripts/sync-versions.mjs).
+#   3. Merging that PR re-runs this workflow, which runs `ci:publish`
+#      (scripts/ci-publish.mjs) — the single idempotent orchestrator that publishes
+#      EVERY registry at the one shared version: npm (changeset publish) → NuGet
+#      (SmooAI.SmoothOperator.Server) → PyPI (client + server) → crates.io.
 #
-# Registry independence: the npm step is `continue-on-error: true` ALWAYS, so a
-# failure in one npm package can never again abort the job before the crates.io /
-# PyPI / Go-tag steps (an unpublishable `create-smooth-extension` E403 pinned
-# crates.io at 1.11.4 while npm shipped 1.21.x). A genuine npm failure still turns
-# the run red — the final "Fail if npm publish failed" step re-raises it after the
-# other registries have shipped. Rust no longer NEEDS the workflow_dispatch
-# fallback; dispatch remains only for re-running a registry by hand.
+# Registry independence lives INSIDE ci-publish.mjs: each registry is
+# existence-checked + skip-if-published, and one registry's failure does NOT skip
+# the others (an unpublishable `create-smooth-extension` E403 once pinned crates.io
+# at 1.11.4 while npm shipped 1.21.x — the orchestrator now attempts every registry
+# regardless and exits non-zero only at the end). The changesets step stays
+# `continue-on-error: true` so a hard ci:publish failure can't abort the Go-tag /
+# auto-merge steps; the final "Fail if publish failed" step re-raises it.
 #
-# The standalone publish-npm.yml / publish-nuget.yml remain as manual fallbacks.
+# The standalone publish-npm.yml remains as a manual npm fallback; any registry can
+# also be re-published by hand with `DRY_RUN=0 pnpm ci:publish` (or a workflow_dispatch).
 # Secrets: GH_PAT, SMOOAI_NPM_TOKEN, SMOOAI_NUGET_API_KEY, SMOOAI_CARGO_REGISTRY_TOKEN,
 # SMOOAI_PYPI_TOKEN (all org-wide; PyPI also supports OIDC Trusted Publishing).
 name: Release (Changesets 🦋)
@@ -95,14 +98,18 @@ jobs:
                   dotnet build dotnet/SmooAI.SmoothOperator.slnx -c Release --no-restore
                   dotnet test dotnet/SmooAI.SmoothOperator.slnx -c Release --no-build --verbosity normal
 
-            # ALWAYS tolerate a partial npm publish failure so the crates.io / PyPI /
-            # Go-tag steps below still run — they are idempotent ("already exists" ⇒
-            # success). One unpublishable npm package used to abort the whole job on
-            # the push path and block every other registry forever (crates.io sat at
-            # 1.11.4 while npm shipped 1.21.x). The failure is NOT swallowed: the
-            # final "Fail if npm publish failed" step re-raises it once the other
-            # registries have shipped.
-            - name: Version + publish npm (Changesets 🦋)
+            # `ci:publish` (scripts/ci-publish.mjs) is the single orchestrator: it runs
+            # sync-versions (lockstep guard) then publishes npm → NuGet → PyPI → crates.io,
+            # each existence-checked + skip-if-published, one registry's failure NOT
+            # skipping the others. It exits non-zero if ANY registry hard-fails.
+            #
+            # ALWAYS `continue-on-error: true`: a hard ci:publish failure (e.g. an
+            # unpublishable `create-smooth-extension` npm E403) must not abort the job
+            # before the Go-tag / auto-merge steps. It is NOT swallowed — the final
+            # "Fail if publish failed" step re-raises it. The publish tokens live on
+            # THIS step's env because ci-publish.mjs runs as the changesets `publish:`
+            # command and inherits them.
+            - name: Version + publish all registries (Changesets 🦋)
               id: changesets
               continue-on-error: true
               uses: changesets/action@v1
@@ -115,87 +122,9 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
                   NPM_TOKEN: ${{ secrets.SMOOAI_NPM_TOKEN }}
-
-            # The C# engine (SmooAI.SmoothOperator.Core) now lives in and publishes from
-            # the smooth-operator-core repo (.github/workflows/publish-nuget.yml there).
-            # The server consumes it as a NuGet PackageReference; nothing to publish here.
-
-            # --- Rust → crates.io --------------------------------------------------
-            # Publish in TOPOLOGICAL order (a crate must exist on the index before the
-            # crates that depend on it can publish). The reference lib first, then
-            # ingestion (depends on it), then the adapters (depend on lib/ingestion),
-            # then the server (depends on all of them). `--no-verify` skips the
-            # rebuild (the npm/.NET steps above already exercised the workspace); the
-            # retry loop tolerates crates.io index-propagation lag and treats an
-            # "already uploaded/exists" error as success (idempotent re-runs).
-            - name: Publish Rust crates to crates.io
-              # `outcome == 'failure'` is load-bearing: changesets/action THROWS when
-              # `ci:publish` exits non-zero, so `outputs.published` is never set on a
-              # partial npm failure. Without this clause, `continue-on-error` alone
-              # would keep the job alive but still skip this step — the other
-              # registries must publish on their own versions regardless of npm.
-              if: steps.changesets.outputs.published == 'true' || steps.changesets.outcome == 'failure' || github.event_name == 'workflow_dispatch'
-              env:
+                  SMOOAI_NUGET_API_KEY: ${{ secrets.SMOOAI_NUGET_API_KEY }}
+                  SMOOAI_PYPI_TOKEN: ${{ secrets.SMOOAI_PYPI_TOKEN }}
                   CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
-              run: |
-                  if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
-                      echo "::error::SMOOAI_CARGO_REGISTRY_TOKEN secret is not set"
-                      exit 1
-                  fi
-                  # The workspace core dep keeps a sibling-repo `path` for local
-                  # two-repo dev; that path is absent on CI runners, which breaks
-                  # `cargo publish`'s workspace load (it reads every member's path
-                  # deps). Strip it so both the load and the published manifest
-                  # resolve smooai-smooth-operator-core from crates.io — the
-                  # `version` is the authoritative requirement. Publish-time only;
-                  # not committed.
-                  sed -i -E 's#smooai-smooth-operator-core = \{ path = "[^"]*", version = "0.15" }#smooai-smooth-operator-core = "0.15"#' rust/Cargo.toml
-                  publish_crate() {
-                      local crate="$1"
-                      local attempt=1
-                      local max=6
-                      while [ "${attempt}" -le "${max}" ]; do
-                          echo "Publishing ${crate} (attempt ${attempt}/${max})..."
-                          local out
-                          if out=$(cargo publish -p "${crate}" --no-verify --allow-dirty --manifest-path rust/Cargo.toml 2>&1); then
-                              echo "${out}"
-                              echo "Published ${crate}."
-                              return 0
-                          fi
-                          echo "${out}"
-                          if echo "${out}" | grep -qiE "already (exists|uploaded)|crate version .* is already"; then
-                              echo "${crate} already published at this version — treating as success."
-                              return 0
-                          fi
-                          echo "Publish of ${crate} failed; waiting for index propagation before retry..."
-                          sleep 30
-                          attempt=$((attempt + 1))
-                      done
-                      echo "::error::Failed to publish ${crate} after ${max} attempts"
-                      return 1
-                  }
-                  for crate in \
-                      smooai-smooth-operator \
-                      smooai-smooth-operator-ingestion \
-                      smooai-smooth-operator-adapter-memory \
-                      smooai-smooth-operator-adapter-backplane-redis \
-                      smooai-smooth-operator-adapter-backplane-nats \
-                      smooai-smooth-operator-adapter-postgres \
-                      smooai-smooth-operator-adapter-dynamodb \
-                      smooai-smooth-operator-server; do
-                      publish_crate "${crate}"
-                  done
-
-            # --- Python → PyPI -----------------------------------------------------
-            # Prefer Trusted Publishing (OIDC) via the job's `id-token: write`; fall
-            # back to a token if SMOOAI_PYPI_TOKEN is set. Build + publish the client.
-            - name: Publish Python packages to PyPI
-              if: steps.changesets.outputs.published == 'true' || steps.changesets.outcome == 'failure' || github.event_name == 'workflow_dispatch'
-              env:
-                  UV_PUBLISH_TOKEN: ${{ secrets.SMOOAI_PYPI_TOKEN }}
-              run: |
-                  export PATH="$HOME/.local/bin:$PATH"
-                  (cd python && uv build && uv publish)
 
             # --- Go → git tag ------------------------------------------------------
             # The Go module is published by tagging. The subdir module lives at
@@ -233,10 +162,12 @@ jobs:
               env:
                   GH_TOKEN: ${{ secrets.GH_PAT }}
 
-            # Runs LAST, after every other registry has shipped: re-raise a tolerated
-            # npm failure so the run is red and the breakage stays visible.
-            - name: Fail if npm publish failed
+            # Runs LAST, after the Go tag + auto-merge: re-raise a tolerated ci:publish
+            # failure so the run is red and the breakage stays visible. ci-publish.mjs
+            # already attempted every registry (it fails only at the end), so this just
+            # surfaces the non-zero exit past the step's continue-on-error.
+            - name: Fail if publish failed
               if: steps.changesets.outcome == 'failure'
               run: |
-                  echo "::error::npm publish step failed — see 'Version + publish npm (Changesets 🦋)'. Other artifacts (crates.io/PyPI/Go) were still published."
+                  echo "::error::ci:publish failed — see 'Version + publish all registries (Changesets 🦋)' for which registry(ies). The orchestrator attempts every registry before exiting non-zero."
                   exit 1
