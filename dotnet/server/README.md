@@ -1,36 +1,22 @@
 # SmooAI.SmoothOperator.Server
 
-The **smooth-operator service in C#** — the native .NET analog of the Rust
-`smooth-operator-server`. It wraps the agent engine
-([`SmooAI.SmoothOperator.Core`](../core)) and adds the *system* around it: conversation
-sessions, the schema-driven protocol, streaming turns, grounding + citations. It's the
-"run the whole smooth-operator system in .NET" layer (vs. embedding just the engine, or
-running the Rust server + the .NET client).
+<p>
+  <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-FF6B6C?style=for-the-badge&labelColor=020618" alt="license"></a>
+  <a href="https://dotnet.microsoft.com"><img src="https://img.shields.io/badge/.NET-8.0-00A6A6?style=for-the-badge&labelColor=020618" alt=".NET 8.0"></a>
+</p>
 
-Conformance is enforced: every event the server produces is validated against the **same
-`spec/` schemas + conformance fixtures** the Rust reference server is held to (via the
-protocol client's `ProtocolValidator`).
+**Wiring a chat loop is a weekend project. A production agent _server_ is not.**
 
-## Status — Phase 0 (the protocol runner)
+Sessions that survive a reconnect. A wire protocol your clients can actually speak. Streaming turns you can watch token by token. Tools the model can call — and hard limits on the ones it must never call. Human-in-the-loop when a tool wants to write.
 
-Shipped:
+`SmooAI.SmoothOperator.Server` is that server, native to ASP.NET Core. It wraps the agent engine ([`SmooAI.SmoothOperator.Core`](https://www.nuget.org/packages/SmooAI.SmoothOperator.Core)) — driving a `SmoothAgent` per turn against any `Microsoft.Extensions.AI` `IChatClient` — and speaks the [smooth-operator](https://github.com/SmooAI/smooth-operator) wire protocol ([`spec/`](https://github.com/SmooAI/smooth-operator/tree/main/spec)). It's the .NET sibling of the [Rust](../../rust/smooth-operator-server), [Go](../../go/server), [TypeScript](../../typescript/server), and [Python](../../python/server) servers, all speaking the one protocol.
 
-- `ISessionStore` / `InMemorySessionStore` — sessions + conversation message logs.
-- `TurnRunner` — drives one `send_message` turn: load prior history, retrieve grounding
-  knowledge, run the engine streaming, emit `stream_token`s, persist the reply, collect
-  citations. (The C# analog of the Rust `run_streaming_turn`.)
-- `FrameDispatcher` — routes an incoming frame by its `action` (`ping` /
-  `create_conversation_session` / `get_session` / `send_message`) and emits the response
-  event(s) to a sink. Transport-agnostic.
-- `ProtocolEvents` — builders for the event frames, byte-compatible with the Rust shapes
-  (including the triple-nested `eventual_response.data.data`).
+---
 
-The event sequence for a turn — `immediate_response` (202) → `stream_token`(s) →
-`eventual_response` (200, with `messageId` + `response.responseParts` + `citations`) — is
-produced and schema-validated. 5 conformance tests.
+## Spin up a real agent server
 
-**Phase 1 (the WebSocket host)** is also shipped, in the sibling
-`SmooAI.SmoothOperator.Server.AspNetCore` project:
+The WebSocket host ships in the sibling `SmooAI.SmoothOperator.Server.AspNetCore` project — the protocol endpoint is three lines of DI:
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -41,13 +27,51 @@ app.MapSmoothOperatorWebSocket("/ws");               // the protocol endpoint
 app.Run();
 ```
 
-Integration tests boot this host in-process and drive a **real WebSocket** — the C# parity of
-the Rust server's `tests/protocol_smoke.rs`.
+That's a full agent backend — sessions, streaming turns, tool-calling, citations — on one WebSocket. Integration tests boot this exact host in-process and drive a **real WebSocket**, the C# parity of the Rust server's `tests/protocol_smoke.rs`. Every event is schema-validated against the same `spec/` fixtures the Rust reference server is held to (via the client's `ProtocolValidator`).
 
-**Phase 2 (durable storage)** is shipped for the session store: `ISessionStore` is async, and
-`SmooAI.SmoothOperator.Server.Postgres` provides a `PostgresSessionStore` so sessions + history
-survive a restart. A shared `ISessionStore` contract test runs against **both** the in-memory and
-Postgres adapters (the Rust adapter-parity pattern), on a real Postgres via Testcontainers.
+---
+
+## Extensible — and safe by construction
+
+An agent is only useful when it can *do* things, and only trustworthy when you can say what it may never do. This server gives you both seams.
+
+**Give it your tools.** Any `Microsoft.Extensions.AI` `AITool` merges with the built-ins for every turn:
+
+```csharp
+var openTicket = AIFunctionFactory.Create(
+    (string subject) => $"ticket opened: {subject}",
+    name: "open_ticket",
+    description: "Open a support ticket for the current customer.");
+
+var runner = new TurnRunner(chatClient, store, tools: new AITool[] { openTicket });
+```
+
+**Or let it gain tools with no redeploy.** The server hosts [SEP extensions](https://github.com/SmooAI/smooth-operator/blob/main/docs/TOOLS.md) via `ExtensionServerHost` — out-of-process tool providers discovered at runtime, their `ui/confirm` prompts bridged into the protocol's confirmation frames for HITL. Gated: an extension contributes tools **only** if you name it in `SMOOTH_EXTENSIONS_ALLOW`. Nothing loads by default.
+
+**Now declare the lines it can't cross.** Register an `IAgentConfigResolver`, and every tool — built-in, yours, or from an extension — flows through the same gates:
+
+```csharp
+builder.Services.AddSingleton<IAgentConfigResolver>(
+    new StaticAgentConfigResolver().Set(agentId, new AgentConfig(
+        InstructionsPrompt: "You are Ziggy, a pirate concierge.",
+        Workflow: AgentConfig.ParseWorkflow(conversationWorkflowJsonb))));
+```
+
+- **Per-agent allow-list** — the agent's `tool_config.enabledTools` restricts its turn to exactly those snake_case toolIds. Off the list, off the table (empty/absent ⇒ the full set, unchanged).
+- **The authLevel gate** — a tool that opts in with `supportsAuthRequirement` is *blocked at call time* on a public agent when tagged `admin`, or when tagged `end_user` and the session isn't verified — via the session's OTP bit or the `ISessionAuthenticator` seam (default: store-backed, **fails closed** until OTP verification). Internal agents auto-satisfy.
+- **End-user OTP flow** — a refused `end_user` tool can offer a one-time-code identity flow via the `IOtpService` seam (`SendOtpAsync` / `VerifyOtpAsync`); the server never generates, holds, or validates a code.
+
+Each entry's `config` object is handed to the tool at invocation (via `AIFunctionArguments.Context["smooth.tool_config"]`). Config parsing is tolerant (malformed jsonb degrades to the default persona) and the workflow judge is failure-tolerant (any error stays on the current step). No resolver registered ⇒ behavior unchanged.
+
+You decide what the agent can touch; the runner enforces it.
+
+---
+
+## What's shipped
+
+- **Phase 0 — the protocol runner.** `ISessionStore` / `InMemorySessionStore`; `TurnRunner` (load history → retrieve grounding → stream the engine → emit `stream_token`s → persist → collect citations); `FrameDispatcher` (routes `ping` / `create_conversation_session` / `get_session` / `send_message`, transport-agnostic); `ProtocolEvents` builders byte-compatible with the Rust shapes. The turn sequence — `immediate_response` (202) → `stream_token`(s) → `eventual_response` (200, with `messageId` + `responseParts` + `citations`) — is produced and schema-validated.
+- **Phase 1 — the WebSocket host** (`SmooAI.SmoothOperator.Server.AspNetCore`): `AddSmoothOperatorServer()` + `MapSmoothOperatorWebSocket("/ws")`, driven by real-WebSocket integration tests.
+- **Phase 2 — durable storage**: `ISessionStore` is async, and `SmooAI.SmoothOperator.Server.Postgres` provides a `PostgresSessionStore` so sessions + history survive a restart. A shared `ISessionStore` contract test runs against **both** the in-memory and Postgres adapters (real Postgres via Testcontainers).
 
 ```csharp
 // Swap durable storage in:
@@ -56,59 +80,27 @@ builder.Services.AddSingleton<ISessionStore>(
 builder.Services.AddSmoothOperatorServer();   // uses the registered ISessionStore
 ```
 
-**Per-agent config + conversation workflows** (SMOODEV-590): register an `IAgentConfigResolver`
-and each agent's own `instructions.prompt` drives its system prompt (overriding the org/default
-persona); its `conversation_workflow` (goal + intent/criteria steps) runs as a stepped,
-judge-advanced flow — the current step is rendered into the prompt and a cheap post-turn judge
-advances the (per-conversation-persisted) pointer when the step's criteria are met; its `greeting`
-is woven into the first reply only; and its `tool_config.enabledTools` restricts the server's tool set
-to the enabled snake_case toolIds (empty/absent ⇒ the full set, unchanged). At tool-execution time each
-entry's `authLevel` is enforced (admin tools blocked on public agents; `end_user` tools need a verified
-session via the `ISessionAuthenticator` seam — default is a store-backed authenticator that fails
-closed until a session completes OTP verification; internal agents auto-satisfied; only tools that
-opt in with a `supportsAuthRequirement` registration flag are gated), and the entry's
-`config` object is handed to the tool at invocation (via `AIFunctionArguments.Context["smooth.tool_config"]`).
+- **Per-agent config + conversation workflows, the authLevel gate, SEP extension hosting, and the OTP flow** described above.
 
-**End-user OTP identity flow.** A public agent's refused `end_user` tool can offer a one-time-code
-identity flow via the `IOtpService` host seam (`SendOtpAsync` / `VerifyOtpAsync`) — the server stays
-credential-free (it never generates, holds, or validates a code). When the gate refuses an `end_user`
-tool on an unverified session, an `IOtpService` is registered, and the session has a contact (email
-captured at create-session time), the server emits `otp_verification_required` → `otp_sent` after the
-turn. A `verify_otp` action marks the session identity-verified (`otp_verified`) so its gated tools run
-on the client's re-sent message, or emits `otp_invalid` with the host's remaining-attempt count. No
-service registered ⇒ no OTP offered and `verify_otp` fails closed (`otp_invalid` / `NOT_FOUND`); admin
-refusals are never offered OTP.
-The workflow judge model is the `judgeModel` option on `LlmWorkflowJudge` (default the cheap haiku-tier model).
-`create_conversation_session` carries only an agent UUID, so config is resolved server-side per
-turn from the session's agent (mirrors the TS / Python lanes' `AgentConfigResolver`). Config
-parsing is tolerant (malformed jsonb degrades to the default persona) and the judge is
-failure-tolerant (any error stays on the current step). No resolver registered ⇒ behavior unchanged.
+**Next:** knowledge + checkpoint adapters on Postgres+pgvector, ingestion + connectors, then a deployable container. See the [Server roadmap](../../docs/Architecture/Polyglot%20Cores.md#server-roadmap-c).
 
-```csharp
-builder.Services.AddSingleton<IAgentConfigResolver>(
-    new StaticAgentConfigResolver().Set(agentId, new AgentConfig(
-        InstructionsPrompt: "You are Ziggy, a pirate concierge.",
-        Workflow: AgentConfig.ParseWorkflow(conversationWorkflowJsonb))));
-// A multi-tenant host swaps in a resolver backed by the `agents` table. Registering a resolver
-// defaults the workflow judge to the LLM judge over your IChatClient; register your own
-// IWorkflowJudge (e.g. a distinct cheap model) to override.
-```
+---
 
-**Next:** knowledge + checkpoint adapters on Postgres+pgvector, ingestion + connectors, ACL +
-auth, then a deployable container. See the
-[Server roadmap](../../docs/Architecture/Polyglot%20Cores.md#server-roadmap-c) in the
-Polyglot Cores doc.
+## Five languages, one protocol
 
-## Shape of it
+The *same* server — same wire protocol, same conformance corpus — exists in five languages. Run it where your stack already lives.
 
-```csharp
-var store = new InMemorySessionStore();
-var runner = new TurnRunner(chatClient, store, knowledgeBase);   // chatClient = any IChatClient
-var dispatcher = new FrameDispatcher(store, runner);
+| Language | Server package | Registry |
+| --- | --- | --- |
+| **C# / .NET** | `SmooAI.SmoothOperator.Server` | in-repo (this project) |
+| **Rust** | `smooai-smooth-operator-server` | [crates.io](https://crates.io/crates/smooai-smooth-operator-server) |
+| **TypeScript** | `@smooai/smooth-operator-server` | [in-repo](../../typescript/server) |
+| **Python** | `smooai-smooth-operator-server` | [in-repo](../../python/server) |
+| **Go** | `github.com/SmooAI/smooth-operator/go/server` | [in-repo](../../go/server) |
 
-// A transport (later: the WS host) feeds raw frames in and writes the events out.
-await dispatcher.DispatchAsync(rawFrameJson, evt => socket.Send(evt.ToJsonString()));
-```
+Every native client — [TypeScript](https://www.npmjs.com/package/@smooai/smooth-operator), Go, .NET, Python, Rust — connects to any of them unmodified.
+
+---
 
 ## Build & test
 
@@ -117,3 +109,11 @@ dotnet test dotnet/server/tests/SmooAI.SmoothOperator.Server.Tests.csproj
 # or the whole solution (engine + server + client):
 dotnet test dotnet/SmooAI.SmoothOperator.slnx
 ```
+
+---
+
+Part of the **[smooth-operator](https://github.com/SmooAI/smooth-operator)** service — Smoo AI's polyglot AI agent service. Don't want to run it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** hosts it for you.
+
+## License
+
+MIT © 2026 Smoo AI. See [LICENSE](https://github.com/SmooAI/smooth-operator/blob/main/LICENSE).
