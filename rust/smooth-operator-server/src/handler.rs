@@ -1294,18 +1294,6 @@ async fn handle_send_message(
         None => (None, None, 0),
     };
 
-    // Captured for the post-turn per-step attempt cap (moved into the spawn): the
-    // workflow (to compute a force-advance target), the step we started this turn
-    // on, and the carried consecutive-hold count. See `apply_step_cap`.
-    let (cap_workflow, cap_step_before, cap_attempts) = match workflow.as_ref() {
-        Some(wt) => (
-            Some(wt.workflow.clone()),
-            wt.current_step_id.clone(),
-            state.session_step_attempts(session_id),
-        ),
-        None => (None, None, 0),
-    };
-
     // The judge LLM surface — only built when there's a workflow to advance. A
     // test-injected chat provider (the mock) doubles as the judge offline; in
     // production the judge runs on the server's default (cheap) model with the

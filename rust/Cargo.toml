@@ -24,12 +24,12 @@ repository = "https://github.com/SmooAI/smooth-operator"
 # (SmooAI/smooth-operator-core). No more sibling path-dep / cross-repo Docker
 # context — the published crate is the single source. Bump this version to adopt
 # a newer core (then `cargo update -p smooai-smooth-operator-core`).
-# NOTE: 0.16.1 is the first PUBLISHED core with `with_model_ceiling` (the server's
-# model-output ceiling clamp) — 0.16.0 predates it, so requiring `^0.16` let an
-# external `cargo build` resolve the broken 0.16.0 and fail to compile. Pin the
-# floor at 0.16.1. (The prior `git`/`rev = d03fa10` pin was a stopgap for exactly
-# that unpublished-API gap, now closed.)
-smooai-smooth-operator-core = "0.16.2"
+# NOTE: 1.7.0 is the first PUBLISHED core with the permission system
+# (`smooth_operator::permission::{PermissionHook, AutoMode, DenyPolicy}`) — the
+# server pins it exactly so the daemon's tool_hooks seam can install a
+# `PermissionHook::with_deny_policy(...)` built against the same engine. Earlier
+# floors (0.16.x) predate the permission API.
+smooai-smooth-operator-core = "1.7.0"
 # Intra-workspace dep on the reference lib carries its version so the adapters /
 # ingestion / server that depend on it are publishable (path = local dev,
 # version = the crates.io requirement).

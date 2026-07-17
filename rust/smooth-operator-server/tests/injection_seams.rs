@@ -383,6 +383,7 @@ async fn injected_tool_hook_observes_tool_calls() {
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )
