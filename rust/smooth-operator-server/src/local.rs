@@ -66,6 +66,7 @@ use tokio::task::JoinHandle;
 use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::tool_provider::ToolProvider;
+use smooth_operator_core::tool::ToolHook;
 
 use crate::config::{ServerConfig, StorageBackend};
 use crate::server::{build_state, router};
@@ -90,6 +91,7 @@ pub struct LocalServerBuilder {
     config: Option<ServerConfig>,
     auth: Option<Arc<dyn AuthVerifier>>,
     tool_provider: Option<Arc<dyn ToolProvider>>,
+    tool_hooks: Vec<Arc<dyn ToolHook>>,
     serve_widget: bool,
     widget_token: Option<String>,
     strict_auth: bool,
@@ -123,6 +125,7 @@ impl Default for LocalServerBuilder {
             config: None,
             auth: None,
             tool_provider: None,
+            tool_hooks: Vec::new(),
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
@@ -174,6 +177,19 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn tools(mut self, provider: Arc<dyn ToolProvider>) -> Self {
         self.tool_provider = Some(provider);
+        self
+    }
+
+    /// Install engine [`ToolHook`]s applied to EVERY per-turn tool registry,
+    /// before the per-agent auth gate and confirmation hooks — so a host
+    /// permission/surveillance hook gets first say on every call. This is the
+    /// prerequisite seam for Big Smooth's narc-judge + auto-mode: it hands the
+    /// server its own `ToolHook`s (an auto-mode permission gate that can
+    /// allow/deny/ask, plus an LLM-judge surveillance hook) without forking the
+    /// runner. Unset ⇒ no extra hooks (unchanged behavior).
+    #[must_use]
+    pub fn tool_hooks(mut self, hooks: Vec<Arc<dyn ToolHook>>) -> Self {
+        self.tool_hooks = hooks;
         self
     }
 
@@ -297,6 +313,9 @@ impl LocalServerBuilder {
         }
         if let Some(provider) = &self.tool_provider {
             state = state.with_tools(Arc::clone(provider));
+        }
+        if !self.tool_hooks.is_empty() {
+            state = state.with_tool_hooks(self.tool_hooks.clone());
         }
         if self.serve_widget {
             state = state.with_widget(self.widget_token.clone());
@@ -559,6 +578,31 @@ mod tests {
             .tools(Arc::new(EmptyProvider))
             .build();
         assert!(state.tool_provider.is_some(), "host ToolProvider installed");
+    }
+
+    #[test]
+    fn tool_hooks_seam_installs_hooks() {
+        use async_trait::async_trait;
+        use smooth_operator_core::tool::ToolHook;
+
+        struct NoopHook;
+        #[async_trait]
+        impl ToolHook for NoopHook {}
+
+        // Default → no hooks (unchanged behavior).
+        assert!(
+            LocalServerBuilder::default().build().tool_hooks.is_empty(),
+            "no tool hooks unless the host installs them"
+        );
+        // `.tool_hooks(..)` threads the hooks onto AppState for the runner.
+        let state = LocalServerBuilder::default()
+            .tool_hooks(vec![Arc::new(NoopHook) as Arc<dyn ToolHook>])
+            .build();
+        assert_eq!(
+            state.tool_hooks.len(),
+            1,
+            "the installed hook must reach AppState"
+        );
     }
 
     #[test]

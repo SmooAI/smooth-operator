@@ -131,6 +131,7 @@ async fn run(
             confirmation: None,
             interactions: None,
             tool_provider: Some(provider),
+            tool_hooks: vec![],
             system_prompt: None,
             org_id: None,
             gateway_key: None,

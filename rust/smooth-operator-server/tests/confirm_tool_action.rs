@@ -147,6 +147,7 @@ fn spawn_turn(
                 confirmation: Some(confirmation_for(&state)),
                 interactions: None,
                 tool_provider: None,
+                tool_hooks: vec![],
                 system_prompt: None,
                 org_id: None,
                 gateway_key: None,
