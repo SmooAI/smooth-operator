@@ -10,6 +10,18 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Description>The smooth-operator service in C# — wraps SmooAI.SmoothOperator.Core to serve the schema-driven conversation protocol (sessions, streaming turns, citations). The native .NET analog of the Rust smooth-operator-server. Phase 0: the in-process protocol runner + dispatch; the WebSocket host + durable adapters arrive in later phases.</Description>
+    <!-- NuGet packaging metadata. <Version> is the LOCKSTEP anchor stamped by
+         scripts/sync-versions.mjs (do NOT confuse with the SmooAI.SmoothOperator.Core
+         PackageReference version below, which tracks the separately-published engine). -->
+    <PackageId>SmooAI.SmoothOperator.Server</PackageId>
+    <Version>1.22.17</Version>
+    <Authors>SmooAI</Authors>
+    <PackageTags>ai;agent;llm;chat;smooth-operator;server;websocket;smooai</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/SmooAI/smooth-operator/tree/main/dotnet/server</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SmooAI/smooth-operator.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
   </PropertyGroup>
 
   <ItemGroup>

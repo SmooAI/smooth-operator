@@ -1,6 +1,6 @@
 [project]
 name = "smooai-smooth-operator-server"
-version = "0.1.0"
+version = "1.22.17"
 description = "Native async WebSocket server for the smooth-operator protocol — parity with the Rust and C# reference servers, consuming the in-process smooai-smooth-operator-core engine."
 readme = "README.md"
 license = { text = "MIT" }
