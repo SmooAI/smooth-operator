@@ -139,6 +139,7 @@ async fn empty_terminal_content_falls_back_to_streamed_reply() {
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )

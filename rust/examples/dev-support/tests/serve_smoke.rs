@@ -364,6 +364,7 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
             conversation_id: &conversation_id,
             request_id: "sm-grounded",
             user_message: "How big is the Frobnicator's ring buffer?",
+            model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
             reranker: None,
@@ -380,6 +381,7 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )

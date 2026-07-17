@@ -157,6 +157,7 @@ fn spawn_turn(
                 auth_gate: None,
                 tool_configs: None,
                 extensions: None,
+                images: vec![],
             },
             &sink,
         )
