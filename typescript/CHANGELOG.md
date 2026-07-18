@@ -1,5 +1,29 @@
 # @smooai/smooth-operator
 
+## 1.30.0
+
+### Minor Changes
+
+- a15fd43: .NET server: `get_conversation_messages` pages by an opaque `cursor` (a message id) instead of the `before` ISO-timestamp cursor, and returns `nextCursor` alongside `hasMore`.
+
+  A timestamp cursor is broken by design — two messages can share a timestamp at any precision the wire keeps, so a `created_at < cursor` filter drops or repeats the collisions. An id cursor names exactly one message. The paging path no longer compares timestamps at all, and the 500-message `before` rescan window (and its paging ceiling) is gone. The .NET client SDK's `GetMessagesAction.Before` becomes `Cursor`, and `GetMessagesResult` gains `NextCursor`. Breaking wire change for clients still sending `before`.
+
+- 5c0fb98: Python server: `get_conversation_messages` pages by opaque `cursor`, not the `before` timestamp.
+
+  The handler now reads `cursor` (a message id today), locates that message in the conversation log, and returns the page immediately older than it. Responses carry `nextCursor` — the id of the oldest message in the page, non-null exactly when `hasMore` is true. An unknown or stale cursor is a `VALIDATION_ERROR` rather than a silently empty page. `createdAt` stays on every message for display, with microsecond precision intact; it is simply no longer the cursor.
+
+  This removes code. The old `_BEFORE_SCAN_WINDOW = 500` bounded rescan existed only because a timestamp cannot locate a position in the log — it capped `before` paging to the newest 500 messages. An id cursor locates the position exactly, so the window, the ISO parsing (`_parse_before`), and the `created_at <` comparison are all gone. There is no timestamp comparison left on the paging path.
+
+  Matches the spec change in #279 and the Rust reference. Tests cover round-trip paging to exhaustion, the identical-`created_at` collision case a timestamp cursor provably cannot survive (the bug the Go server shipped), and the unknown-cursor error.
+
+### Patch Changes
+
+- 075d6e4: Go: commit the type-generation command as `scripts/generate-go.sh` and regenerate `go/protocol/types_gen.go`.
+
+  The command that produced `go/protocol/types_gen.go` was never committed — `go/README.md` deferred to "the original spec" — so Go was the one language whose wire types could not be regenerated. It is now a runnable script, verified to reproduce the previously committed file byte-for-byte from the spec at the commit that last generated it.
+
+  Regenerating picked up everything Go had missed since: `get_messages` now takes an opaque `Cursor *string` (replacing `Before *time.Time`) and returns `NextCursor`, plus the `stream_reasoning` / `stream_preamble` / `cancel` events and the rich-interaction types.
+
 ## 1.29.0
 
 ### Minor Changes
