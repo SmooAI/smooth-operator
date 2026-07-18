@@ -80,9 +80,13 @@ builder.Services.AddSingleton<ISessionStore>(
 builder.Services.AddSmoothOperatorServer();   // uses the registered ISessionStore
 ```
 
+- **Knowledge grounding + citations**: `TurnRunner` retrieves grounding from an `IKnowledgeBase` per turn (ACL-filtered via `IAclKnowledge`), optionally reorders with an `IReranker` (`GatewayReranker` cross-encoder or a network-free lexical fallback, **off by default**), and returns the sources as `citations` on the `eventual_response`. `SmooAI.SmoothOperator.Server.Postgres` ships the durable `PostgresKnowledgeBase` / `PostgresAclKnowledgeStore` (pgvector, ACL filtered in SQL) + `PostgresCheckpointStore`.
+- **Ingestion + connectors**: `IConnector` (+ `MockConnector`), a whitespace-aware `Chunker`, an `IngestPipeline` (connector → chunk → embed → store), and a real `GitHubConnector` (lists the repo tree, fetches text/code files, each doc stamped with its `github:owner/repo` ACL group). *(Notion/Slack connectors are landing in sibling PRs — GitHub is the connector on `main`.)*
+- **HITL write-confirmation**: a turn calling a `SMOOTH_AGENT_CONFIRM_TOOLS`-matched tool parks and emits `write_confirmation_required`; the client resumes it with a `confirm_tool_action` frame. `ConfirmationRegistry` tracks the in-flight confirmation per session; SEP extensions' `ui/confirm` prompts bridge into the same frames.
+- **`/admin/*` API + deployable host**: `MapSmoothOperatorAdmin()` mounts auth-gated `/admin/me`, `/admin/connectors`, and `POST /admin/reindex` (re-ingest without a restart). `SmooAI.SmoothOperator.Server.Host` is a runnable ASP.NET app (model + storage + auth + startup ingestion from env config) shipped as a container via a `Dockerfile`.
 - **Per-agent config + conversation workflows, the authLevel gate, SEP extension hosting, and the OTP flow** described above.
 
-**Next:** knowledge + checkpoint adapters on Postgres+pgvector, ingestion + connectors, then a deployable container. See the [Server roadmap](../../docs/Architecture/Polyglot%20Cores.md#server-roadmap-c).
+**Still open:** the .NET Notion/Slack connectors (in-flight), wiring the checkpoint adapter into a resumable live-turn loop (the adapter is contract-tested but `TurnRunner` is single-turn today), and a live-gateway integration test. See the [Server roadmap](../../docs/Architecture/Polyglot%20Cores.md#server-roadmap-c).
 
 ---
 
