@@ -1,5 +1,14 @@
 # @smooai/smooth-operator
 
+## 1.27.7
+
+### Patch Changes
+
+- 95524bc: Python server: regression test pinning sub-second precision on `get_conversation_messages`' `createdAt`. The handler already emits full microsecond precision (`datetime.isoformat()` on a tz-aware UTC value), but nothing guarded it — clients page by handing the oldest `createdAt` back as `before`, and a second-truncated cursor makes the strict `<` filter drop every message sharing that second. Matches the Go (#264) and TypeScript (#273) fixes.
+- d730dac: TypeScript server: user-initiated turn cancellation (the "Stop button"), mirroring the Rust reference (PR #259). A client stops the in-flight turn with `{"action":"cancel","requestId":"<the send_message requestId>"}`; the server aborts that turn and emits a terminal `cancelled` event (`status: 499`, requestId echoed at the envelope level and inside `data`) **in place of** the `eventual_response` — so a turn always emits exactly one terminal event. A cancel with no active turn is a silent no-op. Only ONE turn runs per connection: a second `send_message` while one is in flight is rejected with error code `TURN_IN_PROGRESS` rather than run concurrently (`confirm_tool_action` / `verify_otp` are turn _resumes_, so they're unaffected). A cancelled turn's partial assistant reply is DISCARDED (never persisted); the user's message, persisted at the start of the turn, stays. A client disconnect mid-turn now also aborts the turn, while the graceful SIGTERM drain still lets an in-flight turn finish.
+
+  Implementation is connection-local, matching the Rust approach: the turn is already spawned as a background task (so the reader stays free to receive `confirm_tool_action` while a turn is parked), so the dispatcher tracks it as the connection's single active turn along with a per-turn `AbortController`, and fires it on cancel/disconnect. Cancellation is cooperative — JS can't drop an in-flight `await` the way tokio drops a future — so a turn parked inside a long tool call stops at the next stream event; the observable protocol contract is identical either way.
+
 ## 1.27.6
 
 ### Patch Changes
