@@ -85,7 +85,7 @@ You decide what the agent can touch; the runner enforces it.
 | Piece | Module | Mirrors |
 | --- | --- | --- |
 | WS transport + per-connection loop + single writer | `server.py` | Rust `server.rs`, C# `SmoothOperatorWebSocketExtensions` |
-| Frame dispatch (`ping` / `create` / `get` / `send_message`) | `dispatcher.py` | C# `FrameDispatcher`, Rust `handler.rs` |
+| Frame dispatch (`ping` / `create` / `get` / `send_message` / `cancel`) | `dispatcher.py` | C# `FrameDispatcher`, Rust `handler.rs` |
 | Session + message store | `session_store.py` | C# `SessionStore`, Rust storage adapter |
 | Streaming turn (engine → protocol events) | `turn_runner.py` | C# `TurnRunner`, Rust `runner.rs` |
 | Per-agent config (instructions / workflow / persona / tools) | `agent_config.py` | monorepo `agents` schema |
@@ -93,7 +93,9 @@ You decide what the agent can touch; the runner enforces it.
 | SEP extension hosting | `extensions.py` | Rust `extensions.rs` |
 | Auth verifier seam (permissive + local HS256 JWT) | `auth.py` | C# `Auth.cs`, Rust verifier seam |
 
-**Graceful SIGTERM drain.** A shared `asyncio.Event` cancel switch is the single source of truth for "stop". Each connection loop races "cancel set" vs "next inbound frame" — with the turn dispatch awaited *inside* the frame branch, so an in-flight turn finishes before the loop exits, then a backplane `detach` always runs.
+**Turn cancellation (the "Stop button").** `{"action": "cancel", "requestId": "<the send_message requestId>"}` cancels the in-flight turn's `asyncio.Task` — `CancelledError` fires at its next `await`, abandoning the LLM/tool call — and emits the terminal `cancelled` event (`status: 499`, echoing the turn's `requestId`) *in place of* the `eventual_response`. One active turn per connection: a second `send_message` mid-turn is rejected with `TURN_IN_PROGRESS`, never run concurrently. A `cancel` with no active turn is a silent no-op. Partial output is discarded — the user's message is persisted at the start of the turn so it stays, the assistant reply only at the end, which the cancellation skips. A client disconnect mid-turn aborts the turn too.
+
+**Graceful SIGTERM drain.** A shared `asyncio.Event` cancel switch is the single source of truth for "stop". Each connection loop races "cancel set" vs "next inbound frame" — with the turn dispatch awaited *inside* the frame branch, so an in-flight turn finishes before the loop exits (a drain lets a turn *complete*; only a client `cancel`/disconnect aborts one), then a backplane `detach` always runs.
 
 **Per-agent config + conversation workflows.** `create_conversation_session` carries only an agent UUID, so config is resolved server-side per turn: an agent's `instructions` become its system prompt; `personality` / `greeting` are appended (greeting only on the first turn); a `conversation_workflow` (goal + ordered steps) renders the current step into the prompt and a cheap post-turn judge advances the pointer when the criteria are met. Parsing is tolerant (malformed → server default, never crashes a session) and the judge is failure-tolerant (any error → stay on the current step). With no resolver installed, behavior is unchanged.
 
