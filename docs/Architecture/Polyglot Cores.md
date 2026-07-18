@@ -131,25 +131,26 @@ ships green parity tests before the next starts.
 
 The **engine** is one of three layers. A .NET shop that wants the *whole* smooth-operator
 system native in C# — not just the in-process agent — needs the layer above the engine, which
-is **not yet built in C#**:
+is **now built in C#** (`SmooAI.SmoothOperator.Server`, see the roadmap below):
 
 | Layer | What | Rust | C# |
 | --- | --- | --- | --- |
 | Engine | the generic agent framework (loop, tools, memory, checkpoint, cast, cost) | `smooai-smooth-operator-core` | `SmooAI.SmoothOperator.Core` ✅ |
-| **Service** | the knowledge-chat **system** on the engine: WS protocol serving, durable storage, ingestion + connectors, ACL, citations, reranker, auth, admin API | `smooth-operator-server` (+ adapters, ingestion) | **— not built —** |
+| **Service** | the knowledge-chat **system** on the engine: WS protocol serving, durable storage, ingestion + connectors, ACL, citations, reranker, auth, admin API | `smooth-operator-server` (+ adapters, ingestion) | `SmooAI.SmoothOperator.Server` ✅ (+ `.Server.AspNetCore` / `.Server.Postgres` / `.Server.Host`) |
 | Client | a protocol client that talks to a running service | — | `SmooAI.SmoothOperator` ✅ (+ `IChatClient` facade) |
 
-A C# **`SmooAI.SmoothOperator.Server`** (the analog of `smooth-operator-server`) would consume
-`…Core` and add: an ASP.NET WebSocket host serving the schema-driven protocol; durable adapters
-(Postgres+pgvector / DynamoDB) for conversations + knowledge + checkpoints (the engine ships
-in-memory); the ingestion pipeline + connectors (GitHub, …); ACL-filtered retrieval
-(`Principal` / `AccessContext` / groups); JWT / trusted auth; citations + reranker; the
-`/admin/*` API; and a deployable host (container, SST / k8s).
+The C# **`SmooAI.SmoothOperator.Server`** (the analog of `smooth-operator-server`) consumes
+`…Core` and adds: an ASP.NET WebSocket host serving the schema-driven protocol; durable adapters
+(Postgres+pgvector) for conversations + knowledge + checkpoints (the engine ships
+in-memory); the ingestion pipeline + connectors (GitHub; Notion/Slack in-flight); ACL-filtered
+retrieval (`Principal` / `AccessContext` / groups); JWT / trusted auth; citations + reranker; the
+`/admin/*` API; HITL write-confirmation; and a deployable host (container). *(Still open: DynamoDB
+adapters, and wiring the checkpoint adapter into a resumable live-turn loop.)*
 
 It's a **much larger surface** than the engine, and it's optional — a .NET shop can run the
-Rust server + the .NET client, or embed `…Core` directly with its own hosting. The C# service
-is the "run the entire system in .NET" option: full native parity, the logical completion of
-the polyglot vision.
+Rust server + the .NET client, embed `…Core` directly with its own hosting, or run the C# server
+end-to-end. The C# service is the "run the entire system in .NET" option: full native parity, the
+logical completion of the polyglot vision.
 
 ### Server roadmap (C#)
 
