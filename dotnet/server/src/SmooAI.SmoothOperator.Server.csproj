@@ -29,6 +29,8 @@
          protocol/session/storage surface around it. The engine now lives in (and publishes
          from) the smooth-operator-core repo; consume it as the published NuGet package. -->
     <PackageReference Include="SmooAI.SmoothOperator.Core" Version="1.7.0" />
+    <!-- ILogger seam for surfacing degraded knowledge-retrieval warnings (pearl th-dadde3). -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

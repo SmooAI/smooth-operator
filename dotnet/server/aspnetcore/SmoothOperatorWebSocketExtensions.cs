@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server.AspNetCore;
@@ -104,7 +105,9 @@ public static class SmoothOperatorWebSocketExtensions
             otpService: services.GetService<IOtpService>(),
             // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
             // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
-            limits: services.GetService<TurnLimits>());
+            limits: services.GetService<TurnLimits>(),
+            // Logger so a degraded knowledge-retrieval failure surfaces a warning in the host's logs.
+            logger: services.GetService<ILoggerFactory>()?.CreateLogger("SmooAI.SmoothOperator.Server.TurnRunner"));
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
