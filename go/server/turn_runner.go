@@ -250,7 +250,35 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		defer r.confirmations.Clear(sessionID)
 	}
 	var reply strings.Builder
-	for ev := range stream.Events() {
+	// Consume the engine stream, but stay cancellable: a `cancel` frame (or a client
+	// disconnect) cancels ctx and the turn must stop RIGHT THERE — emitting no further
+	// events after the terminal `cancelled`, and never persisting the partial assistant
+	// reply (step 5 below is skipped). This is the Go analog of dropping the Rust turn
+	// future: cancellation there is preemptive at an await point, here it is cooperative,
+	// so ctx is checked as a select arm AND again per event (select picks at random among
+	// ready arms, so the arm alone isn't enough to guarantee prompt abort).
+	//
+	// Bailing early abandons the engine's producer goroutine mid-send on an unbuffered
+	// channel, so drainStream discards the remainder in the background until the engine
+	// unwinds (it shares this ctx) and closes the channel — no goroutine leak.
+	events := stream.Events()
+consume:
+	for {
+		var ev core.StreamEvent
+		var open bool
+		select {
+		case <-ctx.Done():
+			go drainStream(events)
+			return TurnResult{}, ctx.Err()
+		case ev, open = <-events:
+			if !open {
+				break consume
+			}
+		}
+		if ctx.Err() != nil {
+			go drainStream(events)
+			return TurnResult{}, ctx.Err()
+		}
 		switch ev.Kind {
 		case core.StreamText:
 			if ev.Text != "" {
@@ -297,6 +325,15 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	}
 
 	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations, NextStepID: nextStepID}, nil
+}
+
+// drainStream discards the tail of an abandoned engine stream so its producer
+// goroutine — blocked mid-send on an unbuffered channel — can finish and close it.
+// Only reached when a turn is cancelled; the engine shares the cancelled context, so
+// its next model call fails and it unwinds promptly.
+func drainStream(events <-chan core.StreamEvent) {
+	for range events { //nolint:revive // draining for effect
+	}
 }
 
 // truncate caps a citation snippet at max characters (a plain prefix slice, matching
