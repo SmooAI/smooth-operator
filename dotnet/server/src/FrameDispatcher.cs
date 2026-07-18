@@ -350,6 +350,22 @@ public sealed class FrameDispatcher
         var extHost = await ExtensionServerHost.BuildAsync(sink, requestId, session.SessionId, _confirmations).ConfigureAwait(false);
         var baseTools = extHost is null ? _tools : _tools.Concat(extHost.Tools()).ToList();
 
+        // Scope retrieval to THIS connection's access up front — the same handle grounds the turn's
+        // auto-context RAG (step 5 below) AND backs the built-in knowledge_search tool, so both read
+        // through the same ACL-filtered store (a doc the caller's groups don't grant is never a candidate).
+        var scopedKnowledge = _knowledge?.ForAccess(_access);
+
+        // Built-in knowledge_search: a model-callable search over the connection's ACL-scoped knowledge
+        // (parity with the Rust server's KnowledgeSearchTool). Prepended before the enabled_tools filter
+        // so it flows through the SAME per-agent restriction + auth gate as every other tool — an agent
+        // with no tool_config gets it (like a Rust built-in), one that restricts tools must list
+        // "knowledge_search" to keep it. Null (skipped) when no knowledge store is configured.
+        var knowledgeTool = KnowledgeSearchTool.Create(scopedKnowledge);
+        if (knowledgeTool is not null)
+        {
+            baseTools = baseTools.Prepend(knowledgeTool).ToList();
+        }
+
         var enabledTools = agentConfig?.EnabledTools;
         var effectiveTools = enabledTools is null
             ? baseTools
@@ -370,9 +386,9 @@ public sealed class FrameDispatcher
         //     for this agent" that still overrides the global.
         var confirmTools = agentConfig?.ConfirmToolPatterns ?? _confirmTools;
 
-        // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
-        //    user only ever sees documents their groups grant (ACL enforced on the chat path).
-        var scopedKnowledge = _knowledge?.ForAccess(_access);
+        // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access (computed
+        //    above, and reused to back the built-in knowledge_search tool) — so a user only ever sees
+        //    documents their groups grant (ACL enforced on the chat path).
         var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
