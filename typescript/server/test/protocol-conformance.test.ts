@@ -171,6 +171,31 @@ describe('protocol conformance', () => {
         expect(typeof req.code).toBe('string');
     });
 
+    it('cancelled builder reproduces the cancelled_event golden (status 499, requestId echoed in the envelope + data)', () => {
+        // The `cancelled_event` fixture ships with the Rust reference PR (#259); until it
+        // lands the contract is pinned by the shape assertions below.
+        const golden = fixtures['cancelled_event'];
+        const built = roundTrip(protocol.cancelled('req-a1b2c3d4-0002'));
+        expect(built.type).toBe('cancelled');
+        expect(built.requestId).toBe('req-a1b2c3d4-0002');
+        expect(built.status).toBe(499);
+        expect(built.data).toEqual({ requestId: 'req-a1b2c3d4-0002', status: 499 });
+        expect(typeof built.timestamp).toBe('number');
+        // No answer payload: a cancelled turn produced no assistant message.
+        expect('messageId' in (built.data as Record<string, unknown>)).toBe(false);
+        if (golden && typeof golden !== 'string') {
+            const { timestamp: _built, ...builtRest } = built;
+            const { timestamp: _golden, ...goldenRest } = golden.instance;
+            expect(builtRest).toEqual(goldenRest);
+        }
+
+        // No requestId anywhere → the field is omitted at both levels (schema-optional).
+        const bare = roundTrip(protocol.cancelled());
+        expect('requestId' in bare).toBe(false);
+        expect('requestId' in (bare.data as Record<string, unknown>)).toBe(false);
+        expect(bare.status).toBe(499);
+    });
+
     it('pong/error builders carry the discriminators a client matches on', () => {
         expect(protocol.pong('p1').type).toBe('pong');
         const err = protocol.error('e1', 'VALIDATION_ERROR', 'bad');

@@ -206,6 +206,31 @@ export function otpInvalid(requestId: string, error: string | undefined, attempt
     };
 }
 
+/**
+ * `cancelled` — the terminal event of a turn the client aborted with a `cancel`
+ * action. Emitted **in place of** the `eventual_response` a completed turn would
+ * send: it echoes the cancelled `send_message`'s `requestId` so the client can
+ * correlate it to the in-flight turn and reset its UI (drop the streaming
+ * indicator, re-enable input).
+ *
+ * Status `499` mirrors nginx's "client closed request" — a terminal, non-`200`
+ * outcome distinct from a server error. The `requestId` is echoed at the envelope
+ * level and inside `data` (envelope convention). No answer payload: a cancelled
+ * turn produced no assistant message (the streamed tokens were ephemeral and are
+ * NOT persisted; the user's message stays persisted).
+ *
+ * A cancel with no active turn is a no-op and emits nothing — this builder is only
+ * called when a live turn was actually aborted. Wire shape matches
+ * `spec/events/cancelled.schema.json` and the Rust reference's `protocol::cancelled`.
+ */
+export function cancelled(requestId?: string): Frame {
+    const data: Record<string, unknown> = { status: 499 };
+    if (requestId !== undefined) data.requestId = requestId;
+    const ev: Frame = { type: 'cancelled', status: 499, data, timestamp: nowMs() };
+    if (requestId !== undefined) ev.requestId = requestId;
+    return ev;
+}
+
 export function error(requestId: string | undefined, code: string, message: string): Frame {
     const descriptor = { code, message };
     const data: Record<string, unknown> = { error: descriptor };
