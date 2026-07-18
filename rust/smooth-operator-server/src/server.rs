@@ -721,31 +721,40 @@ async fn connection_loop(
         }
     });
 
+    // The connection's single active agent turn, if one is running: the cancelled
+    // turn's `requestId` (echoed on the `cancelled` event) + its task handle. A
+    // `send_message` spawns a turn (so the reader stays free to receive
+    // `confirm_tool_action` while the turn parks); we track that handle here so a
+    // later `cancel` frame — or a disconnect — can abort it, dropping the turn
+    // future at its next `.await` (abandoning the in-flight LLM/tool call). Only
+    // ONE turn runs at a time: a second `send_message` while one is in flight is
+    // rejected, never run concurrently.
+    let mut current_turn: Option<(Option<String>, tokio::task::JoinHandle<()>)> = None;
+
     // Reader: dispatch inbound frames. Handlers emit events via `sink_tx`.
     //
     // The `select!` lets a graceful shutdown (SIGTERM/ctrl_c → `state.shutdown`
-    // cancelled by the serve loop) break this loop so the connection drains: it
-    // stops reading new frames, falls out, and detaches below. `biased` so the
-    // shutdown branch wins a tie. Crucially, `handle_frame(...).await` stays
-    // INSIDE the frame arm (not a `select!` condition), so a turn already in
-    // flight when the cancel fires runs to completion before the next loop
-    // iteration observes the cancellation — that is the in-flight drain.
+    // cancelled by the serve loop) break this loop so the connection drains.
+    // `biased` so the shutdown branch wins a tie. On shutdown we do NOT abort an
+    // in-flight turn: the detached turn task holds a `sink` clone, so the writer
+    // (and `writer.await` below) blocks until it finishes — that is the in-flight
+    // drain the k8s termination window relies on. A client *disconnect*
+    // (Close/Err/None), by contrast, DOES abort the turn — no client remains to
+    // receive its output.
     loop {
         tokio::select! {
             biased;
 
             () = state.shutdown.cancelled() => {
                 // Pod is terminating: stop accepting frames on this connection.
-                // Returning closes the socket (the writer task ends when
-                // `sink_tx` drops below); any turn that was mid-flight already
-                // finished in the frame arm before we got here.
+                // Leave any in-flight turn running so it drains (see above).
                 break;
             }
 
             frame = ws_rx.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        handler::handle_frame(
+                        current_turn = handle_text_frame(
                             &state,
                             &access,
                             &conn_id,
@@ -753,6 +762,7 @@ async fn connection_loop(
                             auth_org.as_deref(),
                             text.as_str(),
                             &sink_tx,
+                            current_turn,
                         )
                         .await;
                     }
@@ -763,12 +773,16 @@ async fn connection_loop(
                             "binary frames are not supported; send JSON text frames",
                         ));
                     }
-                    Some(Ok(Message::Close(_))) => break,
+                    // Client disconnected mid-turn: abort the in-flight turn so it
+                    // stops generating (no client remains to receive its output).
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                        if let Some((_, handle)) = current_turn.take() {
+                            handle.abort();
+                        }
+                        break;
+                    }
                     // Ping/Pong control frames are handled by axum automatically.
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
-                    // Stream ended (peer hung up).
-                    None => break,
                 }
             }
         }
@@ -780,6 +794,93 @@ async fn connection_loop(
     state.backplane.detach(&conn_id).await;
     drop(sink_tx);
     let _ = writer.await;
+}
+
+/// Peek a frame's `action` + `requestId` without doing full dispatch parsing —
+/// used by the connection loop to route `cancel` and enforce the single-active-
+/// turn rule *before* delegating other frames to [`handler::handle_frame`].
+/// Returns `(None, None)` for a non-object / unparseable frame (which
+/// `handle_frame` then rejects with a proper `error` event on the normal path).
+fn frame_action_and_request_id(raw: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (None, None);
+    };
+    let action = v.get("action").and_then(|a| a.as_str()).map(str::to_string);
+    let request_id = v
+        .get("requestId")
+        .and_then(|a| a.as_str())
+        .map(str::to_string);
+    (action, request_id)
+}
+
+/// Handle one inbound text frame, threading the connection's single-active-turn
+/// slot through and returning the (possibly updated) slot.
+///
+/// - `cancel` → abort the in-flight turn (if any) and emit a `cancelled` event
+///   echoing its `requestId`; a cancel with no active turn is a silent no-op.
+/// - `send_message` while a turn is already in flight → reject with a
+///   `TURN_IN_PROGRESS` error (never run two turns concurrently on one socket);
+///   otherwise dispatch and track the spawned turn's handle.
+/// - anything else (including `confirm_tool_action`, which resumes the active
+///   turn) → dispatch via [`handler::handle_frame`], which returns no handle.
+#[allow(clippy::too_many_arguments)]
+async fn handle_text_frame(
+    state: &AppState,
+    access: &AccessContext,
+    conn_id: &str,
+    origin: Option<&str>,
+    auth_org: Option<&str>,
+    text: &str,
+    sink_tx: &tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    mut current_turn: Option<(Option<String>, tokio::task::JoinHandle<()>)>,
+) -> Option<(Option<String>, tokio::task::JoinHandle<()>)> {
+    // Forget a handle whose turn already finished, so the single-active-turn
+    // guard below only trips on a genuinely in-flight turn.
+    if current_turn.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+        current_turn = None;
+    }
+
+    let (action, request_id) = frame_action_and_request_id(text);
+
+    match action.as_deref() {
+        Some("cancel") => {
+            if let Some((turn_req_id, handle)) = current_turn.take() {
+                // `abort()` drops the turn future at its next `.await`, abandoning
+                // the in-flight LLM/tool call. Echo the cancelled turn's requestId
+                // (falling back to the cancel frame's own) so the client correlates
+                // the reset.
+                handle.abort();
+                let echo = turn_req_id.or(request_id);
+                let _ = sink_tx.send(crate::protocol::cancelled(echo.as_deref()));
+            }
+            // else: no active turn → harmless no-op (emit nothing).
+            None
+        }
+        Some("send_message") if current_turn.is_some() => {
+            // A turn is already running on this connection: reject the second one
+            // rather than run two concurrently (interleaved streams + racing
+            // storage writes). The client must cancel it or wait for it to finish.
+            let _ = sink_tx.send(crate::protocol::error(
+                request_id.as_deref(),
+                "TURN_IN_PROGRESS",
+                "a turn is already in progress on this connection; cancel it or wait for it to complete",
+            ));
+            current_turn
+        }
+        _ => {
+            // Normal dispatch. For a valid `send_message` this returns the spawned
+            // turn's handle (tracked as the new active turn); for every other
+            // action (and a rejected send_message) it's `None`, leaving
+            // `current_turn` unchanged.
+            let spawned =
+                handler::handle_frame(state, access, conn_id, origin, auth_org, text, sink_tx)
+                    .await;
+            match spawned {
+                Some(handle) => Some((request_id, handle)),
+                None => current_turn,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
