@@ -10,7 +10,13 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Description>Postgres-backed durable storage for SmooAI.SmoothOperator.Server — a PostgresSessionStore implementing ISessionStore, so sessions + conversation history survive a restart. The C# analog of the Rust adapters/postgres OLTP surface.</Description>
+    <!-- Ship the branded README on the NuGet package page. -->
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Npgsql" Version="8.0.5" />

@@ -10,7 +10,13 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Description>ASP.NET Core WebSocket host for SmooAI.SmoothOperator.Server — maps the schema-driven protocol onto a /ws endpoint and wires it via DI. The deployable surface of the C# smooth-operator service.</Description>
+    <!-- Ship the branded README on the NuGet package page. -->
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
