@@ -19,7 +19,17 @@ public enum MessageDirection
     Outbound,
 }
 
-public sealed record StoredMessage(string Id, string ConversationId, MessageDirection Direction, string Text);
+/// <summary>
+/// One logged conversation message. <see cref="CreatedAt"/> is an init-only property (not a
+/// positional parameter) on purpose: it was added for <c>get_conversation_messages</c> paging and a
+/// positional param would break every downstream host that constructs a <c>StoredMessage</c>. Stores
+/// that persist a real timestamp set it explicitly; the rest get "now", which is correct for an
+/// in-process store that appends as it goes. th-30a8a7.
+/// </summary>
+public sealed record StoredMessage(string Id, string ConversationId, MessageDirection Direction, string Text)
+{
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
 
 /// <summary>
 /// One row of the conversation-list / resume surface: identity, last activity, message count,
