@@ -107,8 +107,11 @@ type inboundFrame struct {
 	// create_conversation_session — optional: resume an existing conversation (bind the new
 	// session to it) when known; absent/unknown → a fresh conversation (unchanged). th-d5b446.
 	ConversationID string `json:"conversationId"`
-	// list_conversations — optional max conversations returned (default 50). th-d5b446.
+	// list_conversations / get_conversation_messages — optional max rows returned (default 50).
 	Limit int `json:"limit"`
+	// get_conversation_messages — optional ISO 8601 cursor; return only messages created
+	// strictly before it. th-9715aa.
+	Before string `json:"before"`
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
@@ -138,6 +141,8 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 		d.handleGetSession(ctx, frame, sink)
 	case "list_conversations":
 		d.handleListConversations(ctx, frame, sink)
+	case "get_conversation_messages":
+		d.handleGetConversationMessages(ctx, frame, sink)
 	case "send_message":
 		d.handleSendMessage(ctx, frame, sink)
 	case "confirm_tool_action":
@@ -234,6 +239,97 @@ func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inb
 		})
 	}
 	sink(immediateResponse(frame.RequestID, 200, "Conversations", map[string]any{"conversations": conversations}))
+}
+
+// maxMessageLimit caps get_conversation_messages' limit per the contract (1..100).
+const maxMessageLimit = 100
+
+// beforeScanWindow bounds the store read when paging with `before`.
+const beforeScanWindow = 500
+
+// handleGetConversationMessages — the conversation-resume substrate. Returns a session's
+// conversation messages NEWEST-first with a hasMore flag, per
+// spec/actions/get-messages.schema.json. Optional input: limit (1..100, default 50) and
+// before (ISO 8601 cursor — only messages created strictly before it). Mirrors the Rust
+// handle_get_conversation_messages. th-9715aa.
+func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, frame inboundFrame, sink EventSink) {
+	if frame.SessionID == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'sessionId'"))
+		return
+	}
+	session, err := d.store.GetSession(ctx, frame.SessionID)
+	if err != nil {
+		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		return
+	}
+	if session == nil {
+		sink(errorEvent(frame.RequestID, "SESSION_NOT_FOUND", "Session not found"))
+		return
+	}
+
+	limit := defaultListLimit
+	if frame.Limit > 0 {
+		limit = frame.Limit
+	}
+	if limit > maxMessageLimit {
+		limit = maxMessageLimit
+	}
+
+	var before time.Time
+	if frame.Before != "" {
+		before, err = time.Parse(time.RFC3339, frame.Before)
+		if err != nil {
+			sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Invalid 'before' timestamp; expected ISO 8601"))
+			return
+		}
+	}
+
+	// Fetch limit+1 so the extra row tells us whether more history exists. With a `before`
+	// cursor we can't push the filter into the store, so we pull a bounded window instead.
+	// ponytail: `before` pages within the newest 500 messages; deeper paging needs a
+	// cursor-aware store method (would break SessionStore for downstream implementers).
+	fetch := limit + 1
+	if !before.IsZero() {
+		fetch = beforeScanWindow
+	}
+	stored, err := d.store.ListMessages(ctx, session.ConversationID, fetch)
+	if err != nil {
+		sink(errorEvent(frame.RequestID, "STORAGE_ERROR", "Failed to list messages."))
+		return
+	}
+
+	// Store returns oldest-first; the contract is newest-first.
+	newestFirst := make([]StoredMessage, 0, len(stored))
+	for i := len(stored) - 1; i >= 0; i-- {
+		m := stored[i]
+		if !before.IsZero() && !m.CreatedAt.Before(before) {
+			continue
+		}
+		newestFirst = append(newestFirst, m)
+	}
+
+	hasMore := len(newestFirst) > limit
+	if hasMore {
+		newestFirst = newestFirst[:limit]
+	}
+
+	messages := make([]map[string]any, 0, len(newestFirst))
+	for _, m := range newestFirst {
+		direction := "outbound"
+		if m.Direction == Inbound {
+			direction = "inbound"
+		}
+		messages = append(messages, map[string]any{
+			"id":        m.ID,
+			"direction": direction,
+			"content":   map[string]any{"text": m.Text},
+			"createdAt": m.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	sink(immediateResponse(frame.RequestID, 200, "ConversationMessages", map[string]any{
+		"messages": messages,
+		"hasMore":  hasMore,
+	}))
 }
 
 // conversationTitle derives a sidebar title: a trimmed, ~60-char preview of the first inbound
