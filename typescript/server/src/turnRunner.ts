@@ -66,6 +66,20 @@ export const DEFAULT_SYSTEM_PROMPT =
 /** A sink the runner pushes outbound protocol frames into (single-writer downstream). */
 export type Sink = (frame: Frame) => void;
 
+/**
+ * Thrown out of {@link TurnRunner.run} when the client cancelled the turn (a `cancel`
+ * action, or a disconnect). The caller swallows it: the terminal `cancelled` event was
+ * already emitted by the dispatcher's cancel handler, and nothing further is emitted or
+ * persisted — the partial assistant reply is DISCARDED (the user's message, persisted at
+ * the start of the turn, stays).
+ */
+export class TurnCancelledError extends Error {
+    constructor() {
+        super('turn cancelled by the client');
+        this.name = 'TurnCancelledError';
+    }
+}
+
 export interface TurnRunnerOptions {
     /** The OpenAI-compatible engine client (gateway in prod, {@link MockLlmProvider} in tests). */
     chatClient: ChatClientLike;
@@ -144,11 +158,23 @@ export class TurnRunner {
     }
 
     /**
-     * Run the turn, streaming events to `sink`. `signal`, when aborted, cooperatively
-     * stops streaming further events (an in-flight turn drains what it has). Returns
-     * the final reply + citations so the caller can emit the terminal event.
+     * Run the turn, streaming events to `sink`.
+     *
+     * - `signal` (the server-wide DRAIN signal), when aborted, cooperatively stops
+     *   streaming further events — the turn still persists its reply and returns, so a
+     *   SIGTERM drain completes the in-flight turn (unchanged behaviour).
+     * - `cancelSignal` (this turn's OWN signal, aborted by a client `cancel` action or a
+     *   disconnect) throws {@link TurnCancelledError} instead: nothing more is emitted
+     *   and the assistant reply is never persisted.
+     *
+     * ponytail: cancellation is COOPERATIVE — JS can't drop an in-flight `await` the way
+     * Rust drops a future, and neither `@smooai/smooth-operator-core` nor the `Tool`
+     * interface takes an `AbortSignal`. So a turn parked inside a long tool call stops at
+     * the next stream event rather than instantly; the observable protocol contract
+     * (terminal `cancelled`, no `eventual_response`, no persisted reply) holds either way.
+     * Upgrade path: thread an `AbortSignal` through the engine's `runStream` + `Tool.execute`.
      */
-    async run(conversationId: string, requestId: string, userMessage: string, sink: Sink, signal?: AbortSignal): Promise<TurnResult> {
+    async run(conversationId: string, requestId: string, userMessage: string, sink: Sink, signal?: AbortSignal, cancelSignal?: AbortSignal): Promise<TurnResult> {
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust
         //    auto_sources / C# citation build. The engine's Knowledge.query is the
         //    same retriever the agent injects from, so the citations match the
@@ -236,6 +262,9 @@ export class TurnRunner {
         let reply = '';
         try {
             for await (const event of agent.runStream(userMessage, history)) {
+                // Cancelled: bail BEFORE emitting this event, so nothing follows the
+                // terminal `cancelled` the dispatcher already sent.
+                if (cancelSignal?.aborted) throw new TurnCancelledError();
                 if (signal?.aborted) break;
                 // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from
                 // the gate AFTER `write_confirmation_required`, so the wire order matches
@@ -250,6 +279,10 @@ export class TurnRunner {
             // at turn end). No-op when HITL is off.
             this.confirmations?.clear(confirmSession);
         }
+
+        // A cancel that landed while the stream was blocked (e.g. inside a tool call)
+        // is observed here: DISCARD the partial reply — never persist it, never return.
+        if (cancelSignal?.aborted) throw new TurnCancelledError();
 
         // 5. Persist the outbound reply.
         const outbound = await this.store.appendMessage(conversationId, 'outbound', reply);

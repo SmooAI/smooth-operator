@@ -24,7 +24,7 @@ import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
 import type { Sink } from './turnRunner.js';
-import { DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
+import { DEFAULT_SYSTEM_PROMPT, TurnCancelledError, TurnRunner } from './turnRunner.js';
 
 /**
  * A knowledge provider that yields a retriever SCOPED to a given access context —
@@ -105,6 +105,13 @@ export class FrameDispatcher {
     private readonly modelCeiling?: ModelCeilingResolver;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
+    /**
+     * The connection's SINGLE active agent turn, if one is running. A connection runs at
+     * most one turn at a time: a second `send_message` mid-turn is rejected with
+     * `TURN_IN_PROGRESS` rather than run concurrently (interleaved streams + racing
+     * storage writes). A `cancel` action — or a disconnect — aborts this turn.
+     */
+    private activeTurn: { requestId: string; controller: AbortController; promise: Promise<void> } | undefined;
 
     constructor(options: FrameDispatcherOptions) {
         this.store = options.store;
@@ -142,6 +149,32 @@ export class FrameDispatcher {
      */
     rejectPendingConfirmations(): void {
         this.confirmations.rejectAll();
+    }
+
+    /**
+     * Abort the connection's in-flight turn, if any, WITHOUT emitting anything. Returns
+     * whether a turn was actually aborted.
+     *
+     * The turn's own {@link AbortController} is fired, so the runner throws
+     * {@link TurnCancelledError} at its next stream event — no further protocol events,
+     * and the partial assistant reply is never persisted. Any confirmation the turn is
+     * parked on is rejected so it unparks and reaches that check. The turn is also
+     * dropped from the drain set: {@link waitForTurns} must not block teardown on a turn
+     * nobody is waiting for.
+     *
+     * Used by the `cancel` action (which then emits the terminal `cancelled` event) and
+     * by the connection loop on a client DISCONNECT (no client remains to receive the
+     * turn's output). Graceful drain deliberately does NOT call this — an in-flight turn
+     * finishes on SIGTERM.
+     */
+    cancelActiveTurn(): boolean {
+        const turn = this.activeTurn;
+        if (!turn) return false;
+        this.activeTurn = undefined;
+        turn.controller.abort();
+        this.confirmations.rejectAll();
+        this.turns.delete(turn.promise);
+        return true;
     }
 
     /**
@@ -184,7 +217,23 @@ export class FrameDispatcher {
                     await this.handleGetConversationMessages(frame, requestId, sink);
                     break;
                 case 'send_message':
+                    // One active turn per connection: reject a second one rather than run
+                    // two concurrently. (`confirm_tool_action` / `verify_otp` are turn
+                    // RESUMES, not new turns, so they're unaffected.)
+                    if (this.activeTurn) {
+                        sink(
+                            protocol.error(
+                                requestId,
+                                'TURN_IN_PROGRESS',
+                                'a turn is already in progress on this connection; cancel it or wait for it to complete',
+                            ),
+                        );
+                        break;
+                    }
                     await this.handleSendMessage(frame, requestId, sink, signal);
+                    break;
+                case 'cancel':
+                    this.handleCancel(requestId, sink);
                     break;
                 case 'confirm_tool_action':
                     this.handleConfirmToolAction(frame, requestId, sink);
@@ -206,6 +255,22 @@ export class FrameDispatcher {
             console.error(`[frameDispatcher] action '${action}' failed:`, err);
             sink(protocol.error(requestId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
         }
+    }
+
+    /**
+     * `cancel` — stop the connection's in-flight turn (the "Stop button").
+     *
+     * Per `spec/actions/cancel.schema.json` the client sends `{action, requestId}`,
+     * reusing the `send_message`'s `requestId` as the correlation key. We abort the
+     * tracked turn and emit the terminal `cancelled` event (status 499) echoing the
+     * CANCELLED TURN's requestId — it replaces the `eventual_response` that turn would
+     * otherwise have sent, so a turn emits exactly one terminal event. A cancel with no
+     * active turn is a silent no-op: nothing is emitted and the connection stays live.
+     */
+    private handleCancel(requestId: string | undefined, sink: Sink): void {
+        const turnRequestId = this.activeTurn?.requestId;
+        // Echo the cancelled turn's requestId, falling back to the cancel frame's own.
+        if (this.cancelActiveTurn()) sink(protocol.cancelled(turnRequestId ?? requestId));
     }
 
     private async handleCreateSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
@@ -415,9 +480,14 @@ export class FrameDispatcher {
         // `eventual_response` is emitted from the task on completion. The connection
         // loop awaits all tracked turns on teardown ({@link waitForTurns}) so an
         // in-flight turn finishes before the writer stops (graceful drain).
+        // This turn's own cancel handle — fired by a `cancel` action or a disconnect (NOT
+        // by the server-wide drain `signal`, which lets an in-flight turn finish).
+        const controller = new AbortController();
+        let settled = false;
+
         const turn = (async (): Promise<void> => {
             try {
-                const result = await runner.run(session.conversationId, reqId, message, sink, signal);
+                const result = await runner.run(session.conversationId, reqId, message, sink, signal, controller.signal);
                 // SMOODEV-590 — persist the workflow pointer the judge advanced to, so the
                 // next turn on this conversation resumes on the right step. No-op for
                 // freeform agents (nextStepId undefined) or a store without setCurrentStep.
@@ -440,11 +510,18 @@ export class FrameDispatcher {
                 }
                 sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
             } catch (err) {
+                // Cancelled: the terminal `cancelled` event was already emitted by the
+                // cancel handler (or the client is gone) — emit nothing more.
+                if (err instanceof TurnCancelledError) return;
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean
                 // error and keeps the connection alive (detail stays server-side).
                 console.error('[frameDispatcher] turn failed:', err);
                 sink(protocol.error(reqId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
             } finally {
+                settled = true;
+                // Only clear the slot if it's still OURS: a cancel already took it (and a
+                // later `send_message` may have installed its own).
+                if (this.activeTurn?.controller === controller) this.activeTurn = undefined;
                 // SEP — kill this turn's extension subprocesses and drop any `ui/confirm`
                 // responder it left parked (mirrors the Rust `(ext.clear)` + host drop).
                 if (extHost) {
@@ -453,6 +530,9 @@ export class FrameDispatcher {
                 }
             }
         })();
+        // Track it as the connection's single active turn — unless it already finished
+        // synchronously, in which case there is nothing to cancel.
+        if (!settled) this.activeTurn = { requestId: reqId, controller, promise: turn };
         this.turns.add(turn);
         void turn.finally(() => this.turns.delete(turn));
     }

@@ -126,6 +126,7 @@ pnpm --filter @smooai/smooth-operator-server test
 | --- | --- |
 | WS transport, single writer, read loop | **Done** |
 | FrameDispatcher (ping / create / get / send_message) | **Done** |
+| Turn cancellation (`cancel` → `cancelled` 499, one turn per connection) | **Done** |
 | In-memory SessionStore + history replay | **Done** |
 | TurnRunner streaming (text + tool chunks + citations) | **Done** |
 | Host tool injection (`tools`) + per-agent config + authLevel gate + OTP | **Done** |

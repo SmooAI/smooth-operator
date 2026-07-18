@@ -325,6 +325,12 @@ async function runConnection(socket: WebSocket, dispatcher: FrameDispatcher, bac
         // is enqueued before the writer stops (preserves the graceful-drain "in-flight
         // turn finishes" contract now that turns run as background tasks). No-op when no
         // turn is parked / in flight.
+        // Client DISCONNECTED mid-turn: abort the in-flight turn — no client remains to
+        // receive its output, and its partial reply must not be persisted. Distinct from
+        // a graceful drain (SIGTERM), which falls through with `socketClosed === false`
+        // and deliberately lets the turn finish below.
+        if (socketClosed) dispatcher.cancelActiveTurn();
+
         dispatcher.rejectPendingConfirmations();
         await dispatcher.waitForTurns();
 
