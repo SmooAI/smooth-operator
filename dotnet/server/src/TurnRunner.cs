@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server;
@@ -33,8 +34,9 @@ public sealed class TurnRunner
     private readonly AgentConfig _agentConfig;
     private readonly IWorkflowJudge? _judge;
     private readonly TurnLimits _limits;
+    private readonly ILogger? _logger;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -57,6 +59,8 @@ public sealed class TurnRunner
         // Per-turn output-token budget + agentic-iteration cap, plus the resolved model's hard output
         // ceiling. Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20; EPIC th-1cc9fa).
         _limits = limits ?? TurnLimits.Default;
+        // Optional logger — used to surface a warning when knowledge retrieval degrades (null ⇒ silent).
+        _logger = logger;
     }
 
     /// <summary>
@@ -109,26 +113,46 @@ public sealed class TurnRunner
         //    the top few before they become citations; without one, fetch exactly the top few
         //    (behavior unchanged — the rerank stage is opt-in).
         var citations = new List<JsonObject>();
+        // The knowledge base handed to the engine for its own RAG grounding. Nulled if retrieval fails
+        // this turn so the engine's internal query doesn't re-hit the same dead dependency and throw.
+        var knowledgeForTurn = _knowledge;
         if (_knowledge is not null)
         {
             var fetchLimit = _reranker is not null ? RerankCandidatePool : AutoContextLimit;
-            var candidates = await _knowledge.QueryAsync(userMessage, fetchLimit, cancellationToken).ConfigureAwait(false);
-            IReadOnlyList<KnowledgeResult> hits;
+            IReadOnlyList<KnowledgeResult>? candidates = null;
             try
             {
-                hits = await Rerankers.ApplyOptionalAsync(_reranker, userMessage, candidates, AutoContextLimit, cancellationToken).ConfigureAwait(false);
+                candidates = await _knowledge.QueryAsync(userMessage, fetchLimit, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // The reranker is an opt-in retrieval-QUALITY stage (the GatewayReranker hits the
-                // network) — a transient failure there must not deny the user an answer. Fall back
-                // to the upstream retrieval order, truncated. Cancellation still propagates.
-                hits = candidates.Take(AutoContextLimit).ToArray();
+                // Retrieval (the embedding gateway / vector store) is best-effort grounding: when it is
+                // down the turn must DEGRADE to ungrounded, not die with INTERNAL_ERROR. Drop grounding
+                // for this turn — no citations — and don't hand the failing store to the engine (its own
+                // RAG query would re-hit the dead dependency and throw). The user still gets an answer.
+                // Cancellation still propagates (excluded above).
+                _logger?.LogWarning(ex, "Knowledge retrieval failed for conversation {ConversationId}; proceeding with empty grounding.", conversationId);
+                knowledgeForTurn = null;
             }
-            foreach (var hit in hits)
+            if (candidates is not null)
             {
-                var url = hit.Source.StartsWith("http://", StringComparison.Ordinal) || hit.Source.StartsWith("https://", StringComparison.Ordinal) ? hit.Source : null;
-                citations.Add(ProtocolEvents.Citation(hit.DocumentId, hit.Source, url, Truncate(hit.Chunk, CitationSnippetMaxChars), hit.Score));
+                IReadOnlyList<KnowledgeResult> hits;
+                try
+                {
+                    hits = await Rerankers.ApplyOptionalAsync(_reranker, userMessage, candidates, AutoContextLimit, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // The reranker is an opt-in retrieval-QUALITY stage (the GatewayReranker hits the
+                    // network) — a transient failure there must not deny the user an answer. Fall back
+                    // to the upstream retrieval order, truncated. Cancellation still propagates.
+                    hits = candidates.Take(AutoContextLimit).ToArray();
+                }
+                foreach (var hit in hits)
+                {
+                    var url = hit.Source.StartsWith("http://", StringComparison.Ordinal) || hit.Source.StartsWith("https://", StringComparison.Ordinal) ? hit.Source : null;
+                    citations.Add(ProtocolEvents.Citation(hit.DocumentId, hit.Source, url, Truncate(hit.Chunk, CitationSnippetMaxChars), hit.Score));
+                }
             }
         }
 
@@ -153,7 +177,7 @@ public sealed class TurnRunner
         var options = new AgentOptions
         {
             Instructions = resolvedPrompt,
-            Knowledge = _knowledge,
+            Knowledge = knowledgeForTurn,
             MaxIterations = _limits.MaxIterations,
             MaxOutputTokens = _limits.MaxTokens,
             ModelMaxOutputTokens = _limits.ModelMaxOutputTokens,
