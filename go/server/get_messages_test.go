@@ -127,6 +127,44 @@ func TestGetConversationMessagesBeforeCursor(t *testing.T) {
 	}
 }
 
+// TestGetConversationMessagesCursorRoundTripSameSecond is the regression test for the
+// RFC3339 truncation bug: two messages in the SAME second, paged one at a time by feeding
+// the returned createdAt back as `before`. With whole-second formatting page one reports
+// ".000Z" for a message actually at ".400Z", so page two filters CreatedAt < ".000Z" and
+// returns nothing — history silently vanishes.
+func TestGetConversationMessagesCursorRoundTripSameSecond(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, "older")
+	_, _ = store.AppendMessage(ctx, s.ConversationID, Outbound, "newer")
+
+	base := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
+	store.messages[s.ConversationID][0].CreatedAt = base.Add(100 * time.Millisecond)
+	store.messages[s.ConversationID][1].CreatedAt = base.Add(700 * time.Millisecond)
+
+	page1 := getMessages(t, store, map[string]any{"requestId": "r1", "sessionId": s.SessionID, "limit": 1})
+	first := page1["messages"].([]map[string]any)
+	if len(first) != 1 || first[0]["content"].(map[string]any)["text"] != "newer" {
+		t.Fatalf("page 1 = %+v, want just the newer message", first)
+	}
+	if page1["hasMore"] != true {
+		t.Errorf("page 1 hasMore = %v, want true", page1["hasMore"])
+	}
+
+	// Page by handing the oldest createdAt from page one straight back as the cursor.
+	cursor := first[0]["createdAt"].(string)
+	page2 := getMessages(t, store, map[string]any{"requestId": "r2", "sessionId": s.SessionID, "limit": 1, "before": cursor})
+
+	second := page2["messages"].([]map[string]any)
+	if len(second) != 1 {
+		t.Fatalf("page 2 (before=%s) = %d messages, want the older one; sub-second precision lost?", cursor, len(second))
+	}
+	if got := second[0]["content"].(map[string]any)["text"]; got != "older" {
+		t.Errorf("page 2 message = %v, want older", got)
+	}
+}
+
 func TestGetConversationMessagesInvalidBefore(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
