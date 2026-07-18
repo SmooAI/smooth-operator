@@ -44,6 +44,7 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `confirm_tool_action` | resume after a write-confirmation | `sessionId`, `requestId`, `approved` | resumed stream |
 | `verify_otp` | submit an OTP code after an auth gate | `sessionId`, `requestId`, `code` | `otp_verified` or `otp_invalid` (see below) |
 | `submit_interaction` | resume a turn parked on a Rich Interaction (ANY kind) | `sessionId`, `requestId`, `interactionId`, `kind?`, `values?` or `declined: true` | resumed stream, or `interaction_invalid` (turn stays parked) |
+| `cancel` | stop the in-flight turn (the "Stop button") | `requestId` (of the `send_message` to cancel), `sessionId?` | `cancelled` (or nothing, if no turn is running) |
 | `ping` | keepalive | — | `pong` |
 
 ## Events (server → client)
@@ -59,6 +60,7 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `otp_verification_required` / `otp_sent` / `otp_verified` / `otp_invalid` | auth-gated tool flow |
 | `interaction_required` | the agent raised a Rich Interaction (`kind` + `spec`, e.g. `identity_intake`); only sent to sessions that declared the kind's capability — client renders the kind's card and replies with `submit_interaction` (see [[Rich Interactions]]) |
 | `interaction_invalid` | a `submit_interaction` failed the kind's server-side validation (per-field `errors`); the turn stays parked for a resubmit |
+| `cancelled` | terminal event for a client-`cancel`led turn — emitted **in place of** `eventual_response`, echoing the cancelled turn's `requestId` with `status: 499`. No answer payload: the streamed tokens are discarded (not persisted); the user's message stays persisted |
 | `error` | `{ code, message }` |
 | `pong` | reply to `ping` |
 
@@ -110,6 +112,50 @@ Flow:
 ## Rich Interactions (structured cards, channel-normalized)
 
 A Rich Interaction is a typed, server-validated mid-turn ask (`interaction_required { interactionId, kind, spec, reason }` → the client card → `submit_interaction`). Sessions declare per-kind render capabilities in `supports` at create; kinds without their capability degrade to a **conversational fallback** (the raise tool returns kind-specific instructions and the model submits through the generic `submit_interaction` tool — same server-side validator, same canonical resume payload). The kind catalog lives in `spec/interactions/` (first kind: `identity_intake`, capability `identity_form` — name/email/phone with email-shape + E.164 validation, attaching to the session's OTP contact keys). Full design + extension recipe: [[Rich Interactions]].
+
+## Turn cancellation (the "Stop button")
+
+A client stops the in-flight turn by sending a `cancel` action. The reference
+server's contract (schemas: [`spec/actions/cancel.schema.json`](../../spec/actions/cancel.schema.json),
+[`spec/events/cancelled.schema.json`](../../spec/events/cancelled.schema.json);
+fixtures: `cancel_request` / `cancelled_event`):
+
+```jsonc
+// client → server
+{ "action": "cancel", "requestId": "<the send_message requestId>" }
+// server → client (only if a turn was actually running)
+{ "type": "cancelled", "requestId": "<echoed>", "status": 499,
+  "data": { "requestId": "<echoed>", "status": 499 }, "timestamp": 1749340809000 }
+```
+
+Semantics every language server + the frontend **must** replicate:
+
+- **One active turn per connection.** A `send_message` runs at most one turn on a
+  socket at a time. A second `send_message` arriving while one is in flight is
+  rejected with `error` code `TURN_IN_PROGRESS` — it is **not** run concurrently.
+  (`confirm_tool_action` / `submit_interaction` / `verify_otp` are turn *resumes*,
+  not new turns, so they are unaffected.)
+- **`cancel` aborts the running turn** by dropping the turn future at its next
+  `await` point, abandoning the in-flight LLM/tool call, and emits a terminal
+  `cancelled` event (status **499**, "client closed request") echoing the
+  cancelled turn's `requestId`. It replaces the `eventual_response` that turn
+  would otherwise have sent — exactly one terminal event per turn.
+- **No active turn ⇒ no-op.** A `cancel` with nothing running emits nothing and
+  leaves the connection live.
+- **Partial output is discarded.** The user's message is persisted at the start of
+  the turn (before the agent loop), so it stays; the assistant reply is persisted
+  only at the end, which the abort skips — so a cancelled turn leaves the user
+  message with **no** assistant reply. The streamed `stream_token`s the client
+  already saw are ephemeral UI, never persisted. (The engine's Groove checkpoint
+  store may retain partial mid-turn state, independent of the message log.)
+- **Disconnect mid-turn also aborts the turn** (no client remains to receive its
+  output) — a strict improvement. This is distinct from **graceful shutdown**
+  (SIGTERM), which deliberately lets an in-flight turn *drain* to completion within
+  the pod termination window rather than aborting it.
+
+Implementation is connection-local: the reader loop tracks the spawned turn's task
+handle and `abort()`s it on `cancel`/disconnect. There is no engine change — the
+agent loop is a chain of `await`s, so dropping its future cancels it.
 
 ## Mapping to smooth-operator's `AgentEvent` stream
 
