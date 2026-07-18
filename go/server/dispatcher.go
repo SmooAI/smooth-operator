@@ -323,7 +323,10 @@ func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, fra
 			"id":        m.ID,
 			"direction": direction,
 			"content":   map[string]any{"text": m.Text},
-			"createdAt": m.CreatedAt.UTC().Format(time.RFC3339),
+			// Nano, not RFC3339: clients page by handing the oldest createdAt back as
+			// `before`, and whole-second truncation would put the cursor BEFORE the message
+			// it names — silently dropping every same-second message from page two.
+			"createdAt": m.CreatedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
 	sink(immediateResponse(frame.RequestID, 200, "ConversationMessages", map[string]any{
