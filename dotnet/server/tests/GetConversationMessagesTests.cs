@@ -111,23 +111,154 @@ public class GetConversationMessagesTests
     }
 
     [Fact]
-    public async Task BeforeCursor_ReturnsOnlyOlderMessages()
+    public async Task Cursor_ReturnsOnlyMessagesOlderThanTheOneItNames()
     {
         var (dispatcher, store, events) = Build();
         var session = await store.CreateSessionAsync("agent", "U", "u@example.com");
-        var first = await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "old");
-        await Task.Delay(10); // distinct wall-clock stamps so the cursor has something to cut on.
-        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Outbound, "new");
+        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "old");
+        var newer = await store.AppendMessageAsync(session.ConversationId, MessageDirection.Outbound, "new");
 
-        var cursor = first.CreatedAt.AddMilliseconds(1).ToUniversalTime().ToString("O");
-        var frame = $$"""{"action":"get_conversation_messages","requestId":"r1","sessionId":"{{session.SessionId}}","before":"{{cursor}}"}""";
+        var frame = $$"""{"action":"get_conversation_messages","requestId":"r1","sessionId":"{{session.SessionId}}","cursor":"{{newer.Id}}"}""";
         await dispatcher.DispatchAsync(frame, events.Add);
 
         var data = Assert.Single(events)["data"]!;
-        var messages = data["messages"]!.AsArray();
-        var only = Assert.Single(messages);
+        var only = Assert.Single(data["messages"]!.AsArray());
         Assert.Equal("old", only!["content"]!["text"]!.GetValue<string>());
         Assert.False(data["hasMore"]!.GetValue<bool>());
+        Assert.Null(data["nextCursor"]);
+    }
+
+    [Fact]
+    public async Task NextCursor_NamesOldestOfPage_AndIsNullOnLastPage()
+    {
+        var (dispatcher, store, events) = Build();
+        var session = await store.CreateSessionAsync("agent", "U", "u@example.com");
+        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "a");
+        var b = await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "b");
+
+        var frame = $$"""{"action":"get_conversation_messages","requestId":"r1","sessionId":"{{session.SessionId}}","limit":1}""";
+        await dispatcher.DispatchAsync(frame, events.Add);
+
+        var data = Assert.Single(events)["data"]!;
+        Assert.True(data["hasMore"]!.GetValue<bool>());
+        Assert.Equal(b.Id, data["nextCursor"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task RoundTripPaging_WalksEveryMessageExactlyOnce()
+    {
+        var (dispatcher, store, events) = Build();
+        var session = await store.CreateSessionAsync("agent", "U", "u@example.com");
+        for (var i = 0; i < 4; i++)
+        {
+            await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, $"msg {i}");
+        }
+
+        var seen = await DrainPagesAsync(dispatcher, session.SessionId, events);
+        Assert.Equal(new[] { "msg 3", "msg 2", "msg 1", "msg 0" }, seen);
+    }
+
+    /// <summary>
+    /// The case a timestamp cursor cannot pass: two messages sharing an identical <c>CreatedAt</c>,
+    /// walked one per page. A <c>created_at &lt; cursor</c> filter drops or repeats the collision;
+    /// an id cursor names exactly one message. th-f63e4b.
+    /// </summary>
+    [Fact]
+    public async Task IdenticalTimestamps_ArePagedWithoutLossOrDuplication()
+    {
+        var inner = new InMemorySessionStore();
+        var store = new FrozenClockStore(inner);
+        var dispatcher = new FrameDispatcher(store, new MockChatClient());
+        var events = new List<JsonObject>();
+
+        var session = await store.CreateSessionAsync("agent", "U", "u@example.com");
+        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "twin a");
+        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Outbound, "twin b");
+
+        // Both messages report the same createdAt, so ordering can only come from the store's own order.
+        var stamps = (await store.ListMessagesAsync(session.ConversationId, 10)).Select(m => m.CreatedAt).Distinct();
+        Assert.Single(stamps);
+
+        var seen = await DrainPagesAsync(dispatcher, session.SessionId, events);
+        Assert.Equal(new[] { "twin b", "twin a" }, seen);
+    }
+
+    [Fact]
+    public async Task UnknownCursor_ReturnsValidationError()
+    {
+        var (dispatcher, store, events) = Build();
+        var session = await store.CreateSessionAsync("agent", "U", "u@example.com");
+        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "only");
+
+        var frame = $$"""{"action":"get_conversation_messages","requestId":"r1","sessionId":"{{session.SessionId}}","cursor":"{{Guid.NewGuid()}}"}""";
+        await dispatcher.DispatchAsync(frame, events.Add);
+
+        var ev = Assert.Single(events);
+        Assert.Equal("error", ev["type"]!.GetValue<string>());
+        Assert.Equal("VALIDATION_ERROR", ev["error"]!["code"]!.GetValue<string>());
+    }
+
+    /// <summary>Page one message at a time following <c>nextCursor</c>, returning the texts in order.</summary>
+    private static async Task<List<string>> DrainPagesAsync(FrameDispatcher dispatcher, string sessionId, List<JsonObject> events)
+    {
+        var seen = new List<string>();
+        string? cursor = null;
+        while (true)
+        {
+            events.Clear();
+            var cursorField = cursor is null ? string.Empty : ",\"cursor\":\"" + cursor + "\"";
+            await dispatcher.DispatchAsync(
+                $$"""{"action":"get_conversation_messages","requestId":"r1","sessionId":"{{sessionId}}","limit":1{{cursorField}}}""",
+                events.Add);
+
+            var data = Assert.Single(events)["data"]!;
+            seen.AddRange(data["messages"]!.AsArray().Select(m => m!["content"]!["text"]!.GetValue<string>()));
+
+            if (!data["hasMore"]!.GetValue<bool>())
+            {
+                Assert.Null(data["nextCursor"]);
+                return seen;
+            }
+            cursor = data["nextCursor"]!.GetValue<string>();
+            Assert.NotNull(cursor);
+        }
+    }
+
+    /// <summary>Delegating store that reports one fixed <c>CreatedAt</c> for every message, so paging
+    /// can be tested against a timestamp collision the real clock rarely produces.</summary>
+    private sealed class FrozenClockStore(ISessionStore inner) : ISessionStore
+    {
+        private static readonly DateTimeOffset Frozen = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default) =>
+            inner.CreateSessionAsync(agentId, userName, userEmail, cancellationToken);
+
+        public Task<StoredSession> ResumeSessionAsync(string agentId, string? userName, string? userEmail, string? conversationId, CancellationToken cancellationToken = default) =>
+            inner.ResumeSessionAsync(agentId, userName, userEmail, conversationId, cancellationToken);
+
+        public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default) =>
+            inner.ListConversationsAsync(cancellationToken);
+
+        public Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default) =>
+            inner.GetSessionAsync(sessionId, cancellationToken);
+
+        public async Task<StoredMessage> AppendMessageAsync(string conversationId, MessageDirection direction, string text, CancellationToken cancellationToken = default) =>
+            (await inner.AppendMessageAsync(conversationId, direction, text, cancellationToken)) with { CreatedAt = Frozen };
+
+        public async Task<IReadOnlyList<StoredMessage>> ListMessagesAsync(string conversationId, int limit, CancellationToken cancellationToken = default) =>
+            (await inner.ListMessagesAsync(conversationId, limit, cancellationToken)).Select(m => m with { CreatedAt = Frozen }).ToList();
+
+        public Task<string?> GetWorkflowStepAsync(string conversationId, CancellationToken cancellationToken = default) =>
+            inner.GetWorkflowStepAsync(conversationId, cancellationToken);
+
+        public Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default) =>
+            inner.SetWorkflowStepAsync(conversationId, stepId, cancellationToken);
+
+        public Task<bool> GetSessionAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default) =>
+            inner.GetSessionAuthenticatedAsync(conversationId, cancellationToken);
+
+        public Task SetSessionAuthenticatedAsync(string conversationId, bool verified, CancellationToken cancellationToken = default) =>
+            inner.SetSessionAuthenticatedAsync(conversationId, verified, cancellationToken);
     }
 
     [Fact]

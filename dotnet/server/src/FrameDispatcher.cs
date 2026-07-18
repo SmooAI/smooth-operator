@@ -320,15 +320,13 @@ public sealed class FrameDispatcher
     private const int DefaultMessageLimit = 50;
     private const int MaxMessageLimit = 100;
 
-    // Window scanned when a `before` cursor is supplied — see the ponytail note in the handler.
-    private const int BeforeScanWindow = 500;
-
     /// <summary>
     /// <c>get_conversation_messages</c> — a page of the session's conversation history, newest-first.
     /// Per <c>spec/actions/get-messages.schema.json</c>: <c>{sessionId, limit? (1–100, default 50),
-    /// before? (ISO 8601)}</c> in, an <c>immediate_response</c> carrying <c>{messages, hasMore}</c> out.
-    /// Each message is <c>{id, direction, content:{text}, createdAt}</c>. Mirrors the Rust
-    /// <c>handle_get_conversation_messages</c>. th-30a8a7.
+    /// cursor? (opaque — a message id today)}</c> in, an <c>immediate_response</c> carrying
+    /// <c>{messages, nextCursor, hasMore}</c> out. Each message is
+    /// <c>{id, direction, content:{text}, createdAt}</c>. Mirrors the Rust
+    /// <c>handle_get_conversation_messages</c>. th-30a8a7, th-f63e4b.
     /// </summary>
     private async Task HandleGetConversationMessagesAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
@@ -352,32 +350,33 @@ public sealed class FrameDispatcher
             limit = Math.Clamp(l, 1, MaxMessageLimit);
         }
 
-        DateTimeOffset? before = null;
-        if (frame["before"]?.GetValue<string>() is string beforeRaw
-            && DateTimeOffset.TryParse(beforeRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedBefore))
-        {
-            before = parsedBefore;
-        }
+        var cursor = frame["cursor"]?.GetValue<string>();
 
-        List<StoredMessage> page;
-        bool hasMore;
-        if (before is null)
+        List<StoredMessage> candidates;
+        if (string.IsNullOrEmpty(cursor))
         {
-            // Common path: ask for one extra to learn whether an older page exists, without a count query.
+            // Ask for one extra to learn whether an older page exists, without a count query.
             var fetched = await _store.ListMessagesAsync(session.ConversationId, limit + 1, cancellationToken).ConfigureAwait(false);
-            var newestFirst = fetched.Reverse().ToList();
-            hasMore = newestFirst.Count > limit;
-            page = newestFirst.Take(limit).ToList();
+            candidates = fetched.Reverse().ToList();
         }
         else
         {
-            // ponytail: `before` pages within the newest 500 messages; deeper paging needs a
-            // cursor-aware store method (would break ISessionStore for downstream hosts).
-            var fetched = await _store.ListMessagesAsync(session.ConversationId, BeforeScanWindow, cancellationToken).ConfigureAwait(false);
-            var older = fetched.Reverse().Where(m => m.CreatedAt < before.Value).ToList();
-            hasMore = older.Count > limit;
-            page = older.Take(limit).ToList();
+            // ponytail: locating an id cursor needs the whole log — ISessionStore has no
+            // fetch-relative-to-an-id and a downstream host implements it. Add one if conversations
+            // outgrow a single fetch. Deliberately no timestamp comparison: colliding CreatedAt
+            // values would drop or repeat messages; store order (`seq`) is the paging order.
+            var all = (await _store.ListMessagesAsync(session.ConversationId, int.MaxValue, cancellationToken).ConfigureAwait(false)).Reverse().ToList();
+            var at = all.FindIndex(m => m.Id == cursor);
+            if (at < 0)
+            {
+                sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", $"get_conversation_messages 'cursor' '{cursor}' is not a message in this conversation"));
+                return;
+            }
+            candidates = all.Skip(at + 1).Take(limit + 1).ToList();
         }
+
+        var hasMore = candidates.Count > limit;
+        var page = candidates.Take(limit).ToList();
 
         var messages = new JsonArray();
         foreach (var m in page)
@@ -395,7 +394,13 @@ public sealed class FrameDispatcher
             requestId,
             200,
             "ConversationMessages",
-            new JsonObject { ["messages"] = messages, ["hasMore"] = hasMore }));
+            new JsonObject
+            {
+                ["messages"] = messages,
+                // Non-null exactly when hasMore — names the oldest message in this page.
+                ["nextCursor"] = hasMore ? JsonValue.Create(page[^1].Id) : null,
+                ["hasMore"] = hasMore,
+            }));
     }
 
     private async Task HandleSendMessageAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)

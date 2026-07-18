@@ -474,6 +474,9 @@ public sealed class SessionResult
 public sealed class GetMessagesResult
 {
     public List<MessageItem> Messages { get; set; } = new();
+
+    /// <summary>Cursor naming the oldest message in this page; non-null exactly when <see cref="HasMore"/>.</summary>
+    public string? NextCursor { get; set; }
     public bool HasMore { get; set; }
 }
 

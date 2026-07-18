@@ -549,8 +549,11 @@ public sealed class GetMessagesAction : ClientAction
     [JsonPropertyName("limit")]
     public int? Limit { get; set; }
 
-    [JsonPropertyName("before")]
-    public string? Before { get; set; }
+    /// <summary>Opaque cursor from a prior response's <c>nextCursor</c> — returns only messages older
+    /// than the one it names. Omit to start from the newest. Deliberately not a timestamp: colliding
+    /// timestamps drop or repeat messages. th-f63e4b.</summary>
+    [JsonPropertyName("cursor")]
+    public string? Cursor { get; set; }
 }
 
 public sealed class ConfirmToolAction : ClientAction
