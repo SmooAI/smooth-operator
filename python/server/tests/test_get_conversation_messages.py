@@ -2,8 +2,8 @@
 
 Mirrors the merged Go reference (`go/server/get_messages_test.go`) and the
 ``spec/actions/get-messages.schema.json`` contract: messages NEWEST-first as
-``{id, direction, content: {text}, createdAt}`` plus ``hasMore``, with ``limit``
-(1..100, default 50) and an optional ISO 8601 ``before`` cursor.
+``{id, direction, content: {text}, createdAt}`` plus ``nextCursor``/``hasMore``, with
+``limit`` (1..100, default 50) and an optional opaque ``cursor`` (th-ebc251).
 
 Driven through the real :class:`FrameDispatcher`, like the list_conversations tests.
 """
@@ -11,7 +11,7 @@ Driven through the real :class:`FrameDispatcher`, like the list_conversations te
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -92,63 +92,127 @@ async def test_limit_is_clamped_to_100() -> None:
     assert data["hasMore"] is True
 
 
+async def _restamp(store: InMemorySessionStore, conversation_id: str, stamps: list[datetime]) -> None:
+    """Force each stored message's ``created_at`` — back-to-back appends otherwise land on
+    whatever the clock hands out, which is exactly what these tests need to control."""
+    store._messages[conversation_id] = [
+        StoredMessage(m.id, m.conversation_id, m.direction, m.text, stamp)
+        for m, stamp in zip(store._messages[conversation_id], stamps, strict=True)
+    ]
+
+
 @pytest.mark.asyncio
-async def test_before_cursor_filters_strictly_older() -> None:
+async def test_cursor_returns_the_page_after_the_named_message() -> None:
     store = InMemorySessionStore()
     session = await store.create_session("agent", "U", "u@example.com")
-    # Stamp explicitly — back-to-back appends can land on the same clock tick.
-    base = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
     for i in range(3):
         await store.append_message(session.conversation_id, MessageDirection.INBOUND, f"m{i}")
-    store._messages[session.conversation_id] = [
-        StoredMessage(m.id, m.conversation_id, m.direction, m.text, base + timedelta(minutes=i))
-        for i, m in enumerate(store._messages[session.conversation_id])
-    ]
 
-    data = (
-        await _get_messages(
-            store,
-            requestId="r1",
-            sessionId=session.session_id,
-            before=(base + timedelta(minutes=2)).isoformat(),
-        )
+    page1 = (await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1))["data"]
+    assert [m["content"]["text"] for m in page1["messages"]] == ["m2"]
+    assert page1["hasMore"] is True
+    # nextCursor names the OLDEST message in the page — here the only one.
+    assert page1["nextCursor"] == page1["messages"][0]["id"]
+
+    page2 = (
+        await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1, cursor=page1["nextCursor"])
     )["data"]
-
-    # m2 sits exactly at the cursor — `before` is strict, so only m1/m0 come back.
-    assert [m["content"]["text"] for m in data["messages"]] == ["m1", "m0"]
-    assert data["hasMore"] is False
+    # Strictly older than the cursor — the cursor's own message is not repeated.
+    assert [m["content"]["text"] for m in page2["messages"]] == ["m1"]
 
 
 @pytest.mark.asyncio
-async def test_cursor_round_trip_keeps_sub_second_precision() -> None:
-    """Two messages in the SAME second: page with limit=1, hand the returned createdAt
-    back as `before`, and page two must return the older one. A second-truncated
-    createdAt (Go's original RFC3339) makes the strict `<` filter drop both — this is the
-    regression that test only asserting "createdAt exists" sails right past. th-89b698."""
+async def test_paging_visits_every_message_exactly_once() -> None:
+    """Follow nextCursor to exhaustion at limit=1: every message once, newest-first, and
+    hasMore/nextCursor both fall away on the final page."""
     store = InMemorySessionStore()
     session = await store.create_session("agent", "U", "u@example.com")
-    base = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+    for i in range(5):
+        await store.append_message(session.conversation_id, MessageDirection.INBOUND, f"m{i}")
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(10):  # Loop bound: a paging bug must fail the test, not hang it.
+        frame = {"requestId": "r1", "sessionId": session.session_id, "limit": 1}
+        if cursor is not None:
+            frame["cursor"] = cursor
+        data = (await _get_messages(store, **frame))["data"]
+        seen.extend(m["content"]["text"] for m in data["messages"])
+        if not data["hasMore"]:
+            assert data["nextCursor"] is None
+            break
+        assert data["nextCursor"] is not None
+        cursor = data["nextCursor"]
+    else:
+        pytest.fail("paging never terminated")
+
+    assert seen == ["m4", "m3", "m2", "m1", "m0"]
+
+
+@pytest.mark.asyncio
+async def test_identical_timestamps_are_neither_dropped_nor_duplicated() -> None:
+    """The collision an id cursor exists to survive: two messages sharing a created_at to
+    the microsecond, paged at limit=1. A `created_at < cursor` filter returns the older
+    one twice (non-strict) or loses it entirely (strict) — Go shipped exactly that bug.
+    th-ebc251."""
+    store = InMemorySessionStore()
+    session = await store.create_session("agent", "U", "u@example.com")
     for i in range(2):
         await store.append_message(session.conversation_id, MessageDirection.INBOUND, f"m{i}")
-    store._messages[session.conversation_id] = [
-        StoredMessage(m.id, m.conversation_id, m.direction, m.text, base + timedelta(microseconds=100_000 * (i + 1)))
-        for i, m in enumerate(store._messages[session.conversation_id])
-    ]
+    same = datetime(2026, 7, 18, 12, 0, 0, 123_456, tzinfo=timezone.utc)
+    await _restamp(store, session.conversation_id, [same, same])
 
     page1 = (await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1))["data"]
     assert [m["content"]["text"] for m in page1["messages"]] == ["m1"]
-    cursor = page1["messages"][0]["createdAt"]
-    # The wire value itself must carry sub-second precision — truncation happens here.
-    assert datetime.fromisoformat(cursor).microsecond != 0
+    assert page1["hasMore"] is True
 
-    page2 = (await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1, before=cursor))["data"]
+    page2 = (
+        await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1, cursor=page1["nextCursor"])
+    )["data"]
     assert [m["content"]["text"] for m in page2["messages"]] == ["m0"]
     assert page2["hasMore"] is False
+    assert page2["nextCursor"] is None
 
 
 @pytest.mark.asyncio
-async def test_invalid_before_is_validation_error() -> None:
+async def test_created_at_keeps_sub_second_precision() -> None:
+    """createdAt is display-only now, but it still must not be truncated to whole seconds
+    (Go's original RFC3339 bug). th-89b698."""
     store = InMemorySessionStore()
     session = await store.create_session("agent", "U", "u@example.com")
-    event = await _get_messages(store, requestId="r1", sessionId=session.session_id, before="not-a-timestamp")
+    await store.append_message(session.conversation_id, MessageDirection.INBOUND, "m0")
+    stamp = datetime(2026, 7, 18, 12, 0, 0, 123_456, tzinfo=timezone.utc)
+    await _restamp(store, session.conversation_id, [stamp])
+
+    data = (await _get_messages(store, requestId="r1", sessionId=session.session_id))["data"]
+
+    created_at = data["messages"][0]["createdAt"]
+    assert datetime.fromisoformat(created_at) == stamp
+    assert datetime.fromisoformat(created_at).microsecond == 123_456
+
+
+@pytest.mark.asyncio
+async def test_unknown_cursor_is_validation_error() -> None:
+    """A stale or fabricated cursor is a clean error, not a silently empty page."""
+    store = InMemorySessionStore()
+    session = await store.create_session("agent", "U", "u@example.com")
+    await store.append_message(session.conversation_id, MessageDirection.INBOUND, "m0")
+
+    event = await _get_messages(store, requestId="r1", sessionId=session.session_id, cursor="no-such-message-id")
+
     assert event["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_cursor_on_the_oldest_message_returns_an_empty_final_page() -> None:
+    store = InMemorySessionStore()
+    session = await store.create_session("agent", "U", "u@example.com")
+    for i in range(2):
+        await store.append_message(session.conversation_id, MessageDirection.INBOUND, f"m{i}")
+    oldest = store._messages[session.conversation_id][0].id
+
+    data = (await _get_messages(store, requestId="r1", sessionId=session.session_id, cursor=oldest))["data"]
+
+    assert data["messages"] == []
+    assert data["hasMore"] is False
+    assert data["nextCursor"] is None

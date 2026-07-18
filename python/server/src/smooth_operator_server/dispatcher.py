@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import Any
 
 from smooth_operator_core import Knowledge
@@ -264,12 +264,15 @@ class FrameDispatcher:
 
     async def _handle_get_conversation_messages(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         """``get_conversation_messages`` — the conversation-resume substrate. Returns a
-        session's messages NEWEST-first plus a ``hasMore`` flag, per
+        session's messages NEWEST-first plus ``nextCursor``/``hasMore``, per
         ``spec/actions/get-messages.schema.json``: each entry is ``{id, direction,
         content: {text}, createdAt}``. Optional input: ``limit`` (1..100, default 50) and
-        ``before`` (ISO 8601 cursor — only messages created strictly before it). Mirrors
-        the Rust ``handle_get_conversation_messages`` and the Go/TS/C# reference.
-        th-89b698."""
+        ``cursor`` (opaque — a message id today; returns the messages older than the one
+        it names). Page by feeding a response's ``nextCursor`` back as the next request's
+        ``cursor``. Deliberately NOT a timestamp cursor: messages can share a
+        ``created_at``, and a ``created_at <`` filter drops or repeats the collisions.
+        Mirrors the Rust ``handle_get_conversation_messages`` and the Go/TS/C# reference.
+        th-89b698, th-ebc251."""
         session_id = frame.get("sessionId")
         if not session_id:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
@@ -286,25 +289,29 @@ class FrameDispatcher:
             else _DEFAULT_LIST_LIMIT
         )
 
-        raw_before = frame.get("before")
-        before: datetime | None = None
-        if isinstance(raw_before, str) and raw_before:
-            before = _parse_before(raw_before)
-            if before is None:
-                sink(protocol.error(request_id, "VALIDATION_ERROR", "invalid 'before' timestamp; expected ISO 8601"))
-                return
+        raw_cursor = frame.get("cursor")
+        cursor = raw_cursor if isinstance(raw_cursor, str) and raw_cursor else None
 
-        # Fetch limit+1 so the extra row tells us whether more history exists. With a
-        # `before` cursor the filter can't be pushed into the store, so pull a bounded
-        # window instead.
-        # ponytail: `before` pages within the newest 500 messages; deeper paging needs a
-        # cursor-aware store method (would break SessionStore for downstream hosts).
-        fetch = _BEFORE_SCAN_WINDOW if before is not None else limit + 1
-        stored = await self._store.list_messages(session.conversation_id, fetch)
+        # No cursor: limit+1 rows, where the extra row means "more history exists". With a
+        # cursor we have to locate the named message first, so read the log.
+        # ponytail: cursor paging reads the whole conversation log and slices in memory.
+        # Push it into a cursor-aware store read if conversations outgrow that —
+        # SessionStore is implemented downstream, so widening it is a breaking change.
+        stored = await self._store.list_messages(session.conversation_id, _FULL_LOG if cursor else limit + 1)
 
         # The store returns oldest-first; the contract is newest-first.
-        newest_first = [m for m in reversed(stored) if before is None or m.created_at < before]
+        newest_first = list(reversed(stored))
+        if cursor is not None:
+            at = next((i for i, m in enumerate(newest_first) if m.id == cursor), None)
+            if at is None:
+                sink(
+                    protocol.error(request_id, "VALIDATION_ERROR", f"unknown 'cursor' '{cursor}' for this conversation")
+                )
+                return
+            newest_first = newest_first[at + 1 :]
+
         has_more = len(newest_first) > limit
+        page = newest_first[:limit]
         messages = [
             {
                 "id": m.id,
@@ -312,11 +319,15 @@ class FrameDispatcher:
                 "content": {"text": m.text},
                 "createdAt": m.created_at.astimezone(timezone.utc).isoformat(),
             }
-            for m in newest_first[:limit]
+            for m in page
         ]
+        # `nextCursor` names the OLDEST message in this page — non-null iff `hasMore`.
         sink(
             protocol.immediate_response(
-                request_id, 200, "ConversationMessages", {"messages": messages, "hasMore": has_more}
+                request_id,
+                200,
+                "ConversationMessages",
+                {"messages": messages, "nextCursor": page[-1].id if has_more else None, "hasMore": has_more},
             )
         )
 
@@ -577,19 +588,10 @@ _DEFAULT_LIST_LIMIT = 50
 #: Contract cap on get_conversation_messages' `limit` (1..100). th-89b698.
 _MAX_MESSAGE_LIMIT = 100
 
-#: Bounds the store read when get_conversation_messages pages with `before`. th-89b698.
-_BEFORE_SCAN_WINDOW = 500
-
-
-def _parse_before(raw: str) -> datetime | None:
-    """Parse a ``before`` cursor (ISO 8601) into a tz-aware UTC datetime, or ``None`` when
-    it isn't a valid timestamp. A naive value is read as UTC so it stays comparable to the
-    store's tz-aware ``created_at``."""
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+#: Sentinel `limit` meaning "the whole conversation log" — the store contract is "the most
+#: recent N, oldest first", so this just has to exceed any real conversation. Used when
+#: get_conversation_messages has to locate a `cursor` message. th-ebc251.
+_FULL_LOG = 1_000_000
 
 
 #: Max characters in a conversation title preview before it's clipped with an ellipsis.
