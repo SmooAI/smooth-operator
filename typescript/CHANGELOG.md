@@ -1,5 +1,23 @@
 # @smooai/smooth-operator
 
+## 1.29.0
+
+### Minor Changes
+
+- 441d198: Go server: page `get_conversation_messages` by opaque id cursor instead of an ISO timestamp.
+
+  The request field `before` (ISO 8601) is replaced by `cursor` (opaque, a message id today), and the response now carries `nextCursor` — the id of the oldest message in the page, non-null exactly when `hasMore` is true. Breaking wire change.
+
+  This removes the failure mode rather than renaming it: a timestamp cursor cannot separate two messages that share a timestamp, so `created_at <` paging silently dropped every message colliding on the cursor's instant. An id names exactly one row. The paging path now contains no timestamp comparison, and the bounded 500-message rescan the timestamp cursor required is gone — an id cursor locates its position in the log directly, so paging has no depth ceiling. `createdAt` is still returned (RFC3339Nano) for display.
+
+  An unknown or stale cursor now returns a `VALIDATION_ERROR` instead of a silent empty page.
+
+- bd836c3: TypeScript server: `get_conversation_messages` now pages on an opaque `cursor` (a message id) instead of the `before` ISO-timestamp cursor, and returns `nextCursor` alongside `hasMore`.
+
+  Breaking wire change. A timestamp cursor cannot page a log correctly — two messages can share a `createdAt` at any precision the wire keeps, so a `createdAt < cursor` filter drops or repeats the messages that collide. The cursor now names exactly one message: the page starts immediately after it, on the older side. `nextCursor` is the oldest message in the page, non-null exactly when `hasMore` is true; an unknown cursor is a `VALIDATION_ERROR` rather than a silent empty page.
+
+  This also removes the 500-message bounded rescan the timestamp cursor required, so paging is no longer capped at the newest 500 messages. `createdAt` stays on every message for display.
+
 ## 1.28.0
 
 ### Minor Changes
