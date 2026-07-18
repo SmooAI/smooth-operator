@@ -357,10 +357,17 @@ public sealed class FrameDispatcher
         var otpRecorder = _otpService is not null ? new OtpRefusalRecorder() : null;
         var gatedTools = ToolAuthGate.Apply(effectiveTools, agentConfig, _authenticator, session.ConversationId, otpRecorder);
 
+        // 4b. Resolve the write-confirmation (HITL) patterns for THIS agent. A per-agent
+        //     ConfirmToolPatterns (from AgentConfig) overrides the global ConfirmTools singleton, so a
+        //     multi-agent host gates writes per agent; a null (agent didn't specify) falls back to the
+        //     global patterns — backward compatible. An empty per-agent list is an explicit "no gating
+        //     for this agent" that still overrides the global.
+        var confirmTools = agentConfig?.ConfirmToolPatterns ?? _confirmTools;
+
         // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
         //    user only ever sees documents their groups grant (ACL enforced on the chat path).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge, _limits);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's

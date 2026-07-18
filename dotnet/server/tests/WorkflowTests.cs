@@ -351,6 +351,16 @@ public class WorkflowTests
         Assert.Null(await store.GetWorkflowStepAsync(session.ConversationId));
     }
 
+    [Fact]
+    public void AgentConfig_ConfirmToolPatterns_CountAsConfigured()
+    {
+        // A config carrying ONLY per-agent write-confirmation patterns is not empty (the server would
+        // apply it, overriding the global ConfirmTools). A null list is the "didn't specify" sentinel.
+        Assert.False(new AgentConfig(ConfirmToolPatterns: new[] { "delete_record" }).IsEmpty);
+        Assert.False(new AgentConfig(ConfirmToolPatterns: Array.Empty<string>()).IsEmpty); // explicit "no gating for me" still overrides
+        Assert.True(new AgentConfig().IsEmpty);
+    }
+
     // ── TurnRunner — judge advancement paths ─────────────────────────────────
 
     [Fact]

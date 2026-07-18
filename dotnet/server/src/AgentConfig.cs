@@ -44,14 +44,16 @@ public sealed record AgentConfig(
     string? Greeting = null,
     string? Personality = null,
     IReadOnlyList<EnabledTool>? EnabledTools = null,
+    IReadOnlyList<string>? ConfirmToolPatterns = null,
     string? Visibility = null)
 {
     /// <summary>An empty config — the "no per-agent overrides" sentinel.</summary>
     public static readonly AgentConfig Empty = new();
 
     /// <summary>True when this config carries nothing the server would apply. A non-null
-    /// <see cref="EnabledTools"/> (even empty) is a tool restriction, so it counts as configured.</summary>
-    public bool IsEmpty => string.IsNullOrWhiteSpace(InstructionsPrompt) && Workflow is null && string.IsNullOrWhiteSpace(Greeting) && string.IsNullOrWhiteSpace(Personality) && EnabledTools is null;
+    /// <see cref="EnabledTools"/> (even empty) is a tool restriction, and a non-null
+    /// <see cref="ConfirmToolPatterns"/> is a write-confirmation override, so either counts as configured.</summary>
+    public bool IsEmpty => string.IsNullOrWhiteSpace(InstructionsPrompt) && Workflow is null && string.IsNullOrWhiteSpace(Greeting) && string.IsNullOrWhiteSpace(Personality) && EnabledTools is null && ConfirmToolPatterns is null;
 
     /// <summary>
     /// Parse the <c>instructions</c> jsonb (<c>{"prompt": "..."}</c>) into the freeform prompt
