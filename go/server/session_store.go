@@ -49,6 +49,9 @@ type StoredMessage struct {
 	ConversationID string
 	Direction      MessageDirection
 	Text           string
+	// CreatedAt is when the message was appended (UTC), the createdAt field of the
+	// get_conversation_messages contract and the `before` paging key. th-9715aa.
+	CreatedAt time.Time
 }
 
 // ConversationSummary is one row of the conversation-list / resume surface: identity,
@@ -180,6 +183,7 @@ func (s *InMemorySessionStore) AppendMessage(_ context.Context, conversationID s
 		ConversationID: conversationID,
 		Direction:      direction,
 		Text:           text,
+		CreatedAt:      time.Now().UTC(),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
