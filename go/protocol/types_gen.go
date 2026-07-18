@@ -28,7 +28,65 @@ const ActionEnvelopeActionGetConversationMessages ActionEnvelopeAction = "get_co
 const ActionEnvelopeActionGetSession ActionEnvelopeAction = "get_session"
 const ActionEnvelopeActionPing ActionEnvelopeAction = "ping"
 const ActionEnvelopeActionSendMessage ActionEnvelopeAction = "send_message"
+const ActionEnvelopeActionSubmitInteraction ActionEnvelopeAction = "submit_interaction"
 const ActionEnvelopeActionVerifyOTP ActionEnvelopeAction = "verify_otp"
+
+// A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the
+// `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is
+// optional and advisory — the server cancels the connection's single active turn
+// regardless.
+type CancelRequest struct {
+	// Action discriminator.
+	Action string `json:"action"`
+
+	// The requestId of the in-flight `send_message` turn to cancel. Echoed back on
+	// the `cancelled` event so the client correlates the reset.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Optional, advisory. The server cancels the connection's single active turn; a
+	// per-connection socket carries one turn at a time.
+	SessionID *string `json:"sessionId,omitempty,omitzero"`
+}
+
+// Event: `cancelled`. The terminal event of a turn the client aborted with a
+// `cancel` action — emitted IN PLACE OF the `eventual_response` a completed turn
+// would send. Echoes the cancelled `send_message`'s `requestId` so the client
+// correlates it to the in-flight turn and resets its UI (drop the streaming
+// indicator, re-enable input). Status `499` ("client closed request") marks a
+// terminal, non-200 outcome distinct from a server `error`. There is NO answer
+// payload: a cancelled turn produced no assistant message — the streamed tokens
+// were ephemeral and are NOT persisted, while the user's message stays persisted
+// (so the conversation carries the user turn with no reply). Only emitted when a
+// live turn was actually aborted; a `cancel` with no active turn emits nothing.
+type Cancelled struct {
+	// Cancellation payload (mirrors `requestId` + `status` for clients that only
+	// inspect `data`).
+	Data *CancelledData `json:"data,omitempty,omitzero"`
+
+	// Echoes the `requestId` of the cancelled `send_message` turn (falls back to the
+	// `cancel` frame's own requestId). Absent only if neither carried one.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Terminal cancellation status ("client closed request"). Distinct from 200
+	// (eventual_response) and from error codes.
+	Status int `json:"status"`
+
+	// Server-side Unix epoch milliseconds when the event was emitted.
+	Timestamp *int `json:"timestamp,omitempty,omitzero"`
+
+	// Event type discriminator.
+	Type string `json:"type"`
+}
+
+// Cancellation payload (mirrors `requestId` + `status` for clients that only
+// inspect `data`).
+type CancelledData struct {
+	// Echoes the cancelled turn's requestId.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Terminal cancellation status.
+	Status int `json:"status"`
+}
 
 // A point-in-time snapshot of a smooth-operator agent's state. Checkpoints are
 // written by the agent runtime and are used to resume execution after
@@ -269,6 +327,15 @@ type CreateConversationSessionRequest struct {
 	// Client-generated correlation ID echoed back on all related events.
 	RequestID *string `json:"requestId,omitempty,omitzero"`
 
+	// Client render capabilities for this session — a per-kind list gating the Rich
+	// Interactions the server may emit mid-turn (`interaction_required`). Each
+	// interaction kind declares the capability that gates it (e.g. kind
+	// `identity_intake` → capability `identity_form`); future kinds add their own
+	// values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit
+	// this and the server degrades each kind to its conversational fallback. Unknown
+	// values are ignored (forward-compatible).
+	Supports []string `json:"supports,omitempty,omitzero"`
+
 	// Optional email address for the user participant.
 	UserEmail *string `json:"userEmail,omitempty,omitzero"`
 
@@ -407,6 +474,8 @@ type EventEnvelopeType string
 const EventEnvelopeTypeError EventEnvelopeType = "error"
 const EventEnvelopeTypeEventualResponse EventEnvelopeType = "eventual_response"
 const EventEnvelopeTypeImmediateResponse EventEnvelopeType = "immediate_response"
+const EventEnvelopeTypeInteractionInvalid EventEnvelopeType = "interaction_invalid"
+const EventEnvelopeTypeInteractionRequired EventEnvelopeType = "interaction_required"
 const EventEnvelopeTypeKeepalive EventEnvelopeType = "keepalive"
 const EventEnvelopeTypeOTPInvalid EventEnvelopeType = "otp_invalid"
 const EventEnvelopeTypeOTPSent EventEnvelopeType = "otp_sent"
@@ -461,6 +530,13 @@ type EventualResponseDataData struct {
 	// `domain/citation.schema.json`).
 	Citations []EventualResponseDataDataCitationsElem `json:"citations,omitempty,omitzero"`
 
+	// An optional client-side directive the agent emitted for this turn (e.g. a
+	// navigation or view-application instruction). Opaque at the protocol layer —
+	// like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the
+	// host client and validated there. Optional and back-compatible: absent when the
+	// turn produced no directive. Last-write-wins when multiple were emitted.
+	Directive *EventualResponseDataDataDirective `json:"directive,omitempty,omitzero"`
+
 	// Human-readable escalation reason when `needsEscalation` is true.
 	EscalationReason *string `json:"escalationReason,omitempty,omitzero"`
 
@@ -473,6 +549,12 @@ type EventualResponseDataData struct {
 	// The structured agent response payload. Shape depends on the agent template.
 	// Clients should validate against a template-specific schema before rendering.
 	Response interface{} `json:"response"`
+
+	// Per-turn token accounting and cost, captured from the engine's terminal
+	// completion event. Lets a client accumulate live session cost. Optional and
+	// back-compatible: absent when the engine reported no usage for the turn (e.g. an
+	// offline/mock turn).
+	Usage *EventualResponseDataDataUsage `json:"usage,omitempty,omitzero"`
 }
 
 // A source the agent used to ground its answer (a `Citation` — see
@@ -499,6 +581,28 @@ type EventualResponseDataDataCitationsElem struct {
 	// this is the blob/issue URL stamped onto the document's `source` at ingest.
 	// Absent for sources with no web location.
 	URL *string `json:"url,omitempty,omitzero"`
+}
+
+// An optional client-side directive the agent emitted for this turn (e.g. a
+// navigation or view-application instruction). Opaque at the protocol layer — like
+// `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host
+// client and validated there. Optional and back-compatible: absent when the turn
+// produced no directive. Last-write-wins when multiple were emitted.
+type EventualResponseDataDataDirective map[string]interface{}
+
+// Per-turn token accounting and cost, captured from the engine's terminal
+// completion event. Lets a client accumulate live session cost. Optional and
+// back-compatible: absent when the engine reported no usage for the turn (e.g. an
+// offline/mock turn).
+type EventualResponseDataDataUsage struct {
+	// Accumulated completion (output) tokens across every LLM call in this turn.
+	CompletionTokens *int `json:"completionTokens,omitempty,omitzero"`
+
+	// Accumulated cost in USD across every LLM call in this turn (gateway-priced).
+	CostUsd *float64 `json:"costUsd,omitempty,omitzero"`
+
+	// Accumulated prompt (input) tokens across every LLM call in this turn.
+	PromptTokens *int `json:"promptTokens,omitempty,omitzero"`
 }
 
 // Structured output from the default general-purpose agent template. Agents built
@@ -539,9 +643,16 @@ type GetMessagesRequest struct {
 	// Action discriminator.
 	Action string `json:"action"`
 
-	// ISO 8601 cursor: return only messages created strictly before this timestamp.
-	// Omit to start from the most recent message.
-	Before *time.Time `json:"before,omitempty,omitzero"`
+	// Opaque pagination cursor from a prior response's `nextCursor`. Returns only
+	// messages older than the one the cursor names. Treat it as opaque — its encoding
+	// is storage-defined (a message id today) and may change. Omit to start from the
+	// most recent message.
+	//
+	// Deliberately NOT a timestamp: two messages can share a timestamp at any
+	// precision the wire format keeps, so a `created_at < cursor` filter either drops
+	// or repeats the messages that collide. An id cursor identifies exactly one
+	// message and cannot.
+	Cursor *string `json:"cursor,omitempty,omitzero"`
 
 	// Maximum number of messages to return per page. Must be 1–100; defaults to 50.
 	Limit int `json:"limit,omitempty,omitzero"`
@@ -555,12 +666,17 @@ type GetMessagesRequest struct {
 
 // Data payload carried in the `immediate_response` event.
 type GetMessagesResponse struct {
-	// True if more messages exist before the oldest message in this page. Use the
-	// oldest `createdAt` as the next `before` cursor.
+	// True if more messages exist before the oldest message in this page —
+	// equivalently, if `nextCursor` is non-null.
 	HasMore bool `json:"hasMore"`
 
 	// Ordered list of messages (newest-first up to `limit`).
 	Messages []ConversationMessage `json:"messages"`
+
+	// Opaque cursor naming the oldest message in this page. Pass it as the next
+	// request's `cursor` to fetch the page before this one. Present (non-null) if and
+	// only if `hasMore` is true.
+	NextCursor ResponseNextCursor `json:"nextCursor,omitempty,omitzero"`
 }
 
 // Fields sent by the client to retrieve a session.
@@ -605,6 +721,42 @@ type GetSessionResponse struct {
 	UserParticipantID string `json:"userParticipantId"`
 }
 
+// The canonical validated payload the parked turn resumes with (identical on the
+// form and conversational paths). On success the server also attaches the identity
+// to the session (metadata `userName` / `contactEmail` / `contactPhone` — the same
+// keys the OTP contact seam reads).
+type IdentityIntakePayload struct {
+	// Guidance for the agent when `status` is `declined` / `no_response`.
+	Message *string `json:"message,omitempty,omitzero"`
+
+	// How the interaction resolved.
+	Status PayloadStatus `json:"status"`
+
+	// Present when `status` is `submitted`: the validated, normalized values.
+	Values *PayloadValues `json:"values,omitempty,omitzero"`
+}
+
+// The `spec` carried on `interaction_required` for kind `identity_intake`: which
+// fields to collect.
+type IdentityIntakeSpec struct {
+	// The identity fields to collect, in display order.
+	Fields []SpecFieldsElem `json:"fields"`
+}
+
+// The `values` a client submits via `submit_interaction` for kind
+// `identity_intake`. Validated server-side: required fields present, email shape,
+// phone normalized to E.164.
+type IdentityIntakeValues struct {
+	// The visitor's email address (validated server-side).
+	Email *string `json:"email,omitempty,omitzero"`
+
+	// The visitor's display name.
+	Name *string `json:"name,omitempty,omitzero"`
+
+	// The visitor's phone number (normalized server-side to E.164).
+	Phone *string `json:"phone,omitempty,omitzero"`
+}
+
 // Event: `immediate_response`. Sent by the server synchronously upon receiving any
 // action, to acknowledge that the request was accepted and processing has begun.
 // For streaming actions (`send_message`) this always precedes `stream_chunk` /
@@ -640,6 +792,121 @@ type ImmediateResponse struct {
 // this is the message page. For streaming `send_message`, this is typically empty
 // or contains only a minimal ack.
 type ImmediateResponseData map[string]interface{}
+
+// Event: `interaction_invalid`. Emitted when a `submit_interaction` action carried
+// values that failed the kind's server-side validation. The turn REMAINS parked —
+// the client should re-render the interaction card with the per-field errors and
+// let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable
+// state, never a terminal `error` event.
+type InteractionInvalid struct {
+	// Validation failure details.
+	Data InteractionInvalidData `json:"data"`
+
+	// Echoes the `requestId` of the parked turn (same correlation as the
+	// `interaction_required` event).
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Unix epoch milliseconds when the event was emitted.
+	Timestamp *int `json:"timestamp,omitempty,omitzero"`
+
+	// Event type discriminator.
+	Type string `json:"type"`
+}
+
+// Validation failure details.
+type InteractionInvalidData struct {
+	// Per-field validation errors.
+	Data InteractionInvalidDataData `json:"data"`
+
+	// The request ID this interaction belongs to.
+	RequestID string `json:"requestId"`
+}
+
+// Per-field validation errors.
+type InteractionInvalidDataData struct {
+	// One entry per failed field. `field` is a kind-specific field key
+	// (identity_intake: `name` | `email` | `phone`).
+	Errors []InteractionInvalidDataDataErrorsElem `json:"errors"`
+
+	// The interaction instance the rejected submit targeted.
+	InteractionID string `json:"interactionId"`
+
+	// The interaction kind (e.g. `identity_intake`).
+	Kind string `json:"kind"`
+
+	// Human-readable summary suitable for a card-level error line.
+	Message string `json:"message"`
+}
+
+type InteractionInvalidDataDataErrorsElem struct {
+	// The kind-specific field that failed validation.
+	Field string `json:"field"`
+
+	// Human-readable validation message for this field.
+	Message string `json:"message"`
+}
+
+// Event: `interaction_required`. The Rich Interactions envelope: emitted mid-turn
+// when the agent requests a structured interaction (identity intake, a date
+// picker, choice chips, …) and the session declared the interaction kind's render
+// capability in `supports` at `create_conversation_session`. The turn is parked
+// until the client replies with a `submit_interaction` action carrying the same
+// `requestId` + `interactionId` (values or `declined: true`). Sessions without the
+// capability never receive this event — the server degrades that kind to its
+// conversational fallback instead. `kind` selects the client card and the server
+// validator; `spec` is the kind-specific payload whose shape is defined by
+// `interactions/<kind>.schema.json` (e.g.
+// `interactions/identity-intake.schema.json#/$defs/Spec`).
+type InteractionRequired struct {
+	// Interaction prompt details.
+	Data InteractionRequiredData `json:"data"`
+
+	// Echoes the `requestId` from the originating `send_message` action. Must be
+	// included in the `submit_interaction` reply.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Unix epoch milliseconds when the event was emitted.
+	Timestamp *int `json:"timestamp,omitempty,omitzero"`
+
+	// Event type discriminator.
+	Type string `json:"type"`
+}
+
+// Interaction prompt details.
+type InteractionRequiredData struct {
+	// The interaction the client should render.
+	Data InteractionRequiredDataData `json:"data"`
+
+	// The request ID this interaction belongs to.
+	RequestID string `json:"requestId"`
+}
+
+// The interaction the client should render.
+type InteractionRequiredDataData struct {
+	// Server-generated ID for this specific interaction instance. Must be echoed on
+	// the `submit_interaction` reply so a stale submit can never resolve a newer
+	// park.
+	InteractionID string `json:"interactionId"`
+
+	// The interaction kind (e.g. `identity_intake`). Selects the client's card
+	// component and the server's validator. The kind catalog lives in
+	// `spec/interactions/`.
+	Kind string `json:"kind"`
+
+	// Human-readable reason the agent raised this interaction, suitable for the card
+	// header (e.g. `to send you the quote`).
+	Reason string `json:"reason"`
+
+	// Kind-specific render spec. Shape per
+	// `interactions/<kind>.schema.json#/$defs/Spec` (e.g. identity_intake's `{
+	// fields: [...] }`).
+	Spec InteractionRequiredDataDataSpec `json:"spec"`
+}
+
+// Kind-specific render spec. Shape per
+// `interactions/<kind>.schema.json#/$defs/Spec` (e.g. identity_intake's `{ fields:
+// [...] }`).
+type InteractionRequiredDataDataSpec map[string]interface{}
 
 // Event: `keepalive`. Sent periodically by the server during long-running agent
 // turns (typically every 30 seconds) to prevent AWS API Gateway's 10-minute idle
@@ -1049,6 +1316,24 @@ const ParticipantTypeAiAgent ParticipantType = "ai-agent"
 const ParticipantTypeHumanAgent ParticipantType = "human-agent"
 const ParticipantTypeUser ParticipantType = "user"
 
+type PayloadStatus string
+
+const PayloadStatusDeclined PayloadStatus = "declined"
+const PayloadStatusNoResponse PayloadStatus = "no_response"
+const PayloadStatusSubmitted PayloadStatus = "submitted"
+
+// Present when `status` is `submitted`: the validated, normalized values.
+type PayloadValues struct {
+	// Email corresponds to the JSON schema field "email".
+	Email *string `json:"email,omitempty,omitzero"`
+
+	// Name corresponds to the JSON schema field "name".
+	Name *string `json:"name,omitempty,omitzero"`
+
+	// E.164-normalized (`+15551234567`).
+	Phone *string `json:"phone,omitempty,omitzero"`
+}
+
 // A ping frame. Only `action` and the optional `requestId` are required.
 type PingRequest struct {
 	// Action discriminator.
@@ -1103,8 +1388,40 @@ type RequestAuthContext struct {
 	UserID string `json:"userId"`
 }
 
+type RequestImagesElem struct {
+	// Optional OpenAI vision detail hint. Omitted when absent.
+	Detail *RequestImagesElemDetail `json:"detail,omitempty,omitzero"`
+
+	// A `data:image/...;base64,...` URL or a remote `https` image URL. Emitted to the
+	// model as an OpenAI `image_url` content part.
+	URL string `json:"url"`
+}
+
+type RequestImagesElemDetail string
+
+const RequestImagesElemDetailAuto RequestImagesElemDetail = "auto"
+const RequestImagesElemDetailHigh RequestImagesElemDetail = "high"
+const RequestImagesElemDetailLow RequestImagesElemDetail = "low"
+
 // Arbitrary key/value metadata to attach to the session.
 type RequestMetadata map[string]interface{}
+
+// Kind-specific submitted values. Required unless `declined` is true. Shape per
+// `interactions/<kind>.schema.json#/$defs/Values` (e.g. identity_intake's `{
+// name?, email?, phone? }`). Validated server-side by the kind's validator.
+type RequestValues map[string]interface{}
+
+// An optional client-side directive the agent emitted for this turn (e.g. a
+// navigation or view-application instruction). Opaque at the protocol layer — like
+// `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host
+// client and validated there. Absent when the turn produced no directive.
+// Last-write-wins when multiple were emitted.
+type ResponseDirective map[string]interface{}
+
+// Opaque cursor naming the oldest message in this page. Pass it as the next
+// request's `cursor` to fetch the page before this one. Present (non-null) if and
+// only if `hasMore` is true.
+type ResponseNextCursor *string
 
 type ResponseStatus string
 
@@ -1117,8 +1434,18 @@ type SendMessageRequest struct {
 	// Action discriminator.
 	Action string `json:"action"`
 
+	// Optional image attachments for a multimodal turn. Each item is a `data:` or
+	// `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty →
+	// a text-only turn (byte-identical to before this field existed). Fail-soft: a
+	// malformed entry is ignored rather than rejecting the turn.
+	Images []RequestImagesElem `json:"images,omitempty,omitzero"`
+
 	// The user's message text. Between 1 and 10 000 characters.
 	Message string `json:"message"`
+
+	// Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset).
+	// Absent → the server's configured default model.
+	Model *string `json:"model,omitempty,omitzero"`
 
 	// Client-generated correlation ID echoed back on all related events.
 	RequestID *string `json:"requestId,omitempty,omitzero"`
@@ -1135,6 +1462,13 @@ type SendMessageRequest struct {
 // Data payload carried in the terminal `eventual_response` event for this action.
 // Also see `GeneralAgentResponse` for the structured response shape.
 type SendMessageResponse struct {
+	// An optional client-side directive the agent emitted for this turn (e.g. a
+	// navigation or view-application instruction). Opaque at the protocol layer —
+	// like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the
+	// host client and validated there. Absent when the turn produced no directive.
+	// Last-write-wins when multiple were emitted.
+	Directive *ResponseDirective `json:"directive,omitempty,omitzero"`
+
 	// Human-readable reason when `needsEscalation` is true.
 	EscalationReason *string `json:"escalationReason,omitempty,omitzero"`
 
@@ -1182,6 +1516,11 @@ type Session struct {
 	// campaign source).
 	Metadata SessionMetadata `json:"metadata,omitempty,omitzero"`
 
+	// The organization that owns this session. Mirrors `organizationId` on the
+	// conversation, participants, and messages so org-scoping is uniform across every
+	// domain type and storage backends can write the session's org directly.
+	OrganizationID string `json:"organizationId"`
+
 	// Unique session identifier.
 	SessionID string `json:"sessionId"`
 
@@ -1215,6 +1554,23 @@ type SessionStatus string
 const SessionStatusActive SessionStatus = "active"
 const SessionStatusEnded SessionStatus = "ended"
 const SessionStatusIdle SessionStatus = "idle"
+
+type SpecFieldsElem struct {
+	// Which identity field to collect.
+	Key SpecFieldsElemKey `json:"key"`
+
+	// Optional display label overriding the client's default for this field.
+	Label *string `json:"label,omitempty,omitzero"`
+
+	// Whether the visitor must provide this field to submit.
+	Required bool `json:"required"`
+}
+
+type SpecFieldsElemKey string
+
+const SpecFieldsElemKeyEmail SpecFieldsElemKey = "email"
+const SpecFieldsElemKeyName SpecFieldsElemKey = "name"
+const SpecFieldsElemKeyPhone SpecFieldsElemKey = "phone"
 
 // Event: `stream_chunk`. Emitted each time a node in the smooth-operator workflow
 // completes. Carries the node name and a filtered state snapshot. Clients use this
@@ -1283,6 +1639,81 @@ type StreamChunkDataStatePendingOTPVerification map[string]interface{}
 // operation. Clients should surface a confirmation UI.
 type StreamChunkDataStatePendingWriteConfirmation map[string]interface{}
 
+// Event: `stream_preamble`. A single token of a short, present-tense "what I'm
+// about to do" sentence, generated by a small fast model IN PARALLEL with the main
+// turn to cover the reasoning model's time-to-first-token. Emitted only when the
+// server is configured with `SMOOTH_AGENT_PREAMBLE_MODEL`. Shaped identically to
+// `stream_token` so clients can reuse the render path, but on a distinct `type` so
+// it is shown as an EPHEMERAL status line that the real answer replaces — it is
+// NEVER folded into the answer, and the final response (carried by
+// `eventual_response`) never includes it. The server suppresses it if the real
+// answer has already begun streaming. Clients that do not recognize this event
+// MUST ignore it — the answer still streams via `stream_token`, so the preamble
+// simply isn't shown.
+type StreamPreamble struct {
+	// Preamble token event payload.
+	Data StreamPreambleData `json:"data"`
+
+	// Echoes the `requestId` from the originating `send_message` action.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Unix epoch milliseconds when the event was emitted.
+	Timestamp *int `json:"timestamp,omitempty,omitzero"`
+
+	// The raw preamble token text. Also present inside `data.token` for consumers
+	// that only inspect `data`.
+	Token *string `json:"token,omitempty,omitzero"`
+
+	// Event type discriminator.
+	Type string `json:"type"`
+}
+
+// Preamble token event payload.
+type StreamPreambleData struct {
+	// The request ID this preamble token belongs to.
+	RequestID string `json:"requestId"`
+
+	// The raw preamble token text.
+	Token string `json:"token"`
+}
+
+// Event: `stream_reasoning`. A single *reasoning* token from a reasoning-model's
+// separate thinking channel (`reasoning_content`/`reasoning` deltas — e.g.
+// DeepSeek, gpt-oss/harmony, MiniMax, GLM), forwarded to the client in real time.
+// Corresponds to smooth-operator's `AgentEvent::ReasoningDelta`. Shaped
+// identically to `stream_token` so clients can render it the same way, but on a
+// distinct `type` so reasoning is shown as collapsible "thinking" and is NEVER
+// folded into the answer. The final response (carried by `eventual_response`)
+// already excludes reasoning. Clients that do not recognize this event MUST ignore
+// it — the answer still streams via `stream_token`, so reasoning simply isn't
+// shown.
+type StreamReasoning struct {
+	// Reasoning token event payload.
+	Data StreamReasoningData `json:"data"`
+
+	// Echoes the `requestId` from the originating `send_message` action.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+
+	// Unix epoch milliseconds when the event was emitted.
+	Timestamp *int `json:"timestamp,omitempty,omitzero"`
+
+	// The raw reasoning token text. Also present inside `data.token` for consumers
+	// that only inspect `data`.
+	Token *string `json:"token,omitempty,omitzero"`
+
+	// Event type discriminator.
+	Type string `json:"type"`
+}
+
+// Reasoning token event payload.
+type StreamReasoningData struct {
+	// The request ID this reasoning token belongs to.
+	RequestID string `json:"requestId"`
+
+	// The raw reasoning token text.
+	Token string `json:"token"`
+}
+
 // Event: `stream_token`. A single LLM output token forwarded to the client in real
 // time. Corresponds to smooth-operator's `AgentEvent::TokenDelta`. Clients
 // accumulate tokens to display a live typing animation. After the node finishes, a
@@ -1313,6 +1744,42 @@ type StreamTokenData struct {
 	// The raw token text.
 	Token string `json:"token"`
 }
+
+// Fields sent by the client to submit (or decline) a parked interaction.
+type SubmitInteractionRequest struct {
+	// Action discriminator.
+	Action string `json:"action"`
+
+	// True when the visitor refused the interaction. The turn resumes with a declined
+	// payload so the agent can proceed gracefully. When true, `values` is ignored.
+	Declined *bool `json:"declined,omitempty,omitzero"`
+
+	// Must match the `interactionId` from the `interaction_required` event, so a
+	// stale submit can never resolve a newer park.
+	InteractionID string `json:"interactionId"`
+
+	// Optional interaction kind, for cross-checking; the server already knows the
+	// parked interaction's kind. When present and mismatched, the submit is rejected.
+	Kind *string `json:"kind,omitempty,omitzero"`
+
+	// Must match the `requestId` from the `interaction_required` event being
+	// responded to.
+	RequestID string `json:"requestId"`
+
+	// Session ID of the parked session.
+	SessionID string `json:"sessionId"`
+
+	// Kind-specific submitted values. Required unless `declined` is true. Shape per
+	// `interactions/<kind>.schema.json#/$defs/Values` (e.g. identity_intake's `{
+	// name?, email?, phone? }`). Validated server-side by the kind's validator.
+	Values RequestValues `json:"values,omitempty,omitzero"`
+}
+
+// No dedicated response event for `submit_interaction`. Valid values (or a
+// decline) are acked with an `immediate_response` and the parked turn resumes its
+// normal streaming sequence. Invalid values emit `interaction_invalid` (the turn
+// stays parked). This schema is provided for documentation completeness only.
+type SubmitInteractionResponse map[string]interface{}
 
 // Fields sent by the client to submit an OTP code.
 type VerifyOTPRequest struct {

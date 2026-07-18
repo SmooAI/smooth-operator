@@ -161,7 +161,14 @@ SMOOTH_AGENT_E2E=1 go test -race ./... -run Live      # live cross-language E2E
 
 ## Regenerating types
 
-Generated with [`go-jsonschema`](https://github.com/atombender/go-jsonschema) (pure Go, offline). `--only-models` is intentional: plain structs with no generated enum validation, so the client tolerates forward-compatible wire values and the conformance fixtures round-trip cleanly. Full command in the original spec; run it after any `../spec` change.
+`protocol/types_gen.go` is generated with [`go-jsonschema`](https://github.com/atombender/go-jsonschema) (pure Go, offline). Run [`scripts/generate-go.sh`](../scripts/generate-go.sh) from the repo root after any `../spec` change:
+
+```bash
+go install github.com/atombender/go-jsonschema@latest   # once
+./scripts/generate-go.sh
+```
+
+The script documents its own flags. The two that matter: `--only-models` (plain structs, no generated enum validation, so the client tolerates forward-compatible wire values and the conformance fixtures round-trip cleanly) and `--struct-name-from-title` (every `$def` in the spec carries a stable title, so feeding all schemas at once doesn't collide on the shared `$defs/Request` / `$defs/Response` keys).
 
 ## Smoo-powered or bring-your-own
 
