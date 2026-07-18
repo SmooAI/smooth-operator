@@ -43,14 +43,15 @@ const (
 const DefaultJudgeModel = "claude-haiku-4-5"
 
 // workflowJudgeSystemPrompt instructs the judge model. Mirrors the sibling servers' judge
-// prompt: yes only when criteria are objectively met, and reply as a JSON verdict object.
+// prompt: yes for any usable answer to the step (terse counts), reply as a JSON verdict object.
 const workflowJudgeSystemPrompt = `You are a conversation-workflow judge. Given the CURRENT STEP's intent + criteria and the most recent agent reply, decide whether the step was satisfied this turn.
 
 Rules:
 - "yes" -> the criteria are clearly satisfied on the basis of this turn.
 - "no" -> not satisfied, or the agent moved away from the step.
 - "maybe" -> partial / ambiguous progress. The workflow stays on the current step and tries again next turn.
-- Only answer "yes" when the criteria are objectively met. It is fine to stay on a step for multiple turns.
+- A brief, informal, or terse user answer that addresses the step's question satisfies it (e.g. "a four", "sure", "not really") — answer "yes"; do not hold out for elaboration or exact wording.
+- It is fine to stay on a step for multiple turns, but never require the user to re-confirm something they already said.
 
 Respond with ONLY a JSON object: {"verdict":"yes"|"no"|"maybe"}.`
 

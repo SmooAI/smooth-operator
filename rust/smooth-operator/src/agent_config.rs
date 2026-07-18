@@ -662,7 +662,7 @@ pub fn render_workflow_prompt_section(
     let step_number = idx + 1;
     let total = workflow.steps.len();
     format!(
-        "<ConversationWorkflow>\nGOAL: {goal}\n\nCURRENT STEP ({step_number}/{total}): {id}\nINTENT: {intent}\nCRITERIA: {criteria}\n\nFocus this turn on the CURRENT STEP. Pursue the INTENT and aim to satisfy the CRITERIA. You don't have to force the step to close if the user isn't ready — stay conversational and the workflow will advance once the criteria are clearly met.\n</ConversationWorkflow>",
+        "<ConversationWorkflow>\nGOAL: {goal}\n\nCURRENT STEP ({step_number}/{total}): {id}\nINTENT: {intent}\nCRITERIA: {criteria}\n\nFocus this turn on the CURRENT STEP: pursue the INTENT directly in this reply — ask the step's question now. The user has already agreed to be here; never re-ask for permission, re-confirm readiness, or repeat a question they have already answered — acknowledge briefly and move forward. Stay conversational; the workflow advances once the CRITERIA are met.\n</ConversationWorkflow>",
         goal = workflow.goal,
         id = step.id,
         intent = step.intent,
@@ -713,7 +713,7 @@ impl WorkflowJudgeVerdict {
 
 /// The judge's system prompt. Kept as a const so tests and the runner share the
 /// exact wording. Mirrors the TS judge's rubric.
-pub const JUDGE_SYSTEM_PROMPT: &str = "You are a conversation-workflow judge. Given the CURRENT STEP's intent + criteria and the most recent agent reply, decide whether the step was satisfied this turn.\n\nRules:\n- \"yes\" -> the criteria are clearly satisfied on the basis of this turn.\n- \"no\" -> not satisfied, or the agent moved away from the step.\n- \"maybe\" -> partial/ambiguous progress; stay on the current step and try again next turn.\n- Only answer \"yes\" when the criteria are objectively met. It is OK to stay on a step for multiple turns.\n\nReply with EXACTLY one word: yes, no, or maybe.";
+pub const JUDGE_SYSTEM_PROMPT: &str = "You are a conversation-workflow judge. Given the CURRENT STEP's intent + criteria and the most recent agent reply, decide whether the step was satisfied this turn.\n\nRules:\n- \"yes\" -> the criteria are satisfied on the basis of this turn.\n- A brief, informal, or terse user answer that addresses the step's question satisfies it (e.g. \"a four\", \"sure\", \"not really\") — answer \"yes\"; do not hold out for elaboration or exact wording.\n- \"no\" -> not satisfied, or the agent moved away from the step.\n- \"maybe\" -> partial/ambiguous progress; stay on the current step and try again next turn.\n- It is OK to stay on a step for multiple turns, but never require the user to re-confirm something they already said.\n\nReply with EXACTLY one word: yes, no, or maybe.";
 
 /// Build the judge's user prompt for one turn. Mirrors the TS human prompt.
 #[must_use]
