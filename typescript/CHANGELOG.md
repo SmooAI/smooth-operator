@@ -1,5 +1,16 @@
 # @smooai/smooth-operator
 
+## 1.27.0
+
+### Minor Changes
+
+- 1765f6e: Add a built-in ACL-scoped `knowledge_search` tool to the .NET server. Registering an `IAccessKnowledge` already grounds turns via RAG auto-context; this exposes the same store as a model-callable tool a host enables by name (`knowledge_search`) — no hand-wrapped `AIFunction` required. It's built per-turn over the connection's `IAccessKnowledge.ForAccess(access)` handle, so every search is document-level access-controlled (a doc outside the caller's ACL is never a candidate), and matches the Rust server's tool for parity: same name, args (`query` required + `limit` clamped 1..10, default 3), and text result shape.
+- 508de9d: dotnet: add a Notion `IConnector` (`NotionConnector`) to the server. Recurses `blocks/{id}/children` (paginated, `Notion-Version: 2022-06-28`, integration-token auth), flattens `paragraph`/`heading_1-3`/`bulleted_list_item`/`numbered_list_item`/`quote`/`code`/`toggle` rich_text (plus nested toggle/list-item bodies) into document text, and emits a `child_page` block as its own recursed document rather than inlining it. The document id is the canonical Notion page id and the source is the page URL, so citations link back and re-ingesting overwrites in place. Each configured `NotionRoot` carries a `DocumentAcl`, stamped onto every document under that root (`SourceDocument` gains an optional `Acl`).
+
+### Patch Changes
+
+- c6f202b: dotnet server: TurnRunner degrades gracefully when knowledge retrieval fails. When the embedding gateway / vector store is down, `QueryAsync` used to propagate out of the turn and the dispatcher surfaced `INTERNAL_ERROR`, killing the whole turn. Now the retrieval failure is caught: the turn proceeds with empty grounding (no citations, and the failing store isn't handed to the engine's own RAG query), and a warning is logged. Only the retrieval is wrapped — the rest of the turn is unchanged.
+
 ## 1.26.0
 
 ### Minor Changes
