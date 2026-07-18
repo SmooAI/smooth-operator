@@ -131,6 +131,12 @@ public static class SmoothOperatorWebSocketExtensions
             }
         }, cancellationToken);
 
+        // Did the CLIENT go away (close frame / socket error), as opposed to the connection being torn
+        // down by an ambient cancellation (host shutdown)? A client that hung up mid-turn gets its turn
+        // aborted — no one remains to receive its output. A graceful shutdown, by contrast, lets an
+        // in-flight turn DRAIN to completion (WaitForTurnsAsync below), which is the pod-termination
+        // contract. Mirrors the Rust reader loop: abort on Close/Err/None, drain on shutdown.
+        var clientGone = false;
         try
         {
             while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
@@ -142,15 +148,27 @@ public static class SmoothOperatorWebSocketExtensions
                 }
                 await dispatcher.DispatchAsync(frame, ev => channel.Writer.TryWrite(ev), cancellationToken).ConfigureAwait(false);
             }
+
+            // Fell out of the loop without an exception: either a close frame or a socket no longer
+            // Open (both = the client is gone), unless the ambient token asked us to stop.
+            clientGone = !cancellationToken.IsCancellationRequested;
         }
         catch (OperationCanceledException)
         {
         }
         catch (WebSocketException)
         {
+            clientGone = true;
         }
         finally
         {
+            // Client hung up mid-turn: abort the in-flight turn (its partial assistant message is
+            // discarded — nothing persisted, no event emitted; there is no client to send one to).
+            if (clientGone)
+            {
+                dispatcher.TryCancelActiveTurn(out _);
+            }
+
             // Any turn parked on a write-confirmation must unpark before we can finish: reject
             // outstanding confirmations (fail closed — a write is never auto-approved on disconnect),
             // then await every in-flight spawned turn so its eventual_response is enqueued before the

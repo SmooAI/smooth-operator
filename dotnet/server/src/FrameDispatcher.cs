@@ -34,11 +34,28 @@ public sealed class FrameDispatcher
     private readonly TurnLimits _limits;
     private readonly ILogger? _logger;
 
-    // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
-    // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
-    // inline) to keep the read loop free; the connection awaits these on teardown (graceful drain).
-    private readonly object _turnsLock = new();
-    private readonly HashSet<Task> _turnTasks = new();
+    // The connection's SINGLE in-flight send_message turn, if one is running. A turn that calls a
+    // confirmation-gated tool parks awaiting a later confirm_tool_action frame, so the turn runs as a
+    // background Task (not awaited inline) to keep the read loop free; the connection awaits it on
+    // teardown (graceful drain). Its CancellationTokenSource is the cancel handle: a `cancel` frame (or
+    // a client disconnect) cancels it, which drops the turn at its next await — the C# analog of the
+    // Rust reference aborting the turn's JoinHandle. Only ONE turn runs at a time: a second
+    // send_message while one is in flight is rejected with TURN_IN_PROGRESS, never run concurrently.
+    private readonly object _turnLock = new();
+    private ActiveTurn? _turn;
+
+    private sealed class ActiveTurn
+    {
+        public required string RequestId { get; init; }
+        public required CancellationTokenSource Cts { get; init; }
+        // Set the moment the turn is cancelled. The turn's sink checks it, so a cancelled turn emits
+        // NOTHING further — `cancelled` stays the terminal event even if the engine yields one last
+        // update (e.g. a tool-result content) while unwinding.
+        public volatile bool Cancelled;
+        // Null until the turn task is spawned — a slot with a null Task is still "active"
+        // (the turn is starting), so a cancel arriving in that window is not lost.
+        public Task? Task { get; set; }
+    }
 
     public FrameDispatcher(
         ISessionStore store,
@@ -99,22 +116,62 @@ public sealed class FrameDispatcher
     /// </summary>
     public async Task WaitForTurnsAsync()
     {
-        Task[] pending;
-        lock (_turnsLock)
+        Task? pending;
+        lock (_turnLock)
         {
-            pending = _turnTasks.ToArray();
+            pending = _turn?.Task;
         }
-        if (pending.Length > 0)
+        if (pending is not null)
         {
             try
             {
-                await Task.WhenAll(pending).ConfigureAwait(false);
+                await pending.ConfigureAwait(false);
             }
             catch
             {
                 // A turn that faulted already surfaced its own error event; the drain must not throw.
             }
         }
+    }
+
+    /// <summary>
+    /// Cancel the connection's in-flight turn, if one is running: cancels its per-turn
+    /// <see cref="CancellationTokenSource"/> so the turn drops at its next await (abandoning the
+    /// in-flight LLM/tool call) and its partial assistant reply is never persisted — the C# analog of
+    /// the Rust reference aborting the turn's task handle. The user's message stays persisted (it was
+    /// written before the agent loop). Returns <c>false</c> (a silent no-op) when no turn is in flight.
+    /// <paramref name="turnRequestId"/> receives the cancelled turn's <c>requestId</c> so the caller
+    /// can echo it on the terminal <c>cancelled</c> event.
+    /// </summary>
+    public bool TryCancelActiveTurn(out string? turnRequestId)
+    {
+        ActiveTurn? turn;
+        lock (_turnLock)
+        {
+            turn = _turn is { Task: null or { IsCompleted: false } } ? _turn : null;
+            if (turn is not null)
+            {
+                _turn = null;
+            }
+        }
+
+        turnRequestId = turn?.RequestId;
+        if (turn is null)
+        {
+            return false;
+        }
+
+        turn.Cancelled = true;
+
+        try
+        {
+            turn.Cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The turn finished and disposed its CTS between our slot read and here — nothing to cancel.
+        }
+        return true;
     }
 
     /// <summary>
@@ -164,6 +221,15 @@ public sealed class FrameDispatcher
                     break;
                 case "send_message":
                     await HandleSendMessageAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "cancel":
+                    // The "Stop button": abort the in-flight turn and emit its terminal `cancelled`
+                    // event, echoing the CANCELLED TURN's requestId (falling back to the cancel frame's
+                    // own) so the client correlates the reset. Nothing running ⇒ silent no-op.
+                    if (TryCancelActiveTurn(out var cancelledRequestId))
+                    {
+                        sink(ProtocolEvents.Cancelled(cancelledRequestId ?? requestId));
+                    }
                     break;
                 case "confirm_tool_action":
                     HandleConfirmToolAction(frame, requestId, sink);
@@ -317,6 +383,26 @@ public sealed class FrameDispatcher
     private async Task HandleSendMessageAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
         requestId ??= Guid.NewGuid().ToString();
+
+        // One active turn per connection: a second send_message while one is in flight is rejected
+        // rather than run concurrently (interleaved streams + racing storage writes). The client must
+        // cancel the running turn or wait for it to finish. Checked BEFORE any validation/ack so the
+        // rejected frame has no side effects. Turn *resumes* (confirm_tool_action / verify_otp) are
+        // unaffected — they aren't new turns.
+        bool turnInProgress;
+        lock (_turnLock)
+        {
+            turnInProgress = _turn is { Task: null or { IsCompleted: false } };
+        }
+        if (turnInProgress)
+        {
+            sink(ProtocolEvents.Error(
+                requestId,
+                "TURN_IN_PROGRESS",
+                "a turn is already in progress on this connection; cancel it or wait for it to complete"));
+            return;
+        }
+
         var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
@@ -403,11 +489,35 @@ public sealed class FrameDispatcher
         var conversationId = session.ConversationId;
         var userEmail = session.UserEmail;
 
+        // Per-turn cancellation handle, linked to the connection's token so an ambient teardown still
+        // cancels the turn as before. A `cancel` frame (or a disconnect) cancels it: the turn drops at
+        // its next await, the catch below swallows the OperationCanceledException, and the partial
+        // assistant message is discarded — no eventual_response, nothing persisted. (The user's message
+        // was persisted at the start of the turn, so it stays.)
+        var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var turn = new ActiveTurn { RequestId = requestIdStr, Cts = turnCts };
+
+        // Everything the turn emits goes through this gate: once the turn is cancelled it drops events,
+        // so `cancelled` is genuinely terminal (the engine can still yield one unwinding update as the
+        // cancellation propagates). Ephemeral stream output only — nothing persisted rides on it.
+        var turnSink = (JsonObject ev) =>
+        {
+            if (!turn.Cancelled)
+            {
+                sink(ev);
+            }
+        };
+        // Claim the slot BEFORE spawning, so a cancel racing the spawn still finds the turn.
+        lock (_turnLock)
+        {
+            _turn = turn;
+        }
+
         var task = Task.Run(async () =>
         {
             try
             {
-                var result = await runner.RunAsync(conversationId, requestIdStr, message, sink, sessionIdStr, cancellationToken).ConfigureAwait(false);
+                var result = await runner.RunAsync(conversationId, requestIdStr, message, turnSink, sessionIdStr, turnCts.Token).ConfigureAwait(false);
 
                 // If the auth gate refused an end_user tool this turn for lack of a verified session,
                 // and a host OTP service is installed and the session has a contact to reach, offer the
@@ -419,11 +529,11 @@ public sealed class FrameDispatcher
                     var contact = new OtpContact(Email: userEmail);
                     if (!contact.IsEmpty)
                     {
-                        await OfferOtpAsync(sessionIdStr, refusedTool, contact, requestIdStr, sink, cancellationToken).ConfigureAwait(false);
+                        await OfferOtpAsync(sessionIdStr, refusedTool, contact, requestIdStr, turnSink, turnCts.Token).ConfigureAwait(false);
                     }
                 }
 
-                sink(ProtocolEvents.EventualResponse(
+                turnSink(ProtocolEvents.EventualResponse(
                     requestIdStr,
                     200,
                     result.MessageId,
@@ -433,13 +543,15 @@ public sealed class FrameDispatcher
             }
             catch (OperationCanceledException)
             {
-                // Connection torn down mid-turn — nothing to surface; the socket is gone.
+                // Turn cancelled (a `cancel` frame, a disconnect, or connection teardown): discard the
+                // partial assistant message — no eventual_response, nothing persisted. The `cancelled`
+                // event is emitted by the cancel path itself (a disconnect emits nothing: no client).
             }
             catch (Exception)
             {
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean error and
                 // keeps the connection alive (detail stays server-side).
-                sink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
+                turnSink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
             }
             finally
             {
@@ -449,20 +561,24 @@ public sealed class FrameDispatcher
                 {
                     await extHost.ShutdownAllAsync().ConfigureAwait(false);
                 }
+
+                // Release the turn slot (unless a cancel already took it, or a later turn owns it) and
+                // dispose this turn's CTS — the single owner of the handle, so it's disposed exactly once.
+                lock (_turnLock)
+                {
+                    if (ReferenceEquals(_turn, turn))
+                    {
+                        _turn = null;
+                    }
+                }
+                turnCts.Dispose();
             }
         }, CancellationToken.None);
 
-        lock (_turnsLock)
+        lock (_turnLock)
         {
-            _turnTasks.Add(task);
+            turn.Task = task;
         }
-        _ = task.ContinueWith(t =>
-        {
-            lock (_turnsLock)
-            {
-                _turnTasks.Remove(t);
-            }
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>
