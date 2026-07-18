@@ -52,6 +52,13 @@ export interface StoredMessage {
     conversationId: string;
     direction: MessageDirection;
     text: string;
+    /**
+     * ISO-8601 timestamp of when the message was appended — the `createdAt` field of the
+     * `get_conversation_messages` contract and its `before` paging key. Optional so
+     * stores that predate the action still satisfy the interface; absent → the
+     * dispatcher reports the epoch (the message sorts as oldest). th-75eda5.
+     */
+    createdAt?: string;
 }
 
 /**
@@ -142,7 +149,7 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     async appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage> {
-        const message: StoredMessage = { id: randomUUID(), conversationId, direction, text };
+        const message: StoredMessage = { id: randomUUID(), conversationId, direction, text, createdAt: new Date().toISOString() };
         let list = this.messages.get(conversationId);
         if (!list) {
             list = [];

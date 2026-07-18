@@ -180,6 +180,9 @@ export class FrameDispatcher {
                 case 'list_conversations':
                     await this.handleListConversations(frame, requestId, sink);
                     break;
+                case 'get_conversation_messages':
+                    await this.handleGetConversationMessages(frame, requestId, sink);
+                    break;
                 case 'send_message':
                     await this.handleSendMessage(frame, requestId, sink, signal);
                     break;
@@ -273,6 +276,63 @@ export class FrameDispatcher {
             }));
 
         sink(protocol.immediateResponse(requestId, 200, 'Conversations', { conversations }));
+    }
+
+    /**
+     * `get_conversation_messages` — the conversation-resume substrate. Returns the
+     * session's conversation messages NEWEST-first plus a `hasMore` flag, per
+     * `spec/actions/get-messages.schema.json`. Optional input: `limit` (1..100,
+     * default 50) and `before` (ISO 8601 cursor — only messages created strictly
+     * before it). Mirrors the Rust `handle_get_conversation_messages` and the Go
+     * `handleGetConversationMessages`. th-75eda5.
+     */
+    private async handleGetConversationMessages(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
+        if (!sessionId) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "Missing 'sessionId'"));
+            return;
+        }
+        const session = await this.store.getSession(sessionId);
+        if (!session) {
+            sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
+            return;
+        }
+
+        const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
+        const limit = Math.min(rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
+
+        let before: number | undefined;
+        if (typeof frame.before === 'string' && frame.before.length > 0) {
+            before = Date.parse(frame.before);
+            if (Number.isNaN(before)) {
+                sink(protocol.error(requestId, 'VALIDATION_ERROR', "Invalid 'before' timestamp; expected ISO 8601"));
+                return;
+            }
+        }
+
+        // Fetch limit+1 so the extra row tells us whether more history exists. With a
+        // `before` cursor the filter can't be pushed into the store, so pull a bounded
+        // window instead.
+        // ponytail: `before` pages within the newest 500 messages; deeper paging needs a
+        // cursor-aware store method (would break SessionStore for downstream hosts).
+        const stored = await this.store.listMessages(session.conversationId, before === undefined ? limit + 1 : BEFORE_SCAN_WINDOW);
+
+        // The store returns oldest-first; the contract is newest-first.
+        const newestFirst: Record<string, unknown>[] = [];
+        for (let i = stored.length - 1; i >= 0; i--) {
+            const m = stored[i]!;
+            const createdAt = m.createdAt ?? EPOCH_ISO;
+            if (before !== undefined && !(Date.parse(createdAt) < before)) continue;
+            newestFirst.push({ id: m.id, direction: m.direction, content: { text: m.text }, createdAt });
+        }
+
+        const hasMore = newestFirst.length > limit;
+        sink(
+            protocol.immediateResponse(requestId, 200, 'ConversationMessages', {
+                messages: hasMore ? newestFirst.slice(0, limit) : newestFirst,
+                hasMore,
+            }),
+        );
     }
 
     private async handleSendMessage(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink, signal?: AbortSignal): Promise<void> {
@@ -512,6 +572,15 @@ export class FrameDispatcher {
 }
 
 const TITLE_MAX = 60;
+
+/** `get_conversation_messages` page size when the client sends no `limit`. */
+const DEFAULT_MESSAGE_LIMIT = 50;
+/** Contract ceiling on `get_conversation_messages`' `limit` (1..100). */
+const MAX_MESSAGE_LIMIT = 100;
+/** Store read bound when paging with a `before` cursor. */
+const BEFORE_SCAN_WINDOW = 500;
+/** Reported `createdAt` for a message a pre-th-75eda5 store left untimestamped. */
+const EPOCH_ISO = new Date(0).toISOString();
 
 /**
  * Derive a `list_conversations` entry title from the first inbound message text,
