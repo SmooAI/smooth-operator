@@ -6,6 +6,25 @@
  */
 /* eslint-disable */
 
+// ── from actions/cancel.schema.json ──
+/**
+ * A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional and advisory — the server cancels the connection's single active turn regardless.
+ */
+export interface CancelRequest {
+    /**
+     * Action discriminator.
+     */
+    action: 'cancel';
+    /**
+     * The requestId of the in-flight `send_message` turn to cancel. Echoed back on the `cancelled` event so the client correlates the reset.
+     */
+    requestId?: string;
+    /**
+     * Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+     */
+    sessionId?: string;
+}
+
 // ── from actions/confirm-tool-action.schema.json ──
 /**
  * Fields sent by the client to approve or reject a pending tool write.
@@ -148,9 +167,11 @@ export interface GetMessagesRequest {
      */
     limit?: number;
     /**
-     * ISO 8601 cursor: return only messages created strictly before this timestamp. Omit to start from the most recent message.
+     * Opaque pagination cursor from a prior response's `nextCursor`. Returns only messages older than the one the cursor names. Treat it as opaque — its encoding is storage-defined (a message id today) and may change. Omit to start from the most recent message.
+     *
+     * Deliberately NOT a timestamp: two messages can share a timestamp at any precision the wire format keeps, so a `created_at < cursor` filter either drops or repeats the messages that collide. An id cursor identifies exactly one message and cannot.
      */
-    before?: string;
+    cursor?: string;
 }
 
 // ── from actions/get-messages.schema.json ──
@@ -163,7 +184,11 @@ export interface GetMessagesResponse {
      */
     messages: ConversationMessage[];
     /**
-     * True if more messages exist before the oldest message in this page. Use the oldest `createdAt` as the next `before` cursor.
+     * Opaque cursor naming the oldest message in this page. Pass it as the next request's `cursor` to fetch the page before this one. Present (non-null) if and only if `hasMore` is true.
+     */
+    nextCursor?: string | null;
+    /**
+     * True if more messages exist before the oldest message in this page — equivalently, if `nextCursor` is non-null.
      */
     hasMore: boolean;
 }
@@ -883,6 +908,42 @@ export interface ActionEnvelope {
      */
     requestId?: string;
     [k: string]: unknown;
+}
+
+// ── from events/cancelled.schema.json ──
+/**
+ * Event: `cancelled`. The terminal event of a turn the client aborted with a `cancel` action — emitted IN PLACE OF the `eventual_response` a completed turn would send. Echoes the cancelled `send_message`'s `requestId` so the client correlates it to the in-flight turn and resets its UI (drop the streaming indicator, re-enable input). Status `499` ("client closed request") marks a terminal, non-200 outcome distinct from a server `error`. There is NO answer payload: a cancelled turn produced no assistant message — the streamed tokens were ephemeral and are NOT persisted, while the user's message stays persisted (so the conversation carries the user turn with no reply). Only emitted when a live turn was actually aborted; a `cancel` with no active turn emits nothing.
+ */
+export interface Cancelled {
+    /**
+     * Event type discriminator.
+     */
+    type: 'cancelled';
+    /**
+     * Echoes the `requestId` of the cancelled `send_message` turn (falls back to the `cancel` frame's own requestId). Absent only if neither carried one.
+     */
+    requestId?: string;
+    /**
+     * Terminal cancellation status ("client closed request"). Distinct from 200 (eventual_response) and from error codes.
+     */
+    status: 499;
+    /**
+     * Server-side Unix epoch milliseconds when the event was emitted.
+     */
+    timestamp?: number;
+    /**
+     * Cancellation payload (mirrors `requestId` + `status` for clients that only inspect `data`).
+     */
+    data?: {
+        /**
+         * Echoes the cancelled turn's requestId.
+         */
+        requestId?: string;
+        /**
+         * Terminal cancellation status.
+         */
+        status: 499;
+    };
 }
 
 // ── from events/error.schema.json ──
