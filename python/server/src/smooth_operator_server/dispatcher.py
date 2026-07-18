@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from smooth_operator_core import Knowledge
@@ -115,6 +116,8 @@ class FrameDispatcher:
                 await self._handle_create_session(frame, request_id, sink)
             elif action == "list_conversations":
                 await self._handle_list_conversations(frame, request_id, sink)
+            elif action == "get_conversation_messages":
+                await self._handle_get_conversation_messages(frame, request_id, sink)
             elif action == "get_session":
                 await self._handle_get_session(frame, request_id, sink)
             elif action == "send_message":
@@ -203,6 +206,64 @@ class FrameDispatcher:
             for c in summaries[:limit]
         ]
         sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": conversations}))
+
+    async def _handle_get_conversation_messages(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``get_conversation_messages`` — the conversation-resume substrate. Returns a
+        session's messages NEWEST-first plus a ``hasMore`` flag, per
+        ``spec/actions/get-messages.schema.json``: each entry is ``{id, direction,
+        content: {text}, createdAt}``. Optional input: ``limit`` (1..100, default 50) and
+        ``before`` (ISO 8601 cursor — only messages created strictly before it). Mirrors
+        the Rust ``handle_get_conversation_messages`` and the Go/TS/C# reference.
+        th-89b698."""
+        session_id = frame.get("sessionId")
+        if not session_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
+            return
+        session = await self._store.get_session(session_id)
+        if session is None:
+            sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
+            return
+
+        raw_limit = frame.get("limit")
+        limit = (
+            min(raw_limit, _MAX_MESSAGE_LIMIT)
+            if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0
+            else _DEFAULT_LIST_LIMIT
+        )
+
+        raw_before = frame.get("before")
+        before: datetime | None = None
+        if isinstance(raw_before, str) and raw_before:
+            before = _parse_before(raw_before)
+            if before is None:
+                sink(protocol.error(request_id, "VALIDATION_ERROR", "invalid 'before' timestamp; expected ISO 8601"))
+                return
+
+        # Fetch limit+1 so the extra row tells us whether more history exists. With a
+        # `before` cursor the filter can't be pushed into the store, so pull a bounded
+        # window instead.
+        # ponytail: `before` pages within the newest 500 messages; deeper paging needs a
+        # cursor-aware store method (would break SessionStore for downstream hosts).
+        fetch = _BEFORE_SCAN_WINDOW if before is not None else limit + 1
+        stored = await self._store.list_messages(session.conversation_id, fetch)
+
+        # The store returns oldest-first; the contract is newest-first.
+        newest_first = [m for m in reversed(stored) if before is None or m.created_at < before]
+        has_more = len(newest_first) > limit
+        messages = [
+            {
+                "id": m.id,
+                "direction": m.direction.value,
+                "content": {"text": m.text},
+                "createdAt": m.created_at.astimezone(timezone.utc).isoformat(),
+            }
+            for m in newest_first[:limit]
+        ]
+        sink(
+            protocol.immediate_response(
+                request_id, 200, "ConversationMessages", {"messages": messages, "hasMore": has_more}
+            )
+        )
 
     async def _handle_send_message(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # requestId is load-bearing for streaming correlation; generate one if the
@@ -447,6 +508,24 @@ class FrameDispatcher:
 
 #: Default cap for list_conversations when the caller doesn't ask for a specific limit.
 _DEFAULT_LIST_LIMIT = 50
+
+#: Contract cap on get_conversation_messages' `limit` (1..100). th-89b698.
+_MAX_MESSAGE_LIMIT = 100
+
+#: Bounds the store read when get_conversation_messages pages with `before`. th-89b698.
+_BEFORE_SCAN_WINDOW = 500
+
+
+def _parse_before(raw: str) -> datetime | None:
+    """Parse a ``before`` cursor (ISO 8601) into a tz-aware UTC datetime, or ``None`` when
+    it isn't a valid timestamp. A naive value is read as UTC so it stays comparable to the
+    store's tz-aware ``created_at``."""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
 
 #: Max characters in a conversation title preview before it's clipped with an ellipsis.
 _TITLE_MAX = 60

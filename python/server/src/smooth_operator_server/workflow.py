@@ -38,9 +38,9 @@ _JUDGE_SYSTEM_PROMPT = (
     '- "yes" -> the criteria are clearly satisfied on the basis of this turn.\n'
     '- "no" -> not satisfied, or the agent moved away from the step.\n'
     '- "maybe" -> partial/ambiguous progress. The workflow stays on the current step and tries again next turn.\n'
-    '- A brief, informal, or terse user answer that addresses the step\'s question satisfies it '
+    "- A brief, informal, or terse user answer that addresses the step's question satisfies it "
     '(e.g. "a four", "sure", "not really") — mark "yes"; do not hold out for elaboration or exact wording.\n'
-    '- It is OK to stay on a step for multiple turns, but never require the user to re-confirm something they already said.\n\n'
+    "- It is OK to stay on a step for multiple turns, but never require the user to re-confirm something they already said.\n\n"
     'Reply with ONLY a JSON object: {"verdict": "yes"|"no"|"maybe", "reason": "<one sentence>"}.'
 )
 
