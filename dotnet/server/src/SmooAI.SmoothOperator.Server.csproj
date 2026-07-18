@@ -28,7 +28,7 @@
     <!-- The service is built ON the engine: it drives SmoothAgent per turn and adds the
          protocol/session/storage surface around it. The engine now lives in (and publishes
          from) the smooth-operator-core repo; consume it as the published NuGet package. -->
-    <PackageReference Include="SmooAI.SmoothOperator.Core" Version="1.5.0" />
+    <PackageReference Include="SmooAI.SmoothOperator.Core" Version="1.7.0" />
   </ItemGroup>
 
 </Project>

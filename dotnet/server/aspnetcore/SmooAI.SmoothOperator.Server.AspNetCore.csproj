@@ -10,6 +10,19 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Description>ASP.NET Core WebSocket host for SmooAI.SmoothOperator.Server — maps the schema-driven protocol onto a /ws endpoint and wires it via DI. The deployable surface of the C# smooth-operator service.</Description>
+    <!-- NuGet packaging metadata. The Version ELEMENT below is the LOCKSTEP anchor
+         stamped by scripts/sync-versions.mjs — never the Core PackageReference
+         attribute. (Keep the element-form version out of comments: the sync regex
+         replaces the first element-form match in the file.) -->
+    <PackageId>SmooAI.SmoothOperator.Server.AspNetCore</PackageId>
+    <Version>1.23.3</Version>
+    <Authors>SmooAI</Authors>
+    <PackageTags>ai;agent;llm;chat;smooth-operator;server;aspnetcore;websocket;smooai</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/SmooAI/smooth-operator/tree/main/dotnet/server/aspnetcore</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SmooAI/smooth-operator.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <!-- Ship the branded README on the NuGet package page. -->
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>

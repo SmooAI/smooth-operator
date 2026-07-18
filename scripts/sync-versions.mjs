@@ -152,10 +152,27 @@ const targets = [
     // smooth-operator-core repo). The `<Version>…</Version>` element form never
     // collides with the `Version="…"` attribute form. The .NET Core package that
     // used to live here (dotnet/core) moved OUT (commit 1f566ce) and is versioned
-    // in that repo, so there is nothing else .NET to stamp here.
+    // in that repo. The only other .NET packages to stamp are the two Server add-ons
+    // (AspNetCore host + Postgres store), below.
     {
         name: 'dotnet/server/src/SmooAI.SmoothOperator.Server.csproj',
         url: new URL('../dotnet/server/src/SmooAI.SmoothOperator.Server.csproj', import.meta.url),
+        anchor: /<Version>[^<]*<\/Version>/,
+        apply: (text) => text.replace(/<Version>[^<]*<\/Version>/, `<Version>${version}</Version>`),
+    },
+    // The published .NET SERVER add-on packages (AspNetCore host + Postgres store).
+    // Same `<Version>` element-form rule as the Server csproj above — the only
+    // `Version="…"` attributes in these files are third-party PackageReferences, which
+    // the element-form regex never matches.
+    {
+        name: 'dotnet/server/aspnetcore/SmooAI.SmoothOperator.Server.AspNetCore.csproj',
+        url: new URL('../dotnet/server/aspnetcore/SmooAI.SmoothOperator.Server.AspNetCore.csproj', import.meta.url),
+        anchor: /<Version>[^<]*<\/Version>/,
+        apply: (text) => text.replace(/<Version>[^<]*<\/Version>/, `<Version>${version}</Version>`),
+    },
+    {
+        name: 'dotnet/server/postgres/src/SmooAI.SmoothOperator.Server.Postgres.csproj',
+        url: new URL('../dotnet/server/postgres/src/SmooAI.SmoothOperator.Server.Postgres.csproj', import.meta.url),
         anchor: /<Version>[^<]*<\/Version>/,
         apply: (text) => text.replace(/<Version>[^<]*<\/Version>/, `<Version>${version}</Version>`),
     },

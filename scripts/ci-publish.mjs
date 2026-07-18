@@ -5,7 +5,7 @@
  * smooth-operator artifact at the ONE lockstep version, to every registry:
  *
  *   • npm       → @smooai/smooth-operator          (via `changeset publish`)
- *   • NuGet     → SmooAI.SmoothOperator.Server      (dotnet pack + nuget push)
+ *   • NuGet     → SmooAI.SmoothOperator.Server{,.AspNetCore,.Postgres} (dotnet pack + nuget push)
  *   • PyPI      → smooai-smooth-operator (client)    (uv build + twine upload)
  *                 smooai-smooth-operator-server
  *   • crates.io → smooai-smooth-operator + ingestion + adapters + server
@@ -61,8 +61,15 @@ const CRATES_ORDER = [
     'smooai-smooth-operator-server',
 ];
 
-const NUGET_ID = 'SmooAI.SmoothOperator.Server';
-const NUGET_CSPROJ = 'dotnet/server/src/SmooAI.SmoothOperator.Server.csproj';
+// NuGet packages published from this repo (PackageId → csproj). Server is the base
+// package; AspNetCore (WS host) and Postgres (durable store) are add-ons that depend
+// on it via ProjectReference (packed as a NuGet dependency). All three ship at the
+// one lockstep version.
+const NUGET_PACKAGES = [
+    { id: 'SmooAI.SmoothOperator.Server', csproj: 'dotnet/server/src/SmooAI.SmoothOperator.Server.csproj' },
+    { id: 'SmooAI.SmoothOperator.Server.AspNetCore', csproj: 'dotnet/server/aspnetcore/SmooAI.SmoothOperator.Server.AspNetCore.csproj' },
+    { id: 'SmooAI.SmoothOperator.Server.Postgres', csproj: 'dotnet/server/postgres/src/SmooAI.SmoothOperator.Server.Postgres.csproj' },
+];
 // PyPI dists published from this repo (project dir → distribution name).
 const PYPI_PROJECTS = [
     { dir: 'python', name: 'smooai-smooth-operator' },
@@ -165,19 +172,29 @@ async function publishNpm() {
 }
 
 async function publishNuget() {
-    if (await nugetHasVersion(NUGET_ID, version)) {
-        console.log(`[nuget] skip: ${NUGET_ID} ${version} already on nuget.org`);
+    // Pack every not-yet-published package into one dir, then a single push uploads
+    // them all. Each is existence-checked so a partial-failure re-run skips live ones.
+    const out = mkdtempSync(resolve(tmpdir(), 'so-nupkg-'));
+    let packed = 0;
+    for (const { id, csproj } of NUGET_PACKAGES) {
+        if (await nugetHasVersion(id, version)) {
+            console.log(`[nuget] skip: ${id} ${version} already on nuget.org`);
+            continue;
+        }
+        run('dotnet', ['pack', csproj, '-c', 'Release', '-o', out, `-p:Version=${version}`]);
+        packed++;
+    }
+    if (packed === 0) {
+        console.log(`[nuget] nothing to publish — all packages already at ${version}`);
         return;
     }
-    const out = mkdtempSync(resolve(tmpdir(), 'so-nupkg-'));
-    run('dotnet', ['pack', NUGET_CSPROJ, '-c', 'Release', '-o', out, `-p:Version=${version}`]);
     if (DRY_RUN) {
-        console.log(`[nuget] dry-run: packed ${NUGET_ID} ${version} → ${out} (no push)`);
+        console.log(`[nuget] dry-run: packed ${packed} package(s) @ ${version} → ${out} (no push)`);
         return;
     }
     const key = process.env.SMOOAI_NUGET_API_KEY;
     if (!key) throw new Error('[nuget] SMOOAI_NUGET_API_KEY is not set');
-    // --skip-duplicate is belt-and-suspenders on top of the existence check above.
+    // --skip-duplicate is belt-and-suspenders on top of the existence checks above.
     run('dotnet', [
         'nuget',
         'push',
