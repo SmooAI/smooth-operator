@@ -1,5 +1,22 @@
 # @smooai/smooth-operator
 
+## 1.25.0
+
+### Minor Changes
+
+- a69d091: Add a .NET Slack `IConnector` (`SlackConnector`) for knowledge ingestion. Resolves author names
+  via `users.list`, lists channels via `conversations.list`, and pages messages via
+  `conversations.history`. Emits one document per channel per day with a stable id
+  `slack:{channel}:{date}` (today re-hashes as messages land, past days dedupe on the pipeline's
+  (id, hash) key), `source` = the day's first-message permalink (`chat.getPermalink`), incremental
+  pulls via an `oldest` cursor, and a per-channel ACL label. `SourceDocument` gains an optional
+  `Acl` field to carry per-document access labels (mirrors the Rust `RawDocument.acl`). Threaded
+  replies (`conversations.replies`) are deferred to a follow-up.
+
+### Patch Changes
+
+- aa72bb0: Make the two .NET Server add-on packages publishable to NuGet and bump the Core pin. `SmooAI.SmoothOperator.Server.AspNetCore` (the ASP.NET Core WebSocket host) and `SmooAI.SmoothOperator.Server.Postgres` (the durable Postgres session store) now carry NuGet packaging metadata, get their `<Version>` stamped in lockstep by `sync-versions.mjs`, and are packed + pushed by `ci-publish.mjs` alongside the base `SmooAI.SmoothOperator.Server` package — so downstream hosts can `PackageReference` them instead of vendoring the extension source. The Server package's `SmooAI.SmoothOperator.Core` pin is also bumped from 1.5.0 to the latest published 1.7.0.
+
 ## 1.24.0
 
 ### Minor Changes
