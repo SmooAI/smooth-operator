@@ -171,9 +171,10 @@ type inboundFrame struct {
 	ConversationID string `json:"conversationId"`
 	// list_conversations / get_conversation_messages — optional max rows returned (default 50).
 	Limit int `json:"limit"`
-	// get_conversation_messages — optional ISO 8601 cursor; return only messages created
-	// strictly before it. th-9715aa.
-	Before string `json:"before"`
+	// get_conversation_messages — optional opaque pagination cursor from a prior response's
+	// nextCursor (a message id today); return only messages older than the one it names.
+	// th-669d48.
+	Cursor string `json:"cursor"`
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
@@ -308,14 +309,11 @@ func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inb
 // maxMessageLimit caps get_conversation_messages' limit per the contract (1..100).
 const maxMessageLimit = 100
 
-// beforeScanWindow bounds the store read when paging with `before`.
-const beforeScanWindow = 500
-
 // handleGetConversationMessages — the conversation-resume substrate. Returns a session's
-// conversation messages NEWEST-first with a hasMore flag, per
+// conversation messages NEWEST-first with nextCursor + hasMore, per
 // spec/actions/get-messages.schema.json. Optional input: limit (1..100, default 50) and
-// before (ISO 8601 cursor — only messages created strictly before it). Mirrors the Rust
-// handle_get_conversation_messages. th-9715aa.
+// cursor (opaque — a message id; returns only messages older than the one it names).
+// Mirrors the Rust handle_get_conversation_messages. th-669d48.
 func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, frame inboundFrame, sink EventSink) {
 	if frame.SessionID == "" {
 		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'sessionId'"))
@@ -339,22 +337,13 @@ func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, fra
 		limit = maxMessageLimit
 	}
 
-	var before time.Time
-	if frame.Before != "" {
-		before, err = time.Parse(time.RFC3339, frame.Before)
-		if err != nil {
-			sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Invalid 'before' timestamp; expected ISO 8601"))
-			return
-		}
-	}
-
-	// Fetch limit+1 so the extra row tells us whether more history exists. With a `before`
-	// cursor we can't push the filter into the store, so we pull a bounded window instead.
-	// ponytail: `before` pages within the newest 500 messages; deeper paging needs a
-	// cursor-aware store method (would break SessionStore for downstream implementers).
+	// Without a cursor, limit+1 rows are enough — the extra one tells us whether more history
+	// exists. With a cursor we need the whole log to locate the message it names.
+	// ponytail: full-log read when paging; push the cursor into a store method if a
+	// conversation ever gets big enough to care (would change SessionStore for implementers).
 	fetch := limit + 1
-	if !before.IsZero() {
-		fetch = beforeScanWindow
+	if frame.Cursor != "" {
+		fetch = 0 // 0 = no cap
 	}
 	stored, err := d.store.ListMessages(ctx, session.ConversationID, fetch)
 	if err != nil {
@@ -365,16 +354,36 @@ func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, fra
 	// Store returns oldest-first; the contract is newest-first.
 	newestFirst := make([]StoredMessage, 0, len(stored))
 	for i := len(stored) - 1; i >= 0; i-- {
-		m := stored[i]
-		if !before.IsZero() && !m.CreatedAt.Before(before) {
-			continue
+		newestFirst = append(newestFirst, stored[i])
+	}
+
+	// The cursor names one exact message; the page starts immediately on its older side. An id
+	// identifies a single row, so messages sharing a timestamp can neither be skipped nor
+	// repeated — the failure mode a `created_at <` filter has by construction.
+	if frame.Cursor != "" {
+		at := -1
+		for i, m := range newestFirst {
+			if m.ID == frame.Cursor {
+				at = i
+				break
+			}
 		}
-		newestFirst = append(newestFirst, m)
+		if at < 0 {
+			sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Unknown 'cursor'"))
+			return
+		}
+		newestFirst = newestFirst[at+1:]
 	}
 
 	hasMore := len(newestFirst) > limit
 	if hasMore {
 		newestFirst = newestFirst[:limit]
+	}
+
+	// nextCursor names the oldest message in this page — non-null exactly when hasMore.
+	var nextCursor any
+	if hasMore {
+		nextCursor = newestFirst[len(newestFirst)-1].ID
 	}
 
 	messages := make([]map[string]any, 0, len(newestFirst))
@@ -387,15 +396,15 @@ func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, fra
 			"id":        m.ID,
 			"direction": direction,
 			"content":   map[string]any{"text": m.Text},
-			// Nano, not RFC3339: clients page by handing the oldest createdAt back as
-			// `before`, and whole-second truncation would put the cursor BEFORE the message
-			// it names — silently dropping every same-second message from page two.
+			// Display only — paging goes through the id cursor. Nano anyway: truncating to
+			// whole seconds throws away ordering information clients render.
 			"createdAt": m.CreatedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
 	sink(immediateResponse(frame.RequestID, 200, "ConversationMessages", map[string]any{
-		"messages": messages,
-		"hasMore":  hasMore,
+		"messages":   messages,
+		"nextCursor": nextCursor,
+		"hasMore":    hasMore,
 	}))
 }
 
