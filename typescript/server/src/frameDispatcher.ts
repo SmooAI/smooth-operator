@@ -347,9 +347,13 @@ export class FrameDispatcher {
      * `get_conversation_messages` — the conversation-resume substrate. Returns the
      * session's conversation messages NEWEST-first plus a `hasMore` flag, per
      * `spec/actions/get-messages.schema.json`. Optional input: `limit` (1..100,
-     * default 50) and `before` (ISO 8601 cursor — only messages created strictly
-     * before it). Mirrors the Rust `handle_get_conversation_messages` and the Go
-     * `handleGetConversationMessages`. th-75eda5.
+     * default 50) and `cursor` (an opaque prior-response `nextCursor`, a message id
+     * — returns only messages older than the one it names). The response carries
+     * `nextCursor` = the oldest message in the page, non-null iff `hasMore`.
+     *
+     * The cursor is deliberately NOT a timestamp: two messages can share a
+     * `createdAt` at wire precision, so a `createdAt < cursor` filter drops or
+     * repeats the collision. An id names exactly one message. th-75eda5, th-54d039.
      */
     private async handleGetConversationMessages(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
@@ -366,35 +370,36 @@ export class FrameDispatcher {
         const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
         const limit = Math.min(rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
 
-        let before: number | undefined;
-        if (typeof frame.before === 'string' && frame.before.length > 0) {
-            before = Date.parse(frame.before);
-            if (Number.isNaN(before)) {
-                sink(protocol.error(requestId, 'VALIDATION_ERROR', "Invalid 'before' timestamp; expected ISO 8601"));
-                return;
-            }
-        }
+        const cursor = typeof frame.cursor === 'string' && frame.cursor.length > 0 ? frame.cursor : undefined;
 
-        // Fetch limit+1 so the extra row tells us whether more history exists. With a
-        // `before` cursor the filter can't be pushed into the store, so pull a bounded
-        // window instead.
-        // ponytail: `before` pages within the newest 500 messages; deeper paging needs a
-        // cursor-aware store method (would break SessionStore for downstream hosts).
-        const stored = await this.store.listMessages(session.conversationId, before === undefined ? limit + 1 : BEFORE_SCAN_WINDOW);
+        // No cursor: limit+1 rows is enough — the extra row is the `hasMore` probe.
+        // With a cursor we must locate the named message in the log, so read it whole.
+        // ponytail: whole-log read per cursored page; push the cursor into the store
+        // when a conversation gets big enough to care (that breaks `SessionStore` for
+        // downstream implementers, so not until it earns it).
+        const stored = await this.store.listMessages(session.conversationId, cursor === undefined ? limit + 1 : Number.MAX_SAFE_INTEGER);
 
         // The store returns oldest-first; the contract is newest-first.
-        const newestFirst: Record<string, unknown>[] = [];
-        for (let i = stored.length - 1; i >= 0; i--) {
-            const m = stored[i]!;
-            const createdAt = m.createdAt ?? EPOCH_ISO;
-            if (before !== undefined && !(Date.parse(createdAt) < before)) continue;
-            newestFirst.push({ id: m.id, direction: m.direction, content: { text: m.text }, createdAt });
+        const newestFirst = stored
+            .map((m) => ({ id: m.id, direction: m.direction, content: { text: m.text }, createdAt: m.createdAt ?? EPOCH_ISO }))
+            .reverse();
+
+        let page = newestFirst;
+        if (cursor !== undefined) {
+            const at = newestFirst.findIndex((m) => m.id === cursor);
+            if (at === -1) {
+                sink(protocol.error(requestId, 'VALIDATION_ERROR', `Unknown 'cursor' '${cursor}'`));
+                return;
+            }
+            page = newestFirst.slice(at + 1);
         }
 
-        const hasMore = newestFirst.length > limit;
+        const hasMore = page.length > limit;
+        const messages = hasMore ? page.slice(0, limit) : page;
         sink(
             protocol.immediateResponse(requestId, 200, 'ConversationMessages', {
-                messages: hasMore ? newestFirst.slice(0, limit) : newestFirst,
+                messages,
+                nextCursor: hasMore ? (messages[messages.length - 1]?.id ?? null) : null,
                 hasMore,
             }),
         );
@@ -657,8 +662,6 @@ const TITLE_MAX = 60;
 const DEFAULT_MESSAGE_LIMIT = 50;
 /** Contract ceiling on `get_conversation_messages`' `limit` (1..100). */
 const MAX_MESSAGE_LIMIT = 100;
-/** Store read bound when paging with a `before` cursor. */
-const BEFORE_SCAN_WINDOW = 500;
 /** Reported `createdAt` for a message a pre-th-75eda5 store left untimestamped. */
 const EPOCH_ISO = new Date(0).toISOString();
 
