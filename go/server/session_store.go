@@ -50,7 +50,7 @@ type StoredMessage struct {
 	Direction      MessageDirection
 	Text           string
 	// CreatedAt is when the message was appended (UTC), the createdAt field of the
-	// get_conversation_messages contract and the `before` paging key. th-9715aa.
+	// get_conversation_messages contract. Display only — paging keys off ID. th-669d48.
 	CreatedAt time.Time
 }
 
