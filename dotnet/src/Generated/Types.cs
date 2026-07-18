@@ -5,6 +5,7 @@
 //     Run `dotnet run --project tools/Generator` to regenerate after a schema change.
 //
 //     Named types and their source schema:
+//   CancelRequest                      ← actions/cancel.schema.json
 //   ConfirmToolActionRequest           ← actions/confirm-tool-action.schema.json
 //   ConfirmToolActionResponse          ← actions/confirm-tool-action.schema.json
 //   CreateConversationSessionRequest   ← actions/create-conversation-session.schema.json
@@ -19,6 +20,8 @@
 //   SendMessageRequest                 ← actions/send-message.schema.json
 //   SendMessageResponse                ← actions/send-message.schema.json
 //   GeneralAgentResponse               ← actions/send-message.schema.json
+//   SubmitInteractionRequest           ← actions/submit-interaction.schema.json
+//   SubmitInteractionResponse          ← actions/submit-interaction.schema.json
 //   VerifyOtpRequest                   ← actions/verify-otp.schema.json
 //   VerifyOtpResponse                  ← actions/verify-otp.schema.json
 //   Checkpoint                         ← domain/checkpoint.schema.json
@@ -32,9 +35,12 @@
 //   ErrorObject                        ← envelope.schema.json
 //   ActionEnvelope                     ← envelope.schema.json
 //   EventEnvelope                      ← envelope.schema.json
+//   Cancelled                          ← events/cancelled.schema.json
 //   Error                              ← events/error.schema.json
 //   EventualResponse                   ← events/eventual-response.schema.json
 //   ImmediateResponse                  ← events/immediate-response.schema.json
+//   InteractionInvalid                 ← events/interaction-invalid.schema.json
+//   InteractionRequired                ← events/interaction-required.schema.json
 //   Keepalive                          ← events/keepalive.schema.json
 //   OtpInvalid                         ← events/otp-invalid.schema.json
 //   OtpSent                            ← events/otp-sent.schema.json
@@ -42,6 +48,8 @@
 //   OtpVerified                        ← events/otp-verified.schema.json
 //   Pong                               ← events/pong.schema.json
 //   StreamChunk                        ← events/stream-chunk.schema.json
+//   StreamPreamble                     ← events/stream-preamble.schema.json
+//   StreamReasoning                    ← events/stream-reasoning.schema.json
 //   StreamToken                        ← events/stream-token.schema.json
 //   WriteConfirmationRequired          ← events/write-confirmation-required.schema.json
 // </auto-generated>
@@ -50,6 +58,33 @@
 
 namespace SmooAI.SmoothOperator.Generated
 {
+    /// <summary>
+    /// A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional and advisory — the server cancels the connection's single active turn regardless.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class CancelRequest
+    {
+
+        /// <summary>
+        /// Action discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("action")]
+        public string Action { get; set; } = default!;
+
+        /// <summary>
+        /// The requestId of the in-flight `send_message` turn to cancel. Echoed back on the `cancelled` event so the client correlates the reset.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sessionId")]
+        public string? SessionId { get; set; } = default!;
+
+    }
+
     /// <summary>
     /// Fields sent by the client to approve or reject a pending tool write.
     /// </summary>
@@ -145,6 +180,12 @@ namespace SmooAI.SmoothOperator.Generated
         public string? BrowserFingerprint { get; set; } = default!;
 
         /// <summary>
+        /// Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("supports")]
+        public System.Collections.Generic.ICollection<string>? Supports { get; set; } = default!;
+
+        /// <summary>
         /// Arbitrary key/value metadata to attach to the session.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("metadata")]
@@ -235,10 +276,12 @@ namespace SmooAI.SmoothOperator.Generated
         public int? Limit { get; set; } = 50;
 
         /// <summary>
-        /// ISO 8601 cursor: return only messages created strictly before this timestamp. Omit to start from the most recent message.
+        /// Opaque pagination cursor from a prior response's `nextCursor`. Returns only messages older than the one the cursor names. Treat it as opaque — its encoding is storage-defined (a message id today) and may change. Omit to start from the most recent message.
+        /// <br/>
+        /// <br/>Deliberately NOT a timestamp: two messages can share a timestamp at any precision the wire format keeps, so a `created_at &lt; cursor` filter either drops or repeats the messages that collide. An id cursor identifies exactly one message and cannot.
         /// </summary>
-        [System.Text.Json.Serialization.JsonPropertyName("before")]
-        public System.DateTimeOffset? Before { get; set; } = default!;
+        [System.Text.Json.Serialization.JsonPropertyName("cursor")]
+        public string? Cursor { get; set; } = default!;
 
     }
 
@@ -256,7 +299,13 @@ namespace SmooAI.SmoothOperator.Generated
         public System.Collections.Generic.ICollection<ConversationMessage> Messages { get; set; } = new System.Collections.ObjectModel.Collection<ConversationMessage>();
 
         /// <summary>
-        /// True if more messages exist before the oldest message in this page. Use the oldest `createdAt` as the next `before` cursor.
+        /// Opaque cursor naming the oldest message in this page. Pass it as the next request's `cursor` to fetch the page before this one. Present (non-null) if and only if `hasMore` is true.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("nextCursor")]
+        public string? NextCursor { get; set; } = default!;
+
+        /// <summary>
+        /// True if more messages exist before the oldest message in this page — equivalently, if `nextCursor` is non-null.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("hasMore")]
         public bool HasMore { get; set; } = default!;
@@ -467,6 +516,18 @@ namespace SmooAI.SmoothOperator.Generated
         [System.Text.Json.Serialization.JsonPropertyName("stream")]
         public bool? Stream { get; set; } = true;
 
+        /// <summary>
+        /// Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("model")]
+        public string? Model { get; set; } = default!;
+
+        /// <summary>
+        /// Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("images")]
+        public System.Collections.Generic.ICollection<Images>? Images { get; set; } = default!;
+
     }
 
     /// <summary>
@@ -499,6 +560,12 @@ namespace SmooAI.SmoothOperator.Generated
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("escalationReason")]
         public string? EscalationReason { get; set; } = default!;
+
+        /// <summary>
+        /// An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("directive")]
+        public object? Directive { get; set; } = default!;
 
     }
 
@@ -545,6 +612,75 @@ namespace SmooAI.SmoothOperator.Generated
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("suggestedNextActions")]
         public System.Collections.Generic.ICollection<string> SuggestedNextActions { get; set; } = new System.Collections.ObjectModel.Collection<string>();
+
+    }
+
+    /// <summary>
+    /// Fields sent by the client to submit (or decline) a parked interaction.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class SubmitInteractionRequest
+    {
+
+        /// <summary>
+        /// Action discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("action")]
+        public string Action { get; set; } = default!;
+
+        /// <summary>
+        /// Must match the `requestId` from the `interaction_required` event being responded to.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Session ID of the parked session.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sessionId")]
+        public System.Guid SessionId { get; set; } = default!;
+
+        /// <summary>
+        /// Must match the `interactionId` from the `interaction_required` event, so a stale submit can never resolve a newer park.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("interactionId")]
+        public string InteractionId { get; set; } = default!;
+
+        /// <summary>
+        /// Optional interaction kind, for cross-checking; the server already knows the parked interaction's kind. When present and mismatched, the submit is rejected.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("kind")]
+        public string? Kind { get; set; } = default!;
+
+        /// <summary>
+        /// Kind-specific submitted values. Required unless `declined` is true. Shape per `interactions/&lt;kind&gt;.schema.json#/$defs/Values` (e.g. identity_intake's `{ name?, email?, phone? }`). Validated server-side by the kind's validator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("values")]
+        public object? Values { get; set; } = default!;
+
+        /// <summary>
+        /// True when the visitor refused the interaction. The turn resumes with a declined payload so the agent can proceed gracefully. When true, `values` is ignored.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("declined")]
+        public bool? Declined { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// No dedicated response event for `submit_interaction`. Valid values (or a decline) are acked with an `immediate_response` and the parked turn resumes its normal streaming sequence. Invalid values emit `interaction_invalid` (the turn stays parked). This schema is provided for documentation completeness only.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class SubmitInteractionResponse
+    {
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
 
     }
 
@@ -998,6 +1134,12 @@ namespace SmooAI.SmoothOperator.Generated
         public System.Guid ConversationId { get; set; } = default!;
 
         /// <summary>
+        /// The organization that owns this session. Mirrors `organizationId` on the conversation, participants, and messages so org-scoping is uniform across every domain type and storage backends can write the session's org directly.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organizationId")]
+        public System.Guid OrganizationId { get; set; } = default!;
+
+        /// <summary>
         /// The agent handling this session.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("agentId")]
@@ -1195,6 +1337,45 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     /// <summary>
+    /// Event: `cancelled`. The terminal event of a turn the client aborted with a `cancel` action — emitted IN PLACE OF the `eventual_response` a completed turn would send. Echoes the cancelled `send_message`'s `requestId` so the client correlates it to the in-flight turn and resets its UI (drop the streaming indicator, re-enable input). Status `499` ("client closed request") marks a terminal, non-200 outcome distinct from a server `error`. There is NO answer payload: a cancelled turn produced no assistant message — the streamed tokens were ephemeral and are NOT persisted, while the user's message stays persisted (so the conversation carries the user turn with no reply). Only emitted when a live turn was actually aborted; a `cancel` with no active turn emits nothing.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Cancelled
+    {
+
+        /// <summary>
+        /// Event type discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+        /// <summary>
+        /// Echoes the `requestId` of the cancelled `send_message` turn (falls back to the `cancel` frame's own requestId). Absent only if neither carried one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Terminal cancellation status ("client closed request"). Distinct from 200 (eventual_response) and from error codes.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("status")]
+        public int Status { get; set; } = default!;
+
+        /// <summary>
+        /// Server-side Unix epoch milliseconds when the event was emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("timestamp")]
+        public int? Timestamp { get; set; } = default!;
+
+        /// <summary>
+        /// Cancellation payload (mirrors `requestId` + `status` for clients that only inspect `data`).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data? Data { get; set; } = default!;
+
+    }
+
+    /// <summary>
     /// Event: `error`. Emitted when an unrecoverable error occurs during request processing. The nested `error` object shape (`{ code, message }`) is preserved for wire compatibility with clients that destructure `message.error.code`. `details` carries additional structured context when available.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
@@ -1223,7 +1404,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Full error payload.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data Data { get; set; } = new Data();
+        public Data2 Data { get; set; } = new Data2();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1262,7 +1443,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// The terminal response payload.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data2 Data { get; set; } = new Data2();
+        public Data3 Data { get; set; } = new Data3();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1318,6 +1499,72 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     /// <summary>
+    /// Event: `interaction_invalid`. Emitted when a `submit_interaction` action carried values that failed the kind's server-side validation. The turn REMAINS parked — the client should re-render the interaction card with the per-field errors and let the visitor resubmit. Mirrors `otp_invalid`: invalid input is a retryable state, never a terminal `error` event.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class InteractionInvalid
+    {
+
+        /// <summary>
+        /// Event type discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+        /// <summary>
+        /// Echoes the `requestId` of the parked turn (same correlation as the `interaction_required` event).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Validation failure details.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data4 Data { get; set; } = new Data4();
+
+        /// <summary>
+        /// Unix epoch milliseconds when the event was emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("timestamp")]
+        public int? Timestamp { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// Event: `interaction_required`. The Rich Interactions envelope: emitted mid-turn when the agent requests a structured interaction (identity intake, a date picker, choice chips, …) and the session declared the interaction kind's render capability in `supports` at `create_conversation_session`. The turn is parked until the client replies with a `submit_interaction` action carrying the same `requestId` + `interactionId` (values or `declined: true`). Sessions without the capability never receive this event — the server degrades that kind to its conversational fallback instead. `kind` selects the client card and the server validator; `spec` is the kind-specific payload whose shape is defined by `interactions/&lt;kind&gt;.schema.json` (e.g. `interactions/identity-intake.schema.json#/$defs/Spec`).
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class InteractionRequired
+    {
+
+        /// <summary>
+        /// Event type discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+        /// <summary>
+        /// Echoes the `requestId` from the originating `send_message` action. Must be included in the `submit_interaction` reply.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Interaction prompt details.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data5 Data { get; set; } = new Data5();
+
+        /// <summary>
+        /// Unix epoch milliseconds when the event was emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("timestamp")]
+        public int? Timestamp { get; set; } = default!;
+
+    }
+
+    /// <summary>
     /// Event: `keepalive`. Sent periodically by the server during long-running agent turns (typically every 30 seconds) to prevent AWS API Gateway's 10-minute idle connection timeout from closing the WebSocket while the backend is still computing. Clients should acknowledge receipt by updating their last-seen timestamp, but no reply action is needed. Distinct from `ping`/`pong` which are client-initiated.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
@@ -1340,7 +1587,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Keepalive payload.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data3 Data { get; set; } = new Data3();
+        public Data6 Data { get; set; } = new Data6();
 
         /// <summary>
         /// Unix epoch milliseconds when the keepalive was sent.
@@ -1373,7 +1620,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Failure details.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data4 Data { get; set; } = new Data4();
+        public Data7 Data { get; set; } = new Data7();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1406,7 +1653,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// OTP send acknowledgement details.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data5 Data { get; set; } = new Data5();
+        public Data8 Data { get; set; } = new Data8();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1439,7 +1686,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Verification prompt details.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data6 Data { get; set; } = new Data6();
+        public Data9 Data { get; set; } = new Data9();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1472,7 +1719,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Verification success details.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data7 Data { get; set; } = new Data7();
+        public Data10 Data { get; set; } = new Data10();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1511,7 +1758,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Pong payload (mirrors top-level `timestamp` for clients that only inspect `data`).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data8? Data { get; set; } = default!;
+        public Data11? Data { get; set; } = default!;
 
     }
 
@@ -1544,7 +1791,85 @@ namespace SmooAI.SmoothOperator.Generated
         /// The per-node state snapshot.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data9 Data { get; set; } = new Data9();
+        public Data12 Data { get; set; } = new Data12();
+
+        /// <summary>
+        /// Unix epoch milliseconds when the event was emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("timestamp")]
+        public int? Timestamp { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// Event: `stream_preamble`. A single token of a short, present-tense "what I'm about to do" sentence, generated by a small fast model IN PARALLEL with the main turn to cover the reasoning model's time-to-first-token. Emitted only when the server is configured with `SMOOTH_AGENT_PREAMBLE_MODEL`. Shaped identically to `stream_token` so clients can reuse the render path, but on a distinct `type` so it is shown as an EPHEMERAL status line that the real answer replaces — it is NEVER folded into the answer, and the final response (carried by `eventual_response`) never includes it. The server suppresses it if the real answer has already begun streaming. Clients that do not recognize this event MUST ignore it — the answer still streams via `stream_token`, so the preamble simply isn't shown.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class StreamPreamble
+    {
+
+        /// <summary>
+        /// Event type discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+        /// <summary>
+        /// Echoes the `requestId` from the originating `send_message` action.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// The raw preamble token text. Also present inside `data.token` for consumers that only inspect `data`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("token")]
+        public string? Token { get; set; } = default!;
+
+        /// <summary>
+        /// Preamble token event payload.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data13 Data { get; set; } = new Data13();
+
+        /// <summary>
+        /// Unix epoch milliseconds when the event was emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("timestamp")]
+        public int? Timestamp { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// Event: `stream_reasoning`. A single *reasoning* token from a reasoning-model's separate thinking channel (`reasoning_content`/`reasoning` deltas — e.g. DeepSeek, gpt-oss/harmony, MiniMax, GLM), forwarded to the client in real time. Corresponds to smooth-operator's `AgentEvent::ReasoningDelta`. Shaped identically to `stream_token` so clients can render it the same way, but on a distinct `type` so reasoning is shown as collapsible "thinking" and is NEVER folded into the answer. The final response (carried by `eventual_response`) already excludes reasoning. Clients that do not recognize this event MUST ignore it — the answer still streams via `stream_token`, so reasoning simply isn't shown.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class StreamReasoning
+    {
+
+        /// <summary>
+        /// Event type discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+        /// <summary>
+        /// Echoes the `requestId` from the originating `send_message` action.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// The raw reasoning token text. Also present inside `data.token` for consumers that only inspect `data`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("token")]
+        public string? Token { get; set; } = default!;
+
+        /// <summary>
+        /// Reasoning token event payload.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data14 Data { get; set; } = new Data14();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1583,7 +1908,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Token event payload.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data10 Data { get; set; } = new Data10();
+        public Data15 Data { get; set; } = new Data15();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1616,7 +1941,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// Confirmation prompt details.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data11 Data { get; set; } = new Data11();
+        public Data16 Data { get; set; } = new Data16();
 
         /// <summary>
         /// Unix epoch milliseconds when the event was emitted.
@@ -1727,6 +2052,25 @@ namespace SmooAI.SmoothOperator.Generated
         [System.Runtime.Serialization.EnumMember(Value = @"ended")]
         Ended = 2,
 
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Images
+    {
+
+        /// <summary>
+        /// A `data:image/...;base64,...` URL or a remote `https` image URL. Emitted to the model as an OpenAI `image_url` content part.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("url")]
+        public string Url { get; set; } = default!;
+
+        /// <summary>
+        /// Optional OpenAI vision detail hint. Omitted when absent.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("detail")]
+        [System.Text.Json.Serialization.JsonConverter(typeof(SmooAI.SmoothOperator.Generated.EnumMemberStringConverter<ImagesDetail>))]
+        public ImagesDetail? Detail { get; set; } = default!;
 
     }
 
@@ -1938,8 +2282,12 @@ namespace SmooAI.SmoothOperator.Generated
         Verify_otp = 5,
 
 
+        [System.Runtime.Serialization.EnumMember(Value = @"submit_interaction")]
+        Submit_interaction = 6,
+
+
         [System.Runtime.Serialization.EnumMember(Value = @"ping")]
-        Ping = 6,
+        Ping = 7,
 
 
     }
@@ -1988,13 +2336,39 @@ namespace SmooAI.SmoothOperator.Generated
         Otp_invalid = 9,
 
 
+        [System.Runtime.Serialization.EnumMember(Value = @"interaction_required")]
+        Interaction_required = 10,
+
+
+        [System.Runtime.Serialization.EnumMember(Value = @"interaction_invalid")]
+        Interaction_invalid = 11,
+
+
         [System.Runtime.Serialization.EnumMember(Value = @"error")]
-        Error = 10,
+        Error = 12,
 
 
         [System.Runtime.Serialization.EnumMember(Value = @"pong")]
-        Pong = 11,
+        Pong = 13,
 
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data
+    {
+
+        /// <summary>
+        /// Echoes the cancelled turn's requestId.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Terminal cancellation status.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("status")]
+        public int Status { get; set; } = default!;
 
     }
 
@@ -2017,7 +2391,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data
+    public partial class Data2
     {
 
         /// <summary>
@@ -2041,7 +2415,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data2
+    public partial class Data3
     {
 
         /// <summary>
@@ -2060,19 +2434,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// The final agent output.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data12 Data { get; set; } = new Data12();
-
-    }
-
-    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data3
-    {
-
-        /// <summary>
-        /// The request ID of the in-flight request this keepalive belongs to.
-        /// </summary>
-        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
-        public string RequestId { get; set; } = default!;
+        public Data17 Data { get; set; } = new Data17();
 
     }
 
@@ -2081,16 +2443,16 @@ namespace SmooAI.SmoothOperator.Generated
     {
 
         /// <summary>
-        /// The request ID this verification belongs to.
+        /// The request ID this interaction belongs to.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("requestId")]
         public string RequestId { get; set; } = default!;
 
         /// <summary>
-        /// OTP invalid payload.
+        /// Per-field validation errors.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data13 Data { get; set; } = new Data13();
+        public Data18 Data { get; set; } = new Data18();
 
     }
 
@@ -2099,16 +2461,16 @@ namespace SmooAI.SmoothOperator.Generated
     {
 
         /// <summary>
-        /// The request ID this OTP delivery belongs to.
+        /// The request ID this interaction belongs to.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("requestId")]
         public string RequestId { get; set; } = default!;
 
         /// <summary>
-        /// Delivery details.
+        /// The interaction the client should render.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data14 Data { get; set; } = new Data14();
+        public Data19 Data { get; set; } = new Data19();
 
     }
 
@@ -2117,16 +2479,10 @@ namespace SmooAI.SmoothOperator.Generated
     {
 
         /// <summary>
-        /// The request ID this verification belongs to.
+        /// The request ID of the in-flight request this keepalive belongs to.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("requestId")]
         public string RequestId { get; set; } = default!;
-
-        /// <summary>
-        /// Details about the authentication requirement.
-        /// </summary>
-        [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data15 Data { get; set; } = new Data15();
 
     }
 
@@ -2141,15 +2497,69 @@ namespace SmooAI.SmoothOperator.Generated
         public string RequestId { get; set; } = default!;
 
         /// <summary>
-        /// Success payload.
+        /// OTP invalid payload.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data16 Data { get; set; } = new Data16();
+        public Data20 Data { get; set; } = new Data20();
 
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
     public partial class Data8
+    {
+
+        /// <summary>
+        /// The request ID this OTP delivery belongs to.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Delivery details.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data21 Data { get; set; } = new Data21();
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data9
+    {
+
+        /// <summary>
+        /// The request ID this verification belongs to.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Details about the authentication requirement.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data22 Data { get; set; } = new Data22();
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data10
+    {
+
+        /// <summary>
+        /// The request ID this verification belongs to.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Success payload.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public Data23 Data { get; set; } = new Data23();
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data11
     {
 
         /// <summary>
@@ -2161,7 +2571,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data9
+    public partial class Data12
     {
 
         /// <summary>
@@ -2191,7 +2601,43 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data10
+    public partial class Data13
+    {
+
+        /// <summary>
+        /// The request ID this preamble token belongs to.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// The raw preamble token text.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("token")]
+        public string Token { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data14
+    {
+
+        /// <summary>
+        /// The request ID this reasoning token belongs to.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// The raw reasoning token text.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("token")]
+        public string Token { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data15
     {
 
         /// <summary>
@@ -2209,7 +2655,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data11
+    public partial class Data16
     {
 
         /// <summary>
@@ -2222,7 +2668,25 @@ namespace SmooAI.SmoothOperator.Generated
         /// Details about the pending write that the user must approve or reject.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public Data17 Data { get; set; } = new Data17();
+        public Data24 Data { get; set; } = new Data24();
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public enum ImagesDetail
+    {
+
+        [System.Runtime.Serialization.EnumMember(Value = @"low")]
+        Low = 0,
+
+
+        [System.Runtime.Serialization.EnumMember(Value = @"high")]
+        High = 1,
+
+
+        [System.Runtime.Serialization.EnumMember(Value = @"auto")]
+        Auto = 2,
+
 
     }
 
@@ -2245,7 +2709,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data12
+    public partial class Data17
     {
 
         /// <summary>
@@ -2273,23 +2737,95 @@ namespace SmooAI.SmoothOperator.Generated
         public string? EscalationReason { get; set; } = default!;
 
         /// <summary>
+        /// Per-turn token accounting and cost, captured from the engine's terminal completion event. Lets a client accumulate live session cost. Optional and back-compatible: absent when the engine reported no usage for the turn (e.g. an offline/mock turn).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("usage")]
+        public Usage? Usage { get; set; } = default!;
+
+        /// <summary>
         /// The sources that grounded this answer, when any were retrieved. Collected by the runtime from the documents that actually grounded the turn — the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results — deduplicated by source id and capped. Optional and back-compatible: absent when the turn used no knowledge sources. Each item is a `Citation` (see `domain/citation.schema.json`).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("citations")]
         public System.Collections.Generic.ICollection<Citations>? Citations { get; set; } = default!;
 
+        /// <summary>
+        /// An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("directive")]
+        public object? Directive { get; set; } = default!;
+
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data13
+    public partial class Data18
+    {
+
+        /// <summary>
+        /// The interaction instance the rejected submit targeted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("interactionId")]
+        public string InteractionId { get; set; } = default!;
+
+        /// <summary>
+        /// The interaction kind (e.g. `identity_intake`).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("kind")]
+        public string Kind { get; set; } = default!;
+
+        /// <summary>
+        /// One entry per failed field. `field` is a kind-specific field key (identity_intake: `name` | `email` | `phone`).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("errors")]
+        public System.Collections.Generic.ICollection<Errors> Errors { get; set; } = new System.Collections.ObjectModel.Collection<Errors>();
+
+        /// <summary>
+        /// Human-readable summary suitable for a card-level error line.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("message")]
+        public string Message { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data19
+    {
+
+        /// <summary>
+        /// Server-generated ID for this specific interaction instance. Must be echoed on the `submit_interaction` reply so a stale submit can never resolve a newer park.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("interactionId")]
+        public string InteractionId { get; set; } = default!;
+
+        /// <summary>
+        /// The interaction kind (e.g. `identity_intake`). Selects the client's card component and the server's validator. The kind catalog lives in `spec/interactions/`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("kind")]
+        public string Kind { get; set; } = default!;
+
+        /// <summary>
+        /// Kind-specific render spec. Shape per `interactions/&lt;kind&gt;.schema.json#/$defs/Spec` (e.g. identity_intake's `{ fields: [...] }`).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("spec")]
+        public object Spec { get; set; } = new object();
+
+        /// <summary>
+        /// Human-readable reason the agent raised this interaction, suitable for the card header (e.g. `to send you the quote`).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("reason")]
+        public string Reason { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Data20
     {
 
         /// <summary>
         /// Machine-readable failure reason. Absent if the server cannot determine a specific cause.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
-        [System.Text.Json.Serialization.JsonConverter(typeof(SmooAI.SmoothOperator.Generated.EnumMemberStringConverter<Data13Error>))]
-        public Data13Error? Error { get; set; } = default!;
+        [System.Text.Json.Serialization.JsonConverter(typeof(SmooAI.SmoothOperator.Generated.EnumMemberStringConverter<Data20Error>))]
+        public Data20Error? Error { get; set; } = default!;
 
         /// <summary>
         /// How many more attempts the caller has before the OTP is locked. Zero means the session is locked and a new OTP must be requested.
@@ -2306,15 +2842,15 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data14
+    public partial class Data21
     {
 
         /// <summary>
         /// The channel through which the OTP was delivered.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("channel")]
-        [System.Text.Json.Serialization.JsonConverter(typeof(SmooAI.SmoothOperator.Generated.EnumMemberStringConverter<Data14Channel>))]
-        public Data14Channel Channel { get; set; } = default!;
+        [System.Text.Json.Serialization.JsonConverter(typeof(SmooAI.SmoothOperator.Generated.EnumMemberStringConverter<Data21Channel>))]
+        public Data21Channel Channel { get; set; } = default!;
 
         /// <summary>
         /// Partially masked destination address for display in the UI (e.g. `j***@example.com` or `+1 ***-***-4567`). Sufficient for the user to recognize their own address without exposing it fully.
@@ -2325,7 +2861,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data15
+    public partial class Data22
     {
 
         /// <summary>
@@ -2356,7 +2892,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data16
+    public partial class Data23
     {
 
         /// <summary>
@@ -2398,7 +2934,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public partial class Data17
+    public partial class Data24
     {
 
         /// <summary>
@@ -2412,6 +2948,30 @@ namespace SmooAI.SmoothOperator.Generated
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("actionDescription")]
         public string ActionDescription { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Usage
+    {
+
+        /// <summary>
+        /// Accumulated cost in USD across every LLM call in this turn (gateway-priced).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("costUsd")]
+        public double? CostUsd { get; set; } = default!;
+
+        /// <summary>
+        /// Accumulated prompt (input) tokens across every LLM call in this turn.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("promptTokens")]
+        public int? PromptTokens { get; set; } = default!;
+
+        /// <summary>
+        /// Accumulated completion (output) tokens across every LLM call in this turn.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("completionTokens")]
+        public int? CompletionTokens { get; set; } = default!;
 
     }
 
@@ -2455,7 +3015,25 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public enum Data13Error
+    public partial class Errors
+    {
+
+        /// <summary>
+        /// The kind-specific field that failed validation.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("field")]
+        public string Field { get; set; } = default!;
+
+        /// <summary>
+        /// Human-readable validation message for this field.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("message")]
+        public string Message { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public enum Data20Error
     {
 
         [System.Runtime.Serialization.EnumMember(Value = @"INVALID_CODE")]
@@ -2477,7 +3055,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
-    public enum Data14Channel
+    public enum Data21Channel
     {
 
         [System.Runtime.Serialization.EnumMember(Value = @"email")]
