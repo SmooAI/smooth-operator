@@ -1,6 +1,6 @@
 {
     "name": "@smooai/smooth-operator-server",
-    "version": "1.4.0",
+    "version": "1.4.1",
     "private": true,
     "description": "Native TypeScript smooth-operator server: a WebSocket service that speaks the smooth-operator wire protocol and runs the @smooai/smooth-operator-core engine in-process per turn. The TS sibling of the Rust (rust/smooth-operator-server) and C# (dotnet/server) servers; the client lives in ../src and is untouched.",
     "license": "MIT",
