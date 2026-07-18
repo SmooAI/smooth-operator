@@ -120,6 +120,33 @@ async def test_before_cursor_filters_strictly_older() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cursor_round_trip_keeps_sub_second_precision() -> None:
+    """Two messages in the SAME second: page with limit=1, hand the returned createdAt
+    back as `before`, and page two must return the older one. A second-truncated
+    createdAt (Go's original RFC3339) makes the strict `<` filter drop both — this is the
+    regression that test only asserting "createdAt exists" sails right past. th-89b698."""
+    store = InMemorySessionStore()
+    session = await store.create_session("agent", "U", "u@example.com")
+    base = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+    for i in range(2):
+        await store.append_message(session.conversation_id, MessageDirection.INBOUND, f"m{i}")
+    store._messages[session.conversation_id] = [
+        StoredMessage(m.id, m.conversation_id, m.direction, m.text, base + timedelta(microseconds=100_000 * (i + 1)))
+        for i, m in enumerate(store._messages[session.conversation_id])
+    ]
+
+    page1 = (await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1))["data"]
+    assert [m["content"]["text"] for m in page1["messages"]] == ["m1"]
+    cursor = page1["messages"][0]["createdAt"]
+    # The wire value itself must carry sub-second precision — truncation happens here.
+    assert datetime.fromisoformat(cursor).microsecond != 0
+
+    page2 = (await _get_messages(store, requestId="r1", sessionId=session.session_id, limit=1, before=cursor))["data"]
+    assert [m["content"]["text"] for m in page2["messages"]] == ["m0"]
+    assert page2["hasMore"] is False
+
+
+@pytest.mark.asyncio
 async def test_invalid_before_is_validation_error() -> None:
     store = InMemorySessionStore()
     session = await store.create_session("agent", "U", "u@example.com")
