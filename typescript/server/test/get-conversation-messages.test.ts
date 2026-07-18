@@ -109,6 +109,32 @@ describe('get_conversation_messages action', () => {
         expect(data.hasMore).toBe(false);
     });
 
+    it('pages correctly through messages in the SAME second (createdAt keeps sub-second precision)', async () => {
+        // Regression: a server formatting createdAt at whole-second precision (Go's original
+        // time.RFC3339) makes the documented page-2 cursor — feed page 1's oldest createdAt
+        // back as `before` — silently drop every message sharing that second.
+        const { store, session, sink, dispatch } = await setup();
+        const older = await store.appendMessage(session.conversationId, 'inbound', 'older');
+        const newer = await store.appendMessage(session.conversationId, 'outbound', 'newer');
+        older.createdAt = '2026-07-18T10:00:00.100Z';
+        newer.createdAt = '2026-07-18T10:00:00.900Z';
+
+        await dispatch({ action: 'get_conversation_messages', requestId: 'gm-1', sessionId: session.sessionId, limit: 1 });
+        const page1 = payload(sink);
+        expect(page1.messages.map(text)).toEqual(['newer']);
+        expect(page1.hasMore).toBe(true);
+        const cursor = page1.messages[0]!.createdAt as string;
+        // Sub-second precision survives to the wire — the whole point of the cursor.
+        expect(cursor).toBe('2026-07-18T10:00:00.900Z');
+
+        sink.length = 0;
+        await dispatch({ action: 'get_conversation_messages', requestId: 'gm-2', sessionId: session.sessionId, limit: 1, before: cursor });
+
+        const page2 = payload(sink);
+        expect(page2.messages.map(text)).toEqual(['older']);
+        expect(page2.hasMore).toBe(false);
+    });
+
     it('an unparseable `before` is a VALIDATION_ERROR', async () => {
         const { session, sink, dispatch } = await setup();
 
