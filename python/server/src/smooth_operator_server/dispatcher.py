@@ -81,11 +81,49 @@ class FrameDispatcher:
         #: Fast model for the post-turn workflow judge (None → runner's default).
         self._judge_model = judge_model
         #: Spawned turn tasks kept alive (the event loop only holds weak refs to
-        #: tasks); cleared as each completes so they don't accumulate.
+        #: tasks, and a cancelled turn still needs to run its cancellation to
+        #: completion); cleared as each finishes so they don't accumulate.
         self._turn_tasks: set[asyncio.Task[Any]] = set()
+        #: The connection's single active agent turn, if one is running: the turn's
+        #: ``requestId`` (echoed on the ``cancelled`` event) + its task. Kept as a
+        #: strong ref (the loop only holds weak ones) and cleared when the turn
+        #: completes. Only ONE turn runs at a time — a second ``send_message`` while
+        #: one is in flight is rejected with ``TURN_IN_PROGRESS``, never run
+        #: concurrently. Mirrors the Rust reader loop's ``current_turn`` slot.
+        self._active_turn: tuple[str | None, asyncio.Task[Any]] | None = None
+
+    def _in_flight(self) -> tuple[str | None, asyncio.Task[Any]] | None:
+        """The active turn, or ``None`` if there is none / it already finished. The
+        done check mirrors the Rust ``handle.is_finished()`` guard: the completion
+        callback that clears the slot is scheduled, not immediate, so a frame arriving
+        in that window must not see a finished turn as in-flight."""
+        if self._active_turn is not None and self._active_turn[1].done():
+            self._active_turn = None
+        return self._active_turn
+
+    def cancel_active_turn(self, sink: Sink | None = None) -> bool:
+        """Abort the connection's in-flight turn, if any, and (with a ``sink``) emit
+        the terminal ``cancelled`` event echoing the cancelled turn's ``requestId``.
+
+        Cancelling the task raises :class:`asyncio.CancelledError` inside the turn at
+        its next ``await``, abandoning the in-flight LLM/tool call. The partial
+        assistant reply is discarded — it is persisted only at the END of the turn,
+        which the cancellation skips; the user's message was persisted at the start,
+        so it stays. Returns whether a turn was actually aborted (a cancel with none
+        running is a harmless no-op that emits nothing)."""
+        active = self._in_flight()
+        if active is None:
+            return False
+        turn_request_id, task = active
+        self._active_turn = None
+        task.cancel()
+        if sink is not None:
+            sink(protocol.cancelled(turn_request_id))
+        return True
 
     async def wait_for_turns(self) -> None:
-        """Await every in-flight spawned ``send_message`` turn to completion.
+        """Await every spawned ``send_message`` turn to completion (including one
+        already cancelled, whose cancellation still has to unwind).
 
         ``send_message`` runs its turn as a background task (so the read loop stays
         free to receive a `confirm_tool_action` while a turn is parked). The
@@ -120,8 +158,25 @@ class FrameDispatcher:
                 await self._handle_get_conversation_messages(frame, request_id, sink)
             elif action == "get_session":
                 await self._handle_get_session(frame, request_id, sink)
+            elif action == "cancel":
+                # Client-initiated turn cancellation (the "Stop button"). Connection-
+                # local: aborts the tracked turn task and emits `cancelled`. With no
+                # turn running it is a silent no-op.
+                self.cancel_active_turn(sink)
             elif action == "send_message":
-                await self._handle_send_message(frame, request_id, sink)
+                if self._in_flight() is not None:
+                    # A turn is already running on this connection: reject the second
+                    # one rather than run two concurrently (interleaved streams +
+                    # racing storage writes). The client must cancel it or wait.
+                    sink(
+                        protocol.error(
+                            request_id,
+                            "TURN_IN_PROGRESS",
+                            "a turn is already in progress on this connection; cancel it or wait for it to complete",
+                        )
+                    )
+                else:
+                    await self._handle_send_message(frame, request_id, sink)
             elif action == "confirm_tool_action":
                 self._handle_confirm_tool_action(frame, request_id, sink)
             elif action == "verify_otp":
@@ -371,8 +426,18 @@ class FrameDispatcher:
             )
 
         task = asyncio.ensure_future(_run_turn())
+        # Track it as the connection's single active turn so a later `cancel` frame
+        # (or a disconnect) can abort it, and a second `send_message` is rejected.
+        self._active_turn = (request_id_str, task)
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
+        task.add_done_callback(self._clear_active_turn)
+
+    def _clear_active_turn(self, task: asyncio.Task[Any]) -> None:
+        """Free the active-turn slot once its task finishes (only if it is still THIS
+        task's — a cancel already took the slot, and a later turn may own it now)."""
+        if self._active_turn is not None and self._active_turn[1] is task:
+            self._active_turn = None
 
     async def _maybe_offer_otp(self, refusal: OtpRefusal, session: Any, request_id: str, sink: Sink) -> None:
         """Emit the OTP-offer sequence for a turn whose ``end_user`` tool was refused

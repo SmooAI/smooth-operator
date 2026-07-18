@@ -214,6 +214,36 @@ def otp_invalid(
     }
 
 
+def cancelled(request_id: str | None) -> dict[str, Any]:
+    """``cancelled`` — the terminal event of a turn the client aborted with a
+    ``cancel`` action. Emitted **in place of** the ``eventual_response`` a completed
+    turn would send: it echoes the cancelled ``send_message``'s ``requestId`` so the
+    client can correlate it to the in-flight turn and reset its UI (drop the streaming
+    indicator, re-enable input).
+
+    Status ``499`` mirrors nginx's "client closed request" — a terminal, non-200
+    outcome distinct from a server error. The ``requestId`` is echoed at the envelope
+    level and inside ``data`` (envelope convention). No answer payload: a cancelled
+    turn produced no assistant message (the streamed tokens were ephemeral and are NOT
+    persisted; the user's message stays persisted).
+
+    A cancel with no active turn is a no-op and emits nothing — this builder is only
+    called when a live turn was actually aborted. Mirrors the Rust ``protocol::cancelled``."""
+    ts = _now_ms()
+    data: dict[str, Any] = {"status": 499}
+    if request_id is not None:
+        data["requestId"] = request_id
+    ev: dict[str, Any] = {
+        "type": "cancelled",
+        "status": 499,
+        "data": data,
+        "timestamp": ts,
+    }
+    if request_id is not None:
+        ev["requestId"] = request_id
+    return ev
+
+
 def error(request_id: str | None, code: str, message: str) -> dict[str, Any]:
     """``error`` — an unrecoverable error. The ``{code, message}`` descriptor is
     duplicated at the envelope level and nested under ``data.error`` for wire
