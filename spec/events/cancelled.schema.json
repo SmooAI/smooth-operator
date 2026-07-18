@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/events/cancelled.schema.json",
+  "title": "Cancelled",
+  "description": "Event: `cancelled`. The terminal event of a turn the client aborted with a `cancel` action — emitted IN PLACE OF the `eventual_response` a completed turn would send. Echoes the cancelled `send_message`'s `requestId` so the client correlates it to the in-flight turn and resets its UI (drop the streaming indicator, re-enable input). Status `499` (\"client closed request\") marks a terminal, non-200 outcome distinct from a server `error`. There is NO answer payload: a cancelled turn produced no assistant message — the streamed tokens were ephemeral and are NOT persisted, while the user's message stays persisted (so the conversation carries the user turn with no reply). Only emitted when a live turn was actually aborted; a `cancel` with no active turn emits nothing.",
+  "type": "object",
+  "required": ["type", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "cancelled",
+      "description": "Event type discriminator."
+    },
+    "requestId": {
+      "type": "string",
+      "description": "Echoes the `requestId` of the cancelled `send_message` turn (falls back to the `cancel` frame's own requestId). Absent only if neither carried one."
+    },
+    "status": {
+      "type": "integer",
+      "const": 499,
+      "description": "Terminal cancellation status (\"client closed request\"). Distinct from 200 (eventual_response) and from error codes."
+    },
+    "timestamp": {
+      "type": "integer",
+      "description": "Server-side Unix epoch milliseconds when the event was emitted."
+    },
+    "data": {
+      "type": "object",
+      "description": "Cancellation payload (mirrors `requestId` + `status` for clients that only inspect `data`).",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Echoes the cancelled turn's requestId."
+        },
+        "status": {
+          "type": "integer",
+          "const": 499,
+          "description": "Terminal cancellation status."
+        }
+      }
+    }
+  }
+}

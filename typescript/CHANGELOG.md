@@ -1,5 +1,36 @@
 # @smooai/smooth-operator
 
+## 1.27.4
+
+### Patch Changes
+
+- b910a11: Python server: implement the `get_conversation_messages` action. It previously fell through to `UNSUPPORTED_ACTION`, so a web client resuming a conversation against the Python server rendered no history. The handler mirrors the merged Go/Rust reference and the `spec/actions/get-messages.schema.json` contract: newest-first `messages` (id, direction, content.text, createdAt) plus `hasMore`, with `limit` (1..100, default 50) and an optional ISO 8601 `before` cursor. `StoredMessage` gains a defaulted `created_at` timestamp to back the `createdAt` field and the cursor.
+- c64b97b: TypeScript server: implement the `get_conversation_messages` action. Its dispatcher switch stopped at `verify_otp`, so the action fell through to `UNSUPPORTED_ACTION` and a web client resuming a conversation against the TS server rendered no history. The handler mirrors the merged Go/Rust references and the `spec/actions/get-messages.schema.json` contract: newest-first `messages` (id, direction, content.text, createdAt) plus `hasMore`, with `limit` (1..100, default 50) and an optional ISO 8601 `before` cursor. `StoredMessage` gains an optional `createdAt` timestamp (set by `InMemorySessionStore.appendMessage`) to back the `createdAt` field and the cursor.
+
+## 1.27.3
+
+### Patch Changes
+
+- 0e65c59: Go server: emit `createdAt` with sub-second precision (`RFC3339Nano`) from `get_conversation_messages`. Clients page by handing the oldest `createdAt` back as `before`, which is filtered strictly-less-than against the store's full-precision timestamp — whole-second `RFC3339` truncation put the cursor _before_ the message it named, so every message sharing that second silently vanished from page two. Also aligns the Go wire format with the .NET server, which already round-trips full precision.
+
+## 1.27.2
+
+### Patch Changes
+
+- e5bb69c: .NET server: implement the `get_conversation_messages` action
+
+  The .NET `FrameDispatcher` answered `UNSUPPORTED_ACTION` for
+  `get_conversation_messages`, so a C#-hosted server couldn't page conversation
+  history the way the Rust/Go/TS servers can — a client resuming a conversation
+  had no way to load prior messages. It now returns `{messages, hasMore}`
+  newest-first per `spec/actions/get-messages.schema.json`, with `limit` (1–100,
+  default 50) and an optional ISO 8601 `before` cursor.
+
+  `StoredMessage` gained a `CreatedAt` init-only property (not a positional
+  parameter, so downstream `ISessionStore` implementations keep compiling) that
+  the Postgres store now reads from — and returns on append via — the existing
+  `conversation_messages.created_at` column.
+
 ## 1.27.1
 
 ### Patch Changes

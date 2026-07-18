@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from threading import Lock
@@ -52,6 +52,11 @@ class StoredMessage:
     conversation_id: str
     direction: MessageDirection
     text: str
+    #: When the message was appended (UTC) — the ``createdAt`` field of the
+    #: ``get_conversation_messages`` contract and its ``before`` paging key. Defaulted so
+    #: downstream implementers of :class:`SessionStore` that build a ``StoredMessage``
+    #: positionally keep working. th-89b698.
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass(frozen=True)
@@ -184,7 +189,7 @@ class InMemorySessionStore(SessionStore):
             return self._sessions.get(session_id)
 
     async def append_message(self, conversation_id: str, direction: MessageDirection, text: str) -> StoredMessage:
-        message = StoredMessage(str(uuid.uuid4()), conversation_id, direction, text)
+        message = StoredMessage(str(uuid.uuid4()), conversation_id, direction, text, datetime.now(timezone.utc))
         with self._gate:
             self._messages.setdefault(conversation_id, []).append(message)
             self._updated_at[conversation_id] = datetime.now(timezone.utc)

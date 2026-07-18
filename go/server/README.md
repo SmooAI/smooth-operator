@@ -73,7 +73,8 @@ You decide what the agent can touch; the runner enforces it.
 ## What's shipped
 
 - `SessionStore` / `InMemorySessionStore` — sessions + conversation message logs.
-- `FrameDispatcher` — validates inbound frames and routes them (`create_conversation_session` → store, `send_message` → `TurnRunner`, `get_session` → store, `ping` → pong).
+- `FrameDispatcher` — validates inbound frames and routes them (`create_conversation_session` → store, `send_message` → `TurnRunner`, `get_session` → store, `cancel` → abort the in-flight turn, `ping` → pong).
+- **Turn cancellation** (the "Stop button") — one active turn per connection, tracked with its own cancellable context. `cancel` aborts it and emits the terminal `cancelled` event (`status: 499`) in place of the `eventual_response`; the partial assistant reply is discarded (the user message stays persisted). A second `send_message` mid-turn is rejected with `TURN_IN_PROGRESS`; a client disconnect aborts the turn too — unlike the SIGTERM drain, which lets it finish.
 - `TurnRunner` — drives one turn: replay history into a `core.SmoothAgent` thread, consume `RunStream`, emit a `stream_token` per text delta and a `stream_chunk` per tool call / result, persist the reply, return the terminal `eventual_response` (with citations).
 - `AuthVerifier` seam — a default permissive verifier and a `LocalTokenVerifier` (HS256 JWT, fail-closed), chosen at connect from the `?token=` slot.
 - `AgentConfigResolver` seam — resolves a session's `agentId` into its per-agent config (instructions, conversation `Workflow`, greeting, personality, tool allow-list), folded into the turn. A configured `Workflow` runs a stepped, judge-advanced guided-agency flow.

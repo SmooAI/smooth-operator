@@ -32,8 +32,19 @@ use crate::state::AppState;
 const AGENT_NAME: &str = "smooth-agent";
 
 /// Parse and dispatch a single inbound text frame. Any produced events are sent
-/// through `sink`. Returns `Ok(())` always — protocol-level failures are
-/// surfaced as `error` events, never as hard errors that drop the connection.
+/// through `sink`. Protocol-level failures are surfaced as `error` events, never
+/// as hard errors that drop the connection.
+///
+/// Returns the [`JoinHandle`](tokio::task::JoinHandle) of the spawned agent turn
+/// for a `send_message` frame (so the connection loop can track the single active
+/// turn and abort it on a `cancel` frame or disconnect); `None` for every other
+/// action. The turn is spawned — not awaited inline — because a
+/// confirmation-gated turn parks awaiting a later `confirm_tool_action` frame the
+/// same reader must be free to receive.
+///
+/// Note: `cancel` is NOT dispatched here. Cancellation is connection-local state
+/// (it aborts the tracked turn handle), so [`crate::server`]'s reader loop handles
+/// the `cancel` action directly before delegating other frames here.
 pub async fn handle_frame(
     state: &AppState,
     access: &AccessContext,
@@ -42,7 +53,7 @@ pub async fn handle_frame(
     auth_org: Option<&str>,
     raw: &str,
     sink: &UnboundedSender<Value>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     let parsed: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
@@ -51,7 +62,7 @@ pub async fn handle_frame(
                 "VALIDATION_ERROR",
                 &format!("invalid JSON frame: {e}"),
             ));
-            return;
+            return None;
         }
     };
 
@@ -61,34 +72,43 @@ pub async fn handle_frame(
     match action {
         Some("ping") => {
             let _ = sink.send(protocol::pong(request_id));
+            None
         }
         Some("create_conversation_session") => {
             handle_create_session(state, conn_id, origin, auth_org, &parsed, request_id, sink)
                 .await;
+            None
         }
         Some("get_session") => {
             handle_get_session(state, &parsed, request_id, sink);
+            None
         }
         Some("get_conversation_messages") => {
             handle_get_conversation_messages(state, &parsed, request_id, sink).await;
+            None
         }
         Some("list_conversations") => {
             handle_list_conversations(state, auth_org, &parsed, request_id, sink).await;
+            None
         }
         Some("rename_conversation") => {
             handle_rename_conversation(state, &parsed, request_id, sink).await;
+            None
         }
-        Some("send_message") => {
-            handle_send_message(state, access, &parsed, request_id, sink).await;
-        }
+        // The only action that spawns a turn — its handle flows back to the reader
+        // loop so a later `cancel` (or a disconnect) can abort it.
+        Some("send_message") => handle_send_message(state, access, &parsed, request_id, sink).await,
         Some("confirm_tool_action") => {
             handle_confirm_tool_action(state, &parsed, request_id, sink);
+            None
         }
         Some("verify_otp") => {
             handle_verify_otp(state, &parsed, request_id, sink).await;
+            None
         }
         Some("submit_interaction") => {
             handle_submit_interaction(state, &parsed, request_id, sink);
+            None
         }
         Some(other) => {
             let _ = sink.send(protocol::error(
@@ -96,6 +116,7 @@ pub async fn handle_frame(
                 "UNSUPPORTED_ACTION",
                 &format!("action '{other}' is not supported by this server"),
             ));
+            None
         }
         None => {
             let _ = sink.send(protocol::error(
@@ -103,6 +124,7 @@ pub async fn handle_frame(
                 "VALIDATION_ERROR",
                 "missing 'action' field",
             ));
+            None
         }
     }
 }
@@ -1008,13 +1030,19 @@ async fn persist_workflow_step(
     }
 }
 
+/// Handle a `send_message` frame. Validates the frame, then **spawns** the agent
+/// turn (so the reader stays free to receive `confirm_tool_action` while the turn
+/// parks). Returns the spawned turn's [`JoinHandle`](tokio::task::JoinHandle) so
+/// the connection loop can track it as the connection's single active turn and
+/// abort it on a `cancel` frame (or disconnect). Returns `None` on any validation
+/// failure (an `error` event was already emitted) — no turn was spawned.
 async fn handle_send_message(
     state: &AppState,
     access: &AccessContext,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     // requestId is load-bearing for streaming correlation; require it.
     let Some(request_id) = request_id else {
         let _ = sink.send(protocol::error(
@@ -1022,7 +1050,7 @@ async fn handle_send_message(
             "VALIDATION_ERROR",
             "send_message requires a 'requestId'",
         ));
-        return;
+        return None;
     };
 
     let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
@@ -1031,7 +1059,7 @@ async fn handle_send_message(
             "VALIDATION_ERROR",
             "missing 'sessionId'",
         ));
-        return;
+        return None;
     };
 
     let message = match parsed.get("message").and_then(Value::as_str) {
@@ -1042,7 +1070,7 @@ async fn handle_send_message(
                 "VALIDATION_ERROR",
                 "missing or empty 'message'",
             ));
-            return;
+            return None;
         }
     };
 
@@ -1059,7 +1087,7 @@ async fn handle_send_message(
             "SESSION_NOT_FOUND",
             &format!("session '{session_id}' not found"),
         ));
-        return;
+        return None;
     };
 
     // A test-injected provider (the scenario-parity corpus's `MockLlmClient`)
@@ -1111,7 +1139,7 @@ async fn handle_send_message(
                  per-org key resolved); this server cannot serve LLM turns. Configure the gateway \
                  key to enable send_message.",
             ));
-            return;
+            return None;
         }
     };
 
@@ -1328,7 +1356,7 @@ async fn handle_send_message(
     let request_id_owned = request_id.to_string();
     let conversation_id = session.conversation_id.clone();
 
-    tokio::spawn(async move {
+    let turn_handle = tokio::spawn(async move {
         // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW
         // is set; `None` otherwise, zero overhead). The delegate is bound to THIS
         // turn's sink/request/session so a hosted extension's `ui/confirm` routes
@@ -1485,6 +1513,7 @@ async fn handle_send_message(
             }
         }
     });
+    Some(turn_handle)
 }
 
 /// `confirm_tool_action` — resume a turn parked on a write-tool confirmation.
