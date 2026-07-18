@@ -162,6 +162,9 @@ public sealed class FrameDispatcher
                 case "list_conversations":
                     await HandleListConversationsAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
+                case "get_conversation_messages":
+                    await HandleGetConversationMessagesAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "send_message":
                     await HandleSendMessageAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
@@ -312,6 +315,87 @@ public sealed class FrameDispatcher
             sb.Append(runes[i].ToString());
         }
         return sb.ToString().TrimEnd() + "…";
+    }
+
+    private const int DefaultMessageLimit = 50;
+    private const int MaxMessageLimit = 100;
+
+    // Window scanned when a `before` cursor is supplied — see the ponytail note in the handler.
+    private const int BeforeScanWindow = 500;
+
+    /// <summary>
+    /// <c>get_conversation_messages</c> — a page of the session's conversation history, newest-first.
+    /// Per <c>spec/actions/get-messages.schema.json</c>: <c>{sessionId, limit? (1–100, default 50),
+    /// before? (ISO 8601)}</c> in, an <c>immediate_response</c> carrying <c>{messages, hasMore}</c> out.
+    /// Each message is <c>{id, direction, content:{text}, createdAt}</c>. Mirrors the Rust
+    /// <c>handle_get_conversation_messages</c>. th-30a8a7.
+    /// </summary>
+    private async Task HandleGetConversationMessagesAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    {
+        var sessionId = frame["sessionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "get_conversation_messages requires a 'sessionId'"));
+            return;
+        }
+
+        var session = await _store.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (session is null)
+        {
+            sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));
+            return;
+        }
+
+        var limit = DefaultMessageLimit;
+        if (frame["limit"] is JsonValue lv && lv.TryGetValue<int>(out var l))
+        {
+            limit = Math.Clamp(l, 1, MaxMessageLimit);
+        }
+
+        DateTimeOffset? before = null;
+        if (frame["before"]?.GetValue<string>() is string beforeRaw
+            && DateTimeOffset.TryParse(beforeRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedBefore))
+        {
+            before = parsedBefore;
+        }
+
+        List<StoredMessage> page;
+        bool hasMore;
+        if (before is null)
+        {
+            // Common path: ask for one extra to learn whether an older page exists, without a count query.
+            var fetched = await _store.ListMessagesAsync(session.ConversationId, limit + 1, cancellationToken).ConfigureAwait(false);
+            var newestFirst = fetched.Reverse().ToList();
+            hasMore = newestFirst.Count > limit;
+            page = newestFirst.Take(limit).ToList();
+        }
+        else
+        {
+            // ponytail: `before` pages within the newest 500 messages; deeper paging needs a
+            // cursor-aware store method (would break ISessionStore for downstream hosts).
+            var fetched = await _store.ListMessagesAsync(session.ConversationId, BeforeScanWindow, cancellationToken).ConfigureAwait(false);
+            var older = fetched.Reverse().Where(m => m.CreatedAt < before.Value).ToList();
+            hasMore = older.Count > limit;
+            page = older.Take(limit).ToList();
+        }
+
+        var messages = new JsonArray();
+        foreach (var m in page)
+        {
+            messages.Add(new JsonObject
+            {
+                ["id"] = m.Id,
+                ["direction"] = m.Direction == MessageDirection.Inbound ? "inbound" : "outbound",
+                ["content"] = new JsonObject { ["text"] = m.Text },
+                ["createdAt"] = m.CreatedAt.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            });
+        }
+
+        sink(ProtocolEvents.ImmediateResponse(
+            requestId,
+            200,
+            "ConversationMessages",
+            new JsonObject { ["messages"] = messages, ["hasMore"] = hasMore }));
     }
 
     private async Task HandleSendMessageAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)

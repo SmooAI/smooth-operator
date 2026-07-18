@@ -184,23 +184,31 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         const string sql = """
             INSERT INTO conversation_messages (id, conversation_id, direction, content, created_at)
             VALUES (@id, @cid, @dir, @content, now())
+            RETURNING created_at
             """;
         await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("cid", conversationId);
         command.Parameters.AddWithValue("dir", direction == MessageDirection.Inbound ? "inbound" : "outbound");
         command.Parameters.Add(new NpgsqlParameter("content", NpgsqlDbType.Jsonb) { Value = content });
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return new StoredMessage(id, conversationId, direction, text);
+        // RETURNING the db-assigned now() so the caller's StoredMessage carries the SAME timestamp the
+        // row was stored with (not a second, slightly-later clock read on this side). Read through a
+        // typed accessor — Npgsql boxes a timestamptz as DateTime, so an unbox to DateTimeOffset
+        // throws. th-30a8a7.
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var createdAt = await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? reader.GetFieldValue<DateTimeOffset>(0)
+            : DateTimeOffset.UtcNow;
+        return new StoredMessage(id, conversationId, direction, text) { CreatedAt = createdAt };
     }
 
     public async Task<IReadOnlyList<StoredMessage>> ListMessagesAsync(string conversationId, int limit, CancellationToken cancellationToken = default)
     {
         // Most recent `limit`, returned oldest-first (the stable paging order is `seq`).
         const string sql = """
-            SELECT id, direction, content->>'text' AS text
+            SELECT id, direction, content->>'text' AS text, created_at
             FROM (
-                SELECT id, direction, content, seq FROM conversation_messages
+                SELECT id, direction, content, created_at, seq FROM conversation_messages
                 WHERE conversation_id = @cid ORDER BY seq DESC LIMIT @lim
             ) sub
             ORDER BY sub.seq ASC
@@ -214,7 +222,10 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var direction = reader.GetString(1) == "inbound" ? MessageDirection.Inbound : MessageDirection.Outbound;
-            results.Add(new StoredMessage(reader.GetString(0), conversationId, direction, reader.GetString(2)));
+            results.Add(new StoredMessage(reader.GetString(0), conversationId, direction, reader.GetString(2))
+            {
+                CreatedAt = reader.GetFieldValue<DateTimeOffset>(3),
+            });
         }
         return results;
     }
