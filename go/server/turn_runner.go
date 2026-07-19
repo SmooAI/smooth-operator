@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 
 	core "github.com/SmooAI/smooth-operator-core/go/core"
 )
@@ -239,6 +240,16 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	// 4. Stream the turn: a stream_token per text delta, a stream_chunk per tool call /
 	//    tool result (mirrors the Rust runner translating StreamToolCall/StreamToolResult
 	//    events and the C# RunStreamingAsync loop).
+	// Fire the optional fast-model preamble in PARALLEL with the agent loop (no-op unless
+	// SMOOTH_AGENT_PREAMBLE_MODEL is set). Best-effort and non-blocking: it runs on its own
+	// goroutine, any error is swallowed there, and answerStarted — flipped below on the
+	// first real answer token — drops it if the answer already began streaming. It can
+	// never delay, gate, or corrupt the turn. Pearl th-9e9bfe.
+	var answerStarted atomic.Bool
+	if model := preambleModel(); model != "" {
+		go runPreamble(ctx, r.client, model, requestID, userMessage, &answerStarted, sink)
+	}
+
 	stream, err := agent.RunStream(ctx, userMessage, thread)
 	if err != nil {
 		return TurnResult{}, err
@@ -282,6 +293,9 @@ consume:
 		switch ev.Kind {
 		case core.StreamText:
 			if ev.Text != "" {
+				// Close the preamble window BEFORE emitting: from here on the real
+				// answer is streaming, so a preamble that resolves late is dropped.
+				answerStarted.Store(true)
 				reply.WriteString(ev.Text)
 				sink(streamToken(requestID, ev.Text))
 			}
