@@ -56,6 +56,24 @@ export function streamToken(requestId: string, token: string): Frame {
     };
 }
 
+/**
+ * `stream_preamble` — a single streamed token of the fast-model *preamble*: a short
+ * "what I'm about to do" sentence generated in parallel with the main turn to cover
+ * the reasoning model's time-to-first-token. Shaped exactly like `stream_token`, but
+ * on a distinct `type` so clients render it as an *ephemeral* status line that the
+ * real answer replaces — never folded into the answer. Clients that don't know the
+ * type simply ignore it. Pearl th-9a5794.
+ */
+export function streamPreamble(requestId: string, token: string): Frame {
+    return {
+        type: 'stream_preamble',
+        requestId,
+        token,
+        data: { requestId, token },
+        timestamp: nowMs(),
+    };
+}
+
 /** A per-node state snapshot (tool call / tool result on the live turn). */
 export function streamChunk(requestId: string, node: string, state: Record<string, unknown>): Frame {
     return {
