@@ -42,6 +42,22 @@ public static class ProtocolEvents
         ["timestamp"] = NowMs(),
     };
 
+    /// <summary>
+    /// <c>stream_preamble</c> — one short present-tense "what I'm about to do" sentence produced by a
+    /// fast model IN PARALLEL with the turn, covering the main model's time-to-first-token. Shaped
+    /// exactly like <see cref="StreamToken"/> (so clients reuse the render path) but on a distinct
+    /// type, because it is EPHEMERAL: the real answer replaces it, it is never persisted, and it never
+    /// appears in <c>eventual_response</c>. Emitted only when <c>SMOOTH_AGENT_PREAMBLE_MODEL</c> is set.
+    /// </summary>
+    public static JsonObject StreamPreamble(string requestId, string token) => new()
+    {
+        ["type"] = "stream_preamble",
+        ["requestId"] = requestId,
+        ["token"] = token,
+        ["data"] = new JsonObject { ["requestId"] = requestId, ["token"] = token },
+        ["timestamp"] = NowMs(),
+    };
+
     public static JsonObject StreamChunk(string requestId, string node, JsonNode state) => new()
     {
         ["type"] = "stream_chunk",
