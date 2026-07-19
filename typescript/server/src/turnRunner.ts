@@ -66,6 +66,76 @@ export const DEFAULT_SYSTEM_PROMPT =
 /** A sink the runner pushes outbound protocol frames into (single-writer downstream). */
 export type Sink = (frame: Frame) => void;
 
+/** `max_tokens` for the fast-model preamble — one short sentence. Pearl th-9a5794. */
+export const PREAMBLE_MAX_TOKENS = 64;
+
+/**
+ * System prompt for the fast-model preamble (see `SMOOTH_AGENT_PREAMBLE_MODEL`).
+ * One short present-tense sentence describing intent — no answer (it's generated
+ * WITHOUT the tool result), no greeting, no promises. Byte-for-byte the Rust
+ * reference server's `PREAMBLE_SYSTEM_PROMPT`.
+ */
+export const PREAMBLE_SYSTEM_PROMPT =
+    'You are the assistant\'s voice while it works. '
+    + 'In ONE short present-tense sentence (max ~12 words), tell the user what you\'re about to do to help with their message. '
+    + 'Do NOT answer the question, do NOT greet, do NOT promise a specific result or outcome. '
+    + 'Example: "Let me pull up your recent conversations." '
+    + 'Reply with only that sentence — no quotes, no preamble, no markdown.';
+
+/**
+ * The fast preamble model from `SMOOTH_AGENT_PREAMBLE_MODEL`, or `undefined` when
+ * unset/blank — in which case the preamble is OFF: no extra LLM call, no extra
+ * event, behaviour byte-for-byte unchanged. Mirrors the Rust runner's env read.
+ */
+export function preambleModelFromEnv(): string | undefined {
+    const model = process.env.SMOOTH_AGENT_PREAMBLE_MODEL?.trim();
+    return model ? model : undefined;
+}
+
+/**
+ * A one-shot mutable flag flipped on the FIRST real answer token, so a slow preamble
+ * is dropped rather than popping in AFTER the reply has started streaming.
+ */
+export interface AnswerStartedFlag {
+    started: boolean;
+}
+
+/**
+ * Generate + emit the ephemeral preamble on the SAME gateway/key as the turn (only the
+ * model id and token cap differ), from the user's message alone — no tool results, no
+ * history. Runs concurrently with the agent loop and never gates it.
+ *
+ * Best-effort by construction: every failure is swallowed at debug, and the emit is
+ * skipped entirely once `answerStarted.started` flips. Exported so the race + failure
+ * paths are testable deterministically, without sleeping.
+ */
+export async function runPreamble(
+    chatClient: ChatClientLike,
+    model: string,
+    requestId: string,
+    userMessage: string,
+    sink: Sink,
+    answerStarted: AnswerStartedFlag,
+): Promise<void> {
+    try {
+        const response = await chatClient.chat.completions.create({
+            model,
+            max_tokens: PREAMBLE_MAX_TOKENS,
+            messages: [
+                { role: 'system', content: PREAMBLE_SYSTEM_PROMPT },
+                { role: 'user', content: userMessage },
+            ],
+        });
+        const text = response.choices[0]?.message.content?.trim() ?? '';
+        // Re-check the guard AFTER the await: the answer may have started while the
+        // fast model was still thinking, and then the preamble is no longer wanted.
+        if (text.length > 0 && !answerStarted.started) sink(protocol.streamPreamble(requestId, text));
+    } catch (err) {
+        // A failed or slow preamble must never surface to the client or fail the turn.
+        console.debug('[turnRunner] preamble generation failed (ignored):', err);
+    }
+}
+
 /**
  * Thrown out of {@link TurnRunner.run} when the client cancelled the turn (a `cancel`
  * action, or a disconnect). The caller swallows it: the terminal `cancelled` event was
@@ -260,6 +330,16 @@ export class TurnRunner {
         //    call / tool result (the TS parity of the Rust runner translating
         //    ToolCallStart/Complete and the C# FunctionCall/FunctionResult mapping).
         let reply = '';
+
+        // Optional fast-model preamble, fired in PARALLEL with the agent loop. Off unless
+        // `SMOOTH_AGENT_PREAMBLE_MODEL` is set → no extra call, no extra event. Floating by
+        // design (it must never delay or gate the real turn) but self-contained: `runPreamble`
+        // swallows its own failures, so there is no unhandled rejection to leak.
+        // Pearl th-9a5794.
+        const answerStarted: AnswerStartedFlag = { started: false };
+        const preambleModel = preambleModelFromEnv();
+        if (preambleModel) void runPreamble(this.chatClient, preambleModel, requestId, userMessage, sink, answerStarted);
+
         try {
             for await (const event of agent.runStream(userMessage, history)) {
                 // Cancelled: bail BEFORE emitting this event, so nothing follows the
@@ -270,6 +350,9 @@ export class TurnRunner {
                 // the gate AFTER `write_confirmation_required`, so the wire order matches
                 // the reference (Rust) server. Non-gated tools emit their chunk inline.
                 if (event.type === 'tool_call' && this.isGated(event.name)) continue;
+                // Mark the answer as started BEFORE emitting, so a preamble that resolves
+                // in this same tick is dropped rather than landing after the reply.
+                if (event.type === 'text') answerStarted.started = true;
                 this.emit(requestId, event, sink);
                 if (event.type === 'text') reply += event.text;
             }
