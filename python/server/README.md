@@ -25,6 +25,8 @@ python -m smooth_operator_server
 
 That's a full agent backend — sessions, streaming turns, tool-calling, citations — on one WebSocket, in-memory, auth off, zero config. Env knobs: `SMOOTH_OPERATOR_BIND` (default `127.0.0.1:8787`), `SMOOTH_OPERATOR_SEED_KB=1` for the demo knowledge docs. The gateway is read from `SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY` — with no key, `send_message` returns a clean `LLM_UNAVAILABLE` error and the rest of the protocol still works.
 
+Set `SMOOTH_AGENT_PREAMBLE_MODEL` to a fast model id (e.g. `groq-gpt-oss-20b`) and every streaming turn also runs that small model **in parallel**, emitting one ephemeral `stream_preamble` sentence ("what I'm about to do") to cover the reasoning model's time-to-first-token. Same gateway/key as the main turn, capped at 64 output tokens. It is suppressed the moment the real answer starts streaming, is never folded into the reply or persisted, and any failure is swallowed. Unset (the default) ⇒ no extra call, behavior unchanged.
+
 Or embed it in your own async app:
 
 ```python
