@@ -12,7 +12,11 @@ for later phases (the MVP wires the knowledge base straight through).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import logging
+import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Callable
 
@@ -85,6 +89,33 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful customer support agent. Answer using only the knowledge "
     "provided to you; if it is not there, say you don't know."
 )
+
+#: ``max_tokens`` for the fast-model preamble — one short sentence. Mirrors the
+#: Rust runner's ``PREAMBLE_MAX_TOKENS``. Pearl th-ce3888.
+PREAMBLE_MAX_TOKENS = 64
+
+#: System prompt for the fast-model preamble (see ``SMOOTH_AGENT_PREAMBLE_MODEL``).
+#: One short present-tense sentence describing intent — no answer (it is generated
+#: WITHOUT any tool result), no greeting, no promises. Byte-for-byte the Rust
+#: runner's ``PREAMBLE_SYSTEM_PROMPT``.
+PREAMBLE_SYSTEM_PROMPT = (
+    "You are the assistant's voice while it works. "
+    "In ONE short present-tense sentence (max ~12 words), tell the user what you're about to do to help with their message. "
+    "Do NOT answer the question, do NOT greet, do NOT promise a specific result or outcome. "
+    'Example: "Let me pull up your recent conversations." '
+    "Reply with only that sentence — no quotes, no preamble, no markdown."
+)
+
+logger = logging.getLogger(__name__)
+
+
+def preamble_model() -> str | None:
+    """The fast model id for the parallel preamble, or ``None`` when the feature is
+    off. Unset / empty / whitespace ⇒ off (no extra LLM call, behavior unchanged) —
+    the same contract as the Rust server's ``SMOOTH_AGENT_PREAMBLE_MODEL``."""
+    model = (os.environ.get("SMOOTH_AGENT_PREAMBLE_MODEL") or "").strip()
+    return model or None
+
 
 #: A sink the runner emits ready-to-send protocol event dicts through (the
 #: connection forwards them over the socket). Sync send, like the Rust ``sink``.
@@ -266,6 +297,23 @@ class TurnRunner:
         #    (finally) once it has been spawned above.
         reply_parts: list[str] = []
         final_text: str | None = None
+
+        # Optional fast-model preamble (pearl th-ce3888). When
+        # `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a small fast model runs CONCURRENTLY
+        # with the agent loop and emits ONE ephemeral `stream_preamble` sentence,
+        # covering the reasoning model's time-to-first-token. It uses this
+        # connection's chat client (same gateway/key) with only the model + a tight
+        # token cap overridden. `answer_started` is flipped on the first real answer
+        # token so a slow preamble can never pop in AFTER the answer began. Unset ⇒
+        # off: no task, no LLM call, behavior unchanged.
+        answer_started = asyncio.Event()
+        preamble_task: asyncio.Task[None] | None = None
+        fast_model = preamble_model()
+        if fast_model is not None and self._chat_client is not None:
+            preamble_task = asyncio.create_task(
+                self._run_preamble(fast_model, request_id, user_message, sink, answer_started)
+            )
+
         try:
             # 3. Persist the inbound user message.
             await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
@@ -273,6 +321,9 @@ class TurnRunner:
             async for event in agent.run_stream(user_message, thread=thread):
                 if isinstance(event, TextEvent):
                     if event.text:
+                        # Close the preamble window BEFORE the first answer token
+                        # goes out, so a preamble resolving concurrently is dropped.
+                        answer_started.set()
                         reply_parts.append(event.text)
                         sink(protocol.stream_token(request_id, event.text))
                 elif isinstance(event, ToolCallEvent):
@@ -288,7 +339,15 @@ class TurnRunner:
                 elif isinstance(event, DoneEvent):
                     final_text = event.response.text
         finally:
-            # Turn over: drop any lingering pending confirmation so a stale entry
+            # Turn over: the preamble window is closed for good. Cancel and reap the
+            # task so a still-in-flight preamble can neither emit late nor linger as
+            # a pending task at shutdown. No-op when the feature is off.
+            if preamble_task is not None:
+                answer_started.set()
+                preamble_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await preamble_task
+            # Drop any lingering pending confirmation so a stale entry
             # can't mis-route a later `confirm_tool_action` (mirrors the Rust
             # `(cfg.clear)(session_id)` at turn end). No-op when HITL is off.
             if self._confirmations is not None:
@@ -313,6 +372,42 @@ class TurnRunner:
             await self._advance_workflow(conversation_id, workflow, current_step_id, user_message, reply)
 
         return TurnResult(reply=reply, message_id=outbound.id, citations=citations)
+
+    async def _run_preamble(
+        self,
+        model: str,
+        request_id: str,
+        user_message: str,
+        sink: Sink,
+        answer_started: asyncio.Event,
+    ) -> None:
+        """One-shot fast-model preamble, run as a task alongside the agent loop.
+
+        Best-effort by construction: any failure (gateway error, timeout, malformed
+        response) is logged at debug and swallowed — it never surfaces an ``error``
+        event and never fails the turn. Cancellation is NOT swallowed: the turn's
+        ``finally`` cancels this task, and that must propagate. The ``answer_started``
+        guard is checked immediately before emitting, so a preamble that resolves
+        after the real answer began emits nothing. Pearl th-ce3888."""
+        try:
+            response = await self._chat_client.chat.completions.create(
+                model=model,
+                max_tokens=PREAMBLE_MAX_TOKENS,
+                messages=[
+                    {"role": "system", "content": PREAMBLE_SYSTEM_PROMPT},
+                    # The user's message is the ONLY user-role content — the preamble
+                    # is generated without history and without tool results, so it can
+                    # only describe intent, never answer.
+                    {"role": "user", "content": user_message},
+                ],
+            )
+            token = (response.choices[0].message.content or "").strip()
+            if token and not answer_started.is_set():
+                sink(protocol.stream_preamble(request_id, token))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.debug("preamble generation failed (ignored): %s", exc)
 
     def _assemble_system_prompt(self, current_step_id: str | None, *, is_first_turn: bool) -> str:
         """Assemble the turn's system prompt from the per-agent config, falling back

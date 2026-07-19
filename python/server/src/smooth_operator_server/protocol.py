@@ -58,6 +58,22 @@ def stream_token(request_id: str, token: str) -> dict[str, Any]:
     }
 
 
+def stream_preamble(request_id: str, token: str) -> dict[str, Any]:
+    """``stream_preamble`` — a token of the fast-model *preamble*: a short "what I'm
+    about to do" sentence generated in parallel with the main turn to cover the
+    reasoning model's time-to-first-token. Shaped exactly like ``stream_token`` so
+    clients reuse the render path, but on a distinct ``type`` so it renders as an
+    EPHEMERAL status line the real answer replaces — never folded into the answer,
+    never persisted (per ``stream-preamble.schema.json``). Pearl th-ce3888."""
+    return {
+        "type": "stream_preamble",
+        "requestId": request_id,
+        "token": token,
+        "data": {"requestId": request_id, "token": token},
+        "timestamp": _now_ms(),
+    }
+
+
 def stream_chunk(request_id: str, node: str, state: Any) -> dict[str, Any]:
     """``stream_chunk`` — a per-node state snapshot (tool call / tool result).
     ``node`` is mirrored at the envelope level and inside ``data`` (per
