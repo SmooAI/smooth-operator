@@ -1,5 +1,20 @@
 # @smooai/smooth-operator
 
+## 1.32.0
+
+### Minor Changes
+
+- d17ede9: Emit `stream_preamble` from the **.NET server**. It already had the generated protocol type but never produced the event and never read `SMOOTH_AGENT_PREAMBLE_MODEL`, so a host running on the C# server could not turn the feature on at all — this closes that gap and brings the .NET lane to parity with the Rust reference.
+
+  When `SMOOTH_AGENT_PREAMBLE_MODEL` is set (e.g. `groq-gpt-oss-20b`), `TurnRunner` fires a small fast model IN PARALLEL with the agent loop — same gateway and key as the turn, with only the model id and a 64-token output cap overridden — and emits ONE short present-tense "what I'm about to do" sentence as an ephemeral `stream_preamble` event, covering the reasoning model's time-to-first-token. The system prompt is byte-identical to the other servers'.
+
+  It is deliberately defined by what it must never do: the turn never awaits it (it can't delay or gate the answer), an atomic first-answer-token guard drops it the moment real answer tokens start streaming, any failure (timeout, gateway error, bad model id) is logged at debug and swallowed with no error event reaching the client, and the text is never persisted nor folded into `eventual_response`. Unset, empty, or whitespace ⇒ the feature is off, no extra LLM call is made, and behavior is byte-for-byte unchanged.
+
+- bfaf1a8: Go server: emit `stream_preamble`. When `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a small fast model runs in parallel with the turn and streams one ephemeral "what I'm about to do" sentence, covering the reasoning model's time-to-first-token — matching the Rust reference server's prompt, 64-token cap, and first-answer-token race guard. Unset/empty/whitespace leaves behavior and the model-call count unchanged. The preamble is best-effort (failures swallowed) and ephemeral (never persisted, never folded into `eventual_response`).
+- ff2e4d9: Python server: emit `stream_preamble`. When `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a small fast model runs concurrently with each streaming turn and emits one ephemeral "what I'm about to do" sentence, covering the reasoning model's time-to-first-token — matching the Rust reference server (same system prompt, same 64-token cap, same gateway/key with only the model id overridden).
+
+  The preamble never delays or gates the real turn, is dropped the instant the first real answer token is emitted, is never persisted or folded into `eventual_response`, and any failure is swallowed at debug. Unset, empty, or whitespace ⇒ off (the default): no extra LLM call, behavior byte-for-byte unchanged.
+
 ## 1.31.0
 
 ### Minor Changes
