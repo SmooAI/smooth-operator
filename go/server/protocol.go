@@ -60,6 +60,22 @@ func streamToken(requestID, token string) map[string]any {
 	}
 }
 
+// streamPreamble is one token of the optional fast-model preamble — an EPHEMERAL
+// "what I'm about to do" line that the real answer replaces. Shaped identically to
+// streamToken (token duplicated at the top level and under data) so clients can reuse
+// the render path, but on a distinct type so it is never folded into the answer and
+// never appears in eventual_response. Matches spec/events/stream-preamble.schema.json
+// and the Rust protocol::stream_preamble.
+func streamPreamble(requestID, token string) map[string]any {
+	return map[string]any{
+		"type":      "stream_preamble",
+		"requestId": requestID,
+		"token":     token,
+		"data":      map[string]any{"requestId": requestID, "token": token},
+		"timestamp": nowMs(),
+	}
+}
+
 // streamChunk is a workflow-node update (here: a tool call or a tool result),
 // carrying an opaque state object under data.state.
 func streamChunk(requestID, node string, state map[string]any) map[string]any {
