@@ -13,7 +13,7 @@ import (
 func runTurn(t *testing.T, knowledge core.Knowledge, reply, userMessage string) TurnResult {
 	t.Helper()
 	store := NewInMemorySessionStore()
-	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com")
+	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com", ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

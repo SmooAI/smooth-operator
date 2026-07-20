@@ -221,11 +221,36 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 	}
 }
 
+// scopedSession is the ONLY way a handler may turn a client-supplied sessionId into a
+// session. It loads the session and then hides it unless the connection's authenticated
+// principal owns it — returning (nil, nil), exactly what an unknown sessionId returns, so
+// every caller emits the identical SESSION_NOT_FOUND and no caller can distinguish "not
+// yours" from "never existed".
+//
+// Every sessionId-taking handler (get_session, get_conversation_messages, send_message,
+// verify_otp) routes through here rather than calling store.GetSession directly: the check
+// lives once, at the chokepoint, instead of being re-derived — and forgotten — per handler.
+// th-8fe998.
+func (d *FrameDispatcher) scopedSession(ctx context.Context, sessionID string) (*StoredSession, error) {
+	session, err := d.store.GetSession(ctx, sessionID)
+	if err != nil || session == nil {
+		return nil, err
+	}
+	if !d.access.ConversationScope().Allows(session.OwnerEmail) {
+		return nil, nil
+	}
+	return session, nil
+}
+
 func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inboundFrame, sink EventSink) {
 	// Resume when the caller passes a known conversationId (bind the new session to it so
 	// subsequent turns append to its log and the runner replays its history); absent/unknown
 	// → a fresh conversation (byte-for-byte unchanged). th-d5b446.
-	session, _, err := d.store.ResumeSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail, frame.ConversationID)
+	//
+	// Ownership is stamped from the CONNECTION's authenticated principal. frame.UserEmail is
+	// still forwarded as the OTP delivery contact, but it is attacker-chosen and so has no say
+	// in who owns — or may later read — this conversation. th-8fe998.
+	session, _, err := d.store.ResumeSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail, d.access.ConversationScope(), frame.ConversationID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -242,7 +267,7 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 }
 
 func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFrame, sink EventSink) {
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -280,7 +305,9 @@ func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inb
 		limit = frame.Limit
 	}
 
-	summaries, err := d.store.ListConversations(ctx)
+	// Scoped in the store's selection, before the sort+cap below — a filter applied to an
+	// already-capped page would silently return short/empty pages. th-8fe998.
+	summaries, err := d.store.ListConversations(ctx, d.access.ConversationScope())
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "STORAGE_ERROR", "Failed to list conversations."))
 		return
@@ -319,7 +346,7 @@ func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, fra
 		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'sessionId'"))
 		return
 	}
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -460,7 +487,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -684,7 +711,7 @@ func (d *FrameDispatcher) handleVerifyOtp(ctx context.Context, frame inboundFram
 	}
 
 	// The session must exist (a code can't verify a session we don't track).
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return

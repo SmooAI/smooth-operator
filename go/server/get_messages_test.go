@@ -26,7 +26,7 @@ func getMessages(t *testing.T, store SessionStore, frame map[string]any) map[str
 func TestGetConversationMessagesNewestFirst(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, "first")
 	_, _ = store.AppendMessage(ctx, s.ConversationID, Outbound, "second")
 
@@ -83,7 +83,7 @@ func TestGetConversationMessagesMissingSessionID(t *testing.T) {
 func TestGetConversationMessagesLimitAndHasMore(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	for _, text := range []string{"m1", "m2", "m3", "m4"} {
 		_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, text)
 	}
@@ -138,7 +138,7 @@ func pageAll(t *testing.T, store SessionStore, sessionID string) []string {
 func TestGetConversationMessagesCursorRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	for _, text := range []string{"m1", "m2", "m3", "m4"} {
 		_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, text)
 	}
@@ -163,7 +163,7 @@ func TestGetConversationMessagesCursorRoundTrip(t *testing.T) {
 func TestGetConversationMessagesCursorIdenticalTimestamps(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, "older")
 	_, _ = store.AppendMessage(ctx, s.ConversationID, Outbound, "newer")
 
@@ -188,7 +188,7 @@ func TestGetConversationMessagesCursorIdenticalTimestamps(t *testing.T) {
 func TestGetConversationMessagesNextCursorNamesOldestInPage(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	for _, text := range []string{"m1", "m2", "m3"} {
 		_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, text)
 	}
@@ -216,7 +216,7 @@ func TestGetConversationMessagesNextCursorNamesOldestInPage(t *testing.T) {
 func TestGetConversationMessagesUnknownCursor(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, "m1")
 
 	sink, events := capture()

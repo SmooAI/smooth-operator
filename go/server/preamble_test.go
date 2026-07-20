@@ -100,7 +100,7 @@ func (s *recordingSink) ofType(t string) []map[string]any {
 func runTurnWith(t *testing.T, client core.ChatClient, userMessage string) (TurnResult, *recordingSink, SessionStore, string) {
 	t.Helper()
 	store := NewInMemorySessionStore()
-	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com")
+	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com", ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestPreambleEmitsDocumentedShape(t *testing.T) {
 	}}
 
 	store := NewInMemorySessionStore()
-	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com")
+	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com", ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestPreambleIsEphemeral(t *testing.T) {
 	}}
 
 	store := NewInMemorySessionStore()
-	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com")
+	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com", ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
