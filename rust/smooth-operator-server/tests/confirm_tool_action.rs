@@ -352,6 +352,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         "conn-1",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame,
         &ctrl_tx,
     )
@@ -380,6 +381,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         "conn-1",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame,
         &dup_tx,
     )

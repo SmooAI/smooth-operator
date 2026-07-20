@@ -31,6 +31,69 @@ use crate::state::AppState;
 /// The agent's display name for the reference server.
 const AGENT_NAME: &str = "smooth-agent";
 
+/// The per-user read scope of a connection, derived **only** from the
+/// connection's authenticated principal — never from a client-supplied frame
+/// field (`userEmail` in a create frame is caller-controlled, so trusting it
+/// would let anyone assume anyone's scope).
+///
+/// Org scoping stays where it is; this is the second, per-user dimension —
+/// without it any authenticated member of an org can enumerate and open every
+/// other member's conversations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserScope {
+    /// Auth is not configured for this deployment (`none` / `disabled` /
+    /// `local-token`: local, dev, single-user daemon). There is no identity to
+    /// scope by, so conversation reads behave exactly as they always have.
+    /// **The only unscoped variant.**
+    Unscoped,
+    /// An authenticated principal carrying an email: reads see that user's
+    /// conversations and nothing else.
+    User(String),
+    /// Auth *is* configured but this connection has no usable user identity
+    /// (anonymous/widget connection, or a principal with no `email` claim).
+    /// Fails closed: listing returns nothing and every conversation read is
+    /// treated as not-found. It does **not** block creating a fresh session, so
+    /// the anonymous widget flow is unaffected.
+    Denied,
+}
+
+impl UserScope {
+    /// The email to stamp on a created session's user participant, when the
+    /// principal has one. `None` ⇒ keep whatever the create frame supplied
+    /// (only reachable for anonymous/unscoped connections, which own nothing).
+    #[must_use]
+    pub fn principal_email(&self) -> Option<&str> {
+        match self {
+            Self::User(email) => Some(email),
+            Self::Unscoped | Self::Denied => None,
+        }
+    }
+}
+
+/// Whether this connection may read `conversation_id`.
+///
+/// `Unscoped` sees everything (auth not configured), `Denied` sees nothing, and
+/// a `User` sees only conversations carrying their own `user` participant. A
+/// storage error is a denial — an owner check that can't be completed must not
+/// pass.
+async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &UserScope) -> bool {
+    let email = match scope {
+        UserScope::Unscoped => return true,
+        UserScope::Denied => return false,
+        UserScope::User(email) => email,
+    };
+    match state
+        .storage
+        .list_participants_by_conversation(conversation_id)
+        .await
+    {
+        Ok(participants) => participants
+            .iter()
+            .any(|p| smooth_operator::adapter::is_owner(p, email)),
+        Err(_) => false,
+    }
+}
+
 /// Parse and dispatch a single inbound text frame. Any produced events are sent
 /// through `sink`. Protocol-level failures are surfaced as `error` events, never
 /// as hard errors that drop the connection.
@@ -45,12 +108,14 @@ const AGENT_NAME: &str = "smooth-agent";
 /// Note: `cancel` is NOT dispatched here. Cancellation is connection-local state
 /// (it aborts the tracked turn handle), so [`crate::server`]'s reader loop handles
 /// the `cancel` action directly before delegating other frames here.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_frame(
     state: &AppState,
     access: &AccessContext,
     conn_id: &str,
     origin: Option<&str>,
     auth_org: Option<&str>,
+    scope: &UserScope,
     raw: &str,
     sink: &UnboundedSender<Value>,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -75,8 +140,10 @@ pub async fn handle_frame(
             None
         }
         Some("create_conversation_session") => {
-            handle_create_session(state, conn_id, origin, auth_org, &parsed, request_id, sink)
-                .await;
+            handle_create_session(
+                state, conn_id, origin, auth_org, scope, &parsed, request_id, sink,
+            )
+            .await;
             None
         }
         Some("get_session") => {
@@ -84,11 +151,11 @@ pub async fn handle_frame(
             None
         }
         Some("get_conversation_messages") => {
-            handle_get_conversation_messages(state, &parsed, request_id, sink).await;
+            handle_get_conversation_messages(state, scope, &parsed, request_id, sink).await;
             None
         }
         Some("list_conversations") => {
-            handle_list_conversations(state, auth_org, &parsed, request_id, sink).await;
+            handle_list_conversations(state, auth_org, scope, &parsed, request_id, sink).await;
             None
         }
         Some("rename_conversation") => {
@@ -215,11 +282,13 @@ fn verify_auth_context_value(public_key: Option<&str>, ac: &Value) -> bool {
 /// `create_conversation_session` — create a conversation + user & agent
 /// participants + a session, then reply with an `immediate_response` carrying
 /// the session descriptor (per `create-conversation-session.schema.json`).
+#[allow(clippy::too_many_arguments)]
 async fn handle_create_session(
     state: &AppState,
     conn_id: &str,
     origin: Option<&str>,
     auth_org: Option<&str>,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -245,10 +314,19 @@ async fn handle_create_session(
         .and_then(Value::as_str)
         .unwrap_or("Visitor")
         .to_string();
-    let user_email = parsed
-        .get("userEmail")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // The session's user email — the key every conversation read is scoped by.
+    // An authenticated principal's email ALWAYS wins over the frame's
+    // `userEmail`: the frame field is caller-controlled, so honoring it would
+    // let anyone mint a conversation under someone else's scope (and read it
+    // back from their sidebar). The frame value is used only when the
+    // connection has no principal email at all — the anonymous widget flow,
+    // which owns nothing and can list nothing.
+    let user_email = scope.principal_email().map(str::to_string).or_else(|| {
+        parsed
+            .get("userEmail")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     let browser_fingerprint = parsed
         .get("browserFingerprint")
         .and_then(Value::as_str)
@@ -261,8 +339,17 @@ async fn handle_create_session(
     // `create_conversation`) so subsequent `send_message` appends to it and the
     // runner replays its history by `thread_id`. Absent/unknown id → mint a fresh
     // conversation (byte-for-byte unchanged behavior).
+    //
+    // Ownership: a conversation this connection may NOT read is treated exactly
+    // like an id that never existed — the resume is ignored and a fresh
+    // conversation is minted, byte-for-byte the unknown-id path. Returning a
+    // distinct denial here would be an existence oracle: it would confirm which
+    // conversation ids are real, letting a caller enumerate other users'
+    // conversations by their ids alone.
     let resume = match parsed.get("conversationId").and_then(Value::as_str) {
-        Some(cid) if !cid.is_empty() => state.storage.get_conversation(cid).await.ok().flatten(),
+        Some(cid) if !cid.is_empty() && may_read_conversation(state, cid, scope).await => {
+            state.storage.get_conversation(cid).await.ok().flatten()
+        }
         _ => None,
     };
 
@@ -534,6 +621,7 @@ fn handle_get_session(
 /// page's `nextCursor`. Newest-first (the common "recent history" read).
 async fn handle_get_conversation_messages(
     state: &AppState,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -546,13 +634,23 @@ async fn handle_get_conversation_messages(
         ));
         return;
     };
-    let Some(session) = state.get_session(session_id) else {
-        let _ = sink.send(protocol::error(
-            request_id,
-            "SESSION_NOT_FOUND",
-            &format!("session '{session_id}' not found"),
-        ));
-        return;
+    // A session belonging to ANOTHER user is reported with the identical
+    // not-found event a session id that never existed produces — same code,
+    // same message, same shape. A distinct "forbidden" would be an existence
+    // oracle: it would tell a caller which session ids are real, which is all
+    // an attacker needs to enumerate other users' conversations.
+    let session = match state.get_session(session_id) {
+        Some(session) if may_read_conversation(state, &session.conversation_id, scope).await => {
+            session
+        }
+        _ => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "SESSION_NOT_FOUND",
+                &format!("session '{session_id}' not found"),
+            ));
+            return;
+        }
     };
 
     const DEFAULT_LIMIT: usize = 50;
@@ -608,6 +706,7 @@ async fn handle_get_conversation_messages(
 async fn handle_list_conversations(
     state: &AppState,
     auth_org: Option<&str>,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -624,7 +723,22 @@ async fn handle_list_conversations(
     // the create-session derivation's fallback for the local/no-auth flavor.
     let org_id = auth_org.unwrap_or(crate::server::SEED_ORG_ID);
 
-    let conversations = match state.storage.list_conversations_by_org(org_id).await {
+    // User scope, on top of (never instead of) the org scope. `Denied` — auth
+    // configured but this connection has no principal email — sees nothing
+    // rather than falling back to the whole org. Both scoped reads filter in
+    // the storage query, before any limit, so a page is never silently short.
+    let listed = match scope {
+        UserScope::Denied => Ok(Vec::new()),
+        UserScope::User(email) => {
+            state
+                .storage
+                .list_conversations_by_org_and_user(org_id, email)
+                .await
+        }
+        UserScope::Unscoped => state.storage.list_conversations_by_org(org_id).await,
+    };
+
+    let conversations = match listed {
         Ok(c) => c,
         Err(e) => {
             let _ = sink.send(protocol::error(
