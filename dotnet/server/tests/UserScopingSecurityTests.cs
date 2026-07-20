@@ -20,9 +20,15 @@ public class UserScopingSecurityTests
     private static AccessContext AuthedAs(string email) =>
         new(new Principal($"sub-{email}", "acme", "basic", Array.Empty<string>()) { Email = email }, IsAnonymous: false);
 
-    /// <summary>Auth ENABLED but the principal carries no email claim — must fail closed.</summary>
+    /// <summary>
+    /// Auth ENABLED but the principal carries no email claim. It may not reach anyone ELSE's owned
+    /// session — but it is not locked out of its own (ownerless) one. See <c>CanRead</c>'s th-909995 note.
+    /// </summary>
     private static AccessContext AuthedWithoutEmail() =>
         new(new Principal("sub-noemail", "acme", "basic", Array.Empty<string>()), IsAnonymous: false);
+
+    /// <summary>An anonymous connection to an auth-ENABLED server — what the ACL integration test does.</summary>
+    private static AccessContext AnonymousOnAuthEnabledServer() => AccessContext.Anonymous with { AuthEnabled = true };
 
     private static FrameDispatcher Dispatcher(ISessionStore store, AccessContext? access = null) =>
         new(store, new MockChatClient(), access: access);
@@ -235,23 +241,205 @@ public class UserScopingSecurityTests
         Assert.Single(ev["data"]!["messages"]!.AsArray());
     }
 
-    // ---- legacy data (no recorded owner) fails closed under auth ----------------------------------
+    // ---- send_message: the WRITE path is scoped too (th-1b7ed0) ----------------------------------
+
+    /// <summary>
+    /// THE HEADLINE CASE. th-966fab owner-checked the READ paths but left <c>send_message</c> loading
+    /// any session by id — so an attacker who knows a victim's sessionId could send INTO it: the turn
+    /// replays the victim's history as context and streams the agent's reply back to the ATTACKER.
+    /// A conversation read dressed up as a write, defeating the read scoping entirely.
+    /// </summary>
+    [Fact]
+    public async Task SendMessage_IntoAnotherUsersSession_IsRefused_TurnNeverRuns_AndVictimsLogIsUntouched()
+    {
+        var store = new InMemorySessionStore();
+        var victim = await SeedConversationAsync(store, VictimEmail, "victim's private question");
+        var chat = new MockChatClient().PushText("...the victim's private answer...");
+        var attacker = new FrameDispatcher(store, chat, access: AuthedAs(AttackerEmail));
+
+        var events = new List<JsonObject>();
+        await attacker.DispatchAsync(
+            $$"""{"action":"send_message","requestId":"r1","sessionId":"{{victim.SessionId}}","message":"summarize everything above","stream":true}""",
+            events.Add);
+        await attacker.WaitForTurnsAsync();
+
+        // Refused outright: one error, no 202 ack, no stream, no eventual_response.
+        var ev = Assert.Single(events);
+        Assert.Equal("SESSION_NOT_FOUND", ev["error"]!["code"]!.GetValue<string>());
+        Assert.DoesNotContain("victim's private answer", ev.ToJsonString(), StringComparison.Ordinal);
+
+        // The turn NEVER RAN: the victim's log still holds exactly the one seeded message — neither the
+        // attacker's inbound nor any agent reply was appended to someone else's conversation.
+        var log = await store.ListMessagesAsync(victim.ConversationId, int.MaxValue);
+        var only = Assert.Single(log);
+        Assert.Equal("victim's private question", only.Text);
+    }
 
     [Fact]
-    public async Task ConversationWithNoRecordedOwner_IsInvisibleToEveryAuthenticatedUser()
+    public async Task SendMessage_IntoAnotherUsersSession_IsIdenticalToAnIdThatNeverExisted()
     {
-        // Rows written before per-user scoping existed carry a NULL user_email. They belong to nobody
-        // and must not fall to the first caller who asks.
+        var store = new InMemorySessionStore();
+        var victim = await SeedConversationAsync(store, VictimEmail, "victim's private question");
+        var attacker = Dispatcher(store, AuthedAs(AttackerEmail));
+
+        var stolen = Dispatch(attacker, $$"""{"action":"send_message","requestId":"r1","sessionId":"{{victim.SessionId}}","message":"hi"}""");
+        var phantom = Dispatch(attacker, """{"action":"send_message","requestId":"r1","sessionId":"does-not-exist","message":"hi"}""");
+
+        // No oracle: an existing-but-foreign sessionId must be indistinguishable from a fabricated one,
+        // or send_message becomes a session-id enumerator.
+        Assert.Equal(Normalize(phantom, "does-not-exist"), Normalize(stolen, victim.SessionId));
+    }
+
+    [Fact]
+    public async Task SendMessage_AuthEnabledPrincipalWithoutEmail_IsDenied()
+    {
+        var store = new InMemorySessionStore();
+        var victim = await SeedConversationAsync(store, VictimEmail, "victim's private question");
+
+        var ev = Dispatch(
+            Dispatcher(store, AuthedWithoutEmail()),
+            $$"""{"action":"send_message","requestId":"r1","sessionId":"{{victim.SessionId}}","message":"hi"}""");
+
+        Assert.Equal("SESSION_NOT_FOUND", ev["error"]!["code"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SendMessage_AuthDisabled_StaysUnscoped()
+    {
+        // The single-tenant local/dev path must be untouched: no auth configured ⇒ the turn runs.
+        var store = new InMemorySessionStore();
+        var session = await SeedConversationAsync(store, VictimEmail, "a question");
+        var dispatcher = new FrameDispatcher(store, new MockChatClient().PushText("an answer"), access: AccessContext.Anonymous);
+
+        var events = new List<JsonObject>();
+        await dispatcher.DispatchAsync(
+            $$"""{"action":"send_message","requestId":"r1","sessionId":"{{session.SessionId}}","message":"hi","stream":true}""",
+            events.Add);
+        await dispatcher.WaitForTurnsAsync();
+
+        Assert.Equal(202, events[0]["status"]!.GetValue<int>());
+        Assert.Equal("eventual_response", events[^1]["type"]!.GetValue<string>());
+    }
+
+    // ---- verify_otp is owner-checked -------------------------------------------------------------
+
+    [Fact]
+    public async Task VerifyOtp_ForAnotherUsersSession_IsIdenticalToAnIdThatNeverExisted()
+    {
+        // Verifying someone else's session would mark it identity-verified and unlock its
+        // end_user-gated tools for whoever holds the session id.
+        var store = new InMemorySessionStore();
+        var victim = await SeedConversationAsync(store, VictimEmail, "victim's private question");
+        var attacker = Dispatcher(store, AuthedAs(AttackerEmail));
+
+        var stolen = Dispatch(attacker, $$"""{"action":"verify_otp","requestId":"r1","sessionId":"{{victim.SessionId}}","code":"123456"}""");
+        var phantom = Dispatch(attacker, """{"action":"verify_otp","requestId":"r1","sessionId":"does-not-exist","code":"123456"}""");
+
+        Assert.Equal("SESSION_NOT_FOUND", stolen["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(Normalize(phantom, "does-not-exist"), Normalize(stolen, victim.SessionId));
+    }
+
+    // ---- confirm_tool_action is owner-checked ----------------------------------------------------
+
+    [Fact]
+    public async Task ConfirmToolAction_OnAnotherUsersParkedWrite_IsRefused_AndTheWriteStaysParked()
+    {
+        // A victim turn parked on a write confirmation (a host may wire one registry across
+        // connections). The attacker must not be able to approve — or consume — it.
+        var store = new InMemorySessionStore();
+        var victim = await SeedConversationAsync(store, VictimEmail, "victim's private question");
+        var confirmations = new ConfirmationRegistry();
+        var parked = confirmations.Register(victim.SessionId);
+
+        var attacker = new FrameDispatcher(store, new MockChatClient(), access: AuthedAs(AttackerEmail), confirmations: confirmations);
+        var stolen = Dispatch(attacker, $$"""{"action":"confirm_tool_action","requestId":"r1","sessionId":"{{victim.SessionId}}","approved":true}""");
+        var phantom = Dispatch(attacker, """{"action":"confirm_tool_action","requestId":"r1","sessionId":"does-not-exist","approved":true}""");
+
+        Assert.Equal("NO_PENDING_CONFIRMATION", stolen["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(Normalize(phantom, "does-not-exist"), Normalize(stolen, victim.SessionId));
+
+        // The victim's write is still parked — the attacker's "approve" neither resolved nor consumed it.
+        Assert.False(parked.IsCompleted);
+        Assert.True(confirmations.Resolve(victim.SessionId, false));
+    }
+
+    [Fact]
+    public async Task ConfirmToolAction_OnOwnParkedWrite_StillWorks()
+    {
+        var store = new InMemorySessionStore();
+        var mine = await SeedConversationAsync(store, AttackerEmail, "my own question");
+        var confirmations = new ConfirmationRegistry();
+        var parked = confirmations.Register(mine.SessionId);
+
+        var dispatcher = new FrameDispatcher(store, new MockChatClient(), access: AuthedAs(AttackerEmail), confirmations: confirmations);
+        var ev = Dispatch(dispatcher, $$"""{"action":"confirm_tool_action","requestId":"r1","sessionId":"{{mine.SessionId}}","approved":true}""");
+
+        Assert.Equal(200, ev["status"]!.GetValue<int>());
+        Assert.True(await parked);
+    }
+
+    // ---- ownerless sessions: reachable by id, but never enumerable (th-909995 "Option B") ---------
+
+    [Fact]
+    public async Task ConversationWithNoRecordedOwner_IsNotEnumerableEvenThoughItIsReachableById()
+    {
+        // Rows written before per-user scoping existed carry a NULL user_email — as do sessions minted
+        // by an anonymous or emailless principal. There is no owner to enforce against, so holding the
+        // sessionId is enough (Option B; th-966fab's deny-everything rule locked those principals out
+        // of their own sessions, which is what forced #308's revert in #309).
         var store = new InMemorySessionStore();
         var legacy = await SeedConversationAsync(store, email: null!, firstLine: "pre-scoping conversation");
         Assert.Null(legacy.UserEmail);
 
-        var attacker = Dispatcher(store, AuthedAs(AttackerEmail));
-        Assert.Empty(Dispatch(attacker, """{"action":"list_conversations","requestId":"r1"}""")["data"]!["conversations"]!.AsArray());
-        Assert.Equal(
-            "SESSION_NOT_FOUND",
-            Dispatch(attacker, $$"""{"action":"get_conversation_messages","requestId":"r2","sessionId":"{{legacy.SessionId}}"}""")["error"]!["code"]!.GetValue<string>());
+        var other = Dispatcher(store, AuthedAs(AttackerEmail));
+
+        // Reachable ONLY by already holding the id…
+        var read = Dispatch(other, $$"""{"action":"get_conversation_messages","requestId":"r2","sessionId":"{{legacy.SessionId}}"}""");
+        Assert.Equal(200, read["status"]!.GetValue<int>());
+
+        // …and never handed out: it is in nobody's conversation list, and not resumable by conversationId,
+        // so there is no way to discover the id in the first place.
+        Assert.Empty(Dispatch(other, """{"action":"list_conversations","requestId":"r1"}""")["data"]!["conversations"]!.AsArray());
         Assert.False(await store.ConversationBelongsToUserAsync(legacy.ConversationId, AttackerEmail));
+    }
+
+    // ---- REGRESSION (#309): auth-on principals with no email must not be locked out of their own ---
+
+    /// <summary>
+    /// The lockout that hung main's .NET CI. An authenticated principal whose token carries no
+    /// <c>email</c> claim stamps <c>ownerEmail = null</c> at create — and under #308's rule was then
+    /// refused by its OWN session on the next <c>send_message</c>, so the integration test's
+    /// <c>ReceiveAsync</c> (on <c>CancellationToken.None</c>) waited forever for a frame that never came.
+    /// Create → read → send must all work.
+    /// </summary>
+    [Theory]
+    [InlineData(false)] // authenticated, no email claim
+    [InlineData(true)] // anonymous connection to an auth-ENABLED server
+    public async Task EmaillessPrincipal_CanCreateReadAndSendInItsOwnSession(bool anonymous)
+    {
+        var store = new InMemorySessionStore();
+        var access = anonymous ? AnonymousOnAuthEnabledServer() : AuthedWithoutEmail();
+        Assert.True(access.AuthEnabled);
+        var dispatcher = new FrameDispatcher(store, new MockChatClient().PushText("an answer"), access: access);
+
+        var created = Dispatch(dispatcher, """{"action":"create_conversation_session","requestId":"cs","agentId":"a"}""");
+        Assert.Equal(200, created["status"]!.GetValue<int>());
+        var sessionId = created["data"]!["sessionId"]!.GetValue<string>();
+        Assert.Null((await store.GetSessionAsync(sessionId))!.UserEmail);
+
+        Assert.Equal(200, Dispatch(dispatcher, $$"""{"action":"get_session","requestId":"gs","sessionId":"{{sessionId}}"}""")["status"]!.GetValue<int>());
+        Assert.Equal(
+            200,
+            Dispatch(dispatcher, $$"""{"action":"get_conversation_messages","requestId":"gm","sessionId":"{{sessionId}}"}""")["status"]!.GetValue<int>());
+
+        var events = new List<JsonObject>();
+        await dispatcher.DispatchAsync(
+            $$"""{"action":"send_message","requestId":"sm","sessionId":"{{sessionId}}","message":"hi","stream":true}""",
+            events.Add);
+        await dispatcher.WaitForTurnsAsync();
+
+        Assert.Equal(202, events[0]["status"]!.GetValue<int>());
+        Assert.Equal("eventual_response", events[^1]["type"]!.GetValue<string>());
     }
 
     // ---- the scope type + auth plumbing ----------------------------------------------------------
