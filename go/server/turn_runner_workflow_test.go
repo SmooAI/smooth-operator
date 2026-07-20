@@ -30,7 +30,7 @@ func systemPromptOf(t *testing.T, mock *core.MockLlmProvider) string {
 // retained base) reaches the engine as the system prompt.
 func TestTurnUsesAgentInstructions(t *testing.T) {
 	store := NewInMemorySessionStore()
-	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
+	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com", ConversationScope{Unscoped: true})
 	mock := core.NewMockLlmProvider().PushText("Hello from Bob.")
 
 	prompt := assembleSystemPrompt(defaultSystemPrompt, &AgentConfig{Instructions: "You are Bob, a laconic support agent."}, "", true)
@@ -52,7 +52,7 @@ func TestTurnUsesAgentInstructions(t *testing.T) {
 // persona in place (behavior unchanged).
 func TestTurnDefaultPromptWithoutConfig(t *testing.T) {
 	store := NewInMemorySessionStore()
-	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
+	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com", ConversationScope{Unscoped: true})
 	mock := core.NewMockLlmProvider().PushText("hi")
 
 	prompt := assembleSystemPrompt(defaultSystemPrompt, nil, "", true)
@@ -69,7 +69,7 @@ func TestTurnDefaultPromptWithoutConfig(t *testing.T) {
 // into the system prompt and a "yes" judge verdict advances the returned NextStepID.
 func TestTurnInjectsWorkflowStepAndAdvances(t *testing.T) {
 	store := NewInMemorySessionStore()
-	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
+	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com", ConversationScope{Unscoped: true})
 	wf := sampleWorkflow()
 	// First call = the turn reply; second call = the judge verdict.
 	mock := core.NewMockLlmProvider().PushText("Nice to meet you, Alice.").PushText(`{"verdict":"yes"}`)
@@ -92,7 +92,7 @@ func TestTurnInjectsWorkflowStepAndAdvances(t *testing.T) {
 // TestTurnWorkflowStaysOnStepWhenNotMet asserts a non-yes verdict keeps the pointer put.
 func TestTurnWorkflowStaysOnStepWhenNotMet(t *testing.T) {
 	store := NewInMemorySessionStore()
-	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
+	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com", ConversationScope{Unscoped: true})
 	wf := sampleWorkflow()
 	mock := core.NewMockLlmProvider().PushText("How can I help?").PushText(`{"verdict":"no"}`)
 
@@ -110,7 +110,7 @@ func TestTurnWorkflowStaysOnStepWhenNotMet(t *testing.T) {
 // verdict queued), the turn still succeeds and stays on the current step.
 func TestTurnWorkflowJudgeFailureDoesNotFailTurn(t *testing.T) {
 	store := NewInMemorySessionStore()
-	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com")
+	session, _ := store.CreateSession(context.Background(), "agent-x", "Alice", "a@example.com", ConversationScope{Unscoped: true})
 	wf := sampleWorkflow()
 	// Only the turn reply is queued; the judge call gets an empty-queue error.
 	mock := core.NewMockLlmProvider().PushText("Hi there.")
@@ -139,7 +139,7 @@ func TestPerAgentIsolation(t *testing.T) {
 	})
 
 	run := func(agentID string) string {
-		session, _ := store.CreateSession(context.Background(), agentID, "U", "u@example.com")
+		session, _ := store.CreateSession(context.Background(), agentID, "U", "u@example.com", ConversationScope{Unscoped: true})
 		cfg, _ := resolver.Resolve(context.Background(), agentID)
 		prompt := assembleSystemPrompt(defaultSystemPrompt, cfg, session.CurrentStepID, true)
 		mock := core.NewMockLlmProvider().PushText("ok")
