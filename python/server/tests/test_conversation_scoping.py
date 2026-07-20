@@ -18,9 +18,11 @@ enumerate other users' conversation and session ids.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from smooth_operator_server import dispatcher as dispatcher_module
 from smooth_operator_server.auth import AccessContext, Principal
 from smooth_operator_server.dispatcher import FrameDispatcher
 from smooth_operator_server.session_store import InMemorySessionStore, MessageDirection
@@ -172,6 +174,7 @@ async def test_owner_can_still_resume_their_own_conversation() -> None:
     "frame",
     [
         {"action": "get_session"},
+        {"action": "get_conversation_messages"},
         {"action": "send_message", "message": "steal history"},
         {"action": "verify_otp", "code": "000000"},
     ],
@@ -191,6 +194,7 @@ async def test_session_actions_reject_another_users_session(frame: dict) -> None
     "frame",
     [
         {"action": "get_session"},
+        {"action": "get_conversation_messages"},
         {"action": "send_message", "message": "steal history"},
         {"action": "verify_otp", "code": "000000"},
     ],
@@ -212,6 +216,48 @@ async def test_not_yours_is_byte_identical_to_never_existed(frame: dict) -> None
         return json.dumps(scrubbed).replace(bob_session, "<ID>").replace("does-not-exist", "<ID>")
 
     assert normalized(others) == normalized(ghost)
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_messages_leaks_no_history_across_users() -> None:
+    """The headline case (th-1b7ed0): ``get_conversation_messages`` skipped the
+    chokepoint, so any authenticated user could read anyone's full history by
+    sessionId. Assert on the PAYLOAD — an error code alone would still pass if the
+    messages rode along beside it."""
+    store = InMemorySessionStore()
+    bob_session, _ = await _seed(store, BOB, "bob secret")
+
+    alice = FrameDispatcher(store, None, access=_authed(ALICE))
+    events = await _dispatch(
+        alice, {"action": "get_conversation_messages", "requestId": "r1", "sessionId": bob_session}
+    )
+
+    assert [ev["type"] for ev in events] == ["error"]
+    assert events[0]["error"]["code"] == "SESSION_NOT_FOUND"
+    assert "bob secret" not in json.dumps(events)
+    assert "messages" not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_owner_can_read_their_own_conversation_messages() -> None:
+    """The scoping guard must not break the legitimate read."""
+    store = InMemorySessionStore()
+    alice_session, _ = await _seed(store, ALICE, "mine")
+    events = await _dispatch(
+        FrameDispatcher(store, None, access=_authed(ALICE)),
+        {"action": "get_conversation_messages", "requestId": "r1", "sessionId": alice_session},
+    )
+    assert events[0]["type"] == "immediate_response"
+    assert [m["content"]["text"] for m in events[0]["data"]["messages"]] == ["mine"]
+
+
+def test_visible_session_is_the_only_lookup() -> None:
+    """Structural guard: ``_visible_session`` must be the ONLY place that turns a
+    client-supplied sessionId into a session. A handler calling the store directly
+    skips the ownership check — that is precisely how th-1b7ed0 shipped. Exactly one
+    direct call site is expected: the one inside ``_visible_session`` itself."""
+    source = Path(dispatcher_module.__file__).read_text()
+    assert source.count("self._store.get_session(") == 1
 
 
 @pytest.mark.asyncio
