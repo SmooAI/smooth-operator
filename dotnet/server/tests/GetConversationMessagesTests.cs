@@ -236,8 +236,11 @@ public class GetConversationMessagesTests
         public Task<StoredSession> ResumeSessionAsync(string agentId, string? userName, string? userEmail, string? conversationId, CancellationToken cancellationToken = default) =>
             inner.ResumeSessionAsync(agentId, userName, userEmail, conversationId, cancellationToken);
 
-        public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default) =>
-            inner.ListConversationsAsync(cancellationToken);
+        public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(ConversationScope scope, CancellationToken cancellationToken = default) =>
+            inner.ListConversationsAsync(scope, cancellationToken);
+
+        public Task<bool> ConversationBelongsToUserAsync(string conversationId, string userEmail, CancellationToken cancellationToken = default) =>
+            inner.ConversationBelongsToUserAsync(conversationId, userEmail, cancellationToken);
 
         public Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default) =>
             inner.GetSessionAsync(sessionId, cancellationToken);

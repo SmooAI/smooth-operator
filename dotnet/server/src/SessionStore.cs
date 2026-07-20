@@ -42,6 +42,43 @@ public sealed record StoredMessage(string Id, string ConversationId, MessageDire
 public sealed record ConversationSummary(string ConversationId, DateTimeOffset UpdatedAt, int MessageCount, string? FirstInboundText);
 
 /// <summary>
+/// Which user's conversations a read may see. A store MUST honour this in its query, not after it —
+/// filtering a page in memory after a LIMIT silently returns short or empty pages.
+/// <para>
+/// This is a type rather than a nullable <c>string</c> on purpose: "no filter" means "every user's
+/// conversations", and that must be spelled out (<see cref="Unscoped"/>) instead of falling out of a
+/// forgotten <c>null</c>. th-966fab.
+/// </para>
+/// </summary>
+public readonly record struct ConversationScope
+{
+    private ConversationScope(string? userEmail, bool unscoped)
+    {
+        UserEmail = userEmail;
+        IsUnscoped = unscoped;
+    }
+
+    /// <summary>The owning user's email when scoped; <c>null</c> for <see cref="Unscoped"/>/<see cref="None"/>.</summary>
+    public string? UserEmail { get; }
+
+    /// <summary>
+    /// EVERY user's conversations. Legitimate ONLY on a server with no auth configured (single-tenant
+    /// local/dev, where there is no notion of a user). Never reachable from an authenticated request.
+    /// </summary>
+    public bool IsUnscoped { get; }
+
+    /// <summary>No conversations at all — an authenticated caller whose identity carries no email.</summary>
+    public bool IsEmpty => !IsUnscoped && string.IsNullOrEmpty(UserEmail);
+
+    public static ConversationScope Unscoped { get; } = new(null, unscoped: true);
+
+    /// <summary>Nothing matches. The fail-closed scope. </summary>
+    public static ConversationScope None { get; } = new(null, unscoped: false);
+
+    public static ConversationScope ForUser(string userEmail) => new(userEmail, unscoped: false);
+}
+
+/// <summary>
 /// Persistence for sessions + conversation message logs — the C# analog of the Rust
 /// <c>StorageAdapter</c>'s session/conversation/message surface (and, like it, async). The
 /// bundled <see cref="InMemorySessionStore"/> is the reference store; a Postgres adapter
@@ -65,8 +102,27 @@ public interface ISessionStore
     /// page-load currently mints one — are filtered out), in no particular order; the dispatcher
     /// sorts most-recent-first and caps. The C# analog of the Rust storage list-conversations +
     /// per-conversation peek and the Go <c>ListConversations</c>. th-d5b446.
+    /// <para>
+    /// SECURITY (th-966fab): <paramref name="scope"/> is REQUIRED and MUST be applied inside the
+    /// query. <see cref="ConversationScope.ForUser"/> returns only conversations owned by that email;
+    /// <see cref="ConversationScope.None"/> returns nothing; <see cref="ConversationScope.Unscoped"/>
+    /// returns every user's conversations and is legitimate ONLY on a server with no auth configured.
+    /// Ignoring the scope re-opens a cross-user data leak.
+    /// </para>
     /// </summary>
-    Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(ConversationScope scope, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Whether <paramref name="userEmail"/> owns <paramref name="conversationId"/> — the ownership
+    /// gate behind resume and <c>get_conversation_messages</c>.
+    /// <para>
+    /// SECURITY (th-966fab): returns <c>false</c> for a conversation that does not exist, one owned by
+    /// another user, AND one with no recorded owner (data written before per-user scoping existed).
+    /// Collapsing all three into one answer is deliberate — a caller cannot tell "not yours" from
+    /// "never existed", so this cannot be used to enumerate other users' conversation ids.
+    /// </para>
+    /// </summary>
+    Task<bool> ConversationBelongsToUserAsync(string conversationId, string userEmail, CancellationToken cancellationToken = default);
 
     Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default);
 
@@ -127,6 +183,11 @@ public sealed class InMemorySessionStore : ISessionStore
     // field for ListConversations. th-d5b446.
     private readonly Dictionary<string, DateTimeOffset> _updatedAt = new();
 
+    // Each conversation's owning user email, stamped when the conversation is minted (null when the
+    // creator had no identity — no-auth servers, or an authenticated principal with no email claim).
+    // The scoping key for ListConversations + the ownership gate. th-966fab.
+    private readonly Dictionary<string, string?> _owner = new();
+
     public Task<StoredSession> CreateSessionAsync(string agentId, string? userName, string? userEmail, CancellationToken cancellationToken = default) =>
         ResumeSessionAsync(agentId, userName, userEmail, null, cancellationToken);
 
@@ -155,21 +216,32 @@ public sealed class InMemorySessionStore : ISessionStore
             {
                 _messages[convId] = new List<StoredMessage>();
                 _updatedAt[convId] = DateTimeOffset.UtcNow;
+                _owner[convId] = session.UserEmail; // ownership is stamped once, at mint. th-966fab.
             }
             return Task.FromResult(session);
         }
     }
 
-    public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(ConversationScope scope, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
             var summaries = new List<ConversationSummary>();
+            if (scope.IsEmpty)
+            {
+                // An authenticated caller with no identity email owns nothing. th-966fab.
+                return Task.FromResult<IReadOnlyList<ConversationSummary>>(summaries);
+            }
+
             foreach (var (convId, list) in _messages)
             {
                 if (list.Count == 0)
                 {
                     continue; // drop the empty conversations every page-load mints.
+                }
+                if (!scope.IsUnscoped && !OwnedBy(convId, scope.UserEmail!))
+                {
+                    continue; // not this user's conversation. th-966fab.
                 }
                 var firstInbound = list.FirstOrDefault(m => m.Direction == MessageDirection.Inbound)?.Text;
                 var updatedAt = _updatedAt.TryGetValue(convId, out var t) ? t : DateTimeOffset.UtcNow;
@@ -179,6 +251,19 @@ public sealed class InMemorySessionStore : ISessionStore
             return Task.FromResult(result);
         }
     }
+
+    public Task<bool> ConversationBelongsToUserAsync(string conversationId, string userEmail, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(OwnedBy(conversationId, userEmail));
+        }
+    }
+
+    // Unknown conversation, another user's, and one with no recorded owner are all `false` — the
+    // caller cannot distinguish them, so this is not an existence oracle. Caller holds _gate.
+    private bool OwnedBy(string conversationId, string userEmail) =>
+        _owner.TryGetValue(conversationId, out var owner) && owner is not null && string.Equals(owner, userEmail, StringComparison.OrdinalIgnoreCase);
 
     public Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default)
     {
