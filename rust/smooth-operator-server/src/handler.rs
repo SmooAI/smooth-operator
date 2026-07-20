@@ -51,9 +51,11 @@ pub enum UserScope {
     User(String),
     /// Auth *is* configured but this connection has no usable user identity
     /// (anonymous/widget connection, or a principal with no `email` claim).
-    /// Fails closed: listing returns nothing and every conversation read is
-    /// treated as not-found. It does **not** block creating a fresh session, so
-    /// the anonymous widget flow is unaffected.
+    /// Owns nothing, so it matches no OWNED conversation — but it may still
+    /// reach OWNERLESS ones, which are exactly the conversations it creates
+    /// itself. Denying those too locked anonymous and emailless principals out
+    /// of their own sessions: empty list, resume refused, `send_message`
+    /// refused. th-909995.
     Denied,
 }
 
@@ -72,24 +74,43 @@ impl UserScope {
 
 /// Whether this connection may read `conversation_id`.
 ///
-/// `Unscoped` sees everything (auth not configured), `Denied` sees nothing, and
-/// a `User` sees only conversations carrying their own `user` participant. A
-/// storage error is a denial — an owner check that can't be completed must not
+/// `Unscoped` sees everything (auth not configured). Otherwise the conversation
+/// is owner-checked **only if it has an owner** — a `user` participant carrying
+/// a non-blank email. A conversation with no such participant (created by an
+/// anonymous or emailless principal, or predating ownership) stays readable by
+/// everyone, as it was before scoping shipped; fail-closing it instead denied
+/// those principals their own sessions (th-909995, and the .NET revert in #309).
+/// An owned conversation still needs a matching `User(email)`, so `Denied` — and
+/// any other user — is refused.
+///
+/// A storage error is a denial — an owner check that can't be completed must not
 /// pass.
 async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &UserScope) -> bool {
-    let email = match scope {
-        UserScope::Unscoped => return true,
-        UserScope::Denied => return false,
-        UserScope::User(email) => email,
-    };
+    if matches!(scope, UserScope::Unscoped) {
+        return true;
+    }
     match state
         .storage
         .list_participants_by_conversation(conversation_id)
         .await
     {
-        Ok(participants) => participants
-            .iter()
-            .any(|p| smooth_operator::adapter::is_owner(p, email)),
+        Ok(participants) => {
+            let owned = participants.iter().any(|p| {
+                p.participant_type == smooth_operator::domain::ParticipantType::User
+                    && p.email.as_deref().is_some_and(|e| !e.trim().is_empty())
+            });
+            match scope {
+                // Ownerless ⇒ open (see above); owned ⇒ must match.
+                UserScope::User(email) => {
+                    !owned
+                        || participants
+                            .iter()
+                            .any(|p| smooth_operator::adapter::is_owner(p, email))
+                }
+                UserScope::Denied => !owned,
+                UserScope::Unscoped => true, // handled above
+            }
+        }
         Err(_) => false,
     }
 }
@@ -742,20 +763,11 @@ async fn handle_list_conversations(
     // the create-session derivation's fallback for the local/no-auth flavor.
     let org_id = auth_org.unwrap_or(crate::server::SEED_ORG_ID);
 
-    // User scope, on top of (never instead of) the org scope. `Denied` — auth
-    // configured but this connection has no principal email — sees nothing
-    // rather than falling back to the whole org. Both scoped reads filter in
-    // the storage query, before any limit, so a page is never silently short.
-    let listed = match scope {
-        UserScope::Denied => Ok(Vec::new()),
-        UserScope::User(email) => {
-            state
-                .storage
-                .list_conversations_by_org_and_user(org_id, email)
-                .await
-        }
-        UserScope::Unscoped => state.storage.list_conversations_by_org(org_id).await,
-    };
+    // User scope, on top of (never instead of) the org scope, applied below via
+    // `may_read_conversation` — the SAME predicate the session reads use, so the
+    // list can never disagree with what `get_session` will hand over. It runs
+    // before the limit, so a page is never silently short.
+    let listed = state.storage.list_conversations_by_org(org_id).await;
 
     let conversations = match listed {
         Ok(c) => c,
@@ -770,12 +782,17 @@ async fn handle_list_conversations(
     };
 
     // Peek each conversation's messages for a preview + count, dropping empties.
-    // ponytail: per-conversation peek capped at MSG_CAP — fine for a local
-    // daemon's ~100 convos. If this ever fronts a multi-thousand-conversation
-    // org, push count + first-inbound down into the storage adapter as one query.
+    // ponytail: per-conversation peek + owner check, capped at MSG_CAP — fine for
+    // a local daemon's ~100 convos. If this ever fronts a multi-thousand-conversation
+    // org, push count + first-inbound + the owner filter down into the storage
+    // adapter as one query (`list_conversations_by_org_and_user` is that pushdown
+    // for the owned half; it can't express "or ownerless" yet).
     const MSG_CAP: usize = 200;
     let mut rows: Vec<(i64, Value)> = Vec::new();
     for conv in conversations {
+        if !may_read_conversation(state, &conv.id, scope).await {
+            continue;
+        }
         let mut query = smooth_operator::adapter::MessageQuery::new(&conv.id, MSG_CAP);
         query.descending = false; // oldest-first: the first inbound is the title source
         let Ok(page) = state.storage.list_messages_by_conversation(query).await else {

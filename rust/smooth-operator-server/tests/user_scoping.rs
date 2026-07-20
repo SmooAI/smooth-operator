@@ -810,3 +810,156 @@ async fn rename_cannot_retitle_another_users_conversation() {
     .await;
     assert_eq!(own["type"], "immediate_response", "got: {own}");
 }
+
+// ---- ownerless sessions (pearl th-909995, SECURITY) ------------------------
+//
+// `Denied` used to mean "sees nothing at all". On an auth-ENABLED server that
+// scope covers BOTH an anonymous connection and an authenticated principal
+// whose token carries `sub`/`org`/`role` but no `email` (see the `scope_for`
+// tests in `server.rs`) — and the session such a connection creates is
+// OWNERLESS, so denying it locked the caller out of its own session: empty
+// list, resume refused, `send_message` refused, i.e. no product. The .NET twin
+// hung CI on exactly this shape and was reverted in #309.
+//
+// Option B: a conversation that HAS an owner is still owner-checked; one with
+// NO owner is readable, as it was before scoping shipped. These pin both halves.
+
+/// One ownerless conversation: created by a `Denied` connection (auth enabled,
+/// no principal email) that supplies no `userEmail` either, so its user
+/// participant carries no email and nobody owns it.
+async fn ownerless() -> (AppState, Arc<InMemoryStorageAdapter>, Created) {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), base_config());
+    let created = create_session(&state, &storage, &UserScope::Denied, None).await;
+    seed_message(&storage, &created.conversation_id, "anonymous question").await;
+    (state, storage, created)
+}
+
+#[tokio::test]
+async fn anonymous_or_emailless_can_use_the_session_it_created() {
+    let (state, storage, mine) = ownerless().await;
+    let me = UserScope::Denied;
+
+    assert_eq!(
+        list_ids(&state, &me).await,
+        vec![mine.conversation_id.clone()],
+        "an emailless/anonymous principal must see the conversation it created"
+    );
+
+    let read = get_messages(&state, &me, &mine.session_id).await;
+    assert_eq!(read["type"], "immediate_response", "got: {read}");
+    assert_eq!(
+        read["data"]["messages"].as_array().expect("messages").len(),
+        1
+    );
+
+    // Past the ACL gate: the only thing stopping the turn is the absent gateway.
+    let events = drive_all(&state, &me, &send_frame(&mine.session_id)).await;
+    assert_eq!(
+        events[0]["error"]["code"], "LLM_UNAVAILABLE",
+        "an emailless principal must be able to send into its own session: {events:?}"
+    );
+
+    // And resume binds back to it rather than minting a fresh one.
+    let resumed = drive(
+        &state,
+        &me,
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "cs",
+            "agentId": "agent-fixed",
+            "conversationId": mine.conversation_id,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resumed["data"]["conversationId"], mine.conversation_id,
+        "got: {resumed}"
+    );
+    drop(storage);
+}
+
+#[tokio::test]
+async fn an_emailless_scope_still_cannot_reach_an_owned_session() {
+    // The permissive half of Option B is ONLY the ownerless case: an emailless
+    // scope matches no non-empty owner, so Alice stays sealed off.
+    let (state, storage, a, _b) = two_users().await;
+    let me = UserScope::Denied;
+
+    assert!(
+        list_ids(&state, &me).await.is_empty(),
+        "a connection with no user identity must NOT fall back to the whole org"
+    );
+
+    let read = get_messages(&state, &me, &a.session_id).await;
+    assert_eq!(read["error"]["code"], "SESSION_NOT_FOUND", "got: {read}");
+
+    let events = drive_all(&state, &me, &send_frame(&a.session_id)).await;
+    assert_eq!(events.len(), 1, "no turn may be spawned: {events:?}");
+    assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND");
+
+    // Nothing landed in Alice's log.
+    let messages = storage
+        .list_messages_by_conversation(smooth_operator::adapter::MessageQuery::new(
+            &a.conversation_id,
+            50,
+        ))
+        .await
+        .expect("list messages")
+        .messages;
+    assert_eq!(messages.len(), 1, "only alice's own message: {messages:?}");
+
+    // Nor can it resume her conversation — a fresh one is minted, as for an
+    // id that never existed.
+    let resumed = drive(
+        &state,
+        &me,
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "cs",
+            "agentId": "agent-fixed",
+            "conversationId": a.conversation_id,
+        }),
+    )
+    .await;
+    assert_ne!(
+        resumed["data"]["conversationId"], a.conversation_id,
+        "got: {resumed}"
+    );
+}
+
+#[tokio::test]
+async fn an_ownerless_conversation_is_reachable_by_every_scope() {
+    // The accepted trade-off. Keying anonymous scope on `sub` instead (Option A)
+    // was rejected: Go's anonymous principal uses the literal sub "anonymous"
+    // for EVERY visitor, which would pool them and leak their chats to each other.
+    let (state, storage, orphan) = ownerless().await;
+
+    // An authenticated user's own conversation, alongside the ownerless one.
+    let alice = create_session(&state, &storage, &scoped("alice@example.com"), None).await;
+    seed_message(&storage, &alice.conversation_id, "alice's private question").await;
+
+    for scope in [
+        UserScope::Denied,
+        scoped("alice@example.com"),
+        scoped("bob@example.com"),
+        UserScope::Unscoped,
+    ] {
+        assert!(
+            list_ids(&state, &scope)
+                .await
+                .contains(&orphan.conversation_id),
+            "ownerless conversations stay reachable for {scope:?}"
+        );
+        let read = get_messages(&state, &scope, &orphan.session_id).await;
+        assert_eq!(read["type"], "immediate_response", "got: {read}");
+    }
+
+    // ...while Alice's owned one is still hers alone.
+    assert!(!list_ids(&state, &scoped("bob@example.com"))
+        .await
+        .contains(&alice.conversation_id));
+    assert!(!list_ids(&state, &UserScope::Denied)
+        .await
+        .contains(&alice.conversation_id));
+}
