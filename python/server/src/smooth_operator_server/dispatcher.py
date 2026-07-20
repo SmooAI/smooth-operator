@@ -28,7 +28,7 @@ from .agent_config import (
     filter_tools,
     gate_tools,
 )
-from .auth import AccessContext
+from .auth import AccessContext, normalize_email
 from .confirmation import ConfirmationRegistry
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
@@ -191,6 +191,39 @@ class FrameDispatcher:
             # server-side, not leaked over the wire). Mirrors the C#/Rust handler.
             sink(protocol.error(request_id, "INTERNAL_ERROR", "Internal error processing the request."))
 
+    def _scope_email(self) -> str | None:
+        """The email this connection's conversations are scoped to.
+
+        ``None`` is returned ONLY when auth is disabled (the single-tenant local flavor)
+        — the one legitimate unscoped case. An authenticated-but-emailless principal
+        does NOT land here: callers check :meth:`_auth_enforced` first and refuse.
+        th-8fe998."""
+        return None if self._access.auth_disabled else self._access.scope_email
+
+    @property
+    def _auth_enforced(self) -> bool:
+        return not self._access.auth_disabled
+
+    async def _visible_session(self, session_id: str) -> Any:
+        """The session, but only if this connection's principal owns it — otherwise
+        ``None``, exactly as for a session id that never existed.
+
+        Every sessionId-bearing action routes through here so one guard covers them all.
+        Callers MUST report a miss with the same ``SESSION_NOT_FOUND`` payload they use
+        for a genuinely unknown id: a distinct "forbidden" (or a differently-worded
+        message) turns this endpoint into an existence oracle for enumerating other
+        users' session ids. th-8fe998."""
+        session = await self._store.get_session(session_id)
+        if session is None:
+            return None
+        if not self._auth_enforced:
+            return session  # auth disabled → single tenant, no ownership to check
+        scope = self._scope_email()
+        # Emailless principal (scope None) owns nothing → fail closed, never unscoped.
+        if scope is None or normalize_email(session.owner_email) != scope:
+            return None
+        return session
+
     async def _handle_create_session(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # Resume: a `conversationId` naming an existing conversation binds the new session
         # to it (reuses id + history); absent/unknown → a fresh conversation. The response
@@ -198,11 +231,19 @@ class FrameDispatcher:
         # Mirrors the Rust/Go/TS reference. th-d5b446.
         raw_conv_id = frame.get("conversationId")
         conversation_id = raw_conv_id if isinstance(raw_conv_id, str) and raw_conv_id else None
+        # Ownership comes from the AUTHENTICATED PRINCIPAL, never from the frame. The
+        # client-supplied `userEmail` is exactly the spoofing vector this fix closes:
+        # honoring it would let anyone claim (and then list) another user's scope. With
+        # auth on, the principal's email also replaces `userEmail` as the OTP contact,
+        # so a code is never delivered to a client-chosen address. th-8fe998.
+        owner_email = self._scope_email()
+        user_email = owner_email if self._auth_enforced else frame.get("userEmail")
         session = await self._store.create_session(
             frame.get("agentId") or "",
             frame.get("userName"),
-            frame.get("userEmail"),
+            user_email,
             conversation_id,
+            owner_email=owner_email,
         )
         data = {
             "sessionId": session.session_id,
@@ -219,7 +260,8 @@ class FrameDispatcher:
         if not session_id:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
             return
-        session = await self._store.get_session(session_id)
+        # Not-yours is reported identically to not-found — no existence oracle.
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
@@ -248,7 +290,14 @@ class FrameDispatcher:
             else _DEFAULT_LIST_LIMIT
         )
 
-        summaries = await self._store.list_conversations()
+        # Scope to the authenticated principal. Auth enabled + emailless principal owns
+        # nothing → empty list; we never fall back to unscoped. The store applies the
+        # filter in its selection, so `limit` below caps an already-scoped list rather
+        # than paging over other users' rows. th-8fe998.
+        if self._auth_enforced and self._scope_email() is None:
+            sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": []}))
+            return
+        summaries = await self._store.list_conversations(self._scope_email())
         # Most-recent-first (empties already dropped by the store), then cap.
         summaries.sort(key=lambda c: c.updated_at, reverse=True)
         conversations = [
@@ -342,7 +391,7 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
             return
 
-        session = await self._store.get_session(session_id)
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
@@ -513,8 +562,9 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "verify_otp requires a 'code'"))
             return
 
-        # The session must exist (a code can't authenticate a session we don't track).
-        session = await self._store.get_session(session_id)
+        # The session must exist AND belong to this principal (a code can't authenticate
+        # a session we don't track — or someone else's).
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return

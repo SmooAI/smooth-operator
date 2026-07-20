@@ -28,6 +28,11 @@ class Principal:
     org: str
     role: str
     groups: list[str] = field(default_factory=list)
+    #: The identity's email (JWT ``email`` claim) when the token carries one. This is
+    #: the ACL key conversations are scoped by (th-8fe998) — never a client-supplied
+    #: frame field. ``None`` when the token has no email: the server then fails CLOSED
+    #: (nothing listed, nothing resumable) rather than falling back to unscoped access.
+    email: str | None = None
 
 
 #: The org-public, unauthenticated principal.
@@ -42,13 +47,43 @@ class AccessContext:
 
     principal: Principal
     is_anonymous: bool
+    #: ``True`` only when NO auth is configured (the local/dev single-tenant flavor) —
+    #: the ONE case where conversation access is unscoped. Defaults to ``False`` so any
+    #: context built without thinking about it is treated as auth-enforced and scopes
+    #: (or denies); a fail-OPEN default here would silently unscope third-party
+    #: verifiers. th-8fe998.
+    auth_disabled: bool = False
 
     @property
     def groups(self) -> list[str]:
         return self.principal.groups
 
+    @property
+    def scope_email(self) -> str | None:
+        """The normalized email conversations are scoped to, or ``None`` when the
+        principal has none. Meaningful only when :attr:`auth_disabled` is ``False``."""
+        return normalize_email(self.principal.email)
 
-AccessContext.ANONYMOUS = AccessContext(principal=ANONYMOUS_PRINCIPAL, is_anonymous=True)  # type: ignore[attr-defined]
+
+def normalize_email(value: object) -> str | None:
+    """Canonical form of an email used as an ACL key: trimmed + lowercased, ``None``
+    for anything blank or non-string. Both sides of every ownership comparison go
+    through this, so casing/whitespace can never split one user into two."""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip().lower()
+    return trimmed or None
+
+
+#: Auth-disabled anonymous: the local/dev flavor, unscoped by design.
+AccessContext.ANONYMOUS = AccessContext(  # type: ignore[attr-defined]
+    principal=ANONYMOUS_PRINCIPAL, is_anonymous=True, auth_disabled=True
+)
+#: Auth ENABLED but the token was missing/invalid/expired — anonymous AND enforced,
+#: so conversation access fails closed instead of degrading to unscoped.
+AccessContext.ANONYMOUS_ENFORCED = AccessContext(  # type: ignore[attr-defined]
+    principal=ANONYMOUS_PRINCIPAL, is_anonymous=True, auth_disabled=False
+)
 
 
 class AuthVerifier(ABC):
@@ -96,6 +131,9 @@ def _access_from_claims(payload: dict) -> AccessContext:
         org=str(payload.get("org", "public")),
         role=str(payload.get("role", "basic")),
         groups=groups_list,
+        # The scoping key. A token without an `email` claim yields None → the
+        # connection can list/resume nothing (fail closed), never everything.
+        email=normalize_email(payload.get("email")),
     )
     return AccessContext(principal=principal, is_anonymous=False)
 
@@ -116,7 +154,7 @@ class LocalTokenVerifier(AuthVerifier):
 
     def resolve(self, token: str | None) -> AccessContext:
         if not token:
-            return AccessContext.ANONYMOUS  # type: ignore[attr-defined]
+            return AccessContext.ANONYMOUS_ENFORCED  # type: ignore[attr-defined]
         try:
             parts = token.split(".")
             if len(parts) != 3:
@@ -129,8 +167,9 @@ class LocalTokenVerifier(AuthVerifier):
             payload = json.loads(_b64url_decode(parts[1]))
             return _access_from_claims(payload)
         except Exception:
-            # Fail closed: malformed / bad signature / expired → anonymous.
-            return AccessContext.ANONYMOUS  # type: ignore[attr-defined]
+            # Fail closed: malformed / bad signature / expired → anonymous AND still
+            # auth-enforced, so it scopes to nothing rather than seeing everything.
+            return AccessContext.ANONYMOUS_ENFORCED  # type: ignore[attr-defined]
 
     def mode(self) -> str:
         return "local"
