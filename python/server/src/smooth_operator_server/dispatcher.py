@@ -208,7 +208,13 @@ class FrameDispatcher:
         """The session, but only if this connection's principal owns it — otherwise
         ``None``, exactly as for a session id that never existed.
 
-        Every sessionId-bearing action routes through here so one guard covers them all.
+        This is the ONLY permitted way to turn a client-supplied sessionId into a
+        session. Every sessionId-bearing action routes through here so one guard covers
+        them all — calling ``self._store.get_session`` directly from a handler bypasses
+        the ownership check and is a cross-user data leak (th-1b7ed0 was exactly that,
+        in ``get_conversation_messages``). ``test_visible_session_is_the_only_lookup``
+        fails if a second direct call site appears.
+
         Callers MUST report a miss with the same ``SESSION_NOT_FOUND`` payload they use
         for a genuinely unknown id: a distinct "forbidden" (or a differently-worded
         message) turns this endpoint into an existence oracle for enumerating other
@@ -326,7 +332,9 @@ class FrameDispatcher:
         if not session_id:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
             return
-        session = await self._store.get_session(session_id)
+        # Owner-scoped like every other sessionId action — reading someone else's history
+        # is reported identically to a session that never existed. th-1b7ed0.
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
