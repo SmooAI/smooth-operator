@@ -154,6 +154,19 @@ describe('per-user conversation scoping (th-8fe998)', () => {
             expect((sink[0]!.error as Record<string, unknown>).code).toBe('SESSION_NOT_FOUND');
         });
 
+        it('owner matching is CASE-INSENSITIVE (OIDC providers vary on casing)', async () => {
+            const store = new InMemorySessionStore();
+            const a = await seed(store, 'Alice@Example.com', 'alice');
+
+            const { sink, dispatch } = connect(store, principal('alice@example.com'));
+            await dispatch({ action: 'get_conversation_messages', requestId: 'gm', sessionId: a.sessionId });
+            expect(sink[0]!.type).toBe('immediate_response');
+
+            const list = connect(store, principal('ALICE@EXAMPLE.COM'));
+            await list.dispatch({ action: 'list_conversations', requestId: 'lc' });
+            expect(conversationIds(list.sink)).toEqual([a.conversationId]);
+        });
+
         it('a principal with no email is denied too — emailless never means unrestricted', async () => {
             const store = new InMemorySessionStore();
             const b = await seed(store, 'b@example.com', 'bob secret');
@@ -219,6 +232,62 @@ describe('per-user conversation scoping (th-8fe998)', () => {
             // And A's new session sees none of B's history.
             expect(await store.listMessages(realData.conversationId, 100)).toHaveLength(0);
         });
+    });
+
+    /**
+     * Option B (th-909995). The first cut of this rule denied EVERY read when auth was on
+     * and the principal had no email — which locked an anonymous or emailless caller out
+     * of the session it had just created, i.e. no chat at all on an auth-enabled server.
+     * .NET caught it (its ACL test authenticates with no `email` claim and hung CI, PR
+     * #309); TS had no such test, which is why it shipped here. These are that test.
+     */
+    describe('ownerless sessions stay usable (anonymous / emailless)', () => {
+        for (const [label, access] of [
+            ['anonymous under auth', ANON_UNDER_AUTH],
+            ['authenticated, no email claim', principal(undefined)],
+        ] as const) {
+            it(`${label}: can create, read and send in its OWN session`, async () => {
+                const store = new InMemorySessionStore();
+                const { sink, dispatch } = connect(store, access);
+
+                await dispatch({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent-1' });
+                const own = sink[0]!.data as { sessionId: string; conversationId: string };
+
+                await dispatch({ action: 'get_session', requestId: 'gs', sessionId: own.sessionId });
+                expect(sink[1]!.type).toBe('immediate_response');
+
+                await dispatch({ action: 'send_message', requestId: 'sm', sessionId: own.sessionId, message: 'hello' });
+                expect(sink.some((f) => (f.error as Record<string, unknown> | undefined)?.code === 'SESSION_NOT_FOUND')).toBe(false);
+                expect((await store.listMessages(own.conversationId, 100)).some((m) => m.text === 'hello')).toBe(true);
+
+                await dispatch({ action: 'get_conversation_messages', requestId: 'gm', sessionId: own.sessionId });
+                expect(sink.at(-1)!.type).toBe('immediate_response');
+            });
+
+            it(`${label}: can RESUME its own conversation`, async () => {
+                const store = new InMemorySessionStore();
+                const first = connect(store, access);
+                await first.dispatch({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent-1' });
+                const own = first.sink[0]!.data as { conversationId: string };
+
+                const again = connect(store, access);
+                await again.dispatch({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent-1', conversationId: own.conversationId });
+                expect((again.sink[0]!.data as { conversationId: string }).conversationId).toBe(own.conversationId);
+            });
+
+            it(`${label}: still CANNOT reach a session owned by a real email`, async () => {
+                const store = new InMemorySessionStore();
+                const b = await seed(store, 'b@example.com', 'bob secret');
+
+                const { sink, dispatch } = connect(store, access);
+                await dispatch({ action: 'get_conversation_messages', requestId: 'gm', sessionId: b.sessionId });
+                expect((sink[0]!.error as Record<string, unknown>).code).toBe('SESSION_NOT_FOUND');
+
+                await dispatch({ action: 'send_message', requestId: 'sm', sessionId: b.sessionId, message: 'injected' });
+                expect((sink[1]!.error as Record<string, unknown>).code).toBe('SESSION_NOT_FOUND');
+                expect(await store.listMessages(b.conversationId, 100)).toHaveLength(1);
+            });
+        }
     });
 
     describe('the principal wins over the frame', () => {

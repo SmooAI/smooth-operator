@@ -279,8 +279,11 @@ export class FrameDispatcher {
      * field, which the client controls.
      *
      * Unscoped is reachable ONLY with auth disabled (single-tenant local/dev). With auth
-     * enabled and no email claim the caller is scoped to a value nothing can own, so
-     * every read comes back empty/denied rather than falling back to everyone's data.
+     * enabled and no email claim the caller is scoped to a value nothing can own, so the
+     * LIST comes back empty rather than falling back to everyone's data — and, just as
+     * importantly, rather than pooling every anonymous visitor's chats into one bucket
+     * they could all read. Reaching an OWNERLESS conversation still works, but only by
+     * holding its (unguessable) id — see {@link mayRead}.
      */
     private scopeEmail(): string | undefined {
         if (!this.access.authEnabled) return undefined;
@@ -290,6 +293,17 @@ export class FrameDispatcher {
     /**
      * Whether this connection may read a conversation owned by `ownerEmail`.
      *
+     * A conversation that HAS an owner is owner-checked; one with NO owner (anonymous,
+     * emailless-authenticated, or legacy) is allowed. Denying the ownerless case instead
+     * locks anonymous and emailless principals out of the sessions they just created —
+     * they can't converse at all on an auth-enabled server, which killed anonymous
+     * public-agent chat (see PRs #308/#309). The reported attack — authenticated A
+     * touching authenticated B's OWNED session — is still closed, and an emailless scope
+     * (the sentinel) still matches no real owner.
+     *
+     * Emails compare case-insensitively; OIDC providers vary on the casing they emit for
+     * the same identity, and .NET/Python already compare this way.
+     *
      * Callers turn `false` into the SAME `SESSION_NOT_FOUND` they emit for an id that
      * never existed. A distinct "forbidden" code — or a different message — would be an
      * existence oracle: an attacker could enumerate other users' conversation ids by
@@ -297,7 +311,9 @@ export class FrameDispatcher {
      */
     private mayRead(ownerEmail: string | undefined): boolean {
         const scope = this.scopeEmail();
-        return scope === undefined || ownerEmail === scope;
+        if (scope === undefined) return true; // auth not configured — unscoped
+        if (!ownerEmail) return true; // no owner to enforce
+        return ownerEmail.toLowerCase() === scope.toLowerCase();
     }
 
     private async handleCreateSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
@@ -718,9 +734,11 @@ const EPOCH_ISO = new Date(0).toISOString();
 
 /**
  * The scope used for an authenticated connection whose principal carries NO email —
- * a value no conversation can be owned by, so every read fails closed instead of
- * falling back to unscoped. Randomized per process so it can't be forged by a caller
- * who influences their own `email` claim.
+ * a value no conversation can be owned by, so the list comes back empty instead of
+ * falling back to unscoped (or pooling every emailless caller together), and an
+ * OWNED conversation stays unreachable. Randomized per process so it can't be forged
+ * by a caller who influences their own `email` claim. Still load-bearing under the
+ * owner-checked-only-if-owned rule: it is what makes an emailless scope match nothing.
  */
 const NO_OWNER_SENTINEL = ` no-owner:${randomUUID()}`;
 
