@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,8 +45,8 @@ type StoredSession struct {
 	// OwnerEmail is the AUTHENTICATED principal's email at create time — the conversation
 	// ownership key every read is filtered by. Deliberately NOT ContactEmail: ContactEmail is
 	// client-supplied (the OTP delivery address) and therefore spoofable, so it can never
-	// decide who may read what. "" means the session was created with auth disabled, and is
-	// visible only to an equally unscoped (auth-disabled) reader. th-8fe998.
+	// decide who may read what. "" means the session has no owner to enforce — auth disabled,
+	// or an anonymous/emailless principal — and stays reachable. th-8fe998, th-909995.
 	OwnerEmail string
 }
 
@@ -60,20 +61,35 @@ type ConversationScope struct {
 	// Unscoped makes every conversation visible. Set ONLY when the server has no auth
 	// configured (local/dev single-tenant). This is the one and only unscoped path.
 	Unscoped bool
-	// Email is the authenticated principal's email; a conversation is visible only when its
-	// OwnerEmail matches exactly. Empty with Unscoped false ⇒ nothing is visible.
+	// Email is the authenticated principal's email; an OWNED conversation is visible only
+	// when its OwnerEmail matches (case-insensitively). Empty with Unscoped false ⇒ only
+	// ownerless conversations are visible. See Allows.
 	Email string
 }
 
-// Allows reports whether a conversation owned by ownerEmail is visible in this scope. An
-// empty Email never matches — including against an empty ownerEmail — so an auth-enabled
-// connection whose principal carries no email cannot see the sessions created while auth was
-// disabled. th-8fe998.
+// Allows reports whether a conversation owned by ownerEmail is visible in this scope.
+//
+// A conversation that HAS an owner is owner-checked: only the same principal may read or
+// write it (the th-909995 P0 — authenticated A reaching into authenticated B's session).
+// A conversation with NO owner has nobody to enforce on behalf of, so it stays reachable:
+// that population is anonymous visitors, emailless-authenticated principals, and legacy
+// auth-disabled sessions, and denying it locks them out of the product entirely — they
+// cannot even use the session they just created. th-909995 (Option B).
+//
+// Keying ownerless sessions on Sub instead was rejected: AnonymousPrincipal.Sub is the
+// literal "anonymous" for EVERY visitor, so that would pool all anonymous conversations
+// into one shared bucket and leak them to each other.
+//
+// Emails compare case-insensitively — OIDC providers vary on casing, and the .NET and
+// Python siblings already fold case. th-8fe998, th-909995.
 func (s ConversationScope) Allows(ownerEmail string) bool {
 	if s.Unscoped {
 		return true
 	}
-	return s.Email != "" && ownerEmail == s.Email
+	if ownerEmail == "" {
+		return true
+	}
+	return s.Email != "" && strings.EqualFold(ownerEmail, s.Email)
 }
 
 // StoredMessage is one persisted conversation message.
