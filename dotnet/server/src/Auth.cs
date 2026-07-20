@@ -4,9 +4,21 @@ using System.Text.Json;
 
 namespace SmooAI.SmoothOperator.Server;
 
-/// <summary>An authenticated identity. Mirrors the Rust engine's <c>Principal</c>.</summary>
+/// <summary>
+/// An authenticated identity. Mirrors the Rust engine's <c>Principal</c>.
+/// <para>
+/// <see cref="Email"/> is the per-user data-scoping key: it is the identity conversations are owned
+/// by and filtered on (<c>list_conversations</c>, resume, <c>get_conversation_messages</c>). It is an
+/// init-only property rather than a positional parameter so adding it does not break every downstream
+/// host that constructs a <c>Principal</c>. Populated from the validated token's <c>email</c> claim
+/// (the customer's ALB-OIDC → Auth0/Google flow puts it there); <c>null</c> when the token carries no
+/// email, which fails closed — such a principal sees no conversations. th-966fab.
+/// </para>
+/// </summary>
 public sealed record Principal(string Sub, string Org, string Role, IReadOnlyList<string> Groups)
 {
+    public string? Email { get; init; }
+
     public static Principal Anonymous { get; } = new("anonymous", "public", "anonymous", Array.Empty<string>());
 }
 
@@ -16,9 +28,34 @@ public sealed record Principal(string Sub, string Org, string Role, IReadOnlyLis
 /// </summary>
 public sealed record AccessContext(Principal Principal, bool IsAnonymous)
 {
-    public static AccessContext Anonymous { get; } = new(Principal.Anonymous, true);
+    /// <summary>
+    /// Whether the server has auth CONFIGURED at all — <c>true</c> for any verifier that validates a
+    /// token (jwt / trusted / local), <c>false</c> only for the no-auth single-tenant local/dev path.
+    /// This is the switch that decides whether per-user conversation scoping applies, and it is
+    /// deliberately distinct from <see cref="IsAnonymous"/>: a bad or missing token on an auth-enabled
+    /// server is anonymous AND auth-enabled, so it fails closed (sees nothing) instead of falling back
+    /// to the unscoped no-auth behavior.
+    /// <para>
+    /// Defaults to <c>true</c> (fail closed) so a context built by hand is scoped; only
+    /// <see cref="Anonymous"/> and the <c>none</c> auth mode clear it. th-966fab.
+    /// </para>
+    /// </summary>
+    public bool AuthEnabled { get; init; } = true;
+
+    /// <summary>Anonymous on a server with NO auth configured — the only unscoped identity.</summary>
+    public static AccessContext Anonymous { get; } = new(Principal.Anonymous, true) { AuthEnabled = false };
 
     public IReadOnlyList<string> Groups => Principal.Groups;
+
+    /// <summary>
+    /// The conversation scope this connection may read. Auth off ⇒ <see cref="ConversationScope.Unscoped"/>
+    /// (single-tenant, unchanged). Auth on ⇒ scoped to the principal's email, or
+    /// <see cref="ConversationScope.None"/> when the principal carries none (fail closed — never
+    /// unscoped). th-966fab.
+    /// </summary>
+    public ConversationScope ConversationScope => !AuthEnabled
+        ? ConversationScope.Unscoped
+        : string.IsNullOrEmpty(Principal.Email) ? ConversationScope.None : ConversationScope.ForUser(Principal.Email!);
 }
 
 /// <summary>
@@ -138,7 +175,7 @@ public sealed class TokenAccessResolver : IAuthVerifier
     {
         if (string.IsNullOrEmpty(token))
         {
-            return AccessContext.Anonymous;
+            return AnonymousForMode();
         }
 
         try
@@ -153,9 +190,18 @@ public sealed class TokenAccessResolver : IAuthVerifier
         catch
         {
             // Any failure (malformed, bad signature, expired) fails closed to anonymous.
-            return AccessContext.Anonymous;
+            return AnonymousForMode();
         }
     }
+
+    /// <summary>
+    /// The anonymous context for THIS server's auth mode. On an auth-enabled server a missing or
+    /// unverifiable token stays <c>AuthEnabled</c>, so it fails closed to an EMPTY conversation scope
+    /// rather than inheriting the unscoped no-auth behavior — the whole point of th-966fab.
+    /// </summary>
+    private AccessContext AnonymousForMode() => _options.Mode == AuthMode.None
+        ? AccessContext.Anonymous
+        : AccessContext.Anonymous with { AuthEnabled = true };
 
     private AccessContext FromTrusted(string token)
     {
@@ -204,6 +250,9 @@ public sealed class TokenAccessResolver : IAuthVerifier
         var sub = root.TryGetProperty("sub", out var s) ? s.GetString() ?? "unknown" : "unknown";
         var org = root.TryGetProperty("org", out var o) ? o.GetString() ?? "public" : "public";
         var role = root.TryGetProperty("role", out var r) ? r.GetString() ?? "basic" : "basic";
+        // The data-scoping key. `email` is the standard OIDC claim the customer's ALB → Auth0/Google
+        // flow mints; no claim ⇒ null ⇒ the principal sees no conversations (fail closed). th-966fab.
+        var email = root.TryGetProperty("email", out var e) ? e.GetString() : null;
 
         var groups = new List<string>();
         if (root.TryGetProperty("groups", out var g) && g.ValueKind == JsonValueKind.Array)
@@ -217,7 +266,7 @@ public sealed class TokenAccessResolver : IAuthVerifier
             }
         }
 
-        return new AccessContext(new Principal(sub, org, role, groups), IsAnonymous: false);
+        return new AccessContext(new Principal(sub, org, role, groups) { Email = string.IsNullOrEmpty(email) ? null : email }, IsAnonymous: false);
     }
 
     private static byte[] Base64UrlDecode(string value)

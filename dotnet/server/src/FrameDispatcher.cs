@@ -264,10 +264,34 @@ public sealed class FrameDispatcher
         // response echoes session.ConversationId either way, so a resuming client sees the same id
         // it passed. Mirrors the Rust reference's resume branch. th-d5b446.
         var conversationId = frame["conversationId"]?.GetValue<string>();
+        var scope = _access.ConversationScope;
+
+        // SECURITY (th-966fab): on an auth-enabled server, resuming a conversation you do not own is
+        // refused with the SAME SESSION_NOT_FOUND (same code, same message) a conversation id that
+        // never existed gets — including the previously-silent "unknown id mints a fresh conversation"
+        // path, which would otherwise have made the two distinguishable and let a caller probe for
+        // other users' conversation ids.
+        if (!string.IsNullOrEmpty(conversationId) && !scope.IsUnscoped)
+        {
+            var owns = !scope.IsEmpty
+                && await _store.ConversationBelongsToUserAsync(conversationId!, scope.UserEmail!, cancellationToken).ConfigureAwait(false);
+            if (!owns)
+            {
+                sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"conversation '{conversationId}' not found"));
+                return;
+            }
+        }
+
+        // SECURITY (th-966fab): the session's owning identity is the CONNECTION's authenticated
+        // principal. The frame's `userEmail` is only honoured when no auth is configured at all
+        // (single-tenant local/dev) — trusting client-supplied identity on an authenticated server is
+        // the spoofing vector this closes.
+        var ownerEmail = scope.IsUnscoped ? frame["userEmail"]?.GetValue<string>() : scope.UserEmail;
+
         var session = await _store.ResumeSessionAsync(
             frame["agentId"]?.GetValue<string>() ?? string.Empty,
             frame["userName"]?.GetValue<string>(),
-            frame["userEmail"]?.GetValue<string>(),
+            ownerEmail,
             string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
 
@@ -283,10 +307,26 @@ public sealed class FrameDispatcher
         sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Session created", data));
     }
 
+    /// <summary>
+    /// Whether this connection's principal may read a session stamped with <paramref name="sessionOwnerEmail"/>.
+    /// No auth configured ⇒ always (single-tenant, unchanged). Otherwise the emails must match; a
+    /// principal with no email, and a session with no recorded owner (written before per-user scoping
+    /// existed), both fail closed. th-966fab.
+    /// </summary>
+    private bool CanRead(string? sessionOwnerEmail)
+    {
+        var scope = _access.ConversationScope;
+        return scope.IsUnscoped
+            || (!scope.IsEmpty && !string.IsNullOrEmpty(sessionOwnerEmail)
+                && string.Equals(sessionOwnerEmail, scope.UserEmail, StringComparison.OrdinalIgnoreCase));
+    }
+
     private async Task HandleGetSessionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
         var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
-        if (session is null)
+        // SECURITY (th-966fab): same ownership gate as get_conversation_messages, same indistinguishable
+        // response — get_session leaks another user's conversationId otherwise.
+        if (session is null || !CanRead(session.UserEmail))
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
             return;
@@ -325,7 +365,10 @@ public sealed class FrameDispatcher
             limit = l;
         }
 
-        var summaries = await _store.ListConversationsAsync(cancellationToken).ConfigureAwait(false);
+        // SECURITY (th-966fab): scoped to the connection's authenticated principal. Unscoped ONLY when
+        // no auth is configured; an authenticated principal without an email gets an empty list, never
+        // everyone's. The store applies this in its query — filtering here would break the LIMIT below.
+        var summaries = await _store.ListConversationsAsync(_access.ConversationScope, cancellationToken).ConfigureAwait(false);
 
         var conversations = new JsonArray();
         foreach (var c in summaries.Where(s => s.MessageCount > 0).OrderByDescending(s => s.UpdatedAt).Take(limit))
@@ -404,7 +447,11 @@ public sealed class FrameDispatcher
         }
 
         var session = await _store.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        if (session is null)
+        // SECURITY (th-966fab): a session that exists but belongs to someone else is refused with the
+        // byte-identical response an unknown sessionId gets — same SESSION_NOT_FOUND code, same
+        // message (the caller's own sessionId echoed). Anything that varied between the two would be
+        // an oracle for enumerating other users' session ids.
+        if (session is null || !CanRead(session.UserEmail))
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));
             return;

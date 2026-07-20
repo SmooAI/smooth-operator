@@ -64,7 +64,7 @@ public class ServerInitiatedTurnsTests
 
         // list_conversations (the resume/sidebar substrate) must surface the server-initiated
         // conversation exactly like a client one: present, with a title from the first inbound message.
-        var summaries = await store.ListConversationsAsync();
+        var summaries = await store.ListConversationsAsync(ConversationScope.Unscoped);
         var summary = Assert.Single(summaries, s => s.ConversationId == result.ConversationId);
         Assert.Equal(2, summary.MessageCount);
         Assert.Equal("the initiating question", summary.FirstInboundText);
