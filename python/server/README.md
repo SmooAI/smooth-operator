@@ -77,6 +77,7 @@ state = ServerState(
 - **Per-agent allow-list** — an agent's `tool_config.enabledTools` restricts its turn to exactly those tools. Off the list, off the table.
 - **The authLevel gate** — a tool declaring `supports_auth_requirement = True` is *blocked at call time* on a public agent when tagged `admin`, or when tagged `end_user` and the session isn't identity-verified (its OTP bit, or your `SessionAuthenticator` seam). **Fail-closed** — an absent authenticator means "not authenticated".
 - **End-user OTP flow** — a refused `end_user` tool can offer a one-time-code identity flow via the `OtpService` seam; the server never generates, delivers, or validates a code (the host owns generation, delivery, expiry, attempt counting).
+- **Per-user conversation scoping** — with auth enabled, a conversation is owned by the *authenticated principal's* email (the token's `email` claim, never the client-supplied `userEmail` frame field). `list_conversations` returns only the caller's; resuming or acting on someone else's session is reported exactly like an id that never existed, so it can't be used to probe for other users' ids. **Fail-closed** — an authenticated principal with no email scopes to *nothing*. Auth disabled (the local single-tenant flavor) is the only unscoped mode.
 
 You decide what the agent can touch; the runner enforces it.
 

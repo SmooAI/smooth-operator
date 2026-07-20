@@ -76,7 +76,7 @@ async def test_list_conversations_filters_empties_and_previews_title() -> None:
     await store.append_message(b.conversation_id, MessageDirection.INBOUND, "## First user line")
     await store.append_message(b.conversation_id, MessageDirection.OUTBOUND, "agent reply")
 
-    summaries = await store.list_conversations()
+    summaries = await store.list_conversations(None)
     assert len(summaries) == 1
     got = summaries[0]
     assert got.conversation_id == b.conversation_id
@@ -105,7 +105,7 @@ async def test_unknown_conversation_id_mints_fresh() -> None:
     session = await store.create_session("agent", None, None, "does-not-exist")
     assert session.conversation_id != "does-not-exist"
     # A brand-new empty conversation → nothing to list.
-    assert await store.list_conversations() == []
+    assert await store.list_conversations(None) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -169,4 +169,4 @@ async def test_dispatch_create_without_conversation_id_mints_fresh() -> None:
     convo_id = events[0]["data"]["conversationId"]
     assert isinstance(convo_id, str) and convo_id
     # Fresh empty conversation → not listed.
-    assert await store.list_conversations() == []
+    assert await store.list_conversations(None) == []
