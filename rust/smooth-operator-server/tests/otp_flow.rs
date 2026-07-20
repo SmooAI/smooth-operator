@@ -88,6 +88,7 @@ async fn create_session(state: &AppState) -> String {
         "conn-test",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame.to_string(),
         &tx,
     )
@@ -115,6 +116,7 @@ async fn verify(state: &AppState, session_id: &str, code: &str) -> Value {
         "conn-test",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame.to_string(),
         &tx,
     )
@@ -226,6 +228,7 @@ async fn verify_otp_missing_code_is_validation_error() {
         "conn-test",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame.to_string(),
         &tx,
     )

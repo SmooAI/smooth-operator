@@ -111,6 +111,7 @@ async fn drive(state: &AppState, auth_org: Option<&str>, frame: &Value) -> Value
         "conn-test",
         None,
         auth_org,
+        &handler::UserScope::Unscoped,
         &frame.to_string(),
         &tx,
     )

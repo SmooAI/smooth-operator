@@ -148,7 +148,19 @@ async fn create_session(
     // transport has no persistent socket, so the bearer token rides on the frame
     // (same as `send_message`). A missing/unverifiable token leaves the
     // configured-org behavior unchanged.
-    let org_id = resolve_frame_org(auth, parsed).unwrap_or_else(|| config.org_id.clone());
+    let principal = resolve_frame_principal(auth, parsed);
+    let org_id = principal
+        .as_ref()
+        .map(|p| p.org_id.clone())
+        .unwrap_or_else(|| config.org_id.clone());
+    // The authenticated principal's email wins over the frame's `userEmail`:
+    // the frame field is caller-controlled, so honoring it would stamp a
+    // conversation with someone else's identity — and the server's per-user
+    // conversation scoping reads exactly this participant email back.
+    let user_email = principal
+        .as_ref()
+        .and_then(|p| p.email.clone())
+        .or(user_email);
 
     let conversation_id = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -367,14 +379,17 @@ async fn get_session(
 /// that fails to verify — so the caller falls back to the configured org and the
 /// no-auth/dev behavior is unchanged. Verification failures are logged (never the
 /// token).
-fn resolve_frame_org(auth: &Arc<dyn AuthVerifier>, parsed: &Value) -> Option<String> {
+fn resolve_frame_principal(
+    auth: &Arc<dyn AuthVerifier>,
+    parsed: &Value,
+) -> Option<smooth_operator::auth::Principal> {
     let token = parsed
         .get("token")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|t| !t.is_empty())?;
     match auth.verify(token) {
-        Ok(principal) => Some(principal.org_id),
+        Ok(principal) => Some(principal),
         Err(e) => {
             tracing::warn!(
                 auth_mode = auth.mode(),
