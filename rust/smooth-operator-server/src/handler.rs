@@ -94,6 +94,27 @@ async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &
     }
 }
 
+/// The **only** way a handler may turn a client-supplied `sessionId` into a
+/// session. It loads the session and then hides it unless the connection's
+/// authenticated principal owns its conversation — returning `None`, exactly
+/// what an unknown session id returns, so every caller emits the identical
+/// not-found event and no caller can distinguish "not yours" from "never
+/// existed".
+///
+/// Every sessionId-taking handler routes through here rather than calling
+/// [`AppState::get_session`] directly: the check lives once, at the chokepoint,
+/// instead of being re-derived — and forgotten — per handler. `get_session`,
+/// `send_message`, `verify_otp`, `confirm_tool_action` and `submit_interaction`
+/// each used to load a session by raw id, so any authenticated user who knew or
+/// guessed another user's session id could drive a turn in it (and read the
+/// replayed history back through their own stream). th-1b7ed0.
+async fn scoped_session(state: &AppState, session_id: &str, scope: &UserScope) -> Option<Session> {
+    let session = state.get_session(session_id)?;
+    may_read_conversation(state, &session.conversation_id, scope)
+        .await
+        .then_some(session)
+}
+
 /// Parse and dispatch a single inbound text frame. Any produced events are sent
 /// through `sink`. Protocol-level failures are surfaced as `error` events, never
 /// as hard errors that drop the connection.
@@ -147,7 +168,7 @@ pub async fn handle_frame(
             None
         }
         Some("get_session") => {
-            handle_get_session(state, &parsed, request_id, sink);
+            handle_get_session(state, scope, &parsed, request_id, sink).await;
             None
         }
         Some("get_conversation_messages") => {
@@ -159,22 +180,24 @@ pub async fn handle_frame(
             None
         }
         Some("rename_conversation") => {
-            handle_rename_conversation(state, &parsed, request_id, sink).await;
+            handle_rename_conversation(state, scope, &parsed, request_id, sink).await;
             None
         }
         // The only action that spawns a turn — its handle flows back to the reader
         // loop so a later `cancel` (or a disconnect) can abort it.
-        Some("send_message") => handle_send_message(state, access, &parsed, request_id, sink).await,
+        Some("send_message") => {
+            handle_send_message(state, access, scope, &parsed, request_id, sink).await
+        }
         Some("confirm_tool_action") => {
-            handle_confirm_tool_action(state, &parsed, request_id, sink);
+            handle_confirm_tool_action(state, scope, &parsed, request_id, sink).await;
             None
         }
         Some("verify_otp") => {
-            handle_verify_otp(state, &parsed, request_id, sink).await;
+            handle_verify_otp(state, scope, &parsed, request_id, sink).await;
             None
         }
         Some("submit_interaction") => {
-            handle_submit_interaction(state, &parsed, request_id, sink);
+            handle_submit_interaction(state, scope, &parsed, request_id, sink).await;
             None
         }
         Some(other) => {
@@ -567,8 +590,9 @@ async fn handle_create_session(
 }
 
 /// `get_session` — return the session snapshot (per `get-session.schema.json`).
-fn handle_get_session(
+async fn handle_get_session(
     state: &AppState,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -582,7 +606,7 @@ fn handle_get_session(
         return;
     };
 
-    match state.get_session(session_id) {
+    match scoped_session(state, session_id, scope).await {
         Some(s) => {
             let data = json!({
                 "sessionId": s.session_id,
@@ -639,18 +663,13 @@ async fn handle_get_conversation_messages(
     // same message, same shape. A distinct "forbidden" would be an existence
     // oracle: it would tell a caller which session ids are real, which is all
     // an attacker needs to enumerate other users' conversations.
-    let session = match state.get_session(session_id) {
-        Some(session) if may_read_conversation(state, &session.conversation_id, scope).await => {
-            session
-        }
-        _ => {
-            let _ = sink.send(protocol::error(
-                request_id,
-                "SESSION_NOT_FOUND",
-                &format!("session '{session_id}' not found"),
-            ));
-            return;
-        }
+    let Some(session) = scoped_session(state, session_id, scope).await else {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "SESSION_NOT_FOUND",
+            &format!("session '{session_id}' not found"),
+        ));
+        return;
     };
 
     const DEFAULT_LIMIT: usize = 50;
@@ -849,6 +868,7 @@ const TITLE_MAX: usize = 60;
 /// (200) carrying `{ conversationId, title }`.
 async fn handle_rename_conversation(
     state: &AppState,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -877,11 +897,13 @@ async fn handle_rename_conversation(
         return;
     }
 
-    // The conversation must exist — give a clean 404 rather than a generic
-    // storage error.
+    // The conversation must exist AND be ours — this action takes a raw
+    // conversation id, so without the owner check any authenticated user could
+    // retitle another user's conversation. Not-ours is reported exactly as
+    // never-existed.
     match state.storage.get_conversation(conversation_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+        Ok(Some(_)) if may_read_conversation(state, conversation_id, scope).await => {}
+        Ok(_) => {
             let _ = sink.send(protocol::error(
                 request_id,
                 "CONVERSATION_NOT_FOUND",
@@ -1153,6 +1175,7 @@ async fn persist_workflow_step(
 async fn handle_send_message(
     state: &AppState,
     access: &AccessContext,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -1195,7 +1218,11 @@ async fn handle_send_message(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
-    let Some(session) = state.get_session(session_id) else {
+    // Ownership is checked BEFORE any turn is spawned or any message persisted:
+    // sending into another user's session would replay their history as context
+    // and stream the reply back to the sender, so an unscoped write here is also
+    // a read of their conversation.
+    let Some(session) = scoped_session(state, session_id, scope).await else {
         let _ = sink.send(protocol::error(
             Some(request_id),
             "SESSION_NOT_FOUND",
@@ -1643,8 +1670,9 @@ async fn handle_send_message(
 /// normal streaming sequence (`stream_chunk`/`stream_token` → `eventual_response`);
 /// we additionally ack with an `immediate_response`. Taking the sender makes a
 /// duplicate confirm a no-op (`NO_PENDING_CONFIRMATION`).
-fn handle_confirm_tool_action(
+async fn handle_confirm_tool_action(
     state: &AppState,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -1669,7 +1697,11 @@ fn handle_confirm_tool_action(
         return;
     };
 
-    let Some(responder) = state.take_confirmation(session_id) else {
+    // Approving a write parked in ANOTHER user's turn is the same class of hole
+    // as writing into their session. A session we may not read is reported with
+    // the identical event an id with no pending confirmation produces.
+    let owned = scoped_session(state, session_id, scope).await.is_some();
+    let Some(responder) = owned.then(|| state.take_confirmation(session_id)).flatten() else {
         let _ = sink.send(protocol::error(
             request_id,
             "NO_PENDING_CONFIRMATION",
@@ -1859,8 +1891,9 @@ fn attach_interaction_effect(state: &AppState, session_id: &str, kind: &str, val
 /// The `interactionId` must echo the event's, so a stale submit can never
 /// resolve a newer park; taking the responder only on resolution makes a
 /// duplicate submit a no-op (`NO_PENDING_INTERACTION`).
-fn handle_submit_interaction(
+async fn handle_submit_interaction(
     state: &AppState,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -1886,8 +1919,15 @@ fn handle_submit_interaction(
     };
 
     // Peek the pending interaction WITHOUT consuming the park — an invalid
-    // submit must leave the turn parked for a resubmit.
-    let Some(pending) = state.pending_interaction(session_id) else {
+    // submit must leave the turn parked for a resubmit. A session we may not
+    // read reports the identical event an id with no pending park produces (the
+    // submitted values would otherwise land in another user's turn, and its
+    // identity-attach effect on their session).
+    let owned = scoped_session(state, session_id, scope).await.is_some();
+    let Some(pending) = owned
+        .then(|| state.pending_interaction(session_id))
+        .flatten()
+    else {
         let _ = sink.send(protocol::error(
             Some(request_id),
             "NO_PENDING_INTERACTION",
@@ -2050,6 +2090,7 @@ fn resolve_interaction(
 /// (`NOT_FOUND`, 0 attempts).
 async fn handle_verify_otp(
     state: &AppState,
+    scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -2083,8 +2124,9 @@ async fn handle_verify_otp(
         return;
     };
 
-    // The session must exist (a code can't verify a session we don't track).
-    if state.get_session(session_id).is_none() {
+    // The session must exist AND be ours (a code can't verify — or brute-force —
+    // a session we don't track, nor one belonging to another user).
+    if scoped_session(state, session_id, scope).await.is_none() {
         let _ = sink.send(protocol::error(
             Some(request_id),
             "SESSION_NOT_FOUND",

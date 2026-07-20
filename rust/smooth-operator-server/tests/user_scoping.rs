@@ -465,3 +465,348 @@ async fn anonymous_create_still_honors_the_frame_email() {
         .expect("user participant");
     assert_eq!(user.email.as_deref(), Some("visitor@example.com"));
 }
+
+// ---- the WRITE path (pearl th-1b7ed0, SECURITY) ----------------------------
+//
+// The read-scoping above left every sessionId-taking WRITE handler loading a
+// session by raw id. `send_message` was the worst: user A sending into user B's
+// session replays B's history as the turn's context and streams the reply back
+// to A — reading B's conversation by asking questions against it. Each handler
+// now goes through the `scoped_session` chokepoint, so these drive the attack
+// from A's side and assert the denial is indistinguishable from an unknown id.
+
+/// Drive a frame and collect EVERY event it emits (a spawned turn would emit an
+/// ack + stream events; a denied one emits exactly one error).
+async fn drive_all(state: &AppState, scope: &UserScope, frame: &Value) -> Vec<Value> {
+    let (tx, mut rx) = unbounded_channel::<Value>();
+    let handle = handler::handle_frame(
+        state,
+        &AccessContext::anonymous(),
+        "conn-test",
+        None,
+        Some(SEED_ORG_ID),
+        scope,
+        &frame.to_string(),
+        &tx,
+    )
+    .await;
+    if let Some(handle) = handle {
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    }
+    drop(tx);
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+fn send_frame(session_id: &str) -> Value {
+    json!({
+        "action": "send_message",
+        "requestId": "sm",
+        "sessionId": session_id,
+        "message": "what did we discuss earlier?",
+    })
+}
+
+/// Strip the echoed session id and the wall-clock timestamp, so two events can
+/// be compared for "is there ANY information here about whether the id is real".
+fn normalize(ev: &Value, id: &str) -> Value {
+    let raw = serde_json::to_string(ev).expect("serialize");
+    let mut ev: Value = serde_json::from_str(&raw.replace(id, "<ID>")).expect("deserialize");
+    ev["timestamp"] = Value::from(0);
+    ev
+}
+
+#[tokio::test]
+async fn send_message_into_another_users_session_is_refused_and_runs_no_turn() {
+    let (state, storage, a, _b) = two_users().await;
+    let bob = scoped("bob@example.com");
+
+    let events = drive_all(&state, &bob, &send_frame(&a.session_id)).await;
+
+    // Exactly one event: the not-found error. No 202 ack, so no turn was ever
+    // spawned — Bob never sees a token of Alice's replayed history.
+    assert_eq!(
+        events.len(),
+        1,
+        "a denied send must emit only the error: {events:?}"
+    );
+    assert_eq!(events[0]["type"], "error");
+    assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND");
+
+    // And Alice's conversation is untouched — the attacker's message was never
+    // appended to her log.
+    let messages = storage
+        .list_messages_by_conversation(smooth_operator::adapter::MessageQuery::new(
+            &a.conversation_id,
+            50,
+        ))
+        .await
+        .expect("list messages")
+        .messages;
+    assert_eq!(
+        messages.len(),
+        1,
+        "only alice's own seeded message: {messages:?}"
+    );
+    assert!(
+        !serde_json::to_string(&messages)
+            .unwrap()
+            .contains("what did we discuss earlier?"),
+        "the attacker's message must not land in alice's conversation"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_send_is_identical_to_a_session_that_never_existed() {
+    let (state, _storage, a, _b) = two_users().await;
+    let bob = scoped("bob@example.com");
+
+    let ghost_id = uuid::Uuid::new_v4().to_string();
+    let not_yours = drive_all(&state, &bob, &send_frame(&a.session_id)).await;
+    let never_existed = drive_all(&state, &bob, &send_frame(&ghost_id)).await;
+
+    assert_eq!(
+        normalize(&not_yours[0], &a.session_id),
+        normalize(&never_existed[0], &ghost_id),
+        "not-yours must be indistinguishable from never-existed, or the write \
+         path is an existence oracle for enumerating session ids"
+    );
+}
+
+#[tokio::test]
+async fn send_message_on_your_own_session_still_reaches_the_turn() {
+    // No gateway key is configured in these tests, so an ALLOWED send gets as
+    // far as the LLM gate (`LLM_UNAVAILABLE`) — proving the scope check passed
+    // without needing a live model.
+    let (state, _storage, a, _b) = two_users().await;
+
+    let events = drive_all(
+        &state,
+        &scoped("alice@example.com"),
+        &send_frame(&a.session_id),
+    )
+    .await;
+    assert_eq!(
+        events[0]["error"]["code"], "LLM_UNAVAILABLE",
+        "got: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn auth_disabled_send_message_is_unaffected() {
+    // The `th` daemon / LocalServer embedding runs unauthenticated single-user;
+    // it must still reach the turn for any session.
+    let (state, _storage, a, b) = two_users().await;
+
+    for created in [&a, &b] {
+        let events = drive_all(
+            &state,
+            &UserScope::Unscoped,
+            &send_frame(&created.session_id),
+        )
+        .await;
+        assert_eq!(
+            events[0]["error"]["code"], "LLM_UNAVAILABLE",
+            "got: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn denied_scope_cannot_send_a_message() {
+    let (state, _storage, a, _b) = two_users().await;
+
+    let events = drive_all(&state, &UserScope::Denied, &send_frame(&a.session_id)).await;
+    assert_eq!(
+        events[0]["error"]["code"], "SESSION_NOT_FOUND",
+        "got: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_session_on_another_users_session_is_identical_to_never_existed() {
+    let (state, _storage, a, _b) = two_users().await;
+    let bob = scoped("bob@example.com");
+
+    let frame = |sid: &str| json!({ "action": "get_session", "requestId": "gs", "sessionId": sid });
+    let ghost_id = uuid::Uuid::new_v4().to_string();
+    let not_yours = drive(&state, &bob, &frame(&a.session_id)).await;
+    let never_existed = drive(&state, &bob, &frame(&ghost_id)).await;
+
+    assert_eq!(
+        not_yours["error"]["code"], "SESSION_NOT_FOUND",
+        "got: {not_yours}"
+    );
+    assert_eq!(
+        normalize(&not_yours, &a.session_id),
+        normalize(&never_existed, &ghost_id),
+    );
+
+    // Alice still reads her own snapshot.
+    let own = drive(&state, &scoped("alice@example.com"), &frame(&a.session_id)).await;
+    assert_eq!(own["type"], "immediate_response", "got: {own}");
+    assert_eq!(own["data"]["conversationId"], a.conversation_id);
+}
+
+#[tokio::test]
+async fn verify_otp_on_another_users_session_is_refused() {
+    let (state, _storage, a, _b) = two_users().await;
+
+    let frame = |sid: &str| json!({ "action": "verify_otp", "requestId": "otp", "sessionId": sid, "code": "123456" });
+    let ghost_id = uuid::Uuid::new_v4().to_string();
+    let not_yours = drive(&state, &scoped("bob@example.com"), &frame(&a.session_id)).await;
+    let never_existed = drive(&state, &scoped("bob@example.com"), &frame(&ghost_id)).await;
+
+    assert_eq!(
+        not_yours["error"]["code"], "SESSION_NOT_FOUND",
+        "got: {not_yours}"
+    );
+    assert_eq!(
+        normalize(&not_yours, &a.session_id),
+        normalize(&never_existed, &ghost_id),
+        "otp code submission must not reveal which session ids are real"
+    );
+}
+
+#[tokio::test]
+async fn confirm_tool_action_cannot_approve_another_users_parked_write() {
+    let (state, _storage, a, _b) = two_users().await;
+
+    // Park a write confirmation on ALICE's session, as the runner's bridge would.
+    let (responder, mut verdicts) = unbounded_channel::<smooth_operator_core::HumanResponse>();
+    state.register_confirmation(a.session_id.clone(), responder);
+
+    let frame = |sid: &str| {
+        json!({
+            "action": "confirm_tool_action",
+            "requestId": "cta",
+            "sessionId": sid,
+            "approved": true,
+        })
+    };
+
+    // Bob's approval is refused with the same event an id with nothing parked
+    // gets — and, critically, does NOT consume Alice's park.
+    let ghost_id = uuid::Uuid::new_v4().to_string();
+    let not_yours = drive(&state, &scoped("bob@example.com"), &frame(&a.session_id)).await;
+    let never_existed = drive(&state, &scoped("bob@example.com"), &frame(&ghost_id)).await;
+    assert_eq!(
+        not_yours["error"]["code"], "NO_PENDING_CONFIRMATION",
+        "got: {not_yours}"
+    );
+    assert_eq!(
+        normalize(&not_yours, &a.session_id),
+        normalize(&never_existed, &ghost_id),
+    );
+    assert!(
+        verdicts.try_recv().is_err(),
+        "bob's approval must never reach alice's parked tool call"
+    );
+
+    // Alice's own confirm still resolves it.
+    let own = drive(&state, &scoped("alice@example.com"), &frame(&a.session_id)).await;
+    assert_eq!(own["type"], "immediate_response", "got: {own}");
+    assert!(matches!(
+        verdicts.try_recv(),
+        Ok(smooth_operator_core::HumanResponse::Approved)
+    ));
+}
+
+#[tokio::test]
+async fn submit_interaction_cannot_resolve_another_users_parked_card() {
+    let (state, _storage, a, _b) = two_users().await;
+
+    // Park a Rich Interaction on ALICE's session.
+    let (responder, mut outcomes) =
+        unbounded_channel::<smooth_operator::interaction::InteractionOutcome>();
+    state.register_interaction(
+        a.session_id.clone(),
+        smooth_operator_server::state::PendingInteraction {
+            interaction_id: "int-1".into(),
+            kind: "identity_intake".into(),
+            spec: json!({}),
+            responder,
+        },
+    );
+
+    let frame = |sid: &str| {
+        json!({
+            "action": "submit_interaction",
+            "requestId": "si",
+            "sessionId": sid,
+            "interactionId": "int-1",
+            "declined": true,
+        })
+    };
+
+    let ghost_id = uuid::Uuid::new_v4().to_string();
+    let not_yours = drive(&state, &scoped("bob@example.com"), &frame(&a.session_id)).await;
+    let never_existed = drive(&state, &scoped("bob@example.com"), &frame(&ghost_id)).await;
+    assert_eq!(
+        not_yours["error"]["code"], "NO_PENDING_INTERACTION",
+        "got: {not_yours}"
+    );
+    assert_eq!(
+        normalize(&not_yours, &a.session_id),
+        normalize(&never_existed, &ghost_id),
+    );
+    assert!(
+        outcomes.try_recv().is_err(),
+        "bob's submit must never resolve alice's parked interaction"
+    );
+
+    // Alice's own submit still resolves it.
+    let own = drive(&state, &scoped("alice@example.com"), &frame(&a.session_id)).await;
+    assert_eq!(own["type"], "immediate_response", "got: {own}");
+    assert!(outcomes.try_recv().is_ok());
+}
+
+#[tokio::test]
+async fn rename_cannot_retitle_another_users_conversation() {
+    let (state, storage, a, _b) = two_users().await;
+
+    let frame = |cid: &str| {
+        json!({
+            "action": "rename_conversation",
+            "requestId": "rc",
+            "conversationId": cid,
+            "title": "pwned",
+        })
+    };
+
+    let ghost_id = uuid::Uuid::new_v4().to_string();
+    let not_yours = drive(
+        &state,
+        &scoped("bob@example.com"),
+        &frame(&a.conversation_id),
+    )
+    .await;
+    let never_existed = drive(&state, &scoped("bob@example.com"), &frame(&ghost_id)).await;
+    assert_eq!(
+        not_yours["error"]["code"], "CONVERSATION_NOT_FOUND",
+        "got: {not_yours}"
+    );
+    assert_eq!(
+        normalize(&not_yours, &a.conversation_id),
+        normalize(&never_existed, &ghost_id),
+    );
+
+    let conversation = storage
+        .get_conversation(&a.conversation_id)
+        .await
+        .expect("get conversation")
+        .expect("conversation exists");
+    assert_ne!(conversation.name, "pwned");
+
+    // Alice can still rename her own.
+    let own = drive(
+        &state,
+        &scoped("alice@example.com"),
+        &frame(&a.conversation_id),
+    )
+    .await;
+    assert_eq!(own["type"], "immediate_response", "got: {own}");
+}
