@@ -194,10 +194,11 @@ class FrameDispatcher:
     def _scope_email(self) -> str | None:
         """The email this connection's conversations are scoped to.
 
-        ``None`` is returned ONLY when auth is disabled (the single-tenant local flavor)
-        — the one legitimate unscoped case. An authenticated-but-emailless principal
-        does NOT land here: callers check :meth:`_auth_enforced` first and refuse.
-        th-8fe998."""
+        ``None`` means "no owner to match": either auth is disabled (the single-tenant
+        local flavor, where ownership is not consulted at all — see
+        :meth:`_auth_enforced`) or the principal is authenticated but carries no email
+        claim. In the latter case it matches no OWNED conversation, only ownerless ones.
+        th-8fe998, th-909995."""
         return None if self._access.auth_disabled else self._access.scope_email
 
     @property
@@ -205,8 +206,15 @@ class FrameDispatcher:
         return not self._access.auth_disabled
 
     async def _visible_session(self, session_id: str) -> Any:
-        """The session, but only if this connection's principal owns it — otherwise
+        """The session, but only if this connection's principal may see it — otherwise
         ``None``, exactly as for a session id that never existed.
+
+        An OWNED session requires an exact (case/whitespace-insensitive) match against
+        the principal's email. An OWNERLESS session — minted by an anonymous or
+        emailless principal, or predating ownership — stays visible to everyone, as it
+        was before scoping shipped. Refusing those instead locked anonymous and
+        emailless principals out of the sessions they had just created themselves: empty
+        list, no resume, no send_message, i.e. no product. th-909995.
 
         This is the ONLY permitted way to turn a client-supplied sessionId into a
         session. Every sessionId-bearing action routes through here so one guard covers
@@ -224,11 +232,12 @@ class FrameDispatcher:
             return None
         if not self._auth_enforced:
             return session  # auth disabled → single tenant, no ownership to check
-        scope = self._scope_email()
-        # Emailless principal (scope None) owns nothing → fail closed, never unscoped.
-        if scope is None or normalize_email(session.owner_email) != scope:
-            return None
-        return session
+        owner = normalize_email(session.owner_email)
+        if owner is None:
+            return session  # ownerless → open, as before scoping (th-909995)
+        # Owned → exact match only. An emailless principal (scope None) matches no
+        # owner, so it still cannot reach anyone else's owned session.
+        return session if owner == self._scope_email() else None
 
     async def _handle_create_session(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # Resume: a `conversationId` naming an existing conversation binds the new session
@@ -250,6 +259,7 @@ class FrameDispatcher:
             user_email,
             conversation_id,
             owner_email=owner_email,
+            enforced=self._auth_enforced,
         )
         data = {
             "sessionId": session.session_id,
@@ -296,14 +306,12 @@ class FrameDispatcher:
             else _DEFAULT_LIST_LIMIT
         )
 
-        # Scope to the authenticated principal. Auth enabled + emailless principal owns
-        # nothing → empty list; we never fall back to unscoped. The store applies the
-        # filter in its selection, so `limit` below caps an already-scoped list rather
-        # than paging over other users' rows. th-8fe998.
-        if self._auth_enforced and self._scope_email() is None:
-            sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": []}))
-            return
-        summaries = await self._store.list_conversations(self._scope_email())
+        # Scope to the authenticated principal: their own conversations plus ownerless
+        # ones (th-909995 — an emailless/anonymous principal must still see the
+        # conversations it created, which are ownerless by construction). The store
+        # applies the filter in its selection, so `limit` below caps an already-scoped
+        # list rather than paging over other users' rows. th-8fe998.
+        summaries = await self._store.list_conversations(self._scope_email(), enforced=self._auth_enforced)
         # Most-recent-first (empties already dropped by the store), then cap.
         summaries.sort(key=lambda c: c.updated_at, reverse=True)
         conversations = [
