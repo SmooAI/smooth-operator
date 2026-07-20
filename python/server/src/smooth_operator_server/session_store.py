@@ -39,9 +39,9 @@ class StoredSession:
     contact_email: str | None = None
     #: The AUTHENTICATED principal's email that owns this session's conversation — the
     #: ACL key (th-8fe998). Set from the connection's principal, NEVER from a client
-    #: frame field. ``None`` means "no owner": with auth enabled such a session belongs
-    #: to nobody and is invisible to every principal; with auth disabled (the
-    #: single-tenant local flavor) ownership isn't consulted at all.
+    #: frame field. ``None`` means "no owner" — an anonymous/emailless principal, or a
+    #: session predating ownership — and stays reachable by everyone (th-909995); with
+    #: auth disabled (the single-tenant local flavor) ownership isn't consulted at all.
     owner_email: str | None = None
 
 
@@ -103,18 +103,21 @@ class SessionStore(ABC):
         conversation_id: str | None = None,
         *,
         owner_email: str | None = None,
+        enforced: bool = False,
     ) -> StoredSession:
-        """Mint a session. When ``conversation_id`` names an EXISTING conversation THAT
-        ``owner_email`` OWNS, the new session binds to it (resume: reuses the id + its
-        persisted message log, so subsequent turns append and history replays). An
-        absent, unknown, **or not-owned** id mints a fresh conversation.
+        """Mint a session. When ``conversation_id`` names an EXISTING conversation that
+        ``owner_email`` may reach, the new session binds to it (resume: reuses the id +
+        its persisted message log, so subsequent turns append and history replays). An
+        absent, unknown, **or not-reachable** id mints a fresh conversation.
 
         ``owner_email`` is the authenticated principal's email and must come from the
         connection's auth context, never from a client-supplied frame field. ``None``
-        means either "auth disabled" (the caller then also passes ``None`` to
-        :meth:`list_conversations`, and ownership is not consulted) or "authenticated
-        but emailless" — in the latter case the caller must refuse the request outright
-        rather than call this with ``None``.
+        means either "auth disabled" or "authenticated but emailless"; ``enforced``
+        distinguishes them — ``False`` (auth disabled, single tenant) skips the
+        ownership check entirely, ``True`` restricts the resume to conversations owned
+        by ``owner_email`` **or by nobody**. Ownerless conversations stay reachable so
+        anonymous/emailless principals can resume what they themselves created;
+        refusing those locked them out of their own sessions. th-909995.
 
         Resuming a conversation owned by ANOTHER user must be indistinguishable from
         resuming an id that never existed: both mint a fresh conversation. Do not add a
@@ -126,8 +129,8 @@ class SessionStore(ABC):
     async def get_session(self, session_id: str) -> StoredSession | None: ...
 
     @abstractmethod
-    async def list_conversations(self, user_email: str | None) -> list[ConversationSummary]:
-        """A summary per conversation OWNED BY ``user_email`` that has at least one
+    async def list_conversations(self, user_email: str | None, *, enforced: bool = False) -> list[ConversationSummary]:
+        """A summary per conversation reachable by ``user_email`` that has at least one
         message (empty conversations — every page-load currently mints one — are
         dropped), in no particular order; the dispatcher sorts most-recent-first and
         caps. The Python analog of the Rust ``list_conversations_by_org`` +
@@ -135,8 +138,11 @@ class SessionStore(ABC):
 
         ``user_email`` is **required** — deliberately not defaulted. A default would be
         fail-OPEN and would let an implementer of this protocol ship an unscoped (i.e.
-        cross-user-leaking) store without ever confronting the question. Pass ``None``
-        ONLY for the single-tenant, auth-disabled flavor, where it means "unscoped".
+        cross-user-leaking) store without ever confronting the question.
+
+        ``enforced=False`` is the single-tenant, auth-disabled flavor: unscoped, every
+        conversation. ``enforced=True`` returns those owned by ``user_email`` plus the
+        ownerless ones (anonymous/emailless/legacy), never another owner's. th-909995.
 
         Apply the filter in the SELECTION itself, never after the dispatcher's limit —
         filtering a limited page silently returns short or empty pages."""
@@ -189,7 +195,8 @@ class InMemorySessionStore(SessionStore):
         #: + updated_at source for list_conversations. th-d5b446.
         self._updated_at: dict[str, datetime] = {}
         #: Per-conversation owner email (the ACL key, normalized). Absent/None = owned
-        #: by nobody → invisible to every authenticated principal. th-8fe998.
+        #: by nobody → reachable by every principal (th-909995: anonymous and emailless
+        #: principals mint exactly these, and must not be locked out of them).
         self._owners: dict[str, str | None] = {}
         #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
         self._current_step: dict[str, str] = {}
@@ -205,19 +212,21 @@ class InMemorySessionStore(SessionStore):
         conversation_id: str | None = None,
         *,
         owner_email: str | None = None,
+        enforced: bool = False,
     ) -> StoredSession:
         owner = normalize_email(owner_email)
         with self._gate:
             # Resume: bind to an existing conversation (reuse its id + persisted log) when
-            # the caller passes a known conversationId THEY OWN. Unknown, absent, or
-            # owned by someone else → mint a fresh one. Not-owned takes the exact same
-            # branch as never-existed, so the two are indistinguishable on the wire —
-            # a separate refusal would let an attacker probe for other users' ids.
-            # `owner is None` = auth disabled (single tenant): ownership isn't consulted.
+            # the caller passes a known conversationId THEY MAY REACH — theirs, or an
+            # ownerless one. Unknown, absent, or owned by someone else → mint a fresh
+            # one. Not-owned takes the exact same branch as never-existed, so the two are
+            # indistinguishable on the wire — a separate refusal would let an attacker
+            # probe for other users' ids. `enforced=False` = auth disabled (single
+            # tenant): ownership isn't consulted. th-909995.
             resume = (
                 bool(conversation_id)
                 and conversation_id in self._messages
-                and (owner is None or self._owners.get(conversation_id) == owner)
+                and (not enforced or self._owners.get(conversation_id) in (None, owner))
             )
             conv_id = conversation_id if resume else str(uuid.uuid4())
             session = StoredSession(
@@ -250,7 +259,7 @@ class InMemorySessionStore(SessionStore):
             self._updated_at[conversation_id] = datetime.now(timezone.utc)
         return message
 
-    async def list_conversations(self, user_email: str | None) -> list[ConversationSummary]:
+    async def list_conversations(self, user_email: str | None, *, enforced: bool = False) -> list[ConversationSummary]:
         scope = normalize_email(user_email)
         with self._gate:
             out: list[ConversationSummary] = []
@@ -258,10 +267,9 @@ class InMemorySessionStore(SessionStore):
                 if not log:  # drop empties — every page-load mints one
                     continue
                 # Ownership filter lives HERE, in the selection — the dispatcher's limit
-                # is applied to the already-filtered result. `scope is None` is the
-                # auth-disabled single-tenant flavor (unscoped); the dispatcher never
-                # passes None for an authenticated-but-emailless caller.
-                if scope is not None and self._owners.get(conv_id) != scope:
+                # is applied to the already-filtered result. Another owner's rows are
+                # dropped; ownerless ones survive for every principal (th-909995).
+                if enforced and self._owners.get(conv_id) not in (None, scope):
                     continue
                 # Messages are stored oldest-first, so the first inbound is the title source.
                 first_inbound = next((m.text for m in log if m.direction is MessageDirection.INBOUND), None)

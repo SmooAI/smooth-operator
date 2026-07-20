@@ -5,8 +5,14 @@ conversations, and neither the resume path nor a sessionId lookup was owner-chec
 any authenticated user could enumerate and open anyone else's chats.
 
 These cases are written from the ATTACKER's side — user A trying to see, resume, or
-act on user B's conversations — plus the two fail-closed corners (authenticated but
-emailless) and the one legitimately-unscoped corner (auth disabled).
+act on user B's conversations — plus the corners: an emailless/anonymous principal
+(which owns nothing, so it reaches only OWNERLESS sessions — th-909995) and the
+legitimately-unscoped auth-disabled flavor.
+
+The scoping rule is Option B (th-909995): a session that HAS an owner is owner-checked;
+a session with NO owner is open, as it was before scoping shipped. Fail-closing the
+ownerless case instead denied anonymous and emailless principals their OWN sessions —
+empty list, no resume, no send_message — which is why PR #309 reverted the .NET twin.
 
 The sharpest case here is :func:`test_not_yours_is_byte_identical_to_never_existed`:
 "someone else's id" and "an id that never existed" must produce the SAME bytes. Any
@@ -279,34 +285,93 @@ async def test_owner_can_use_their_own_session() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("access", [_authed(None), ANON_ENFORCED], ids=["emailless-principal", "anonymous-enforced"])
-async def test_auth_enabled_without_an_email_sees_nothing(access: AccessContext) -> None:
-    """Fail CLOSED: a principal we can't scope gets an empty list and no session —
-    never a silent fallback to unscoped."""
+async def test_emailless_principal_can_use_its_own_session(access: AccessContext) -> None:
+    """Option B (th-909995). A principal with no email claim — an anonymous connection
+    to an AUTH-ENABLED server, or an authenticated token carrying sub/org/role but no
+    ``email`` — still owns the product: it can create a session, read it back, list its
+    conversation, and send into it. Denying these (the th-8fe998 rule) locked such
+    principals out of the sessions they had just created themselves."""
     store = InMemorySessionStore()
-    alice_session, alice_conv = await _seed(store, ALICE, "alice secret")
-    unowned_session = (await store.create_session("agent", None, None)).session_id
-
     dispatcher = FrameDispatcher(store, None, access=access)
-    listed = await _dispatch(dispatcher, {"action": "list_conversations"})
-    assert listed[0]["data"]["conversations"] == []
-    assert alice_conv not in json.dumps(listed)
 
-    for session_id in (alice_session, unowned_session):
-        events = await _dispatch(dispatcher, {"action": "get_session", "requestId": "r1", "sessionId": session_id})
-        assert events[0]["error"]["code"] == "SESSION_NOT_FOUND"
+    created = await _dispatch(dispatcher, {"action": "create_conversation_session", "requestId": "r1"})
+    session_id = created[0]["data"]["sessionId"]
+    conversation_id = created[0]["data"]["conversationId"]
+
+    read = await _dispatch(dispatcher, {"action": "get_session", "requestId": "r1", "sessionId": session_id})
+    assert read[0]["type"] == "immediate_response"
+    assert read[0]["data"]["conversationId"] == conversation_id
+
+    # send_message gets PAST the ownership gate: the only thing stopping it here is the
+    # absent LLM gateway (this dispatcher has no chat client), NOT SESSION_NOT_FOUND.
+    sent = await _dispatch(
+        dispatcher, {"action": "send_message", "requestId": "r1", "sessionId": session_id, "message": "hi"}
+    )
+    assert sent[0]["error"]["code"] == "LLM_UNAVAILABLE"
+
+    # And the conversation it created is listable by it.
+    await store.append_message(conversation_id, MessageDirection.INBOUND, "hi")
+    listed = await _dispatch(dispatcher, {"action": "list_conversations"})
+    assert _conv_ids(listed) == [conversation_id]
+
+    # Resume by conversationId binds back to the same conversation.
+    resumed = await _dispatch(dispatcher, {"action": "create_conversation_session", "conversationId": conversation_id})
+    assert resumed[0]["data"]["conversationId"] == conversation_id
 
 
 @pytest.mark.asyncio
-async def test_unowned_conversation_is_invisible_to_every_principal() -> None:
-    """A session minted with no owner (e.g. by a host that forgot to pass one) belongs
-    to nobody — the default is invisible, not public."""
+@pytest.mark.parametrize("access", [_authed(None), ANON_ENFORCED], ids=["emailless-principal", "anonymous-enforced"])
+async def test_emailless_principal_still_cannot_reach_an_owned_session(access: AccessContext) -> None:
+    """The permissive half of Option B is ONLY the ownerless case. An emailless scope
+    matches no non-empty owner, so Alice's session and history stay unreachable."""
+    store = InMemorySessionStore()
+    alice_session, alice_conv = await _seed(store, ALICE, "alice secret")
+
+    dispatcher = FrameDispatcher(store, None, access=access)
+    for action in ("get_session", "get_conversation_messages"):
+        events = await _dispatch(dispatcher, {"action": action, "requestId": "r1", "sessionId": alice_session})
+        assert events[0]["error"]["code"] == "SESSION_NOT_FOUND"
+        assert "alice secret" not in json.dumps(events)
+
+    listed = await _dispatch(dispatcher, {"action": "list_conversations"})
+    assert alice_conv not in _conv_ids(listed)
+
+    # Nor by resuming her conversation id — that mints a fresh, empty one.
+    resumed = await _dispatch(dispatcher, {"action": "create_conversation_session", "conversationId": alice_conv})
+    assert resumed[0]["data"]["conversationId"] != alice_conv
+    assert [m.text for m in await store.list_messages(alice_conv, 100)] == ["alice secret"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_never_appends_to_another_users_session() -> None:
+    """The reported P0: authenticated A writing into authenticated B's OWNED session.
+    Assert on B's LOG, not just the error code — a refusal that still appended would
+    pass a code-only check."""
+    store = InMemorySessionStore()
+    bob_session, bob_conv = await _seed(store, BOB, "bob secret")
+
+    alice = FrameDispatcher(store, None, access=_authed(ALICE))
+    events = await _dispatch(
+        alice, {"action": "send_message", "requestId": "r1", "sessionId": bob_session, "message": "injected"}
+    )
+    assert [ev["type"] for ev in events] == ["error"]
+    assert events[0]["error"]["code"] == "SESSION_NOT_FOUND"
+    assert [m.text for m in await store.list_messages(bob_conv, 100)] == ["bob secret"]
+
+
+@pytest.mark.asyncio
+async def test_unowned_conversation_is_reachable_by_every_principal() -> None:
+    """Option B's accepted trade-off: a conversation with NO owner (anonymous, emailless,
+    or predating ownership) stays open, exactly as it was before scoping shipped. The
+    alternative — keying anonymous scope on ``sub`` — pools every anonymous visitor
+    under the literal sub "anonymous" and leaks their chats to each other."""
     store = InMemorySessionStore()
     orphan = await store.create_session("agent", None, None)
     await store.append_message(orphan.conversation_id, MessageDirection.INBOUND, "orphan")
 
-    for access in (_authed(ALICE), _authed(BOB)):
+    for access in (_authed(ALICE), _authed(BOB), _authed(None), ANON_ENFORCED):
         listed = await _dispatch(FrameDispatcher(store, None, access=access), {"action": "list_conversations"})
-        assert listed[0]["data"]["conversations"] == []
+        assert _conv_ids(listed) == [orphan.conversation_id]
 
 
 @pytest.mark.asyncio
@@ -346,6 +411,23 @@ async def test_store_list_conversations_requires_an_explicit_scope() -> None:
     with pytest.raises(TypeError):
         await store.list_conversations()  # type: ignore[call-arg]
 
-    assert [c.conversation_id for c in await store.list_conversations(BOB)] == []
-    assert len(await store.list_conversations(ALICE)) == 1
-    assert len(await store.list_conversations(None)) == 1  # None = auth-disabled, unscoped
+    assert [c.conversation_id for c in await store.list_conversations(BOB, enforced=True)] == []
+    assert len(await store.list_conversations(ALICE, enforced=True)) == 1
+    assert len(await store.list_conversations(None)) == 1  # unenforced = auth-disabled, unscoped
+
+
+@pytest.mark.asyncio
+async def test_store_enforced_scope_admits_ownerless_only_alongside_the_owner() -> None:
+    """``enforced=True`` = "mine + nobody's"; ``enforced=False`` (auth disabled) = all."""
+    store = InMemorySessionStore()
+    _, alice_conv = await _seed(store, ALICE, "a")
+    _, bob_conv = await _seed(store, BOB, "b")
+    orphan = await store.create_session("agent", None, None)
+    await store.append_message(orphan.conversation_id, MessageDirection.INBOUND, "o")
+
+    def ids(summaries: list) -> set[str]:
+        return {c.conversation_id for c in summaries}
+
+    assert ids(await store.list_conversations(ALICE, enforced=True)) == {alice_conv, orphan.conversation_id}
+    assert ids(await store.list_conversations(None, enforced=True)) == {orphan.conversation_id}
+    assert ids(await store.list_conversations(None)) == {alice_conv, bob_conv, orphan.conversation_id}
