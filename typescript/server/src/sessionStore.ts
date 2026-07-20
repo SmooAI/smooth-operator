@@ -225,7 +225,8 @@ export class InMemorySessionStore implements SessionStore {
         for (const [conversationId, list] of this.messages) {
             // Scoped: skip conversations this user doesn't own. Filtering here — inside the
             // selection, before any caller-side limit — is what keeps a scoped page full.
-            if (userEmail !== undefined && this.convOwner.get(conversationId) !== userEmail) continue;
+            // Case-insensitive: OIDC providers vary on the casing they emit for one identity.
+            if (userEmail !== undefined && this.convOwner.get(conversationId)?.toLowerCase() !== userEmail.toLowerCase()) continue;
             const firstInbound = list.find((m) => m.direction === 'inbound');
             out.push({
                 conversationId,
