@@ -16,8 +16,8 @@ type Principal struct {
 	Sub string
 	Org string
 	// Email is the identity's email claim — the per-user ownership key for conversations
-	// (th-8fe998). "" means the token carried no email: with auth enabled that fails CLOSED
-	// (no conversations visible), never falls back to unscoped.
+	// (th-8fe998). "" means the token carried no email: with auth enabled such a principal
+	// owns nothing and sees no OWNED conversation, but never falls back to unscoped.
 	Email  string
 	Role   string
 	Groups []string
@@ -57,8 +57,10 @@ func (a AccessContext) Groups() []string { return a.Principal.Groups }
 // outcomes, and only the first is unscoped:
 //
 //	auth disabled                     → unscoped (local/dev single-tenant, unchanged)
-//	auth enabled, principal has email → scoped to that email
-//	auth enabled, no/blank email      → fail CLOSED (zero value: nothing visible)
+//	auth enabled, principal has email → scoped to that email (owned conversations)
+//	auth enabled, no/blank email      → zero value: no OWNED conversation is visible, but
+//	                                    ownerless ones remain reachable so anonymous and
+//	                                    emailless principals can still converse (th-909995)
 //
 // th-8fe998.
 func (a AccessContext) ConversationScope() ConversationScope {

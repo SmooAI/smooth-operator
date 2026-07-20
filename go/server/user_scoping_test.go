@@ -269,9 +269,14 @@ func TestClientSuppliedEmailCannotStealScope(t *testing.T) {
 	}
 }
 
-// Auth enabled but the token carries no email: fail CLOSED. This is the case a well-meaning
-// "if email == \"\" { return everything }" fallback would turn into a full leak.
-func TestAuthEnabledWithoutEmailSeesNothing(t *testing.T) {
+// Auth enabled but the token carries no email: no OWNED conversation is visible. Such a
+// principal owns nothing and can therefore reach nothing that anyone else owns — the leak a
+// well-meaning "if email == \"\" { return everything }" fallback would open.
+//
+// Owner-LESS conversations are a separate population and DO stay reachable (th-909995): this
+// principal's own sessions are stamped with no owner, so denying them means denying it the
+// product entirely. TestEmaillessPrincipalCanConverseOnAuthEnabledServer covers that side.
+func TestAuthEnabledWithoutEmailSeesNoOwnedConversations(t *testing.T) {
 	store := NewInMemorySessionStore()
 	a := seedConversation(t, store, "a@example.com", "alice secret")
 	unowned, _ := store.CreateSession(context.Background(), "agent", "U", "", ConversationScope{Unscoped: true})
@@ -283,19 +288,29 @@ func TestAuthEnabledWithoutEmailSeesNothing(t *testing.T) {
 	sink, events := capture()
 	dispatchJSON(t, d, map[string]any{"action": "list_conversations", "requestId": "r1"}, sink)
 	convs := (*events)[0]["data"].(map[string]any)["conversations"].([]map[string]any)
-	if len(convs) != 0 {
-		t.Fatalf("emailless principal saw %d conversations, want 0 (fail closed): %+v", len(convs), convs)
+	for _, c := range convs {
+		if c["conversationId"] == a.ConversationID {
+			t.Fatalf("emailless principal saw A's OWNED conversation: %+v", convs)
+		}
 	}
 
-	// It must also be denied the sessions themselves — including the owner-less ones, which a
-	// naive `owner == principal.Email` string compare would match on "" == "".
-	for name, sid := range map[string]string{"owned by A": a.SessionID, "owner-less": unowned.SessionID} {
+	// A's session itself stays hidden; the owner-less one is reachable.
+	for _, tc := range []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{"owned by A", a.SessionID, true},
+		{"owner-less", unowned.SessionID, false},
+	} {
 		sink, events := capture()
 		dispatchJSON(t, d, map[string]any{
-			"action": "get_conversation_messages", "requestId": "r1", "sessionId": sid,
+			"action": "get_conversation_messages", "requestId": "r1", "sessionId": tc.id,
 		}, sink)
-		if errCode((*events)[0]) != "SESSION_NOT_FOUND" {
-			t.Fatalf("emailless principal read session %s: %+v", name, (*events)[0])
+		denied := errCode((*events)[0]) == "SESSION_NOT_FOUND"
+		if denied != tc.wantErr {
+			t.Fatalf("emailless principal on session %s: denied=%v, want denied=%v (%+v)",
+				tc.name, denied, tc.wantErr, (*events)[0])
 		}
 	}
 }
@@ -341,10 +356,14 @@ func TestConversationScopeAllows(t *testing.T) {
 		{"unscoped sees owned", ConversationScope{Unscoped: true}, "a@example.com", true},
 		{"unscoped sees owner-less", ConversationScope{Unscoped: true}, "", true},
 		{"match", scopeFor("a@example.com"), "a@example.com", true},
+		{"match ignores email casing", scopeFor("Alice@Example.COM"), "alice@example.com", true},
 		{"mismatch", scopeFor("a@example.com"), "b@example.com", false},
-		{"scoped cannot see owner-less", scopeFor("a@example.com"), "", false},
-		{"zero value denies everything", ConversationScope{}, "a@example.com", false},
-		{"zero value denies owner-less too", ConversationScope{}, "", false},
+		// Owner-less conversations have nobody to enforce on behalf of, so they stay
+		// reachable — otherwise anonymous and emailless principals are locked out of the
+		// sessions they themselves created. th-909995 (Option B).
+		{"scoped sees owner-less", scopeFor("a@example.com"), "", true},
+		{"zero value denies OWNED conversations", ConversationScope{}, "a@example.com", false},
+		{"zero value sees owner-less", ConversationScope{}, "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -372,8 +391,8 @@ func TestVerifierScopeDerivation(t *testing.T) {
 		if s.Unscoped || s.Email != "" {
 			t.Fatalf("rejected token %q yielded scope %+v, want fail-closed zero value", tok, s)
 		}
-		if s.Allows("a@example.com") || s.Allows("") {
-			t.Fatalf("rejected token %q can still see conversations", tok)
+		if s.Allows("a@example.com") {
+			t.Fatalf("rejected token %q can still see another user's OWNED conversation", tok)
 		}
 	}
 }
