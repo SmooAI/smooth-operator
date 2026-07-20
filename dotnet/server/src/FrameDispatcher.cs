@@ -235,7 +235,7 @@ public sealed class FrameDispatcher
                     }
                     break;
                 case "confirm_tool_action":
-                    await HandleConfirmToolActionAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    HandleConfirmToolAction(frame, requestId, sink);
                     break;
                 case "verify_otp":
                     await HandleVerifyOtpAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
@@ -321,29 +321,12 @@ public sealed class FrameDispatcher
                 && string.Equals(sessionOwnerEmail, scope.UserEmail, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>
-    /// SECURITY (th-1b7ed0): the ONLY way a handler may turn a client-supplied <c>sessionId</c> into a
-    /// session. It loads the session and then hides it unless the connection's authenticated principal
-    /// owns it — returning <c>null</c>, exactly what an unknown sessionId returns, so every caller emits
-    /// the identical not-found response and no caller can distinguish "not yours" from "never existed".
-    ///
-    /// Every sessionId-taking handler (<c>get_session</c>, <c>get_conversation_messages</c>,
-    /// <c>send_message</c>, <c>confirm_tool_action</c>, <c>verify_otp</c>) routes through here rather
-    /// than calling <see cref="ISessionStore.GetSessionAsync"/> directly: the check lives once, at the
-    /// chokepoint, instead of being re-derived — and forgotten — per handler. th-966fab scoped the read
-    /// paths and left <c>send_message</c> open, which let a caller replay someone else's conversation
-    /// as turn context and read the reply.
-    /// </summary>
-    private async Task<StoredSession?> ScopedSessionAsync(string? sessionId, CancellationToken cancellationToken)
-    {
-        var session = await _store.GetSessionAsync(sessionId ?? string.Empty, cancellationToken).ConfigureAwait(false);
-        return session is not null && CanRead(session.UserEmail) ? session : null;
-    }
-
     private async Task HandleGetSessionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
-        var session = await ScopedSessionAsync(frame["sessionId"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
-        if (session is null)
+        var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        // SECURITY (th-966fab): same ownership gate as get_conversation_messages, same indistinguishable
+        // response — get_session leaks another user's conversationId otherwise.
+        if (session is null || !CanRead(session.UserEmail))
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
             return;
@@ -463,12 +446,12 @@ public sealed class FrameDispatcher
             return;
         }
 
-        // SECURITY: a session that exists but belongs to someone else is refused with the
+        var session = await _store.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        // SECURITY (th-966fab): a session that exists but belongs to someone else is refused with the
         // byte-identical response an unknown sessionId gets — same SESSION_NOT_FOUND code, same
         // message (the caller's own sessionId echoed). Anything that varied between the two would be
         // an oracle for enumerating other users' session ids.
-        var session = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        if (session is null)
+        if (session is null || !CanRead(session.UserEmail))
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));
             return;
@@ -556,11 +539,7 @@ public sealed class FrameDispatcher
             return;
         }
 
-        // SECURITY (th-1b7ed0): the WRITE path is scoped too. Sending into a session you don't own
-        // replays ITS history as turn context and streams the reply back to YOU — a read of someone
-        // else's conversation dressed up as a write, which defeats the read scoping. Refused before
-        // the turn starts, so nothing is appended to the victim's log.
-        var session = await ScopedSessionAsync(frame["sessionId"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
+        var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
@@ -749,7 +728,7 @@ public sealed class FrameDispatcher
     /// a duplicate confirm is a clean <c>NO_PENDING_CONFIRMATION</c> no-op. Fails closed: a missing
     /// <c>sessionId</c> or non-bool <c>approved</c> is rejected (never silently approve).
     /// </summary>
-    private async Task HandleConfirmToolActionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    private void HandleConfirmToolAction(JsonObject frame, string? requestId, Action<JsonObject> sink)
     {
         var sessionId = frame["sessionId"]?.GetValue<string>();
         if (string.IsNullOrEmpty(sessionId))
@@ -766,11 +745,7 @@ public sealed class FrameDispatcher
             return;
         }
 
-        // SECURITY (th-1b7ed0): a verdict on a session you don't own would let a caller approve (or
-        // deny) another user's parked write. Refused with the SAME NO_PENDING_CONFIRMATION an unknown
-        // sessionId gets, so the two stay indistinguishable. th-1b7ed0.
-        var scoped = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        if (scoped is null || !_confirmations.Resolve(sessionId, approved))
+        if (!_confirmations.Resolve(sessionId, approved))
         {
             sink(ProtocolEvents.Error(requestId, "NO_PENDING_CONFIRMATION", $"no tool action is awaiting confirmation for session '{sessionId}'"));
             return;
@@ -845,10 +820,8 @@ public sealed class FrameDispatcher
             return;
         }
 
-        // The session must exist AND be ours (a code can't verify a session we don't track — nor one
-        // that belongs to someone else: marking a foreign session identity-verified would unlock its
-        // end_user-gated tools). Same response either way. th-1b7ed0.
-        var session = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        // The session must exist (a code can't verify a session we don't track).
+        var session = await _store.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));
