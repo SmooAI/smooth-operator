@@ -273,16 +273,59 @@ export class FrameDispatcher {
         if (this.cancelActiveTurn()) sink(protocol.cancelled(turnRequestId ?? requestId));
     }
 
+    /**
+     * The email conversations are scoped to on this connection, or `undefined` for
+     * unscoped. Driven by the connection's AUTHENTICATED PRINCIPAL — never by a frame
+     * field, which the client controls.
+     *
+     * Unscoped is reachable ONLY with auth disabled (single-tenant local/dev). With auth
+     * enabled and no email claim the caller is scoped to a value nothing can own, so
+     * every read comes back empty/denied rather than falling back to everyone's data.
+     */
+    private scopeEmail(): string | undefined {
+        if (!this.access.authEnabled) return undefined;
+        return this.access.principal.email ?? NO_OWNER_SENTINEL;
+    }
+
+    /**
+     * Whether this connection may read a conversation owned by `ownerEmail`.
+     *
+     * Callers turn `false` into the SAME `SESSION_NOT_FOUND` they emit for an id that
+     * never existed. A distinct "forbidden" code — or a different message — would be an
+     * existence oracle: an attacker could enumerate other users' conversation ids by
+     * diffing the two responses. Not-yours and not-there must be indistinguishable.
+     */
+    private mayRead(ownerEmail: string | undefined): boolean {
+        const scope = this.scopeEmail();
+        return scope === undefined || ownerEmail === scope;
+    }
+
     private async handleCreateSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         // Resume: a `conversationId` naming an existing conversation binds the new
         // session to it (reuses id + history); absent/unknown → a fresh conversation.
         // The response echoes `conversationId` either way, so a resuming client sees
         // the same id it passed. Mirrors the Rust reference's resume branch.
-        const conversationId = typeof frame.conversationId === 'string' && frame.conversationId.length > 0 ? frame.conversationId : undefined;
+        const requested = typeof frame.conversationId === 'string' && frame.conversationId.length > 0 ? frame.conversationId : undefined;
+
+        // Someone else's conversation is treated as an id we don't know: we drop it and
+        // mint a fresh conversation, which is byte-for-byte what an unknown id already
+        // does. Erroring here instead would tell the attacker their guessed id was real.
+        let conversationId = requested;
+        if (requested !== undefined && this.scopeEmail() !== undefined) {
+            const conv = await this.store.getConversation(requested);
+            if (!conv || !this.mayRead(conv.userEmail)) conversationId = undefined;
+        }
+
+        // The session's owner is the PRINCIPAL's email, not the frame's `userEmail` —
+        // trusting the frame is the spoofing vector this whole change exists to close.
+        // With auth disabled there's no principal, so the frame value stands (unscoped
+        // single-tenant behavior, unchanged).
+        const ownerEmail = this.access.authEnabled ? this.access.principal.email : typeof frame.userEmail === 'string' ? frame.userEmail : undefined;
+
         const session = await this.store.createSession(
             typeof frame.agentId === 'string' ? frame.agentId : '',
             typeof frame.userName === 'string' ? frame.userName : undefined,
-            typeof frame.userEmail === 'string' ? frame.userEmail : undefined,
+            ownerEmail,
             conversationId,
         );
         sink(
@@ -300,7 +343,8 @@ export class FrameDispatcher {
     private async handleGetSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        // Not-yours collapses into not-found: same code, same message, same shape.
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -328,7 +372,9 @@ export class FrameDispatcher {
         const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
         const limit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_LIMIT;
 
-        const summaries = await this.store.listConversations();
+        // Scoped to the connection's principal. Applied in the store selection, ahead of
+        // the limit below — filtering after a limit silently yields short/empty pages.
+        const summaries = await this.store.listConversations(this.scopeEmail());
         const conversations = summaries
             .filter((c) => c.messageCount > 0)
             .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
@@ -362,7 +408,8 @@ export class FrameDispatcher {
             return;
         }
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        // Not-yours collapses into not-found: same code, same message, same shape.
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -409,7 +456,9 @@ export class FrameDispatcher {
         const reqId = requestId ?? randomUUID();
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        // Not-yours collapses into not-found — otherwise a caller could post turns into
+        // (and read the streamed replies from) another user's conversation.
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(reqId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -631,9 +680,11 @@ export class FrameDispatcher {
             return;
         }
 
-        // The session must exist (a code can't verify a session we don't track).
+        // The session must exist (a code can't verify a session we don't track) AND
+        // belong to this caller — otherwise OTP codes could be burned against, and
+        // verification claimed on, someone else's session.
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -664,6 +715,14 @@ const DEFAULT_MESSAGE_LIMIT = 50;
 const MAX_MESSAGE_LIMIT = 100;
 /** Reported `createdAt` for a message a pre-th-75eda5 store left untimestamped. */
 const EPOCH_ISO = new Date(0).toISOString();
+
+/**
+ * The scope used for an authenticated connection whose principal carries NO email —
+ * a value no conversation can be owned by, so every read fails closed instead of
+ * falling back to unscoped. Randomized per process so it can't be forged by a caller
+ * who influences their own `email` claim.
+ */
+const NO_OWNER_SENTINEL = ` no-owner:${randomUUID()}`;
 
 /**
  * Derive a `list_conversations` entry title from the first inbound message text,
