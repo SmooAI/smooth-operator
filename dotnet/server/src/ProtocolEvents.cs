@@ -215,6 +215,36 @@ public static class ProtocolEvents
         };
     }
 
+    /// <summary>
+    /// <c>cancelled</c> — the terminal event of a turn the client aborted with a <c>cancel</c> action.
+    /// Emitted <b>in place of</b> the <c>eventual_response</c> a completed turn would send: it echoes
+    /// the cancelled <c>send_message</c>'s <c>requestId</c> so the client can correlate it to the
+    /// in-flight turn and reset its UI (drop the streaming indicator, re-enable input).
+    ///
+    /// Status <c>499</c> mirrors nginx's "client closed request" — a terminal, non-200 outcome distinct
+    /// from a server error. The <c>requestId</c> is echoed at the envelope level and inside <c>data</c>
+    /// (envelope convention). No answer payload: a cancelled turn produced no assistant message (the
+    /// streamed tokens were ephemeral and are NOT persisted; the user's message stays persisted).
+    ///
+    /// A cancel with no active turn is a no-op and emits nothing — this builder is only called when a
+    /// live turn was actually aborted. Wire shape matches the Rust <c>protocol::cancelled</c> and
+    /// <c>spec/events/cancelled.schema.json</c>.
+    /// </summary>
+    public static JsonObject Cancelled(string? requestId)
+    {
+        var data = new JsonObject { ["status"] = 499 };
+        if (requestId is not null) data["requestId"] = requestId;
+        var ev = new JsonObject
+        {
+            ["type"] = "cancelled",
+            ["status"] = 499,
+            ["data"] = data,
+            ["timestamp"] = NowMs(),
+        };
+        if (requestId is not null) ev["requestId"] = requestId;
+        return ev;
+    }
+
     public static JsonObject Error(string? requestId, string code, string message)
     {
         // The {code, message} descriptor is duplicated at the envelope top level (`error`) and nested
