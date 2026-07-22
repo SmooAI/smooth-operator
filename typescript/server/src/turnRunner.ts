@@ -12,7 +12,7 @@
  * `runStream` mapped event-by-event onto protocol events.
  */
 import { approve, deny, SmoothAgent } from '@smooai/smooth-operator-core';
-import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool } from '@smooai/smooth-operator-core';
+import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool, ToolHook } from '@smooai/smooth-operator-core';
 
 import type { ConfirmationRegistry } from './confirmation.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
@@ -160,6 +160,14 @@ export interface TurnRunnerOptions {
     /** Tools the agent may call during the turn (default none); passed straight to the engine. */
     tools?: Tool[];
     /**
+     * Consumer-supplied tool-call surveillance {@link ToolHook}s (default none). Passed
+     * straight to the engine's `toolHooks` seam, so each hook's `preCall` runs before a
+     * tool executes (a throw blocks it) and its `postCall` runs after with a mutable
+     * result it may redact. This is where host-supplied surveillance (Narc, redaction)
+     * plugs into every turn's tool registry. Empty ⇒ behaviour unchanged.
+     */
+    toolHooks?: ToolHook[];
+    /**
      * Tool-name substrings gated behind write-confirmation HITL (default empty → no
      * gating, behavior unchanged). A tool whose name contains one of these parks the
      * turn (emits `write_confirmation_required`) until the client confirms.
@@ -196,6 +204,7 @@ export class TurnRunner {
     private readonly knowledge?: Knowledge;
     private readonly systemPrompt: string;
     private readonly tools: Tool[];
+    private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
     private readonly confirmations?: ConfirmationRegistry;
     private readonly sessionId?: string;
@@ -211,6 +220,7 @@ export class TurnRunner {
         this.knowledge = options.knowledge;
         this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
         this.tools = options.tools ?? [];
+        this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations;
         this.sessionId = options.sessionId;
@@ -275,6 +285,9 @@ export class TurnRunner {
         };
         if (this.knowledge) agentOptions.knowledge = this.knowledge;
         if (this.tools.length > 0) agentOptions.tools = this.tools;
+        // Thread consumer-supplied surveillance hooks into the engine's per-turn tool
+        // registry. Empty ⇒ unset ⇒ behaviour unchanged.
+        if (this.toolHooks.length > 0) agentOptions.toolHooks = this.toolHooks;
 
         // Clamp max_tokens to the resolved model's output ceiling (best-effort; a
         // missing/unknown ceiling ⇒ unclamped). Reuses the cached /model/info fetch.

@@ -10,7 +10,7 @@
  * the `?token=` slot), so retrieval for each turn is scoped to it — ACL is enforced
  * on the live chat path, not just at ingest.
  */
-import type { ChatClientLike, Knowledge, Tool } from '@smooai/smooth-operator-core';
+import type { ChatClientLike, Knowledge, Tool, ToolHook } from '@smooai/smooth-operator-core';
 import { randomUUID } from 'node:crypto';
 
 import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
@@ -44,6 +44,13 @@ export interface FrameDispatcherOptions {
     systemPrompt?: string;
     /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
     tools?: Tool[];
+    /**
+     * Consumer-supplied tool-call surveillance {@link ToolHook}s (default none). Forwarded
+     * verbatim to every turn's {@link TurnRunner} — unlike {@link tools}, hooks are NOT
+     * subject to the per-agent enabled-tools filter or auth gating: they observe/redact
+     * every tool call. Empty ⇒ behaviour unchanged.
+     */
+    toolHooks?: ToolHook[];
     /**
      * SMOODEV-590 — resolves a session's `agentId` into its per-agent config
      * (instructions, conversationWorkflow, greeting, personality, tool allow-list).
@@ -95,6 +102,7 @@ export class FrameDispatcher {
     private readonly access: AccessContext;
     private readonly systemPrompt?: string;
     private readonly tools: Tool[];
+    private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
     private readonly confirmations: ConfirmationRegistry;
     private readonly agentConfig?: AgentConfigResolver;
@@ -120,6 +128,7 @@ export class FrameDispatcher {
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
         this.tools = options.tools ?? [];
+        this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations ?? new ConfirmationRegistry();
         this.agentConfig = options.agentConfig;
@@ -530,6 +539,7 @@ export class FrameDispatcher {
             knowledge: scopedKnowledge,
             systemPrompt: effectiveSystemPrompt,
             tools: effectiveTools,
+            toolHooks: this.toolHooks,
             confirmTools: this.confirmTools,
             confirmations: this.confirmations,
             sessionId,
