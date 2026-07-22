@@ -157,6 +157,7 @@ fn spawn_turn(
                 auth_gate: None,
                 tool_configs: None,
                 extensions: None,
+                images: vec![],
             },
             &sink,
         )
@@ -334,6 +335,30 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
 
     let (_pending, mut seen) = await_pending_action(&mut rx).await;
 
+    // Register the session the way the live `create_conversation_session` /
+    // `send_message` path does — `confirm_tool_action` now routes through the
+    // ownership chokepoint, which resolves the session before it will touch the
+    // park (th-1b7ed0). A parked turn always has a registered session in the
+    // real server; the fixture spawns one directly, so it must say so.
+    state.insert_session(smooth_operator::domain::Session {
+        session_id: SESSION_ID.into(),
+        conversation_id: CONVERSATION_ID.into(),
+        organization_id: String::new(),
+        agent_id: "agent-hitl".into(),
+        agent_name: "smooth-agent".into(),
+        user_participant_id: "part-user".into(),
+        agent_participant_id: "part-agent".into(),
+        thread_id: CONVERSATION_ID.into(),
+        status: Some(smooth_operator::domain::SessionStatus::Active),
+        token_count: Some(0),
+        message_count: Some(0),
+        metadata: None,
+        created_at: None,
+        updated_at: None,
+        ended_at: None,
+        last_activity_at: None,
+    });
+
     // A separate "control" sink for the confirm frame's ack (mirrors the live
     // server, where the confirm arrives on the same connection's reader).
     let (ctrl_tx, mut ctrl_rx) = unbounded_channel::<Value>();
@@ -351,6 +376,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         "conn-1",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame,
         &ctrl_tx,
     )
@@ -379,6 +405,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         "conn-1",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame,
         &dup_tx,
     )

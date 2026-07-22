@@ -113,6 +113,22 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return session;
     }
 
+    /// <inheritdoc />
+    public async Task<bool> ConversationBelongsToUserAsync(string conversationId, string userEmail, CancellationToken cancellationToken = default)
+    {
+        // Unknown conversation, another user's, and one with a NULL user_email all return no row —
+        // indistinguishable to the caller, so this cannot be used to probe for conversation ids.
+        const string sql = """
+            SELECT 1 FROM conversation_sessions
+            WHERE conversation_id = @cid AND lower(user_email) = lower(@email)
+            LIMIT 1
+            """;
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("cid", conversationId);
+        command.Parameters.AddWithValue("email", userEmail);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+    }
+
     private async Task<bool> ConversationExistsAsync(string conversationId, CancellationToken cancellationToken)
     {
         const string sql = "SELECT 1 FROM conversation_sessions WHERE conversation_id = @cid LIMIT 1";
@@ -122,13 +138,25 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return result is not null;
     }
 
-    public async Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(ConversationScope scope, CancellationToken cancellationToken = default)
     {
+        // An authenticated caller with no identity email owns nothing — short-circuit, never query
+        // unscoped. th-966fab.
+        if (scope.IsEmpty)
+        {
+            return Array.Empty<ConversationSummary>();
+        }
+
         // One row per conversation with at least one message: count, last-activity time (max message
         // created_at), and the FIRST inbound message text (lowest seq, direction inbound) as the title
         // source. Empty conversations are naturally excluded (no rows). Sorting + capping is the
         // dispatcher's job. The C# analog of the Rust list-conversations + per-conversation peek. th-d5b446.
-        const string sql = """
+        //
+        // SECURITY (th-966fab): the owner filter is a WHERE inside the aggregate, NOT a post-hoc filter
+        // in C# — the dispatcher applies its LIMIT to what comes back, so filtering afterwards would
+        // hand back short/empty pages. A conversation with no owning session row (data written before
+        // scoping existed) matches nobody.
+        var sql = """
             SELECT m.conversation_id,
                    COUNT(*)              AS message_count,
                    MAX(m.created_at)     AS updated_at,
@@ -138,7 +166,28 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
             FROM conversation_messages m
             GROUP BY m.conversation_id
             """;
+        if (!scope.IsUnscoped)
+        {
+            sql = """
+                SELECT m.conversation_id,
+                       COUNT(*)              AS message_count,
+                       MAX(m.created_at)     AS updated_at,
+                       (SELECT i.content->>'text' FROM conversation_messages i
+                         WHERE i.conversation_id = m.conversation_id AND i.direction = 'inbound'
+                         ORDER BY i.seq ASC LIMIT 1) AS first_inbound
+                FROM conversation_messages m
+                WHERE EXISTS (SELECT 1 FROM conversation_sessions s
+                               WHERE s.conversation_id = m.conversation_id
+                                 AND lower(s.user_email) = lower(@email))
+                GROUP BY m.conversation_id
+                """;
+        }
+
         await using var command = _dataSource.CreateCommand(sql);
+        if (!scope.IsUnscoped)
+        {
+            command.Parameters.AddWithValue("email", scope.UserEmail!);
+        }
 
         var results = new List<ConversationSummary>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -184,23 +233,31 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         const string sql = """
             INSERT INTO conversation_messages (id, conversation_id, direction, content, created_at)
             VALUES (@id, @cid, @dir, @content, now())
+            RETURNING created_at
             """;
         await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("cid", conversationId);
         command.Parameters.AddWithValue("dir", direction == MessageDirection.Inbound ? "inbound" : "outbound");
         command.Parameters.Add(new NpgsqlParameter("content", NpgsqlDbType.Jsonb) { Value = content });
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return new StoredMessage(id, conversationId, direction, text);
+        // RETURNING the db-assigned now() so the caller's StoredMessage carries the SAME timestamp the
+        // row was stored with (not a second, slightly-later clock read on this side). Read through a
+        // typed accessor — Npgsql boxes a timestamptz as DateTime, so an unbox to DateTimeOffset
+        // throws. th-30a8a7.
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var createdAt = await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? reader.GetFieldValue<DateTimeOffset>(0)
+            : DateTimeOffset.UtcNow;
+        return new StoredMessage(id, conversationId, direction, text) { CreatedAt = createdAt };
     }
 
     public async Task<IReadOnlyList<StoredMessage>> ListMessagesAsync(string conversationId, int limit, CancellationToken cancellationToken = default)
     {
         // Most recent `limit`, returned oldest-first (the stable paging order is `seq`).
         const string sql = """
-            SELECT id, direction, content->>'text' AS text
+            SELECT id, direction, content->>'text' AS text, created_at
             FROM (
-                SELECT id, direction, content, seq FROM conversation_messages
+                SELECT id, direction, content, created_at, seq FROM conversation_messages
                 WHERE conversation_id = @cid ORDER BY seq DESC LIMIT @lim
             ) sub
             ORDER BY sub.seq ASC
@@ -214,7 +271,10 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var direction = reader.GetString(1) == "inbound" ? MessageDirection.Inbound : MessageDirection.Outbound;
-            results.Add(new StoredMessage(reader.GetString(0), conversationId, direction, reader.GetString(2)));
+            results.Add(new StoredMessage(reader.GetString(0), conversationId, direction, reader.GetString(2))
+            {
+                CreatedAt = reader.GetFieldValue<DateTimeOffset>(3),
+            });
         }
         return results;
     }

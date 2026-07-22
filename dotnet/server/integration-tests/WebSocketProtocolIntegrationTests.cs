@@ -134,13 +134,14 @@ public class WebSocketProtocolIntegrationTests
     [Fact]
     public async Task HandlerException_EmitsError_AndKeepsConnectionAlive()
     {
-        // A turn that throws (here: knowledge retrieval is unreachable — e.g. the embedding gateway
-        // is down) must surface as a clean error event and NOT drop the connection. Otherwise any
-        // unexpected error mid-turn silently kills the socket with no signal to the client.
+        // A turn that throws (here: the chat completion itself fails — e.g. the LLM gateway is down)
+        // must surface as a clean error event and NOT drop the connection. Otherwise any unexpected
+        // error mid-turn silently kills the socket with no signal to the client. (Knowledge-retrieval
+        // failure no longer works as the trigger — it now degrades to ungrounded, see #255 — so this
+        // exercises the dispatcher's generic handler-exception path via a failing chat client.)
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
-        builder.Services.AddSingleton<IChatClient>(new MockChatClient().PushText("never reached"));
-        builder.Services.AddSingleton<IAccessKnowledge>(new ThrowingAccessKnowledge());
+        builder.Services.AddSingleton<IChatClient>(new ThrowingChatClient());
         builder.Services.AddSmoothOperatorServer();
         await using var app = builder.Build();
         app.MapSmoothOperatorWebSocket("/ws");
@@ -174,18 +175,30 @@ public class WebSocketProtocolIntegrationTests
         await app.StopAsync();
     }
 
-    /// <summary>Knowledge whose retrieval always throws — stands in for the embedding/vector store being down.</summary>
-    private sealed class ThrowingAccessKnowledge : IAccessKnowledge
+    /// <summary>A chat client whose completion always throws — stands in for the LLM gateway being down.
+    /// A failing chat completion is a genuine turn-level handler exception (unlike best-effort knowledge
+    /// retrieval, which degrades), so it must surface as a clean error event.</summary>
+    private sealed class ThrowingChatClient : IChatClient
     {
-        public IKnowledgeBase? ForAccess(AccessContext access) => new ThrowingKnowledgeBase();
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("chat gateway unreachable");
 
-        private sealed class ThrowingKnowledgeBase : IKnowledgeBase
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            public Task IngestAsync(KnowledgeDocument document, CancellationToken cancellationToken = default) =>
-                throw new NotSupportedException();
+            await Task.Yield();
+            throw new InvalidOperationException("chat gateway unreachable");
+#pragma warning disable CS0162 // Unreachable code — required to type the iterator as ChatResponseUpdate.
+            yield break;
+#pragma warning restore CS0162
+        }
 
-            public Task<IReadOnlyList<KnowledgeResult>> QueryAsync(string query, int limit, CancellationToken cancellationToken = default) =>
-                throw new InvalidOperationException("knowledge store unreachable");
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
         }
     }
 

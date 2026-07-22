@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using SmooAI.SmoothOperator.Core;
 using SmooAI.SmoothOperator.Core.Extensions;
 
@@ -32,12 +33,30 @@ public sealed class FrameDispatcher
     private readonly ISessionAuthenticator _authenticator;
     private readonly IOtpService? _otpService;
     private readonly TurnLimits _limits;
+    private readonly ILogger? _logger;
 
-    // In-flight spawned send_message turns. A turn that calls a confirmation-gated tool parks
-    // awaiting a later confirm_tool_action frame, so the turn runs as a background Task (not awaited
-    // inline) to keep the read loop free; the connection awaits these on teardown (graceful drain).
-    private readonly object _turnsLock = new();
-    private readonly HashSet<Task> _turnTasks = new();
+    // The connection's SINGLE in-flight send_message turn, if one is running. A turn that calls a
+    // confirmation-gated tool parks awaiting a later confirm_tool_action frame, so the turn runs as a
+    // background Task (not awaited inline) to keep the read loop free; the connection awaits it on
+    // teardown (graceful drain). Its CancellationTokenSource is the cancel handle: a `cancel` frame (or
+    // a client disconnect) cancels it, which drops the turn at its next await — the C# analog of the
+    // Rust reference aborting the turn's JoinHandle. Only ONE turn runs at a time: a second
+    // send_message while one is in flight is rejected with TURN_IN_PROGRESS, never run concurrently.
+    private readonly object _turnLock = new();
+    private ActiveTurn? _turn;
+
+    private sealed class ActiveTurn
+    {
+        public required string RequestId { get; init; }
+        public required CancellationTokenSource Cts { get; init; }
+        // Set the moment the turn is cancelled. The turn's sink checks it, so a cancelled turn emits
+        // NOTHING further — `cancelled` stays the terminal event even if the engine yields one last
+        // update (e.g. a tool-result content) while unwinding.
+        public volatile bool Cancelled;
+        // Null until the turn task is spawned — a slot with a null Task is still "active"
+        // (the turn is starting), so a cancel arriving in that window is not lost.
+        public Task? Task { get; set; }
+    }
 
     public FrameDispatcher(
         ISessionStore store,
@@ -54,6 +73,7 @@ public sealed class FrameDispatcher
         ISessionAuthenticator? authenticator = null,
         IOtpService? otpService = null,
         TurnLimits? limits = null,
+        ILogger? logger = null,
         IReadOnlyList<IToolHook>? toolHooks = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -87,6 +107,9 @@ public sealed class FrameDispatcher
         // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
         // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
         _limits = limits ?? TurnLimits.Default;
+        // Optional logger, threaded into each per-turn TurnRunner so a degraded knowledge-retrieval
+        // failure surfaces a warning (null ⇒ silent, unchanged for callers that don't wire one).
+        _logger = logger;
     }
 
     /// <summary>
@@ -98,22 +121,62 @@ public sealed class FrameDispatcher
     /// </summary>
     public async Task WaitForTurnsAsync()
     {
-        Task[] pending;
-        lock (_turnsLock)
+        Task? pending;
+        lock (_turnLock)
         {
-            pending = _turnTasks.ToArray();
+            pending = _turn?.Task;
         }
-        if (pending.Length > 0)
+        if (pending is not null)
         {
             try
             {
-                await Task.WhenAll(pending).ConfigureAwait(false);
+                await pending.ConfigureAwait(false);
             }
             catch
             {
                 // A turn that faulted already surfaced its own error event; the drain must not throw.
             }
         }
+    }
+
+    /// <summary>
+    /// Cancel the connection's in-flight turn, if one is running: cancels its per-turn
+    /// <see cref="CancellationTokenSource"/> so the turn drops at its next await (abandoning the
+    /// in-flight LLM/tool call) and its partial assistant reply is never persisted — the C# analog of
+    /// the Rust reference aborting the turn's task handle. The user's message stays persisted (it was
+    /// written before the agent loop). Returns <c>false</c> (a silent no-op) when no turn is in flight.
+    /// <paramref name="turnRequestId"/> receives the cancelled turn's <c>requestId</c> so the caller
+    /// can echo it on the terminal <c>cancelled</c> event.
+    /// </summary>
+    public bool TryCancelActiveTurn(out string? turnRequestId)
+    {
+        ActiveTurn? turn;
+        lock (_turnLock)
+        {
+            turn = _turn is { Task: null or { IsCompleted: false } } ? _turn : null;
+            if (turn is not null)
+            {
+                _turn = null;
+            }
+        }
+
+        turnRequestId = turn?.RequestId;
+        if (turn is null)
+        {
+            return false;
+        }
+
+        turn.Cancelled = true;
+
+        try
+        {
+            turn.Cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The turn finished and disposed its CTS between our slot read and here — nothing to cancel.
+        }
+        return true;
     }
 
     /// <summary>
@@ -161,11 +224,23 @@ public sealed class FrameDispatcher
                 case "list_conversations":
                     await HandleListConversationsAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
+                case "get_conversation_messages":
+                    await HandleGetConversationMessagesAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "send_message":
                     await HandleSendMessageAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
+                case "cancel":
+                    // The "Stop button": abort the in-flight turn and emit its terminal `cancelled`
+                    // event, echoing the CANCELLED TURN's requestId (falling back to the cancel frame's
+                    // own) so the client correlates the reset. Nothing running ⇒ silent no-op.
+                    if (TryCancelActiveTurn(out var cancelledRequestId))
+                    {
+                        sink(ProtocolEvents.Cancelled(cancelledRequestId ?? requestId));
+                    }
+                    break;
                 case "confirm_tool_action":
-                    HandleConfirmToolAction(frame, requestId, sink);
+                    await HandleConfirmToolActionAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
                 case "verify_otp":
                     await HandleVerifyOtpAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
@@ -194,10 +269,34 @@ public sealed class FrameDispatcher
         // response echoes session.ConversationId either way, so a resuming client sees the same id
         // it passed. Mirrors the Rust reference's resume branch. th-d5b446.
         var conversationId = frame["conversationId"]?.GetValue<string>();
+        var scope = _access.ConversationScope;
+
+        // SECURITY (th-966fab): on an auth-enabled server, resuming a conversation you do not own is
+        // refused with the SAME SESSION_NOT_FOUND (same code, same message) a conversation id that
+        // never existed gets — including the previously-silent "unknown id mints a fresh conversation"
+        // path, which would otherwise have made the two distinguishable and let a caller probe for
+        // other users' conversation ids.
+        if (!string.IsNullOrEmpty(conversationId) && !scope.IsUnscoped)
+        {
+            var owns = !scope.IsEmpty
+                && await _store.ConversationBelongsToUserAsync(conversationId!, scope.UserEmail!, cancellationToken).ConfigureAwait(false);
+            if (!owns)
+            {
+                sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"conversation '{conversationId}' not found"));
+                return;
+            }
+        }
+
+        // SECURITY (th-966fab): the session's owning identity is the CONNECTION's authenticated
+        // principal. The frame's `userEmail` is only honoured when no auth is configured at all
+        // (single-tenant local/dev) — trusting client-supplied identity on an authenticated server is
+        // the spoofing vector this closes.
+        var ownerEmail = scope.IsUnscoped ? frame["userEmail"]?.GetValue<string>() : scope.UserEmail;
+
         var session = await _store.ResumeSessionAsync(
             frame["agentId"]?.GetValue<string>() ?? string.Empty,
             frame["userName"]?.GetValue<string>(),
-            frame["userEmail"]?.GetValue<string>(),
+            ownerEmail,
             string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
 
@@ -213,9 +312,54 @@ public sealed class FrameDispatcher
         sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Session created", data));
     }
 
+    /// <summary>
+    /// Whether this connection's principal may reach a session stamped with <paramref name="sessionOwnerEmail"/>.
+    /// A session that HAS an owner is owner-checked (OrdinalIgnoreCase — the same human, not a second
+    /// account). A session with NO owner belongs to nobody to enforce against, so it is reachable, as
+    /// it was before scoping existed.
+    /// <para>
+    /// th-909995 ("Option B"). th-966fab's stricter rule — auth on + no owner, or auth on + a principal
+    /// with no email ⇒ deny — is what forced the revert of #308 (see #309): an authenticated principal
+    /// whose token carries no <c>email</c> claim, and an anonymous connection to an auth-ENABLED server,
+    /// both stamp <c>ownerEmail = null</c> at <c>create_conversation_session</c> and were then refused
+    /// by their own session on the next <c>send_message</c> — locked out of the product, not merely
+    /// denied someone else's history. Anonymous/public-agent chat is a supported scenario, so ownerless
+    /// sessions stay reachable; what closes the reported P0 is that an OWNED session is only reachable
+    /// by its owner. Ownerless sessions still never appear in <c>list_conversations</c> (SQL-side scope
+    /// filter) and are still not resumable by conversationId — reaching one requires already holding
+    /// its sessionId, so this is not an enumeration surface.
+    /// </para>
+    /// </summary>
+    private bool CanRead(string? sessionOwnerEmail)
+    {
+        var scope = _access.ConversationScope;
+        return scope.IsUnscoped
+            || string.IsNullOrEmpty(sessionOwnerEmail)
+            || string.Equals(sessionOwnerEmail, scope.UserEmail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// SECURITY (th-1b7ed0): the ONLY way a handler may turn a client-supplied <c>sessionId</c> into a
+    /// session. It loads the session and then hides it unless the connection's authenticated principal
+    /// owns it — returning <c>null</c>, exactly what an unknown sessionId returns, so every caller emits
+    /// the identical not-found response and no caller can distinguish "not yours" from "never existed".
+    ///
+    /// Every sessionId-taking handler (<c>get_session</c>, <c>get_conversation_messages</c>,
+    /// <c>send_message</c>, <c>confirm_tool_action</c>, <c>verify_otp</c>) routes through here rather
+    /// than calling <see cref="ISessionStore.GetSessionAsync"/> directly: the check lives once, at the
+    /// chokepoint, instead of being re-derived — and forgotten — per handler. th-966fab scoped the read
+    /// paths and left <c>send_message</c> open, which let a caller replay someone else's conversation
+    /// as turn context and read the reply.
+    /// </summary>
+    private async Task<StoredSession?> ScopedSessionAsync(string? sessionId, CancellationToken cancellationToken)
+    {
+        var session = await _store.GetSessionAsync(sessionId ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        return session is not null && CanRead(session.UserEmail) ? session : null;
+    }
+
     private async Task HandleGetSessionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
-        var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        var session = await ScopedSessionAsync(frame["sessionId"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
@@ -255,7 +399,10 @@ public sealed class FrameDispatcher
             limit = l;
         }
 
-        var summaries = await _store.ListConversationsAsync(cancellationToken).ConfigureAwait(false);
+        // SECURITY (th-966fab): scoped to the connection's authenticated principal. Unscoped ONLY when
+        // no auth is configured; an authenticated principal without an email gets an empty list, never
+        // everyone's. The store applies this in its query — filtering here would break the LIMIT below.
+        var summaries = await _store.ListConversationsAsync(_access.ConversationScope, cancellationToken).ConfigureAwait(false);
 
         var conversations = new JsonArray();
         foreach (var c in summaries.Where(s => s.MessageCount > 0).OrderByDescending(s => s.UpdatedAt).Take(limit))
@@ -313,10 +460,124 @@ public sealed class FrameDispatcher
         return sb.ToString().TrimEnd() + "…";
     }
 
+    private const int DefaultMessageLimit = 50;
+    private const int MaxMessageLimit = 100;
+
+    /// <summary>
+    /// <c>get_conversation_messages</c> — a page of the session's conversation history, newest-first.
+    /// Per <c>spec/actions/get-messages.schema.json</c>: <c>{sessionId, limit? (1–100, default 50),
+    /// cursor? (opaque — a message id today)}</c> in, an <c>immediate_response</c> carrying
+    /// <c>{messages, nextCursor, hasMore}</c> out. Each message is
+    /// <c>{id, direction, content:{text}, createdAt}</c>. Mirrors the Rust
+    /// <c>handle_get_conversation_messages</c>. th-30a8a7, th-f63e4b.
+    /// </summary>
+    private async Task HandleGetConversationMessagesAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    {
+        var sessionId = frame["sessionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "get_conversation_messages requires a 'sessionId'"));
+            return;
+        }
+
+        // SECURITY: a session that exists but belongs to someone else is refused with the
+        // byte-identical response an unknown sessionId gets — same SESSION_NOT_FOUND code, same
+        // message (the caller's own sessionId echoed). Anything that varied between the two would be
+        // an oracle for enumerating other users' session ids.
+        var session = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (session is null)
+        {
+            sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));
+            return;
+        }
+
+        var limit = DefaultMessageLimit;
+        if (frame["limit"] is JsonValue lv && lv.TryGetValue<int>(out var l))
+        {
+            limit = Math.Clamp(l, 1, MaxMessageLimit);
+        }
+
+        var cursor = frame["cursor"]?.GetValue<string>();
+
+        List<StoredMessage> candidates;
+        if (string.IsNullOrEmpty(cursor))
+        {
+            // Ask for one extra to learn whether an older page exists, without a count query.
+            var fetched = await _store.ListMessagesAsync(session.ConversationId, limit + 1, cancellationToken).ConfigureAwait(false);
+            candidates = fetched.Reverse().ToList();
+        }
+        else
+        {
+            // ponytail: locating an id cursor needs the whole log — ISessionStore has no
+            // fetch-relative-to-an-id and a downstream host implements it. Add one if conversations
+            // outgrow a single fetch. Deliberately no timestamp comparison: colliding CreatedAt
+            // values would drop or repeat messages; store order (`seq`) is the paging order.
+            var all = (await _store.ListMessagesAsync(session.ConversationId, int.MaxValue, cancellationToken).ConfigureAwait(false)).Reverse().ToList();
+            var at = all.FindIndex(m => m.Id == cursor);
+            if (at < 0)
+            {
+                sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", $"get_conversation_messages 'cursor' '{cursor}' is not a message in this conversation"));
+                return;
+            }
+            candidates = all.Skip(at + 1).Take(limit + 1).ToList();
+        }
+
+        var hasMore = candidates.Count > limit;
+        var page = candidates.Take(limit).ToList();
+
+        var messages = new JsonArray();
+        foreach (var m in page)
+        {
+            messages.Add(new JsonObject
+            {
+                ["id"] = m.Id,
+                ["direction"] = m.Direction == MessageDirection.Inbound ? "inbound" : "outbound",
+                ["content"] = new JsonObject { ["text"] = m.Text },
+                ["createdAt"] = m.CreatedAt.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            });
+        }
+
+        sink(ProtocolEvents.ImmediateResponse(
+            requestId,
+            200,
+            "ConversationMessages",
+            new JsonObject
+            {
+                ["messages"] = messages,
+                // Non-null exactly when hasMore — names the oldest message in this page.
+                ["nextCursor"] = hasMore ? JsonValue.Create(page[^1].Id) : null,
+                ["hasMore"] = hasMore,
+            }));
+    }
+
     private async Task HandleSendMessageAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
         requestId ??= Guid.NewGuid().ToString();
-        var session = await _store.GetSessionAsync(frame["sessionId"]?.GetValue<string>() ?? string.Empty, cancellationToken).ConfigureAwait(false);
+
+        // One active turn per connection: a second send_message while one is in flight is rejected
+        // rather than run concurrently (interleaved streams + racing storage writes). The client must
+        // cancel the running turn or wait for it to finish. Checked BEFORE any validation/ack so the
+        // rejected frame has no side effects. Turn *resumes* (confirm_tool_action / verify_otp) are
+        // unaffected — they aren't new turns.
+        bool turnInProgress;
+        lock (_turnLock)
+        {
+            turnInProgress = _turn is { Task: null or { IsCompleted: false } };
+        }
+        if (turnInProgress)
+        {
+            sink(ProtocolEvents.Error(
+                requestId,
+                "TURN_IN_PROGRESS",
+                "a turn is already in progress on this connection; cancel it or wait for it to complete"));
+            return;
+        }
+
+        // SECURITY (th-1b7ed0): the WRITE path is scoped too. Sending into a session you don't own
+        // replays ITS history as turn context and streams the reply back to YOU — a read of someone
+        // else's conversation dressed up as a write, which defeats the read scoping. Refused before
+        // the turn starts, so nothing is appended to the victim's log.
+        var session = await ScopedSessionAsync(frame["sessionId"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
@@ -349,6 +610,22 @@ public sealed class FrameDispatcher
         var extHost = await ExtensionServerHost.BuildAsync(sink, requestId, session.SessionId, _confirmations).ConfigureAwait(false);
         var baseTools = extHost is null ? _tools : _tools.Concat(extHost.Tools()).ToList();
 
+        // Scope retrieval to THIS connection's access up front — the same handle grounds the turn's
+        // auto-context RAG (step 5 below) AND backs the built-in knowledge_search tool, so both read
+        // through the same ACL-filtered store (a doc the caller's groups don't grant is never a candidate).
+        var scopedKnowledge = _knowledge?.ForAccess(_access);
+
+        // Built-in knowledge_search: a model-callable search over the connection's ACL-scoped knowledge
+        // (parity with the Rust server's KnowledgeSearchTool). Prepended before the enabled_tools filter
+        // so it flows through the SAME per-agent restriction + auth gate as every other tool — an agent
+        // with no tool_config gets it (like a Rust built-in), one that restricts tools must list
+        // "knowledge_search" to keep it. Null (skipped) when no knowledge store is configured.
+        var knowledgeTool = KnowledgeSearchTool.Create(scopedKnowledge);
+        if (knowledgeTool is not null)
+        {
+            baseTools = baseTools.Prepend(knowledgeTool).ToList();
+        }
+
         var enabledTools = agentConfig?.EnabledTools;
         var effectiveTools = enabledTools is null
             ? baseTools
@@ -362,10 +639,17 @@ public sealed class FrameDispatcher
         var otpRecorder = _otpService is not null ? new OtpRefusalRecorder() : null;
         var gatedTools = ToolAuthGate.Apply(effectiveTools, agentConfig, _authenticator, session.ConversationId, otpRecorder);
 
-        // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access — so a
-        //    user only ever sees documents their groups grant (ACL enforced on the chat path).
-        var scopedKnowledge = _knowledge?.ForAccess(_access);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, _confirmTools, _confirmations, agentConfig, _judge, _limits, _toolHooks);
+        // 4b. Resolve the write-confirmation (HITL) patterns for THIS agent. A per-agent
+        //     ConfirmToolPatterns (from AgentConfig) overrides the global ConfirmTools singleton, so a
+        //     multi-agent host gates writes per agent; a null (agent didn't specify) falls back to the
+        //     global patterns — backward compatible. An empty per-agent list is an explicit "no gating
+        //     for this agent" that still overrides the global.
+        var confirmTools = agentConfig?.ConfirmToolPatterns ?? _confirmTools;
+
+        // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access (computed
+        //    above, and reused to back the built-in knowledge_search tool) — so a user only ever sees
+        //    documents their groups grant (ACL enforced on the chat path).
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's
@@ -379,11 +663,35 @@ public sealed class FrameDispatcher
         var conversationId = session.ConversationId;
         var userEmail = session.UserEmail;
 
+        // Per-turn cancellation handle, linked to the connection's token so an ambient teardown still
+        // cancels the turn as before. A `cancel` frame (or a disconnect) cancels it: the turn drops at
+        // its next await, the catch below swallows the OperationCanceledException, and the partial
+        // assistant message is discarded — no eventual_response, nothing persisted. (The user's message
+        // was persisted at the start of the turn, so it stays.)
+        var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var turn = new ActiveTurn { RequestId = requestIdStr, Cts = turnCts };
+
+        // Everything the turn emits goes through this gate: once the turn is cancelled it drops events,
+        // so `cancelled` is genuinely terminal (the engine can still yield one unwinding update as the
+        // cancellation propagates). Ephemeral stream output only — nothing persisted rides on it.
+        var turnSink = (JsonObject ev) =>
+        {
+            if (!turn.Cancelled)
+            {
+                sink(ev);
+            }
+        };
+        // Claim the slot BEFORE spawning, so a cancel racing the spawn still finds the turn.
+        lock (_turnLock)
+        {
+            _turn = turn;
+        }
+
         var task = Task.Run(async () =>
         {
             try
             {
-                var result = await runner.RunAsync(conversationId, requestIdStr, message, sink, sessionIdStr, cancellationToken).ConfigureAwait(false);
+                var result = await runner.RunAsync(conversationId, requestIdStr, message, turnSink, sessionIdStr, turnCts.Token).ConfigureAwait(false);
 
                 // If the auth gate refused an end_user tool this turn for lack of a verified session,
                 // and a host OTP service is installed and the session has a contact to reach, offer the
@@ -395,11 +703,11 @@ public sealed class FrameDispatcher
                     var contact = new OtpContact(Email: userEmail);
                     if (!contact.IsEmpty)
                     {
-                        await OfferOtpAsync(sessionIdStr, refusedTool, contact, requestIdStr, sink, cancellationToken).ConfigureAwait(false);
+                        await OfferOtpAsync(sessionIdStr, refusedTool, contact, requestIdStr, turnSink, turnCts.Token).ConfigureAwait(false);
                     }
                 }
 
-                sink(ProtocolEvents.EventualResponse(
+                turnSink(ProtocolEvents.EventualResponse(
                     requestIdStr,
                     200,
                     result.MessageId,
@@ -409,13 +717,15 @@ public sealed class FrameDispatcher
             }
             catch (OperationCanceledException)
             {
-                // Connection torn down mid-turn — nothing to surface; the socket is gone.
+                // Turn cancelled (a `cancel` frame, a disconnect, or connection teardown): discard the
+                // partial assistant message — no eventual_response, nothing persisted. The `cancelled`
+                // event is emitted by the cancel path itself (a disconnect emits nothing: no client).
             }
             catch (Exception)
             {
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean error and
                 // keeps the connection alive (detail stays server-side).
-                sink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
+                turnSink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
             }
             finally
             {
@@ -425,20 +735,24 @@ public sealed class FrameDispatcher
                 {
                     await extHost.ShutdownAllAsync().ConfigureAwait(false);
                 }
+
+                // Release the turn slot (unless a cancel already took it, or a later turn owns it) and
+                // dispose this turn's CTS — the single owner of the handle, so it's disposed exactly once.
+                lock (_turnLock)
+                {
+                    if (ReferenceEquals(_turn, turn))
+                    {
+                        _turn = null;
+                    }
+                }
+                turnCts.Dispose();
             }
         }, CancellationToken.None);
 
-        lock (_turnsLock)
+        lock (_turnLock)
         {
-            _turnTasks.Add(task);
+            turn.Task = task;
         }
-        _ = task.ContinueWith(t =>
-        {
-            lock (_turnsLock)
-            {
-                _turnTasks.Remove(t);
-            }
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -452,7 +766,7 @@ public sealed class FrameDispatcher
     /// a duplicate confirm is a clean <c>NO_PENDING_CONFIRMATION</c> no-op. Fails closed: a missing
     /// <c>sessionId</c> or non-bool <c>approved</c> is rejected (never silently approve).
     /// </summary>
-    private void HandleConfirmToolAction(JsonObject frame, string? requestId, Action<JsonObject> sink)
+    private async Task HandleConfirmToolActionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
         var sessionId = frame["sessionId"]?.GetValue<string>();
         if (string.IsNullOrEmpty(sessionId))
@@ -469,7 +783,11 @@ public sealed class FrameDispatcher
             return;
         }
 
-        if (!_confirmations.Resolve(sessionId, approved))
+        // SECURITY (th-1b7ed0): a verdict on a session you don't own would let a caller approve (or
+        // deny) another user's parked write. Refused with the SAME NO_PENDING_CONFIRMATION an unknown
+        // sessionId gets, so the two stay indistinguishable. th-1b7ed0.
+        var scoped = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (scoped is null || !_confirmations.Resolve(sessionId, approved))
         {
             sink(ProtocolEvents.Error(requestId, "NO_PENDING_CONFIRMATION", $"no tool action is awaiting confirmation for session '{sessionId}'"));
             return;
@@ -544,8 +862,10 @@ public sealed class FrameDispatcher
             return;
         }
 
-        // The session must exist (a code can't verify a session we don't track).
-        var session = await _store.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        // The session must exist AND be ours (a code can't verify a session we don't track — nor one
+        // that belongs to someone else: marking a foreign session identity-verified would unlock its
+        // end_user-gated tools). Same response either way. th-1b7ed0.
+        var session = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", $"session '{sessionId}' not found"));

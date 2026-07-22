@@ -187,6 +187,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )

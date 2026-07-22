@@ -42,6 +42,22 @@ public static class ProtocolEvents
         ["timestamp"] = NowMs(),
     };
 
+    /// <summary>
+    /// <c>stream_preamble</c> — one short present-tense "what I'm about to do" sentence produced by a
+    /// fast model IN PARALLEL with the turn, covering the main model's time-to-first-token. Shaped
+    /// exactly like <see cref="StreamToken"/> (so clients reuse the render path) but on a distinct
+    /// type, because it is EPHEMERAL: the real answer replaces it, it is never persisted, and it never
+    /// appears in <c>eventual_response</c>. Emitted only when <c>SMOOTH_AGENT_PREAMBLE_MODEL</c> is set.
+    /// </summary>
+    public static JsonObject StreamPreamble(string requestId, string token) => new()
+    {
+        ["type"] = "stream_preamble",
+        ["requestId"] = requestId,
+        ["token"] = token,
+        ["data"] = new JsonObject { ["requestId"] = requestId, ["token"] = token },
+        ["timestamp"] = NowMs(),
+    };
+
     public static JsonObject StreamChunk(string requestId, string node, JsonNode state) => new()
     {
         ["type"] = "stream_chunk",
@@ -197,6 +213,36 @@ public static class ProtocolEvents
             ["data"] = new JsonObject { ["requestId"] = requestId, ["data"] = inner },
             ["timestamp"] = NowMs(),
         };
+    }
+
+    /// <summary>
+    /// <c>cancelled</c> — the terminal event of a turn the client aborted with a <c>cancel</c> action.
+    /// Emitted <b>in place of</b> the <c>eventual_response</c> a completed turn would send: it echoes
+    /// the cancelled <c>send_message</c>'s <c>requestId</c> so the client can correlate it to the
+    /// in-flight turn and reset its UI (drop the streaming indicator, re-enable input).
+    ///
+    /// Status <c>499</c> mirrors nginx's "client closed request" — a terminal, non-200 outcome distinct
+    /// from a server error. The <c>requestId</c> is echoed at the envelope level and inside <c>data</c>
+    /// (envelope convention). No answer payload: a cancelled turn produced no assistant message (the
+    /// streamed tokens were ephemeral and are NOT persisted; the user's message stays persisted).
+    ///
+    /// A cancel with no active turn is a no-op and emits nothing — this builder is only called when a
+    /// live turn was actually aborted. Wire shape matches the Rust <c>protocol::cancelled</c> and
+    /// <c>spec/events/cancelled.schema.json</c>.
+    /// </summary>
+    public static JsonObject Cancelled(string? requestId)
+    {
+        var data = new JsonObject { ["status"] = 499 };
+        if (requestId is not null) data["requestId"] = requestId;
+        var ev = new JsonObject
+        {
+            ["type"] = "cancelled",
+            ["status"] = 499,
+            ["data"] = data,
+            ["timestamp"] = NowMs(),
+        };
+        if (requestId is not null) ev["requestId"] = requestId;
+        return ev;
     }
 
     public static JsonObject Error(string? requestId, string code, string message)

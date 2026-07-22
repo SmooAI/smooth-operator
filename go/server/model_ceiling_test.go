@@ -87,7 +87,7 @@ func TestRunnerAppliesRaisedDefaultsAndCeiling(t *testing.T) {
 	t.Run("clamped to ceiling below default", func(t *testing.T) {
 		mock := core.NewMockLlmProvider().PushText("hi")
 		store := NewInMemorySessionStore()
-		session, err := store.CreateSession(context.Background(), "agent-1", "A", "a@example.com")
+		session, err := store.CreateSession(context.Background(), "agent-1", "A", "a@example.com", ConversationScope{Unscoped: true})
 		if err != nil {
 			t.Fatalf("create session: %v", err)
 		}
@@ -107,7 +107,7 @@ func TestRunnerAppliesRaisedDefaultsAndCeiling(t *testing.T) {
 	t.Run("raised default when no ceiling", func(t *testing.T) {
 		mock := core.NewMockLlmProvider().PushText("hi")
 		store := NewInMemorySessionStore()
-		session, _ := store.CreateSession(context.Background(), "agent-1", "A", "a@example.com")
+		session, _ := store.CreateSession(context.Background(), "agent-1", "A", "a@example.com", ConversationScope{Unscoped: true})
 		runner := NewTurnRunner(mock, store, "", nil, nil, nil, nil, nil, "", "", nil)
 		if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "r-1", "hello", func(map[string]any) {}); err != nil {
 			t.Fatalf("run: %v", err)

@@ -30,12 +30,30 @@
 //! gateway this turn was billed/scoped to). Both are carried as `Option` and
 //! the shared crate never interprets them — it only threads them through.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use smooth_operator_core::Tool;
 
 use crate::access_control::AccessContext;
+
+/// An image attachment on a multimodal turn's user message. `url` is a `data:`
+/// image URL (`data:image/png;base64,...`) or a remote `https` URL; `detail`
+/// (`"low"`/`"high"`/`"auto"`) is the optional OpenAI vision hint, omitted when
+/// absent. The wire shape mirrors the core `ImageContent` — the server maps one
+/// to the other before handing the turn to the engine. Shared by the inbound
+/// `send_message` request (`images`) and the [`ToolProviderContext`] so a host
+/// tool can see what the turn carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserImage {
+    /// A `data:`/`https` image URL, emitted to the model as an OpenAI
+    /// `image_url` content part.
+    pub url: String,
+    /// Optional OpenAI vision detail hint (`"low"`/`"high"`/`"auto"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
 
 /// The per-turn context a [`ToolProvider`] sees when asked for tools.
 ///
@@ -69,6 +87,18 @@ pub struct ToolProviderContext {
     /// for this agent's turn. Empty when no tool carries config; the shared crate
     /// does not interpret it.
     pub tool_specific_config: std::collections::HashMap<String, serde_json::Value>,
+    /// Optional **directive sink** — where a host tool writes a client-side
+    /// directive (a navigation / view-application instruction) for this turn. The
+    /// runner drains it after the turn and carries the value onto the
+    /// `eventual_response`'s `directive` field. Opaque `serde_json::Value`
+    /// (last-write-wins): the shared crate never interprets the shape, exactly as
+    /// `response` is left loose. `None` (the default) ⇒ no host directive path, so
+    /// behavior is byte-for-byte unchanged.
+    pub directive_sink: Option<Arc<Mutex<serde_json::Value>>>,
+    /// The image attachments this turn carried (multimodal turns). A host tool may
+    /// read them; empty for the text-only common case. The runner also maps these
+    /// onto the engine's user message via core `with_user_images`.
+    pub images: Vec<UserImage>,
 }
 
 impl ToolProviderContext {
@@ -86,6 +116,8 @@ impl ToolProviderContext {
             conversation_id: None,
             gateway_key: None,
             tool_specific_config: std::collections::HashMap::new(),
+            directive_sink: None,
+            images: Vec::new(),
         }
     }
 
@@ -110,6 +142,21 @@ impl ToolProviderContext {
     #[must_use]
     pub fn with_gateway_key(mut self, gateway_key: impl Into<String>) -> Self {
         self.gateway_key = Some(gateway_key.into());
+        self
+    }
+
+    /// Set the turn's [`directive_sink`](Self::directive_sink) — the slot a host
+    /// tool writes a client-side directive into for this turn.
+    #[must_use]
+    pub fn with_directive_sink(mut self, sink: Arc<Mutex<serde_json::Value>>) -> Self {
+        self.directive_sink = Some(sink);
+        self
+    }
+
+    /// Set the turn's [`images`](Self::images) — the attachments the turn carried.
+    #[must_use]
+    pub fn with_images(mut self, images: Vec<UserImage>) -> Self {
+        self.images = images;
         self
     }
 }
@@ -190,6 +237,8 @@ mod tests {
         let ctx = ToolProviderContext::new(Some("org-a".into()), AccessContext::anonymous());
         assert_eq!(ctx.conversation_id, None);
         assert_eq!(ctx.gateway_key, None);
+        assert!(ctx.directive_sink.is_none());
+        assert!(ctx.images.is_empty());
     }
 
     #[test]
@@ -199,6 +248,39 @@ mod tests {
             .with_gateway_key("sk-org-a");
         assert_eq!(ctx.conversation_id.as_deref(), Some("conv-123"));
         assert_eq!(ctx.gateway_key.as_deref(), Some("sk-org-a"));
+    }
+
+    #[test]
+    fn builder_sets_directive_sink_and_images() {
+        let sink = Arc::new(Mutex::new(serde_json::Value::Null));
+        let ctx = ToolProviderContext::new(Some("org-a".into()), AccessContext::anonymous())
+            .with_directive_sink(Arc::clone(&sink))
+            .with_images(vec![UserImage {
+                url: "https://x/y.png".into(),
+                detail: Some("high".into()),
+            }]);
+        // A host tool writes through the sink; the runner reads it afterward.
+        *ctx.directive_sink.as_ref().unwrap().lock().unwrap() =
+            serde_json::json!({"kind": "Navigate"});
+        assert_eq!(
+            *sink.lock().unwrap(),
+            serde_json::json!({"kind": "Navigate"})
+        );
+        assert_eq!(ctx.images.len(), 1);
+        assert_eq!(ctx.images[0].url, "https://x/y.png");
+        assert_eq!(ctx.images[0].detail.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn user_image_omits_detail_when_absent() {
+        // Back-compat wire shape: no `detail` key when None.
+        let v = serde_json::to_value(UserImage {
+            url: "data:image/png;base64,AAAA".into(),
+            detail: None,
+        })
+        .unwrap();
+        assert!(v.get("detail").is_none());
+        assert_eq!(v["url"], "data:image/png;base64,AAAA");
     }
 
     #[tokio::test]

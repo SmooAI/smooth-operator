@@ -84,7 +84,7 @@ pub use settings::{
     AgentSettings, InMemorySettingsStore, SettingsStore, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
 };
 pub use telemetry::init_telemetry;
-pub use tool_provider::{ToolProvider, ToolProviderContext};
+pub use tool_provider::{ToolProvider, ToolProviderContext, UserImage};
 pub use tools::{
     builtin_tools, interaction_channel, ConversationHistoryTool, FetchUrlTool, InteractionAttach,
     InteractionChannelPair, KnowledgeResultSink, KnowledgeSearchTool, NoopWebSearchProvider,

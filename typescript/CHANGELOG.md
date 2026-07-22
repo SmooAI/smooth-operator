@@ -1,5 +1,580 @@
 # @smooai/smooth-operator
 
+## 1.36.8
+
+### Patch Changes
+
+- 156c6ab: feat(ts server): `toolHooks` seam plumbs consumer-supplied ToolHooks into every turn's tool registry
+
+  The TypeScript server gains a `toolHooks` option on `ServerOptions` (and
+  `serveLocal`), forwarded verbatim through `FrameDispatcher` → `TurnRunner` →
+  the engine's `AgentOptions.toolHooks`. Consumer-supplied `ToolHook`s run around
+  every dispatched tool: `preCall` before execution (a throw blocks the call) and
+  `postCall` after with a mutable result it may redact. Unlike `tools`, hooks
+  bypass the per-agent enabled-tools filter and auth gating — they observe/redact
+  every call. Empty ⇒ behaviour unchanged. This is the server half of the
+  polyglot ToolHook parity work, mirroring the Rust `LocalServerBuilder` hook seam
+  feeding the per-turn `ToolRegistry`. Requires `@smooai/smooth-operator-core`
+  with the `ToolHook` lifecycle.
+
+## 1.36.7
+
+### Patch Changes
+
+- 799124c: SECURITY (Rust server): scope conversations by owner only when an owner exists (Option B, th-909995)
+
+  `may_read_conversation` mapped every principal without an email — an anonymous connection to an
+  auth-enabled server, or a token carrying `sub`/`org`/`role` but no `email` — to `UserScope::Denied`
+  and refused it everything. The session such a connection creates is ownerless by construction, so
+  it was locked out of its own session: empty `list_conversations`, resume refused, `get_session` /
+  `get_conversation_messages` / `send_message` all `SESSION_NOT_FOUND`. The identical rule in the
+  .NET twin hung CI on a WebSocket ACL test and was reverted in #309.
+
+  Option B: a conversation that HAS an owner (a `user` participant with a non-blank email) is still
+  owner-checked, case-insensitively; one with NO owner is readable, as it was before scoping shipped.
+  `Denied` matches no non-empty owner, so the reported P0 stays closed: authenticated A cannot read,
+  resume, or `send_message` into authenticated B's owned session, and a refusal appends nothing to
+  B's log. `Err(_) => false` (a storage error is a denial), the `UserScope` enum, and the
+  `scoped_session` chokepoint at all 7 call sites are unchanged, as is the unauthenticated
+  `LocalServer` / smooth-daemon embedding (`UserScope::Unscoped`).
+
+  Option A (`email ?? sub`) was rejected: Go's anonymous principal uses the literal sub `"anonymous"`
+  for every visitor, so keying on `sub` would pool all anonymous visitors and leak their chats to
+  each other.
+
+  `list_conversations` now applies that same predicate per conversation instead of the
+  `list_conversations_by_org_and_user` storage pushdown, which cannot express "mine or ownerless" —
+  so the list can never disagree with what `get_session` will hand over. Still filtered before the
+  limit, so pages are never silently short.
+
+## 1.36.6
+
+### Patch Changes
+
+- 86465a1: SECURITY (Go): fix conversation ownership check to close cross-user access without locking out anonymous and emailless principals.
+
+  The previous rule (`s.Unscoped || (s.Email != "" && ownerEmail == s.Email)`) denied everything to any connection whose principal carried no email claim. On an auth-enabled server that population is real — `AnonymousPrincipal` has no email, and plenty of IdPs issue tokens without one — so those callers got an empty conversation list, a refused resume, and a refused `send_message` on the session they had just created. That is an outage for anonymous/public-agent chat, a supported scenario. The identical rule in the .NET sibling hung CI on a WebSocket ACL test that authenticates without an email claim, forcing a revert there (#309); Go had no equivalent test, which is why it went unnoticed.
+
+  `ConversationScope.Allows` now owner-checks only conversations that HAVE an owner:
+
+  - a session with an owner is readable and writable only by that same principal — this keeps the reported P0 (authenticated A reaching into authenticated B's owned session) closed on both the read and the write path;
+  - a session with no owner (anonymous, emailless-authenticated, or legacy auth-disabled) stays reachable, since there is no owner to enforce on behalf of.
+
+  Keying ownerless sessions on `sub` instead was considered and rejected: `AnonymousPrincipal.Sub` is the literal string `"anonymous"` for every visitor, so it would pool all anonymous conversations into one shared bucket and leak them to each other.
+
+  Email comparison is now case-insensitive (`strings.EqualFold`), matching the .NET and Python siblings — OIDC providers vary on the casing of the email claim.
+
+  Unchanged: the `scopedSession` chokepoint every sessionId-taking handler routes through, the identical `SESSION_NOT_FOUND` for not-yours vs never-existed (no existence oracle), selection-side filtering for the conversation list, and the auth-disabled unscoped path.
+
+## 1.36.5
+
+### Patch Changes
+
+- 5d0a499: SECURITY (Python server): scope sessions by owner only when an owner exists (Option B, th-909995)
+
+  The th-8fe998 scoping rule fail-closed on any principal without an email claim. On an
+  auth-enabled server that locked out **anonymous connections and authenticated-but-emailless
+  principals entirely** — the session they had just created was ownerless, so `list_conversations`
+  returned empty, resume minted a fresh conversation, and `get_session` / `get_conversation_messages`
+  / `send_message` all answered `SESSION_NOT_FOUND`. The identical rule in the .NET twin hung CI on
+  a WebSocket ACL test and was reverted in #309.
+
+  Option B: a session that HAS an owner is still owner-checked (case/whitespace-insensitive email
+  match); a session with NO owner — anonymous, emailless, or predating ownership — is reachable, as
+  it was before scoping shipped. An emailless scope matches no non-empty owner, so the reported P0
+  stays closed: authenticated A cannot read, resume, or `send_message` into authenticated B's owned
+  session, and a refusal appends nothing to B's log. Not-yours remains byte-identical to
+  never-existed (no existence oracle), and the auth-disabled single-tenant flavor is unchanged.
+
+  Option A (`email ?? sub`) was rejected: Go's anonymous principal uses the literal sub `"anonymous"`
+  for every visitor, so keying on `sub` would pool all anonymous visitors together and leak their
+  chats to each other.
+
+  `SessionStore.create_session` / `list_conversations` gain a keyword-only `enforced: bool = False`
+  that distinguishes "auth disabled, unscoped" from "authenticated but emailless" — both of which
+  present as a `None` owner.
+
+## 1.36.4
+
+### Patch Changes
+
+- b1a0568: SECURITY (.NET server): scope the conversation WRITE path, not just the reads.
+
+  th-966fab owner-checked `get_session` / `get_conversation_messages` / resume, but
+  `send_message` still loaded any session by client-supplied `sessionId`. An
+  authenticated user who knew (or guessed) another user's `sessionId` could send a
+  message into that session — the turn replayed the victim's conversation history as
+  context and streamed the agent's reply back to the _attacker_. A read of someone
+  else's conversation dressed up as a write, defeating the read scoping entirely.
+  `verify_otp` and `confirm_tool_action` were unscoped the same way (marking a
+  foreign session identity-verified; approving a foreign parked write).
+
+  The fix adopts the Go server's chokepoint pattern: a single private
+  `ScopedSessionAsync` is now the only way a handler may turn a client-supplied
+  `sessionId` into a session. It hides a session the connection's principal doesn't
+  own by returning exactly what an unknown id returns, so every caller emits the
+  identical not-found response and "not yours" stays indistinguishable from "never
+  existed". All five sessionId-taking handlers route through it.
+
+  The visibility rule is "Option B": a session that HAS an owner is owner-checked; a
+  session with NO owner is reachable. A first attempt (#308) also denied ownerless
+  sessions and emailless principals outright, and was reverted (#309) — an
+  authenticated principal whose token carries no `email` claim, and an anonymous
+  connection to an auth-enabled server, both stamp `ownerEmail = null` at
+  `create_conversation_session` and were then refused by their own session on the next
+  `send_message`. That is not "denied someone else's history", it is "cannot use the
+  product": it killed anonymous/public-agent chat, and hung the .NET integration suite,
+  whose ACL test converses over exactly that path. Ownerless sessions remain absent from
+  `list_conversations` and non-resumable by `conversationId`, so reaching one requires
+  already holding its `sessionId`. No behavior change when auth is disabled
+  (single-tenant local/dev stays unscoped).
+
+## 1.36.3
+
+### Patch Changes
+
+- d17fa66: SECURITY: TS server — owner-check only conversations that HAVE an owner (Option B)
+
+  The per-user scoping rule shipped in #297 scoped an authenticated principal with no
+  `email` claim (and an anonymous connection to an auth-enabled server) to an unownable
+  sentinel, and required `ownerEmail === scope` on every read. That denied such callers
+  EVERYTHING — empty list, resume refused, `send_message` refused — locking them out of
+  the session they had just created, i.e. no anonymous or emailless chat at all on an
+  auth-enabled server. The identical rule in .NET hung CI on a WebSocket ACL test and was
+  reverted in #309; TS had no equivalent test, so it went unnoticed here.
+
+  `mayRead` now allows a conversation with NO owner and owner-checks one that has an
+  owner. The reported P0 stays closed: authenticated A still cannot read or write
+  authenticated B's owned session (`SESSION_NOT_FOUND`, byte-identical to a never-existed
+  id, nothing appended to B's log), and an emailless scope still matches no real owner —
+  the list stays empty for emailless principals rather than pooling every anonymous
+  visitor's chats into one readable bucket.
+
+  Owner comparison is now case-insensitive (read path and list selection), matching .NET
+  and Python — OIDC providers vary on the casing they emit for the same identity.
+
+## 1.36.2
+
+### Patch Changes
+
+- bd7fb5b: SECURITY (Rust server): owner-check every sessionId-taking WebSocket action.
+
+  The per-user scoping added for the read paths left the write paths loading a
+  session by raw client-supplied id. `send_message` was the worst case: an
+  authenticated user who knew or guessed another user's `sessionId` could send a
+  message into that session — the turn replayed the victim's conversation history
+  as context and streamed the agent's reply back to the _sender_, so the write
+  hole was also a read of the victim's conversation. `get_session`, `verify_otp`,
+  `confirm_tool_action`, `submit_interaction` and `rename_conversation` had the
+  same gap.
+
+  All of them now route through a single `scoped_session` chokepoint (mirroring
+  the Go dispatcher's `scopedSession`): it loads the session and hides it unless
+  the connection's authenticated principal owns its conversation, returning
+  exactly what an unknown id returns — so "not yours" is byte-identical to "never
+  existed" and cannot be used as an existence oracle. A storage error is a denial.
+  Unauthenticated single-user deployments (the `th` daemon / `LocalServer`
+  embedding) stay unscoped, and org scoping remains as defense in depth.
+
+## 1.36.1
+
+### Patch Changes
+
+- 770edec: SECURITY: fix cross-user conversation-history leak in the Python server's `get_conversation_messages`.
+
+  The per-user scoping fix added a `_visible_session` ownership chokepoint and routed
+  `get_session`, `send_message` and `verify_otp` through it, but `get_conversation_messages`
+  still called the store directly — so any authenticated user could read any other user's
+  full conversation history by sessionId. It now routes through the same chokepoint and
+  reports a session it does not own with the byte-identical `SESSION_NOT_FOUND` payload it
+  uses for an id that never existed (no existence oracle). A structural test now fails if any
+  future handler bypasses the chokepoint again.
+
+## 1.36.0
+
+### Minor Changes
+
+- ef9a697: **SECURITY (Rust): per-user conversation scoping — fixes a cross-user data leak.**
+  `list_conversations` was scoped by organization only, and the resume-by-`conversationId`
+  path plus `get_conversation_messages` were not owner-checked at all, so any authenticated
+  user in an org could enumerate and open every other user's conversations in that org.
+
+  Conversation reads are now scoped to the connection's **authenticated principal** (the
+  JWT `email` claim, surfaced as `Principal::email`), on top of — never instead of — the
+  existing org scope. The scope is derived only from the verified token: a create frame's
+  client-supplied `userEmail` no longer decides the session's identity when the connection
+  is authenticated (that was the spoofing vector), and the same fix is applied to the
+  Lambda transport's create path. `StorageAdapter` gains
+  `list_conversations_by_org_and_user`, which filters in the query rather than after a
+  limit; Postgres pushes it down to one `EXISTS` query, other adapters use the trait's
+  participant-filtering default, so a new adapter is scoped by construction.
+
+  Fail-closed rules: auth enabled + principal email ⇒ scoped; auth enabled but no principal
+  or no `email` claim ⇒ empty list and every read denied (never a silent fall back to the
+  whole org); auth **disabled** (`AUTH_MODE=none`, unconfigured, or the single-user
+  `local-token` daemon / `LocalServer`) ⇒ unscoped, behavior unchanged. Denials are
+  indistinguishable from genuine misses — another user's session returns the byte-identical
+  `SESSION_NOT_FOUND` an unknown id returns, and resuming another user's conversation mints
+  a fresh one exactly as an unknown id does, so there is no existence oracle to enumerate
+  conversation ids with.
+
+## 1.35.0
+
+### Minor Changes
+
+- 16c5d4e: **SECURITY (.NET server) — cross-user conversation data leak.** `list_conversations` returned EVERY
+  user's conversations, and `create_conversation_session` resume, `get_conversation_messages`, and
+  `get_session` performed no ownership check. Any authenticated user could enumerate and open anyone
+  else's chats. The conversation surface is now scoped to the connection's **authenticated principal**.
+
+  What changed:
+
+  - `Principal` carries `Email` (init-only, lifted from the validated token's `email` claim), and
+    `AccessContext` carries `AuthEnabled` — which distinguishes "no auth configured" from "auth on but
+    this token is anonymous". The second case now fails closed instead of inheriting unscoped behavior.
+  - `create_conversation_session` stamps the **principal's** email as the session owner. The frame's
+    client-supplied `userEmail` is honoured only when no auth is configured at all — supplying someone
+    else's email no longer buys you their scope.
+  - Resume, `get_conversation_messages`, and `get_session` are owner-checked. A conversation/session you
+    do not own returns `SESSION_NOT_FOUND` with a payload **byte-identical** to one that never existed,
+    so the error cannot be used as an existence oracle to enumerate other users' ids. (This includes
+    resume of an unknown id, which previously minted a fresh conversation — under auth it now returns
+    the same `SESSION_NOT_FOUND`.)
+  - Conversations with no recorded owner (rows written before scoping existed) belong to nobody and are
+    invisible to every authenticated user.
+  - Auth-disabled single-tenant local/dev servers are **unchanged**: unscoped, no ownership checks.
+
+  **BREAKING for anyone implementing `ISessionStore`** (this compile break is deliberate — an optional
+  parameter defaulting to "no filter" would be fail-open and would leave downstream stores silently
+  vulnerable):
+
+  - `ListConversationsAsync(CancellationToken)` → `ListConversationsAsync(ConversationScope scope, CancellationToken)`.
+    Apply the scope **inside your query** (`WHERE user_email = …`), never as a post-hoc filter in
+    C# — the dispatcher applies its `LIMIT` to what you return, so filtering afterwards yields short or
+    empty pages. `ConversationScope.Unscoped` returns every user's conversations and is legitimate ONLY
+    on a server with no auth configured; `ConversationScope.None` returns nothing.
+  - New required member `ConversationBelongsToUserAsync(string conversationId, string userEmail, CancellationToken)`.
+    It MUST return `false` — indistinguishably — for a conversation that does not exist, one owned by
+    another user, and one with no recorded owner.
+
+  Hosts that pass identity to the server must ensure the token carries an `email` claim; a principal
+  without one now sees no conversations rather than everyone's.
+
+## 1.34.0
+
+### Minor Changes
+
+- b79184f: **SECURITY (cross-user data leak) — Go server: scope conversations to the authenticated user.**
+
+  `SessionStore.ListConversations` took no user filter, so `list_conversations` returned **every user's conversations** to any authenticated caller. The resume path and `get_conversation_messages` were not owner-checked either, so a caller could also open and read another user's conversation by id. Any authenticated user could enumerate and read anyone else's chats.
+
+  Conversations are now owned by the **authenticated principal** and every read is filtered by it:
+
+  - `Principal` carries `Email` (the JWT `email` claim); `AccessContext.ConversationScope()` derives the connection's visibility. Ownership comes from the connection's principal only — the client-supplied `userName` / `userEmail` frame fields were the spoofing vector and no longer influence who may read what (`userEmail` still serves as the OTP delivery contact).
+  - `ListConversations` filters during selection, before the handler's limit — filtering after a limit silently returns short/empty pages.
+  - `get_session`, `get_conversation_messages`, `send_message` and `verify_otp` all route session lookups through one owner-checked chokepoint.
+  - **Not-yours is indistinguishable from never-existed.** A denied session read returns the identical `SESSION_NOT_FOUND` payload an unknown id returns, and resuming another user's conversation mints a fresh conversation exactly as an unknown id does — so neither path can be used as an oracle to enumerate other users' session or conversation ids.
+  - Fails **closed**: auth enabled with a principal that has no email (including a rejected/expired token) sees nothing, rather than falling back to unscoped.
+  - Auth **disabled** (no verifier configured — local/dev single-tenant) stays unscoped and is unchanged. That is the only unscoped path.
+
+  **BREAKING for `SessionStore` implementers (deliberate).** `ListConversations`, `CreateSession` and `ResumeSession` now take a required `ConversationScope`. The parameter is required rather than optional-defaulting-to-unscoped precisely so that every downstream implementation gets a **compile error** and must confront who may see what; a default-to-unscoped parameter would be fail-open and would leave downstream stores silently vulnerable.
+
+  Migration: thread the scope from `AccessContext.ConversationScope()` into your store, persist the owning email on conversation creation, and filter reads by `scope.Allows(ownerEmail)`. `ConversationScope`'s zero value denies everything, so a partially-migrated store leaks nothing.
+
+- 011db17: **SECURITY** — fix a cross-user conversation data leak in the TypeScript server, and scope every conversation read to the connection's authenticated principal (th-8fe998).
+
+  **The vulnerability.** `SessionStore.listConversations()` took no user filter, so the `list_conversations` action returned EVERY user's conversations to any caller. The resume path (`create_conversation_session` with a `conversationId`) and `get_conversation_messages` performed no owner check either, so any authenticated user could enumerate other users' conversation ids from the list and then open, read, and post into those conversations. `get_session`, `send_message`, and `verify_otp` were exposed through the same missing check.
+
+  **The fix.** A session now records an owner — the authenticated principal's email, taken from the connection's `email` claim. Every conversation read is checked against it:
+
+  - `list_conversations` is scoped to the principal, with the filter applied inside the store selection (ahead of any limit, so a scoped page is never silently short or empty).
+  - `get_session`, `get_conversation_messages`, `send_message`, and `verify_otp` return `SESSION_NOT_FOUND` for a session the caller doesn't own — byte-identical to the response for an id that never existed, so the pair can't be used as an existence oracle to enumerate other users' session ids.
+  - Resuming another user's conversation is treated exactly like resuming an unknown id: the id is dropped and a fresh conversation is minted. Erroring on a real-but-not-yours id while silently minting for an unknown one would itself confirm which ids exist.
+  - The client-supplied `userName` / `userEmail` frame fields no longer determine identity. They were the spoofing vector: a caller could claim any email and receive that user's scope. The principal always wins; on an auth-enabled server the frame values are ignored for ownership (`userEmail` still serves as the OTP delivery contact).
+
+  **Fail-closed rules.** Auth enabled and the principal has an email → scoped to it. Auth enabled and the principal is missing or emailless (including a missing, expired, or forged token) → empty list and denied reads, never a silent fall back to unscoped. Auth disabled (no verifier configured — local/dev single-tenant) → unscoped, unchanged; this is the only unscoped path.
+
+  **BREAKING for custom `SessionStore` implementations** — deliberately, and the break is the point:
+
+  - `listConversations()` gains a **required** `userEmail: string | undefined` parameter. It is required, not optional-defaulting-to-unscoped, because an optional parameter is fail-OPEN: existing implementations would keep compiling and keep leaking every user's conversations. The compile error forces each implementation to make an explicit scoping decision.
+  - `getConversation()` now returns `{ conversationId, userEmail }`, with `userEmail` required so a store that doesn't track ownership fails to compile rather than silently reporting every conversation as ownerless.
+  - `StoredSession` gains an optional `userEmail` (the owner). Implementations must persist it at create time and must NOT let a resume rewrite it, or a second caller could take ownership of a conversation by resuming it.
+
+  Migration: filter conversations by the passed `userEmail` in the query itself (`WHERE user_email = ?`), never after applying a limit; return `undefined` for `userEmail` only when the row genuinely has no owner. `AccessContext` also gains a required `authEnabled` flag, set by the verifier, which distinguishes "auth is off" (unscoped) from "auth is on but this connection didn't authenticate" (fail closed) — custom `AuthVerifier` implementations must set it.
+
+## 1.33.0
+
+### Minor Changes
+
+- b38cb4b: **SECURITY — Python server: per-user conversation scoping (th-8fe998).** Fixes a cross-user data leak: `list_conversations` took no user filter and returned **every** user's conversations, and neither the resume path nor the sessionId-bearing actions were owner-checked, so any authenticated user could enumerate and open anyone else's chats.
+
+  Conversations are now owned by the **authenticated principal's** email (the JWT `email` claim, plumbed onto `Principal`) — never the client-supplied `userName` / `userEmail` frame fields, which were the spoofing vector. With auth enabled the principal's email also replaces `userEmail` as the OTP contact, so a verification code can't be delivered to a client-chosen address.
+
+  - `list_conversations` is scoped to the caller, with the filter applied **in the store's selection** — not after the dispatcher's limit, which would silently return short or empty pages.
+  - `create_conversation_session` (resume), `get_session`, `send_message`, and `verify_otp` are owner-checked. Someone else's id is reported **byte-identically** to an id that never existed — the resume path mints a fresh conversation, the rest return the same `SESSION_NOT_FOUND` payload — so none of them can be used as an existence oracle to enumerate other users' ids.
+  - Fail-closed: auth enabled + a principal with no email lists nothing and can resume nothing; it never falls back to unscoped. A session stored with no owner is invisible to everyone. Auth **disabled** (the local single-tenant flavor) is the only unscoped path and is unchanged.
+
+  **BREAKING (`SessionStore` implementers).** `list_conversations` now takes a **required** `user_email` parameter — deliberately not an optional defaulting to `None`/unscoped, which would be fail-open and would let a downstream store ship cross-user-leaking without ever confronting the question. `create_session` gains a keyword-only `owner_email`, and `StoredSession` gains `owner_email`.
+
+  Migration: pass the authenticated principal's email through both and filter your selection by it. Pass `None` **only** for a single-tenant, auth-disabled deployment, where it means "unscoped". If you implement this protocol in your own store, treat a not-owned row exactly as a missing one.
+
+## 1.32.1
+
+### Patch Changes
+
+- 3acca21: .NET server: implement turn cancellation (the "Stop button") — the `cancel` action, ported from the Rust reference. `FrameDispatcher` now tracks the connection's single in-flight `send_message` turn with a per-turn `CancellationTokenSource`: a `{"action":"cancel","requestId":"<turn>"}` frame cancels it (dropping the turn at its next await, abandoning the in-flight LLM/tool call) and emits the terminal `cancelled` event (`status: 499`, echoing the turn's `requestId`) in place of `eventual_response`. The partial assistant message is discarded — the user's message, persisted before the agent loop, stays. A cancel with no active turn is a silent no-op; a second `send_message` while a turn is in flight is rejected with `TURN_IN_PROGRESS` rather than run concurrently. A client disconnect aborts the in-flight turn as well, while graceful shutdown still drains it. No engine change.
+
+## 1.32.0
+
+### Minor Changes
+
+- d17ede9: Emit `stream_preamble` from the **.NET server**. It already had the generated protocol type but never produced the event and never read `SMOOTH_AGENT_PREAMBLE_MODEL`, so a host running on the C# server could not turn the feature on at all — this closes that gap and brings the .NET lane to parity with the Rust reference.
+
+  When `SMOOTH_AGENT_PREAMBLE_MODEL` is set (e.g. `groq-gpt-oss-20b`), `TurnRunner` fires a small fast model IN PARALLEL with the agent loop — same gateway and key as the turn, with only the model id and a 64-token output cap overridden — and emits ONE short present-tense "what I'm about to do" sentence as an ephemeral `stream_preamble` event, covering the reasoning model's time-to-first-token. The system prompt is byte-identical to the other servers'.
+
+  It is deliberately defined by what it must never do: the turn never awaits it (it can't delay or gate the answer), an atomic first-answer-token guard drops it the moment real answer tokens start streaming, any failure (timeout, gateway error, bad model id) is logged at debug and swallowed with no error event reaching the client, and the text is never persisted nor folded into `eventual_response`. Unset, empty, or whitespace ⇒ the feature is off, no extra LLM call is made, and behavior is byte-for-byte unchanged.
+
+- bfaf1a8: Go server: emit `stream_preamble`. When `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a small fast model runs in parallel with the turn and streams one ephemeral "what I'm about to do" sentence, covering the reasoning model's time-to-first-token — matching the Rust reference server's prompt, 64-token cap, and first-answer-token race guard. Unset/empty/whitespace leaves behavior and the model-call count unchanged. The preamble is best-effort (failures swallowed) and ephemeral (never persisted, never folded into `eventual_response`).
+- ff2e4d9: Python server: emit `stream_preamble`. When `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a small fast model runs concurrently with each streaming turn and emits one ephemeral "what I'm about to do" sentence, covering the reasoning model's time-to-first-token — matching the Rust reference server (same system prompt, same 64-token cap, same gateway/key with only the model id overridden).
+
+  The preamble never delays or gates the real turn, is dropped the instant the first real answer token is emitted, is never persisted or folded into `eventual_response`, and any failure is swallowed at debug. Unset, empty, or whitespace ⇒ off (the default): no extra LLM call, behavior byte-for-byte unchanged.
+
+## 1.31.0
+
+### Minor Changes
+
+- 2fc8486: TypeScript server: emit `stream_preamble` (pearl th-8e0a52).
+
+  The TS server now honours `SMOOTH_AGENT_PREAMBLE_MODEL`, matching the Rust reference. When set, a small fast model runs in parallel with each turn on the same gateway/key (model id + a 64-token cap are the only overrides) and emits ONE ephemeral "what I'm about to do" sentence to cover the reasoning model's time-to-first-token.
+
+  Off by default: unset, empty, or whitespace means no extra LLM call, no extra event, behaviour byte-for-byte unchanged. The preamble is suppressed once the real answer starts streaming, is never persisted or folded into `eventual_response`, and any failure is swallowed at debug so it can never fail or delay a turn.
+
+## 1.30.0
+
+### Minor Changes
+
+- a15fd43: .NET server: `get_conversation_messages` pages by an opaque `cursor` (a message id) instead of the `before` ISO-timestamp cursor, and returns `nextCursor` alongside `hasMore`.
+
+  A timestamp cursor is broken by design — two messages can share a timestamp at any precision the wire keeps, so a `created_at < cursor` filter drops or repeats the collisions. An id cursor names exactly one message. The paging path no longer compares timestamps at all, and the 500-message `before` rescan window (and its paging ceiling) is gone. The .NET client SDK's `GetMessagesAction.Before` becomes `Cursor`, and `GetMessagesResult` gains `NextCursor`. Breaking wire change for clients still sending `before`.
+
+- 5c0fb98: Python server: `get_conversation_messages` pages by opaque `cursor`, not the `before` timestamp.
+
+  The handler now reads `cursor` (a message id today), locates that message in the conversation log, and returns the page immediately older than it. Responses carry `nextCursor` — the id of the oldest message in the page, non-null exactly when `hasMore` is true. An unknown or stale cursor is a `VALIDATION_ERROR` rather than a silently empty page. `createdAt` stays on every message for display, with microsecond precision intact; it is simply no longer the cursor.
+
+  This removes code. The old `_BEFORE_SCAN_WINDOW = 500` bounded rescan existed only because a timestamp cannot locate a position in the log — it capped `before` paging to the newest 500 messages. An id cursor locates the position exactly, so the window, the ISO parsing (`_parse_before`), and the `created_at <` comparison are all gone. There is no timestamp comparison left on the paging path.
+
+  Matches the spec change in #279 and the Rust reference. Tests cover round-trip paging to exhaustion, the identical-`created_at` collision case a timestamp cursor provably cannot survive (the bug the Go server shipped), and the unknown-cursor error.
+
+### Patch Changes
+
+- 075d6e4: Go: commit the type-generation command as `scripts/generate-go.sh` and regenerate `go/protocol/types_gen.go`.
+
+  The command that produced `go/protocol/types_gen.go` was never committed — `go/README.md` deferred to "the original spec" — so Go was the one language whose wire types could not be regenerated. It is now a runnable script, verified to reproduce the previously committed file byte-for-byte from the spec at the commit that last generated it.
+
+  Regenerating picked up everything Go had missed since: `get_messages` now takes an opaque `Cursor *string` (replacing `Before *time.Time`) and returns `NextCursor`, plus the `stream_reasoning` / `stream_preamble` / `cancel` events and the rich-interaction types.
+
+## 1.29.0
+
+### Minor Changes
+
+- 441d198: Go server: page `get_conversation_messages` by opaque id cursor instead of an ISO timestamp.
+
+  The request field `before` (ISO 8601) is replaced by `cursor` (opaque, a message id today), and the response now carries `nextCursor` — the id of the oldest message in the page, non-null exactly when `hasMore` is true. Breaking wire change.
+
+  This removes the failure mode rather than renaming it: a timestamp cursor cannot separate two messages that share a timestamp, so `created_at <` paging silently dropped every message colliding on the cursor's instant. An id names exactly one row. The paging path now contains no timestamp comparison, and the bounded 500-message rescan the timestamp cursor required is gone — an id cursor locates its position in the log directly, so paging has no depth ceiling. `createdAt` is still returned (RFC3339Nano) for display.
+
+  An unknown or stale cursor now returns a `VALIDATION_ERROR` instead of a silent empty page.
+
+- bd836c3: TypeScript server: `get_conversation_messages` now pages on an opaque `cursor` (a message id) instead of the `before` ISO-timestamp cursor, and returns `nextCursor` alongside `hasMore`.
+
+  Breaking wire change. A timestamp cursor cannot page a log correctly — two messages can share a `createdAt` at any precision the wire keeps, so a `createdAt < cursor` filter drops or repeats the messages that collide. The cursor now names exactly one message: the page starts immediately after it, on the older side. `nextCursor` is the oldest message in the page, non-null exactly when `hasMore` is true; an unknown cursor is a `VALIDATION_ERROR` rather than a silent empty page.
+
+  This also removes the 500-message bounded rescan the timestamp cursor required, so paging is no longer capped at the newest 500 messages. `createdAt` stays on every message for display.
+
+## 1.28.0
+
+### Minor Changes
+
+- b135852: Protocol: `get_conversation_messages` pagination moves from a timestamp cursor to an opaque cursor.
+
+  `before` (ISO 8601 timestamp) is replaced by `cursor` (opaque, storage-defined — a message id today), and the response gains `nextCursor`, non-null exactly when `hasMore` is true. Page by feeding `nextCursor` back as the next request's `cursor`.
+
+  A timestamp is the wrong cursor: two messages can share a timestamp at any precision the wire format preserves, so a `created_at < cursor` filter either drops or repeats the messages that collide. This is not hypothetical — the Go server shipped whole-second `RFC3339` and silently dropped every message sharing a second from page two. An id names exactly one message and cannot collide. The Rust server already paginated this way; this makes the spec match the design that was already correct.
+
+  Breaking on paper, inert in practice: a survey of every consumer (smooai, smooth, heypage) found no caller that pages — all are single-fetch, none passes `before`, none reads `hasMore` or `nextCursor`.
+
+  Also regenerates all client type sets from `spec/`, which had drifted badly. The regen pulls in schema changes that landed without regeneration (`cancel`, `submit_interaction`, `interaction_required`/`interaction_invalid`) and surfaces a latent bug: `organizationId` became required on `Session` in spec PR #97, but Python's model was never regenerated, so the Python client has been accepting sessions a conformant server would reject ever since.
+
+## 1.27.7
+
+### Patch Changes
+
+- 95524bc: Python server: regression test pinning sub-second precision on `get_conversation_messages`' `createdAt`. The handler already emits full microsecond precision (`datetime.isoformat()` on a tz-aware UTC value), but nothing guarded it — clients page by handing the oldest `createdAt` back as `before`, and a second-truncated cursor makes the strict `<` filter drop every message sharing that second. Matches the Go (#264) and TypeScript (#273) fixes.
+- d730dac: TypeScript server: user-initiated turn cancellation (the "Stop button"), mirroring the Rust reference (PR #259). A client stops the in-flight turn with `{"action":"cancel","requestId":"<the send_message requestId>"}`; the server aborts that turn and emits a terminal `cancelled` event (`status: 499`, requestId echoed at the envelope level and inside `data`) **in place of** the `eventual_response` — so a turn always emits exactly one terminal event. A cancel with no active turn is a silent no-op. Only ONE turn runs per connection: a second `send_message` while one is in flight is rejected with error code `TURN_IN_PROGRESS` rather than run concurrently (`confirm_tool_action` / `verify_otp` are turn _resumes_, so they're unaffected). A cancelled turn's partial assistant reply is DISCARDED (never persisted); the user's message, persisted at the start of the turn, stays. A client disconnect mid-turn now also aborts the turn, while the graceful SIGTERM drain still lets an in-flight turn finish.
+
+  Implementation is connection-local, matching the Rust approach: the turn is already spawned as a background task (so the reader stays free to receive `confirm_tool_action` while a turn is parked), so the dispatcher tracks it as the connection's single active turn along with a per-turn `AbortController`, and fires it on cancel/disconnect. Cancellation is cooperative — JS can't drop an in-flight `await` the way tokio drops a future — so a turn parked inside a long tool call stops at the next stream event; the observable protocol contract is identical either way.
+
+## 1.27.6
+
+### Patch Changes
+
+- 91078ac: TypeScript server: regression test pinning sub-second `createdAt` precision on `get_conversation_messages`. A server that formats `createdAt` at whole-second precision breaks the documented paging loop — clients feed page one's oldest `createdAt` back as `before`, and a strictly-less-than filter against a truncated cursor silently drops every message sharing that second. The TS server was already correct (`Date#toISOString`, millisecond precision, passed through unreformatted); the test locks it in.
+
+## 1.27.5
+
+### Patch Changes
+
+- ac1da05: Go server: implement turn cancellation — the `cancel` action (the "Stop button"), porting the Rust reference. A connection now runs at most ONE agent turn at a time: `send_message` registers its turn with a cancellable context, a `cancel` frame cancels it and emits the terminal `cancelled` event (`status: 499`, echoing the cancelled turn's `requestId` at the envelope level and inside `data`), and a second `send_message` while a turn is in flight is rejected with `TURN_IN_PROGRESS` rather than run concurrently. A cancel with no active turn is a silent no-op. A cancelled turn discards its partial assistant message (never persisted) and emits no `eventual_response`; the user's message stays persisted. A client disconnect mid-turn aborts the turn the same way, while the SIGTERM graceful-drain path still lets an in-flight turn finish.
+
+## 1.27.4
+
+### Patch Changes
+
+- b910a11: Python server: implement the `get_conversation_messages` action. It previously fell through to `UNSUPPORTED_ACTION`, so a web client resuming a conversation against the Python server rendered no history. The handler mirrors the merged Go/Rust reference and the `spec/actions/get-messages.schema.json` contract: newest-first `messages` (id, direction, content.text, createdAt) plus `hasMore`, with `limit` (1..100, default 50) and an optional ISO 8601 `before` cursor. `StoredMessage` gains a defaulted `created_at` timestamp to back the `createdAt` field and the cursor.
+- c64b97b: TypeScript server: implement the `get_conversation_messages` action. Its dispatcher switch stopped at `verify_otp`, so the action fell through to `UNSUPPORTED_ACTION` and a web client resuming a conversation against the TS server rendered no history. The handler mirrors the merged Go/Rust references and the `spec/actions/get-messages.schema.json` contract: newest-first `messages` (id, direction, content.text, createdAt) plus `hasMore`, with `limit` (1..100, default 50) and an optional ISO 8601 `before` cursor. `StoredMessage` gains an optional `createdAt` timestamp (set by `InMemorySessionStore.appendMessage`) to back the `createdAt` field and the cursor.
+
+## 1.27.3
+
+### Patch Changes
+
+- 0e65c59: Go server: emit `createdAt` with sub-second precision (`RFC3339Nano`) from `get_conversation_messages`. Clients page by handing the oldest `createdAt` back as `before`, which is filtered strictly-less-than against the store's full-precision timestamp — whole-second `RFC3339` truncation put the cursor _before_ the message it named, so every message sharing that second silently vanished from page two. Also aligns the Go wire format with the .NET server, which already round-trips full precision.
+
+## 1.27.2
+
+### Patch Changes
+
+- e5bb69c: .NET server: implement the `get_conversation_messages` action
+
+  The .NET `FrameDispatcher` answered `UNSUPPORTED_ACTION` for
+  `get_conversation_messages`, so a C#-hosted server couldn't page conversation
+  history the way the Rust/Go/TS servers can — a client resuming a conversation
+  had no way to load prior messages. It now returns `{messages, hasMore}`
+  newest-first per `spec/actions/get-messages.schema.json`, with `limit` (1–100,
+  default 50) and an optional ISO 8601 `before` cursor.
+
+  `StoredMessage` gained a `CreatedAt` init-only property (not a positional
+  parameter, so downstream `ISessionStore` implementations keep compiling) that
+  the Postgres store now reads from — and returns on append via — the existing
+  `conversation_messages.created_at` column.
+
+## 1.27.1
+
+### Patch Changes
+
+- d6c63d7: Go server: implement the `get_conversation_messages` action. It previously fell through to `UNSUPPORTED_ACTION`, so a web client resuming a conversation against the Go server rendered no history. The handler mirrors the Rust reference and the `spec/actions/get-messages.schema.json` contract: newest-first `messages` (id, direction, content.text, createdAt) plus `hasMore`, with `limit` (1..100, default 50) and an optional ISO 8601 `before` cursor. `StoredMessage` gains a `CreatedAt` timestamp to back the `createdAt` field and the cursor.
+
+## 1.27.0
+
+### Minor Changes
+
+- 1765f6e: Add a built-in ACL-scoped `knowledge_search` tool to the .NET server. Registering an `IAccessKnowledge` already grounds turns via RAG auto-context; this exposes the same store as a model-callable tool a host enables by name (`knowledge_search`) — no hand-wrapped `AIFunction` required. It's built per-turn over the connection's `IAccessKnowledge.ForAccess(access)` handle, so every search is document-level access-controlled (a doc outside the caller's ACL is never a candidate), and matches the Rust server's tool for parity: same name, args (`query` required + `limit` clamped 1..10, default 3), and text result shape.
+- 508de9d: dotnet: add a Notion `IConnector` (`NotionConnector`) to the server. Recurses `blocks/{id}/children` (paginated, `Notion-Version: 2022-06-28`, integration-token auth), flattens `paragraph`/`heading_1-3`/`bulleted_list_item`/`numbered_list_item`/`quote`/`code`/`toggle` rich_text (plus nested toggle/list-item bodies) into document text, and emits a `child_page` block as its own recursed document rather than inlining it. The document id is the canonical Notion page id and the source is the page URL, so citations link back and re-ingesting overwrites in place. Each configured `NotionRoot` carries a `DocumentAcl`, stamped onto every document under that root (`SourceDocument` gains an optional `Acl`).
+
+### Patch Changes
+
+- c6f202b: dotnet server: TurnRunner degrades gracefully when knowledge retrieval fails. When the embedding gateway / vector store is down, `QueryAsync` used to propagate out of the turn and the dispatcher surfaced `INTERNAL_ERROR`, killing the whole turn. Now the retrieval failure is caught: the turn proceeds with empty grounding (no citations, and the failing store isn't handed to the engine's own RAG query), and a warning is logged. Only the retrieval is wrapped — the rest of the turn is unchanged.
+
+## 1.26.0
+
+### Minor Changes
+
+- 798f447: Per-agent write-confirmation (HITL) patterns. `AgentConfig` gains a
+  `ConfirmToolPatterns` field so a multi-agent host can gate tools behind a
+  `confirm_tool_action` round-trip per agent instead of sharing the single global
+  `ConfirmTools` DI singleton. The dispatcher uses the per-agent patterns when the
+  agent specifies them (an explicit empty list disables gating for that agent) and
+  falls back to the global `ConfirmTools` when it doesn't — fully backward
+  compatible.
+
+### Patch Changes
+
+- 8a0eae9: .NET ingestion parity: paragraph-aware chunker + content-hash IngestLedger
+
+  Bring the .NET `Chunker` to parity with the Rust ingestion chunker — ~500-char
+  paragraph-aware chunks (blank-line units, oversized paragraphs hard-split on word
+  boundaries, greedy packing) with 64-char whole-word trailing overlap and stable
+  `{documentId}#{index}` chunk ids (replacing the old whitespace-break 1200/150
+  sliding-window splitter). Add a new `IngestLedger` with FNV-1a content-hash
+  idempotency (byte-identical to Rust's `content_hash`) so re-ingesting identical
+  content is a no-op while changed content is reprocessed; wire it through
+  `IngestPipeline` (skips unchanged documents, dedupes identical chunks).
+
+## 1.25.0
+
+### Minor Changes
+
+- a69d091: Add a .NET Slack `IConnector` (`SlackConnector`) for knowledge ingestion. Resolves author names
+  via `users.list`, lists channels via `conversations.list`, and pages messages via
+  `conversations.history`. Emits one document per channel per day with a stable id
+  `slack:{channel}:{date}` (today re-hashes as messages land, past days dedupe on the pipeline's
+  (id, hash) key), `source` = the day's first-message permalink (`chat.getPermalink`), incremental
+  pulls via an `oldest` cursor, and a per-channel ACL label. `SourceDocument` gains an optional
+  `Acl` field to carry per-document access labels (mirrors the Rust `RawDocument.acl`). Threaded
+  replies (`conversations.replies`) are deferred to a follow-up.
+
+### Patch Changes
+
+- aa72bb0: Make the two .NET Server add-on packages publishable to NuGet and bump the Core pin. `SmooAI.SmoothOperator.Server.AspNetCore` (the ASP.NET Core WebSocket host) and `SmooAI.SmoothOperator.Server.Postgres` (the durable Postgres session store) now carry NuGet packaging metadata, get their `<Version>` stamped in lockstep by `sync-versions.mjs`, and are packed + pushed by `ci-publish.mjs` alongside the base `SmooAI.SmoothOperator.Server` package — so downstream hosts can `PackageReference` them instead of vendoring the extension source. The Server package's `SmooAI.SmoothOperator.Core` pin is also bumped from 1.5.0 to the latest published 1.7.0.
+
+## 1.24.0
+
+### Minor Changes
+
+- 14070ec: Add a host-callable seam to start an agent turn server-side (`IServerInitiatedTurns`, registered by `AddSmoothOperatorServer`). A host — e.g. `POST /webhooks/datadog` saying "investigate this alert" — can now create a conversation and run a turn without a client `send_message` frame. It reuses the same `TurnRunner` + `ISessionStore` path as the client flow, so the inbound message and streamed reply persist identically: a client that later lists or resumes that conversation sees it the same as a client-initiated one. Interactive per-connection concerns (write-confirmation HITL, OTP gating) are intentionally omitted. Live push to already-connected sockets is deferred — the durable message log is the surface clients read.
+
+## 1.23.4
+
+### Patch Changes
+
+- 607f81d: docs: refresh the .NET server docs to match the shipped 1.23.x surface. `dotnet/server/README.md`'s "What's shipped/Next" list and `docs/Architecture/Polyglot Cores.md`'s service-layer intro both lagged the published dll — knowledge grounding, ACL-filtered retrieval, citations, the reranker, GitHub ingestion + connectors, HITL write-confirmation, the `/admin/*` API, and the deployable host all ship in C# now. Corrected the stale "not yet built in C#" framing and marked the genuinely-open items (Notion/Slack connectors in-flight, checkpoint-adapter resume wiring).
+
+## 1.23.3
+
+### Patch Changes
+
+- 7a53f95: Docs: add branded, NuGet-page READMEs for `SmooAI.SmoothOperator.Server.AspNetCore`
+  and `SmooAI.SmoothOperator.Server.Postgres`. Each explains what the package is,
+  how to install and use it (real API surface — `AddSmoothOperatorServer` /
+  `MapSmoothOperatorWebSocket` / `ConfirmTools`; `PostgresSessionStore` /
+  `PostgresAclKnowledgeStore`), and cross-references the rest of the .NET family
+  (Core, Server, AspNetCore, Postgres, client). Wired each via `PackageReadmeFile`
+  so it renders on nuget.org once the packages are published.
+
+## 1.23.2
+
+### Patch Changes
+
+- 4b2b5d7: Conversation-workflow adherence (th-d57a1d): the rendered `<ConversationWorkflow>` step section now instructs the agent to ask the current step's question directly and never re-ask for permission / re-confirm readiness / repeat an answered question (gpt-oss-class models over-indexed on the old "you don't have to force the step to close" line and looped on re-confirmation). The workflow judge now counts brief/terse answers that address the step ("a four", "sure") as satisfying it instead of holding out for elaboration. Same wording change applied across all five language servers (TS, Rust, Python, Go, .NET).
+
+## 1.23.1
+
+### Patch Changes
+
+- b60234e: Wire Changesets to drive lockstep publishing for every polyglot server artifact — npm + NuGet + PyPI + crates.io — closing the npm-only gap.
+
+  - `scripts/sync-versions.mjs` now also stamps the .NET server package (`SmooAI.SmoothOperator.Server.csproj` `<Version>`) and the PyPI server package (`python/server/pyproject.toml`), and fails loudly if any manifest anchor is missing (never publishes an out-of-lockstep set).
+  - New `scripts/ci-publish.mjs`: a single idempotent orchestrator that runs sync-versions first, then publishes npm → NuGet → PyPI (client + server) → crates.io, each existence-checked + skip-if-already-published, with a `DRY_RUN=1` path that packs/validates but uploads nothing. One registry's failure no longer skips the others; any hard failure exits non-zero. `ci:publish` now points at it.
+  - `release.yml` folds the previously-inline crates.io/PyPI steps into `ci:publish` and adds the NuGet publish token, so the whole polyglot release goes through one orchestrator.
+
+- b60234e: Docs: elevate the server + registry-landing READMEs into a narrative story. Root
+  README gets a sharper problem→vision hook, a "safe by construction" section
+  (ToolHook auth-gate + per-agent allow-list + document ACLs + SEP allowlist), and
+  a clean language→client→server→registry table. Each per-language server README
+  (Rust crates.io crate, TypeScript, Python, Go, .NET) now leads with a hook, a
+  "spin up a real agent server in N lines" snippet, an honest "extending via
+  tools + guardrails" example in that language's real API, badges, and the polyglot
+  table. No code changes; accuracy verified against the shipped surface.
+
+## 1.23.0
+
+### Minor Changes
+
+- d3d3abe: Two additive SEP-protocol enhancements on the streaming path (directive nav + business-card images), both optional and back-compatible.
+
+  **Directive-over-SEP.** `eventual_response` gains an optional `directive` field — an opaque client-side directive (e.g. a Navigate / ApplyView instruction) a host tool emitted this turn. The runner threads a `directive_sink` into the `ToolProviderContext` (new `with_directive_sink` builder), drains it after the turn (last-write-wins, mirroring the citation sink), and carries the value onto `TurnResult::directive`. The protocol layer never interprets the shape — the host client owns it, exactly like `response`. Absent when no host tool wrote one, so the event is byte-for-byte unchanged for existing clients. Added to `spec/events/eventual-response.schema.json` and `spec/actions/send-message.schema.json` `$defs/Response`, and to the TypeScript SDK.
+
+  **Image-through-SEP.** `send_message` gains an optional `images` array (`{ url, detail? }`) for multimodal turns. A new facade `UserImage` type flows from the inbound request into `TurnRequest::images` and the `ToolProviderContext` (new `with_images` builder); when non-empty the runner maps each onto a core `ImageContent` and attaches them to the engine's user message via `AgentConfig::with_user_images` (requires core `0.16.2`). Parsing is fail-soft (a malformed `images` entry is dropped, never rejects the turn). Empty/absent ⇒ a text-only turn, unchanged. Added to `spec/actions/send-message.schema.json` `$defs/Request` and the TypeScript SDK.
+
 ## 1.22.17
 
 ### Patch Changes

@@ -67,6 +67,7 @@ async fn create_session(
         "conn-test",
         origin,
         auth_org,
+        &handler::UserScope::Unscoped,
         &frame.to_string(),
         &tx,
     )

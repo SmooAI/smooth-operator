@@ -163,7 +163,7 @@ public abstract class SessionStoreContractTests
         await store.AppendMessageAsync(withMessages.ConversationId, MessageDirection.Inbound, "first user line");
         await store.AppendMessageAsync(withMessages.ConversationId, MessageDirection.Outbound, "agent reply");
 
-        var summaries = await store.ListConversationsAsync();
+        var summaries = await store.ListConversationsAsync(ConversationScope.Unscoped);
         var summary = Assert.Single(summaries, s => s.ConversationId == withMessages.ConversationId);
         Assert.Equal(2, summary.MessageCount);
         Assert.Equal("first user line", summary.FirstInboundText);
@@ -180,6 +180,59 @@ public abstract class SessionStoreContractTests
 
         var withoutEmail = await store.CreateSessionAsync("", null, null);
         Assert.Null((await store.GetSessionAsync(withoutEmail.SessionId))!.UserEmail);
+    }
+
+    // ---- SECURITY: per-user scoping (th-966fab) — asserted against EVERY adapter -----------------
+
+    [SkippableFact]
+    public async Task ListConversations_ScopedToOneUser_ExcludesEveryOtherUser()
+    {
+        var store = await CreateStoreAsync();
+        var a = $"a-{Guid.NewGuid():N}@example.com";
+        var b = $"b-{Guid.NewGuid():N}@example.com";
+
+        var mine = await store.CreateSessionAsync("agent", "A", a);
+        await store.AppendMessageAsync(mine.ConversationId, MessageDirection.Inbound, "my line");
+        var theirs = await store.CreateSessionAsync("agent", "B", b);
+        await store.AppendMessageAsync(theirs.ConversationId, MessageDirection.Inbound, "their private line");
+        var ownerless = await store.CreateSessionAsync("agent", "L", null);
+        await store.AppendMessageAsync(ownerless.ConversationId, MessageDirection.Inbound, "legacy line");
+
+        var scoped = await store.ListConversationsAsync(ConversationScope.ForUser(a));
+        Assert.Contains(scoped, s => s.ConversationId == mine.ConversationId);
+        Assert.DoesNotContain(scoped, s => s.ConversationId == theirs.ConversationId);
+        // A conversation with no recorded owner belongs to nobody — not to the first caller who asks.
+        Assert.DoesNotContain(scoped, s => s.ConversationId == ownerless.ConversationId);
+
+        // Email match is case-insensitive: the same human, not a second account.
+        var upper = await store.ListConversationsAsync(ConversationScope.ForUser(a.ToUpperInvariant()));
+        Assert.Contains(upper, s => s.ConversationId == mine.ConversationId);
+
+        // The fail-closed scope sees nothing at all.
+        Assert.Empty(await store.ListConversationsAsync(ConversationScope.None));
+
+        // Unscoped (no auth configured) still sees everything — unchanged single-tenant behavior.
+        var unscoped = await store.ListConversationsAsync(ConversationScope.Unscoped);
+        Assert.Contains(unscoped, s => s.ConversationId == mine.ConversationId);
+        Assert.Contains(unscoped, s => s.ConversationId == theirs.ConversationId);
+    }
+
+    [SkippableFact]
+    public async Task ConversationBelongsToUser_IsFalseForOtherUsers_UnknownIds_AndOwnerlessRows()
+    {
+        var store = await CreateStoreAsync();
+        var a = $"a-{Guid.NewGuid():N}@example.com";
+        var b = $"b-{Guid.NewGuid():N}@example.com";
+
+        var theirs = await store.CreateSessionAsync("agent", "B", b);
+        var ownerless = await store.CreateSessionAsync("agent", "L", null);
+
+        Assert.True(await store.ConversationBelongsToUserAsync(theirs.ConversationId, b));
+        Assert.True(await store.ConversationBelongsToUserAsync(theirs.ConversationId, b.ToUpperInvariant()));
+        // All three of these must be the SAME answer — that's what makes them non-enumerable.
+        Assert.False(await store.ConversationBelongsToUserAsync(theirs.ConversationId, a));
+        Assert.False(await store.ConversationBelongsToUserAsync($"never-existed-{Guid.NewGuid():N}", a));
+        Assert.False(await store.ConversationBelongsToUserAsync(ownerless.ConversationId, a));
     }
 }
 

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server.AspNetCore;
@@ -105,6 +106,8 @@ public static class SmoothOperatorWebSocketExtensions
             // Per-turn token/iteration limits + the resolved model's output ceiling (EPIC th-1cc9fa).
             // Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20) with no ceiling.
             limits: services.GetService<TurnLimits>(),
+            // Logger so a degraded knowledge-retrieval failure surfaces a warning in the host's logs.
+            logger: services.GetService<ILoggerFactory>()?.CreateLogger("SmooAI.SmoothOperator.Server.TurnRunner"),
             // Tool-call hooks (surveillance / redaction) applied to every turn's registry. A host that
             // registered an IReadOnlyList<IToolHook> gets them; absent one ⇒ no hooks (unchanged). The
             // DI analog of the Rust operative installing NarcHook on its ToolRegistry.
@@ -132,6 +135,12 @@ public static class SmoothOperatorWebSocketExtensions
             }
         }, cancellationToken);
 
+        // Did the CLIENT go away (close frame / socket error), as opposed to the connection being torn
+        // down by an ambient cancellation (host shutdown)? A client that hung up mid-turn gets its turn
+        // aborted — no one remains to receive its output. A graceful shutdown, by contrast, lets an
+        // in-flight turn DRAIN to completion (WaitForTurnsAsync below), which is the pod-termination
+        // contract. Mirrors the Rust reader loop: abort on Close/Err/None, drain on shutdown.
+        var clientGone = false;
         try
         {
             while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
@@ -143,15 +152,27 @@ public static class SmoothOperatorWebSocketExtensions
                 }
                 await dispatcher.DispatchAsync(frame, ev => channel.Writer.TryWrite(ev), cancellationToken).ConfigureAwait(false);
             }
+
+            // Fell out of the loop without an exception: either a close frame or a socket no longer
+            // Open (both = the client is gone), unless the ambient token asked us to stop.
+            clientGone = !cancellationToken.IsCancellationRequested;
         }
         catch (OperationCanceledException)
         {
         }
         catch (WebSocketException)
         {
+            clientGone = true;
         }
         finally
         {
+            // Client hung up mid-turn: abort the in-flight turn (its partial assistant message is
+            // discarded — nothing persisted, no event emitted; there is no client to send one to).
+            if (clientGone)
+            {
+                dispatcher.TryCancelActiveTurn(out _);
+            }
+
             // Any turn parked on a write-confirmation must unpark before we can finish: reject
             // outstanding confirmations (fail closed — a write is never auto-approved on disconnect),
             // then await every in-flight spawned turn so its eventual_response is enqueued before the
