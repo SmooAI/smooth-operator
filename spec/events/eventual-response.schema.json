@@ -106,6 +106,10 @@
                   }
                 }
               }
+            },
+            "directive": {
+              "type": ["object", "null"],
+              "description": "An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted."
             }
           }
         }

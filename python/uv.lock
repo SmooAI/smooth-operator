@@ -775,7 +775,7 @@ wheels = [
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.19.0"
+version = "1.36.2"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

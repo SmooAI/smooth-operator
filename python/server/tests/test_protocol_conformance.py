@@ -72,6 +72,15 @@ def test_eventual_response_with_citations_matches_fixture(fixtures: dict) -> Non
     assert _strip_timestamp(built) == _strip_timestamp(fixture)
 
 
+def test_cancelled_builder_matches_fixture(fixtures: dict) -> None:
+    """The terminal event of a client-cancelled turn matches the golden shape:
+    ``status: 499`` at both levels, the cancelled turn's ``requestId`` echoed, and no
+    answer payload."""
+    fixture = fixtures["cancelled_event"]["instance"]
+    built = protocol.cancelled(fixture["requestId"])
+    assert _strip_timestamp(built) == _strip_timestamp(fixture)
+
+
 def test_stream_chunk_envelope_shape(fixtures: dict) -> None:
     """The server's ``stream_chunk`` envelope mirrors ``node`` at both levels and
     nests ``state`` under ``data`` — matching the golden's structure."""

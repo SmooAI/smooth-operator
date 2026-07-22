@@ -1,7 +1,9 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server;
@@ -22,6 +24,25 @@ public sealed class TurnRunner
     private const int MaxPriorMessages = 50;
     private const int CitationSnippetMaxChars = 280;
 
+    /// <summary><c>max_tokens</c> for the fast-model preamble — one short sentence. Pearl th-9a5794.</summary>
+    private const int PreambleMaxTokens = 64;
+
+    /// <summary>
+    /// System prompt for the fast-model preamble (see <c>SMOOTH_AGENT_PREAMBLE_MODEL</c>). One short
+    /// present-tense sentence describing intent — no answer (it is generated WITHOUT the tool result),
+    /// no greeting, no promises. Byte-identical to the Rust/Python/TS servers' prompt.
+    /// </summary>
+    private const string PreambleSystemPrompt =
+        "You are the assistant's voice while it works. " +
+        "In ONE short present-tense sentence (max ~12 words), tell the user what you're about to do to help with their message. " +
+        "Do NOT answer the question, do NOT greet, do NOT promise a specific result or outcome. " +
+        "Example: \"Let me pull up your recent conversations.\" " +
+        "Reply with only that sentence — no quotes, no preamble, no markdown.";
+
+    /// <summary>Env var enabling the preamble. Unset / empty / whitespace ⇒ the feature is OFF and no
+    /// extra LLM call is ever made.</summary>
+    private const string PreambleModelEnvVar = "SMOOTH_AGENT_PREAMBLE_MODEL";
+
     private readonly IChatClient _chatClient;
     private readonly ISessionStore _store;
     private readonly IKnowledgeBase? _knowledge;
@@ -33,8 +54,18 @@ public sealed class TurnRunner
     private readonly AgentConfig _agentConfig;
     private readonly IWorkflowJudge? _judge;
     private readonly TurnLimits _limits;
+    private readonly ILogger? _logger;
+    private readonly IChatClient _preambleChatClient;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null)
+    /// <summary>
+    /// The fire-and-forget preamble task from the most recent <see cref="RunAsync(string,string,string,Action{JsonObject},string,CancellationToken)"/>
+    /// (a completed task when the feature is off). Exposed purely so tests — and diagnostics — can
+    /// observe when the parallel preamble has finished; the turn itself NEVER awaits it, so it can
+    /// neither delay nor fail the answer.
+    /// </summary>
+    public Task PreambleCompleted { get; private set; } = Task.CompletedTask;
+
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -57,7 +88,18 @@ public sealed class TurnRunner
         // Per-turn output-token budget + agentic-iteration cap, plus the resolved model's hard output
         // ceiling. Absent ⇒ the raised server defaults (max_tokens 8192, iterations 20; EPIC th-1cc9fa).
         _limits = limits ?? TurnLimits.Default;
+        // Optional logger — used to surface a warning when knowledge retrieval degrades (null ⇒ silent).
+        _logger = logger;
+        // The client the parallel preamble calls. Defaults to the turn's own client — same gateway,
+        // same key — with only the model id and max output tokens overridden per call (mirrors the
+        // Rust runner cloning the turn's LlmConfig). A separate instance is only ever injected by tests.
+        _preambleChatClient = preambleChatClient ?? _chatClient;
     }
+
+    /// <summary>The configured preamble model id, or <c>null</c> when the feature is off (env unset,
+    /// empty, or whitespace). Read per turn so a host can flip it without a restart.</summary>
+    private static string? PreambleModel() =>
+        Environment.GetEnvironmentVariable(PreambleModelEnvVar)?.Trim() is { Length: > 0 } model ? model : null;
 
     /// <summary>
     /// The system prompt for this turn: per-agent <c>instructions.prompt</c> when present (else the
@@ -109,26 +151,46 @@ public sealed class TurnRunner
         //    the top few before they become citations; without one, fetch exactly the top few
         //    (behavior unchanged — the rerank stage is opt-in).
         var citations = new List<JsonObject>();
+        // The knowledge base handed to the engine for its own RAG grounding. Nulled if retrieval fails
+        // this turn so the engine's internal query doesn't re-hit the same dead dependency and throw.
+        var knowledgeForTurn = _knowledge;
         if (_knowledge is not null)
         {
             var fetchLimit = _reranker is not null ? RerankCandidatePool : AutoContextLimit;
-            var candidates = await _knowledge.QueryAsync(userMessage, fetchLimit, cancellationToken).ConfigureAwait(false);
-            IReadOnlyList<KnowledgeResult> hits;
+            IReadOnlyList<KnowledgeResult>? candidates = null;
             try
             {
-                hits = await Rerankers.ApplyOptionalAsync(_reranker, userMessage, candidates, AutoContextLimit, cancellationToken).ConfigureAwait(false);
+                candidates = await _knowledge.QueryAsync(userMessage, fetchLimit, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // The reranker is an opt-in retrieval-QUALITY stage (the GatewayReranker hits the
-                // network) — a transient failure there must not deny the user an answer. Fall back
-                // to the upstream retrieval order, truncated. Cancellation still propagates.
-                hits = candidates.Take(AutoContextLimit).ToArray();
+                // Retrieval (the embedding gateway / vector store) is best-effort grounding: when it is
+                // down the turn must DEGRADE to ungrounded, not die with INTERNAL_ERROR. Drop grounding
+                // for this turn — no citations — and don't hand the failing store to the engine (its own
+                // RAG query would re-hit the dead dependency and throw). The user still gets an answer.
+                // Cancellation still propagates (excluded above).
+                _logger?.LogWarning(ex, "Knowledge retrieval failed for conversation {ConversationId}; proceeding with empty grounding.", conversationId);
+                knowledgeForTurn = null;
             }
-            foreach (var hit in hits)
+            if (candidates is not null)
             {
-                var url = hit.Source.StartsWith("http://", StringComparison.Ordinal) || hit.Source.StartsWith("https://", StringComparison.Ordinal) ? hit.Source : null;
-                citations.Add(ProtocolEvents.Citation(hit.DocumentId, hit.Source, url, Truncate(hit.Chunk, CitationSnippetMaxChars), hit.Score));
+                IReadOnlyList<KnowledgeResult> hits;
+                try
+                {
+                    hits = await Rerankers.ApplyOptionalAsync(_reranker, userMessage, candidates, AutoContextLimit, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // The reranker is an opt-in retrieval-QUALITY stage (the GatewayReranker hits the
+                    // network) — a transient failure there must not deny the user an answer. Fall back
+                    // to the upstream retrieval order, truncated. Cancellation still propagates.
+                    hits = candidates.Take(AutoContextLimit).ToArray();
+                }
+                foreach (var hit in hits)
+                {
+                    var url = hit.Source.StartsWith("http://", StringComparison.Ordinal) || hit.Source.StartsWith("https://", StringComparison.Ordinal) ? hit.Source : null;
+                    citations.Add(ProtocolEvents.Citation(hit.DocumentId, hit.Source, url, Truncate(hit.Chunk, CitationSnippetMaxChars), hit.Score));
+                }
             }
         }
 
@@ -153,7 +215,7 @@ public sealed class TurnRunner
         var options = new AgentOptions
         {
             Instructions = resolvedPrompt,
-            Knowledge = _knowledge,
+            Knowledge = knowledgeForTurn,
             MaxIterations = _limits.MaxIterations,
             MaxOutputTokens = _limits.MaxTokens,
             ModelMaxOutputTokens = _limits.ModelMaxOutputTokens,
@@ -211,6 +273,49 @@ public sealed class TurnRunner
         var reply = new StringBuilder();
         var toolNames = new Dictionary<string, string>();
         var emittedCalls = new HashSet<string>();
+
+        // First-answer-token guard for the optional preamble: the stream loop below flips it on the
+        // first real text delta so a slow preamble can never pop in AFTER the answer has begun. The
+        // two run on different tasks, so it is an explicit shared box written with Interlocked and read
+        // with Volatile — never a plain (or closure-captured) local.
+        var answerStarted = new StrongBox<int>(0);
+
+        // Fire the fast-model preamble in PARALLEL with the agent loop (no-op unless
+        // SMOOTH_AGENT_PREAMBLE_MODEL is set). Best-effort and fully detached: it is never awaited, so
+        // it cannot delay or gate the turn, and any failure is swallowed after a debug log — no error
+        // event ever reaches the client. Its text is written straight to the sink and NEVER appended to
+        // `reply`, so it is not persisted and never appears in eventual_response. Pearl th-9a5794.
+        PreambleCompleted = Task.CompletedTask;
+        if (PreambleModel() is { } preambleModel)
+        {
+            PreambleCompleted = Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        ChatMessage[] prompt =
+                        [
+                            new(ChatRole.System, PreambleSystemPrompt),
+                            new(ChatRole.User, userMessage), // the user's message only — no tool results
+                        ];
+                        var response = await _preambleChatClient.GetResponseAsync(
+                            prompt,
+                            new ChatOptions { ModelId = preambleModel, MaxOutputTokens = PreambleMaxTokens },
+                            cancellationToken).ConfigureAwait(false);
+                        var preambleText = response.Text?.Trim();
+                        if (!string.IsNullOrEmpty(preambleText) && Volatile.Read(ref answerStarted.Value) == 0)
+                        {
+                            sink(ProtocolEvents.StreamPreamble(requestId, preambleText));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogDebug(ex, "Preamble generation failed (ignored).");
+                    }
+                },
+                cancellationToken);
+        }
+
         try
         {
             await foreach (var update in agent.RunStreamingAsync(userMessage, thread, cancellationToken).ConfigureAwait(false))
@@ -218,6 +323,9 @@ public sealed class TurnRunner
                 var text = update.Text;
                 if (!string.IsNullOrEmpty(text))
                 {
+                    // The real answer has started — from here on the preamble task must stay silent.
+                    // Flipped BEFORE the token is emitted so the guard can never lose the race.
+                    Interlocked.Exchange(ref answerStarted.Value, 1);
                     reply.Append(text);
                     sink(ProtocolEvents.StreamToken(requestId, text));
                 }

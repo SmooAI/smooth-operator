@@ -374,7 +374,7 @@ CURRENT STEP (%d/%d): %s
 INTENT: %s
 CRITERIA: %s
 
-Focus this turn on the CURRENT STEP. Pursue the INTENT and aim to satisfy the CRITERIA. You don't have to force the step to close if the user isn't ready — stay conversational and the workflow will advance once the criteria are clearly met.
+Focus this turn on the CURRENT STEP: pursue the INTENT directly in this reply — ask the step's question now. The user has already agreed to be here; never re-ask for permission, re-confirm readiness, or repeat a question they have already answered — acknowledge briefly and move forward. Stay conversational; the workflow advances once the CRITERIA are met.
 </ConversationWorkflow>`, wf.Goal, stepNumber, total, step.ID, step.Intent, step.Criteria)
 }
 

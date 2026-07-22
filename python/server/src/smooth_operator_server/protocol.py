@@ -58,6 +58,22 @@ def stream_token(request_id: str, token: str) -> dict[str, Any]:
     }
 
 
+def stream_preamble(request_id: str, token: str) -> dict[str, Any]:
+    """``stream_preamble`` — a token of the fast-model *preamble*: a short "what I'm
+    about to do" sentence generated in parallel with the main turn to cover the
+    reasoning model's time-to-first-token. Shaped exactly like ``stream_token`` so
+    clients reuse the render path, but on a distinct ``type`` so it renders as an
+    EPHEMERAL status line the real answer replaces — never folded into the answer,
+    never persisted (per ``stream-preamble.schema.json``). Pearl th-ce3888."""
+    return {
+        "type": "stream_preamble",
+        "requestId": request_id,
+        "token": token,
+        "data": {"requestId": request_id, "token": token},
+        "timestamp": _now_ms(),
+    }
+
+
 def stream_chunk(request_id: str, node: str, state: Any) -> dict[str, Any]:
     """``stream_chunk`` — a per-node state snapshot (tool call / tool result).
     ``node`` is mirrored at the envelope level and inside ``data`` (per
@@ -212,6 +228,36 @@ def otp_invalid(
         },
         "timestamp": _now_ms(),
     }
+
+
+def cancelled(request_id: str | None) -> dict[str, Any]:
+    """``cancelled`` — the terminal event of a turn the client aborted with a
+    ``cancel`` action. Emitted **in place of** the ``eventual_response`` a completed
+    turn would send: it echoes the cancelled ``send_message``'s ``requestId`` so the
+    client can correlate it to the in-flight turn and reset its UI (drop the streaming
+    indicator, re-enable input).
+
+    Status ``499`` mirrors nginx's "client closed request" — a terminal, non-200
+    outcome distinct from a server error. The ``requestId`` is echoed at the envelope
+    level and inside ``data`` (envelope convention). No answer payload: a cancelled
+    turn produced no assistant message (the streamed tokens were ephemeral and are NOT
+    persisted; the user's message stays persisted).
+
+    A cancel with no active turn is a no-op and emits nothing — this builder is only
+    called when a live turn was actually aborted. Mirrors the Rust ``protocol::cancelled``."""
+    ts = _now_ms()
+    data: dict[str, Any] = {"status": 499}
+    if request_id is not None:
+        data["requestId"] = request_id
+    ev: dict[str, Any] = {
+        "type": "cancelled",
+        "status": 499,
+        "data": data,
+        "timestamp": ts,
+    }
+    if request_id is not None:
+        ev["requestId"] = request_id
+    return ev
 
 
 def error(request_id: str | None, code: str, message: str) -> dict[str, Any]:

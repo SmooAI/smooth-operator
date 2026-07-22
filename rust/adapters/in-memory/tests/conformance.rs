@@ -112,6 +112,7 @@ async fn full_lifecycle_through_the_adapter() {
     // --- two participants: a user and an ai-agent ---
     let mut user = participant("part-user", "conv-1", "org-1", ParticipantType::User);
     user.external_id = Some("supabase-user-123".into());
+    user.email = Some("Owner@Example.com".into());
     store.add_participant(user).await.expect("add user");
     store
         .add_participant(participant(
@@ -128,6 +129,33 @@ async fn full_lifecycle_through_the_adapter() {
         .await
         .expect("list participants");
     assert_eq!(participants.len(), 2);
+
+    // --- per-user conversation scope (SECURITY, pearl th-b2c60b) ---
+    // Org scoping alone lets any member of an org enumerate every other
+    // member's conversations, so every adapter must ALSO scope by the owning
+    // user participant's email.
+    let owned = store
+        .list_conversations_by_org_and_user("org-1", "owner@example.com")
+        .await
+        .expect("scoped list");
+    assert_eq!(owned.len(), 1, "the owner sees their own conversation");
+    assert_eq!(owned[0].id, "conv-1", "email compare is case-insensitive");
+    assert!(
+        store
+            .list_conversations_by_org_and_user("org-1", "someone-else@example.com")
+            .await
+            .expect("scoped list")
+            .is_empty(),
+        "another user in the SAME org must see nothing"
+    );
+    assert!(
+        store
+            .list_conversations_by_org_and_user("org-1", "")
+            .await
+            .expect("scoped list")
+            .is_empty(),
+        "an emailless caller owns nothing — fail closed"
+    );
     assert!(participants
         .iter()
         .any(|p| p.participant_type == ParticipantType::User));

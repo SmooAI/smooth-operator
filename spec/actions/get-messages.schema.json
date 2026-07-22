@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://smooth-agent.dev/spec/actions/get-messages.schema.json",
   "title": "GetMessages",
-  "description": "Action: `get_conversation_messages`. Retrieves a page of messages from the conversation attached to the given session. Results are ordered newest-first. Use `before` for cursor-based pagination. The server replies with an `immediate_response` event whose `data` matches the `Response` schema below.",
+  "description": "Action: `get_conversation_messages`. Retrieves a page of messages from the conversation attached to the given session. Results are ordered newest-first. Page by feeding a response's `nextCursor` back as the next request's `cursor`. The server replies with an `immediate_response` event whose `data` matches the `Response` schema below.",
 
   "$defs": {
     "Request": {
@@ -33,10 +33,9 @@
           "default": 50,
           "description": "Maximum number of messages to return per page. Must be 1–100; defaults to 50."
         },
-        "before": {
+        "cursor": {
           "type": "string",
-          "format": "date-time",
-          "description": "ISO 8601 cursor: return only messages created strictly before this timestamp. Omit to start from the most recent message."
+          "description": "Opaque pagination cursor from a prior response's `nextCursor`. Returns only messages older than the one the cursor names. Treat it as opaque — its encoding is storage-defined (a message id today) and may change. Omit to start from the most recent message.\n\nDeliberately NOT a timestamp: two messages can share a timestamp at any precision the wire format keeps, so a `created_at < cursor` filter either drops or repeats the messages that collide. An id cursor identifies exactly one message and cannot."
         }
       }
     },
@@ -53,9 +52,13 @@
           "items": { "$ref": "#/$defs/ConversationMessage" },
           "description": "Ordered list of messages (newest-first up to `limit`)."
         },
+        "nextCursor": {
+          "type": ["string", "null"],
+          "description": "Opaque cursor naming the oldest message in this page. Pass it as the next request's `cursor` to fetch the page before this one. Present (non-null) if and only if `hasMore` is true."
+        },
         "hasMore": {
           "type": "boolean",
-          "description": "True if more messages exist before the oldest message in this page. Use the oldest `createdAt` as the next `before` cursor."
+          "description": "True if more messages exist before the oldest message in this page — equivalently, if `nextCursor` is non-null."
         }
       }
     },

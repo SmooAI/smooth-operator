@@ -77,6 +77,22 @@ impl MessageQuery {
     }
 }
 
+/// Whether `participant` is the conversation's owning **user** with
+/// `user_email`. Emails are compared case-insensitively (mail domains are, and
+/// IdPs differ on local-part casing), and a blank email never matches — so a
+/// participant row with no email can't be claimed by an emailless caller.
+#[must_use]
+pub fn is_owner(participant: &Participant, user_email: &str) -> bool {
+    if user_email.trim().is_empty() {
+        return false;
+    }
+    participant.participant_type == crate::domain::ParticipantType::User
+        && participant
+            .email
+            .as_deref()
+            .is_some_and(|e| e.trim().eq_ignore_ascii_case(user_email.trim()))
+}
+
 /// The single storage seam. All slices are backend-agnostic.
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
@@ -90,6 +106,37 @@ pub trait StorageAdapter: Send + Sync {
 
     /// List conversations owned by an organization (newest first).
     async fn list_conversations_by_org(&self, organization_id: &str) -> Result<Vec<Conversation>>;
+
+    /// List the conversations in `organization_id` that `user_email` **owns** —
+    /// i.e. that carry a `user` participant with that email (case-insensitive).
+    ///
+    /// This is the per-user scope for conversation reads on a multi-user
+    /// deployment: org scoping alone lets any member of an org enumerate every
+    /// other member's conversations. The filter belongs *in the query*, not
+    /// applied to an already-limited page, so a caller's `limit` counts rows the
+    /// user can actually see.
+    ///
+    /// The default implementation is correct for any adapter — it filters
+    /// [`list_conversations_by_org`](Self::list_conversations_by_org) through
+    /// each conversation's participants — so a new adapter is scoped by
+    /// construction and can never be silently fail-open. Override it when the
+    /// backend can push the join down (Postgres does).
+    async fn list_conversations_by_org_and_user(
+        &self,
+        organization_id: &str,
+        user_email: &str,
+    ) -> Result<Vec<Conversation>> {
+        let mut owned = Vec::new();
+        for conversation in self.list_conversations_by_org(organization_id).await? {
+            let participants = self
+                .list_participants_by_conversation(&conversation.id)
+                .await?;
+            if participants.iter().any(|p| is_owner(p, user_email)) {
+                owned.push(conversation);
+            }
+        }
+        Ok(owned)
+    }
 
     /// Apply a partial update to a conversation; returns the updated row.
     async fn update_conversation(

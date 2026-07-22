@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from threading import Lock
+
+from .auth import normalize_email
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,12 @@ class StoredSession:
     #: ``metadata.contactEmail``). ``None`` when no email was supplied — the server
     #: then can't offer OTP for this session.
     contact_email: str | None = None
+    #: The AUTHENTICATED principal's email that owns this session's conversation — the
+    #: ACL key (th-8fe998). Set from the connection's principal, NEVER from a client
+    #: frame field. ``None`` means "no owner" — an anonymous/emailless principal, or a
+    #: session predating ownership — and stays reachable by everyone (th-909995); with
+    #: auth disabled (the single-tenant local flavor) ownership isn't consulted at all.
+    owner_email: str | None = None
 
 
 class MessageDirection(Enum):
@@ -52,6 +60,11 @@ class StoredMessage:
     conversation_id: str
     direction: MessageDirection
     text: str
+    #: When the message was appended (UTC) — the ``createdAt`` field of the
+    #: ``get_conversation_messages`` contract and its ``before`` paging key. Defaulted so
+    #: downstream implementers of :class:`SessionStore` that build a ``StoredMessage``
+    #: positionally keep working. th-89b698.
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass(frozen=True)
@@ -83,23 +96,56 @@ class SessionStore(ABC):
 
     @abstractmethod
     async def create_session(
-        self, agent_id: str, user_name: str | None, user_email: str | None, conversation_id: str | None = None
+        self,
+        agent_id: str,
+        user_name: str | None,
+        user_email: str | None,
+        conversation_id: str | None = None,
+        *,
+        owner_email: str | None = None,
+        enforced: bool = False,
     ) -> StoredSession:
-        """Mint a session. When ``conversation_id`` names an EXISTING conversation, the
-        new session binds to it (resume: reuses the id + its persisted message log, so
-        subsequent turns append and history replays). An absent or unknown id mints a
-        fresh conversation (unchanged behavior). th-d5b446."""
+        """Mint a session. When ``conversation_id`` names an EXISTING conversation that
+        ``owner_email`` may reach, the new session binds to it (resume: reuses the id +
+        its persisted message log, so subsequent turns append and history replays). An
+        absent, unknown, **or not-reachable** id mints a fresh conversation.
+
+        ``owner_email`` is the authenticated principal's email and must come from the
+        connection's auth context, never from a client-supplied frame field. ``None``
+        means either "auth disabled" or "authenticated but emailless"; ``enforced``
+        distinguishes them — ``False`` (auth disabled, single tenant) skips the
+        ownership check entirely, ``True`` restricts the resume to conversations owned
+        by ``owner_email`` **or by nobody**. Ownerless conversations stay reachable so
+        anonymous/emailless principals can resume what they themselves created;
+        refusing those locked them out of their own sessions. th-909995.
+
+        Resuming a conversation owned by ANOTHER user must be indistinguishable from
+        resuming an id that never existed: both mint a fresh conversation. Do not add a
+        distinct error for the not-owned case — that builds an existence oracle.
+        th-d5b446, th-8fe998."""
         ...
 
     @abstractmethod
     async def get_session(self, session_id: str) -> StoredSession | None: ...
 
     @abstractmethod
-    async def list_conversations(self) -> list[ConversationSummary]:
-        """A summary per conversation that has at least one message (empty conversations —
-        every page-load currently mints one — are dropped), in no particular order; the
-        dispatcher sorts most-recent-first and caps. The Python analog of the Rust
-        ``list_conversations_by_org`` + per-conversation peek. th-d5b446."""
+    async def list_conversations(self, user_email: str | None, *, enforced: bool = False) -> list[ConversationSummary]:
+        """A summary per conversation reachable by ``user_email`` that has at least one
+        message (empty conversations — every page-load currently mints one — are
+        dropped), in no particular order; the dispatcher sorts most-recent-first and
+        caps. The Python analog of the Rust ``list_conversations_by_org`` +
+        per-conversation peek. th-d5b446, th-8fe998.
+
+        ``user_email`` is **required** — deliberately not defaulted. A default would be
+        fail-OPEN and would let an implementer of this protocol ship an unscoped (i.e.
+        cross-user-leaking) store without ever confronting the question.
+
+        ``enforced=False`` is the single-tenant, auth-disabled flavor: unscoped, every
+        conversation. ``enforced=True`` returns those owned by ``user_email`` plus the
+        ownerless ones (anonymous/emailless/legacy), never another owner's. th-909995.
+
+        Apply the filter in the SELECTION itself, never after the dispatcher's limit —
+        filtering a limited page silently returns short or empty pages."""
         ...
 
     @abstractmethod
@@ -148,6 +194,10 @@ class InMemorySessionStore(SessionStore):
         #: Per-conversation last-activity time (create, then every append) — the sort key
         #: + updated_at source for list_conversations. th-d5b446.
         self._updated_at: dict[str, datetime] = {}
+        #: Per-conversation owner email (the ACL key, normalized). Absent/None = owned
+        #: by nobody → reachable by every principal (th-909995: anonymous and emailless
+        #: principals mint exactly these, and must not be locked out of them).
+        self._owners: dict[str, str | None] = {}
         #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
         self._current_step: dict[str, str] = {}
         #: Per-session OTP-verified bit (absent/False = unverified). Set by a
@@ -155,12 +205,29 @@ class InMemorySessionStore(SessionStore):
         self._authenticated: dict[str, bool] = {}
 
     async def create_session(
-        self, agent_id: str, user_name: str | None, user_email: str | None, conversation_id: str | None = None
+        self,
+        agent_id: str,
+        user_name: str | None,
+        user_email: str | None,
+        conversation_id: str | None = None,
+        *,
+        owner_email: str | None = None,
+        enforced: bool = False,
     ) -> StoredSession:
+        owner = normalize_email(owner_email)
         with self._gate:
             # Resume: bind to an existing conversation (reuse its id + persisted log) when
-            # the caller passes a known conversationId. Unknown/absent → mint a fresh one.
-            resume = bool(conversation_id) and conversation_id in self._messages
+            # the caller passes a known conversationId THEY MAY REACH — theirs, or an
+            # ownerless one. Unknown, absent, or owned by someone else → mint a fresh
+            # one. Not-owned takes the exact same branch as never-existed, so the two are
+            # indistinguishable on the wire — a separate refusal would let an attacker
+            # probe for other users' ids. `enforced=False` = auth disabled (single
+            # tenant): ownership isn't consulted. th-909995.
+            resume = (
+                bool(conversation_id)
+                and conversation_id in self._messages
+                and (not enforced or self._owners.get(conversation_id) in (None, owner))
+            )
             conv_id = conversation_id if resume else str(uuid.uuid4())
             session = StoredSession(
                 session_id=str(uuid.uuid4()),
@@ -170,6 +237,7 @@ class InMemorySessionStore(SessionStore):
                 user_participant_id=str(uuid.uuid4()),
                 agent_participant_id=str(uuid.uuid4()),
                 contact_email=(user_email.strip() or None) if isinstance(user_email, str) else None,
+                owner_email=owner,
             )
             self._sessions[session.session_id] = session
             # Only seed an empty log + timestamp on a fresh conversation — a resume keeps
@@ -177,6 +245,7 @@ class InMemorySessionStore(SessionStore):
             if not resume:
                 self._messages[conv_id] = []
                 self._updated_at[conv_id] = datetime.now(timezone.utc)
+                self._owners[conv_id] = owner
         return session
 
     async def get_session(self, session_id: str) -> StoredSession | None:
@@ -184,17 +253,23 @@ class InMemorySessionStore(SessionStore):
             return self._sessions.get(session_id)
 
     async def append_message(self, conversation_id: str, direction: MessageDirection, text: str) -> StoredMessage:
-        message = StoredMessage(str(uuid.uuid4()), conversation_id, direction, text)
+        message = StoredMessage(str(uuid.uuid4()), conversation_id, direction, text, datetime.now(timezone.utc))
         with self._gate:
             self._messages.setdefault(conversation_id, []).append(message)
             self._updated_at[conversation_id] = datetime.now(timezone.utc)
         return message
 
-    async def list_conversations(self) -> list[ConversationSummary]:
+    async def list_conversations(self, user_email: str | None, *, enforced: bool = False) -> list[ConversationSummary]:
+        scope = normalize_email(user_email)
         with self._gate:
             out: list[ConversationSummary] = []
             for conv_id, log in self._messages.items():
                 if not log:  # drop empties — every page-load mints one
+                    continue
+                # Ownership filter lives HERE, in the selection — the dispatcher's limit
+                # is applied to the already-filtered result. Another owner's rows are
+                # dropped; ownerless ones survive for every principal (th-909995).
+                if enforced and self._owners.get(conv_id) not in (None, scope):
                     continue
                 # Messages are stored oldest-first, so the first inbound is the title source.
                 first_inbound = next((m.text for m in log if m.direction is MessageDirection.INBOUND), None)

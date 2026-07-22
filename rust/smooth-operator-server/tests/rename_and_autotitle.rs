@@ -95,6 +95,7 @@ async fn drive(state: &AppState, frame: &Value) -> Value {
         "conn-test",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &frame.to_string(),
         &tx,
     )

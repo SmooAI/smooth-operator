@@ -163,6 +163,12 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
                 try:
                     raw = recv_task.result()
                 except websockets.ConnectionClosed:
+                    # Client hung up: abort any in-flight turn so it stops generating
+                    # (no client remains to receive its output). No `cancelled` event
+                    # — there is nobody to send it to. Distinct from the graceful
+                    # SIGTERM drain (the `else` branch), which deliberately lets an
+                    # in-flight turn finish.
+                    dispatcher.cancel_active_turn()
                     break
                 # Dispatch the turn INSIDE the frame branch and AWAIT it, so an
                 # in-flight turn finishes even if the cancel fires mid-turn.

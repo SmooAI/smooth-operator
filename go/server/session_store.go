@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,54 @@ type StoredSession struct {
 	// threaded into the auth gate so a verified caller's end_user tools run. The Go analog of
 	// the Rust session metadata.otpVerified. th-8078dd.
 	OtpVerified bool
+	// OwnerEmail is the AUTHENTICATED principal's email at create time — the conversation
+	// ownership key every read is filtered by. Deliberately NOT ContactEmail: ContactEmail is
+	// client-supplied (the OTP delivery address) and therefore spoofable, so it can never
+	// decide who may read what. "" means the session has no owner to enforce — auth disabled,
+	// or an anonymous/emailless principal — and stays reachable. th-8fe998, th-909995.
+	OwnerEmail string
+}
+
+// ConversationScope is the visibility filter for conversation reads: WHO is asking, derived
+// from the connection's authenticated principal (AccessContext.ConversationScope) and never
+// from client-supplied frame fields.
+//
+// The ZERO VALUE denies everything. That is deliberate: an implementer who forgets to
+// populate it leaks nothing, and there is no way to spell "show me everything" by accident —
+// Unscoped must be set explicitly, and only the no-auth path sets it. th-8fe998.
+type ConversationScope struct {
+	// Unscoped makes every conversation visible. Set ONLY when the server has no auth
+	// configured (local/dev single-tenant). This is the one and only unscoped path.
+	Unscoped bool
+	// Email is the authenticated principal's email; an OWNED conversation is visible only
+	// when its OwnerEmail matches (case-insensitively). Empty with Unscoped false ⇒ only
+	// ownerless conversations are visible. See Allows.
+	Email string
+}
+
+// Allows reports whether a conversation owned by ownerEmail is visible in this scope.
+//
+// A conversation that HAS an owner is owner-checked: only the same principal may read or
+// write it (the th-909995 P0 — authenticated A reaching into authenticated B's session).
+// A conversation with NO owner has nobody to enforce on behalf of, so it stays reachable:
+// that population is anonymous visitors, emailless-authenticated principals, and legacy
+// auth-disabled sessions, and denying it locks them out of the product entirely — they
+// cannot even use the session they just created. th-909995 (Option B).
+//
+// Keying ownerless sessions on Sub instead was rejected: AnonymousPrincipal.Sub is the
+// literal "anonymous" for EVERY visitor, so that would pool all anonymous conversations
+// into one shared bucket and leak them to each other.
+//
+// Emails compare case-insensitively — OIDC providers vary on casing, and the .NET and
+// Python siblings already fold case. th-8fe998, th-909995.
+func (s ConversationScope) Allows(ownerEmail string) bool {
+	if s.Unscoped {
+		return true
+	}
+	if ownerEmail == "" {
+		return true
+	}
+	return s.Email != "" && strings.EqualFold(ownerEmail, s.Email)
 }
 
 // StoredMessage is one persisted conversation message.
@@ -49,6 +98,9 @@ type StoredMessage struct {
 	ConversationID string
 	Direction      MessageDirection
 	Text           string
+	// CreatedAt is when the message was appended (UTC), the createdAt field of the
+	// get_conversation_messages contract. Display only — paging keys off ID. th-669d48.
+	CreatedAt time.Time
 }
 
 // ConversationSummary is one row of the conversation-list / resume surface: identity,
@@ -71,18 +123,33 @@ type ConversationSummary struct {
 // implement the same interface for durability; the bundled InMemorySessionStore is
 // the reference store.
 type SessionStore interface {
-	CreateSession(ctx context.Context, agentID, userName, userEmail string) (StoredSession, error)
+	// CreateSession mints a fresh session owned by scope's principal (Email; "" when auth is
+	// disabled). userEmail stays the client-supplied OTP contact and MUST NOT be used for
+	// ownership — it is attacker-controlled. th-8fe998.
+	CreateSession(ctx context.Context, agentID, userName, userEmail string, scope ConversationScope) (StoredSession, error)
 	// ResumeSession mints a session bound to an existing conversation when conversationID is
-	// non-empty AND known (returns resumed=true, reusing its message log so subsequent turns
-	// append to it); an empty or unknown conversationID mints a fresh conversation
-	// (resumed=false) — identical to CreateSession. The resume substrate behind
-	// create_conversation_session's optional conversationId. th-d5b446.
-	ResumeSession(ctx context.Context, agentID, userName, userEmail, conversationID string) (session StoredSession, resumed bool, err error)
-	// ListConversations returns a summary per conversation that has at least one message
-	// (empty conversations — every page-load currently mints one — are filtered out), in no
-	// particular order; the handler sorts most-recent-first and caps. The Go analog of the
-	// Rust storage.list_conversations_by_org + per-conversation peek. th-d5b446.
-	ListConversations(ctx context.Context) ([]ConversationSummary, error)
+	// non-empty, known, AND visible to scope (returns resumed=true, reusing its message log
+	// so subsequent turns append to it); an empty, unknown, or SOMEONE ELSE'S conversationID
+	// mints a fresh conversation (resumed=false) — identical to CreateSession.
+	//
+	// Treating another user's conversation exactly like an unknown one is the security
+	// contract, not an accident: it makes "not yours" and "never existed" indistinguishable to
+	// the caller, so the resume path cannot be used as an oracle to enumerate other users'
+	// conversation ids. Implementations MUST NOT report the difference. th-d5b446, th-8fe998.
+	ResumeSession(ctx context.Context, agentID, userName, userEmail string, scope ConversationScope, conversationID string) (session StoredSession, resumed bool, err error)
+	// ListConversations returns a summary per conversation that is visible to scope and has at
+	// least one message (empty conversations — every page-load currently mints one — are
+	// filtered out), in no particular order; the handler sorts most-recent-first and caps.
+	//
+	// The scope filter MUST be applied during selection, never to an already-truncated page:
+	// filtering after a limit silently returns short or empty pages. The scope parameter is
+	// REQUIRED — there is no unscoped default — so every implementer is forced to confront who
+	// may see what. The zero value denies everything. th-d5b446, th-8fe998.
+	ListConversations(ctx context.Context, scope ConversationScope) ([]ConversationSummary, error)
+	// GetSession returns the session for sessionID regardless of ownership — it is the raw
+	// lookup primitive. Callers serving a client request MUST check the returned session's
+	// OwnerEmail against the connection's scope and treat a mismatch as not-found; the
+	// dispatcher routes every such read through FrameDispatcher.scopedSession. th-8fe998.
 	GetSession(ctx context.Context, sessionID string) (*StoredSession, error)
 	AppendMessage(ctx context.Context, conversationID string, direction MessageDirection, text string) (StoredMessage, error)
 	// ListMessages returns the most recent limit messages for a conversation, oldest first.
@@ -107,6 +174,10 @@ type InMemorySessionStore struct {
 	// updatedAt tracks each conversation's last activity (creation, then every append), the
 	// sort key + updatedAt field for ListConversations. th-d5b446.
 	updatedAt map[string]time.Time
+	// owner maps conversation id → owning principal email ("" = created with auth disabled).
+	// Set once at conversation creation and never rewritten, so a resume cannot re-home
+	// someone else's conversation onto the resumer. th-8fe998.
+	owner map[string]string
 }
 
 // NewInMemorySessionStore returns an empty in-memory store.
@@ -115,14 +186,15 @@ func NewInMemorySessionStore() *InMemorySessionStore {
 		sessions:  map[string]StoredSession{},
 		messages:  map[string][]StoredMessage{},
 		updatedAt: map[string]time.Time{},
+		owner:     map[string]string{},
 	}
 }
 
 // CreateSession mints a fresh session (and an empty message log for its conversation).
 // userName is accepted for protocol parity but not retained; userEmail is retained as the
 // OTP delivery contact (ContactEmail) so the end_user auth-gate flow can offer verification.
-func (s *InMemorySessionStore) CreateSession(ctx context.Context, agentID, userName, userEmail string) (StoredSession, error) {
-	session, _, err := s.ResumeSession(ctx, agentID, userName, userEmail, "")
+func (s *InMemorySessionStore) CreateSession(ctx context.Context, agentID, userName, userEmail string, scope ConversationScope) (StoredSession, error) {
+	session, _, err := s.ResumeSession(ctx, agentID, userName, userEmail, scope, "")
 	return session, err
 }
 
@@ -130,7 +202,7 @@ func (s *InMemorySessionStore) CreateSession(ctx context.Context, agentID, userN
 // conversationID is non-empty and known, else a fresh one (resumed=false). Only a fresh
 // conversation gets an empty message log seeded — a resume keeps the existing log so
 // subsequent turns append to it.
-func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*userName*/, userEmail, conversationID string) (StoredSession, bool, error) {
+func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*userName*/, userEmail string, scope ConversationScope, conversationID string) (StoredSession, bool, error) {
 	if agentID == "" {
 		agentID = uuid.NewString()
 	}
@@ -140,10 +212,15 @@ func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*use
 	resumed := false
 	convID := conversationID
 	if convID != "" {
-		_, resumed = s.messages[convID] // known conversation → bind to it
+		// Known AND visible to this scope. The two conditions collapse into one boolean on
+		// purpose: an unknown conversation and another user's conversation take the exact same
+		// branch below, so the caller cannot tell them apart and cannot probe for which ids
+		// exist. th-8fe998.
+		_, known := s.messages[convID]
+		resumed = known && scope.Allows(s.owner[convID])
 	}
 	if !resumed {
-		convID = uuid.NewString() // absent or unknown → fresh conversation
+		convID = uuid.NewString() // absent, unknown, or not ours → fresh conversation
 	}
 
 	session := StoredSession{
@@ -153,12 +230,21 @@ func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*use
 		AgentName:          "smooth-agent",
 		UserParticipantID:  uuid.NewString(),
 		AgentParticipantID: uuid.NewString(),
-		ContactEmail:       userEmail,
+		// Client-supplied, used only as the OTP delivery contact — never for ownership.
+		ContactEmail: userEmail,
+		// Ownership comes from the authenticated principal alone. On a resume the session
+		// inherits the conversation's EXISTING owner rather than re-stamping it, so resuming can
+		// never quietly transfer a conversation. th-8fe998.
+		OwnerEmail: scope.Email,
+	}
+	if resumed {
+		session.OwnerEmail = s.owner[convID]
 	}
 	s.sessions[session.SessionID] = session
 	if !resumed {
 		s.messages[convID] = nil
 		s.updatedAt[convID] = time.Now()
+		s.owner[convID] = scope.Email
 	}
 	return session, resumed, nil
 }
@@ -180,6 +266,7 @@ func (s *InMemorySessionStore) AppendMessage(_ context.Context, conversationID s
 		ConversationID: conversationID,
 		Direction:      direction,
 		Text:           text,
+		CreatedAt:      time.Now().UTC(),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -192,12 +279,18 @@ func (s *InMemorySessionStore) AppendMessage(_ context.Context, conversationID s
 // conversations are dropped so the caller's sidebar isn't buried in the blanks every
 // page-load mints. Messages are stored oldest-first, so the first inbound scan yields the
 // title source. th-d5b446.
-func (s *InMemorySessionStore) ListConversations(_ context.Context) ([]ConversationSummary, error) {
+func (s *InMemorySessionStore) ListConversations(_ context.Context, scope ConversationScope) ([]ConversationSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]ConversationSummary, 0, len(s.messages))
 	for convID, msgs := range s.messages {
 		if len(msgs) == 0 {
+			continue
+		}
+		// Ownership filter runs here, during selection — NOT on the handler's already-capped
+		// page. Filtering after a limit would hand back short/empty pages while other users'
+		// conversations silently consumed the quota. th-8fe998.
+		if !scope.Allows(s.owner[convID]) {
 			continue
 		}
 		firstInbound := ""

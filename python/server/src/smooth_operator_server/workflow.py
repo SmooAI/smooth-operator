@@ -38,7 +38,9 @@ _JUDGE_SYSTEM_PROMPT = (
     '- "yes" -> the criteria are clearly satisfied on the basis of this turn.\n'
     '- "no" -> not satisfied, or the agent moved away from the step.\n'
     '- "maybe" -> partial/ambiguous progress. The workflow stays on the current step and tries again next turn.\n'
-    '- Only mark "yes" when the criteria are objectively met. It is OK to stay on a step for multiple turns.\n\n'
+    "- A brief, informal, or terse user answer that addresses the step's question satisfies it "
+    '(e.g. "a four", "sure", "not really") — mark "yes"; do not hold out for elaboration or exact wording.\n'
+    "- It is OK to stay on a step for multiple turns, but never require the user to re-confirm something they already said.\n\n"
     'Reply with ONLY a JSON object: {"verdict": "yes"|"no"|"maybe", "reason": "<one sentence>"}.'
 )
 
@@ -100,9 +102,10 @@ def render_workflow_prompt_section(
         f"CURRENT STEP ({step_number}/{total}): {step.id}\n"
         f"INTENT: {step.intent}\n"
         f"CRITERIA: {step.criteria}\n\n"
-        "Focus this turn on the CURRENT STEP. Pursue the INTENT and aim to satisfy the CRITERIA. "
-        "You don't have to force the step to close if the customer isn't ready — stay conversational "
-        "and the workflow will advance once the criteria are clearly met.\n"
+        "Focus this turn on the CURRENT STEP: pursue the INTENT directly in this reply — ask the "
+        "step's question now. The user has already agreed to be here; never re-ask for permission, "
+        "re-confirm readiness, or repeat a question they have already answered — acknowledge briefly "
+        "and move forward. Stay conversational; the workflow advances once the CRITERIA are met.\n"
         "</ConversationWorkflow>"
     )
 

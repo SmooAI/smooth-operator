@@ -17,6 +17,14 @@ export interface Principal {
     org: string;
     role: string;
     groups: string[];
+    /**
+     * The authenticated user's email, from the `email` claim. This is the ONLY
+     * trusted source of the caller's identity for per-user conversation scoping —
+     * the client-supplied `userEmail` frame field is attacker-controlled and must
+     * never decide what a caller may read. Absent → the connection has no scopable
+     * identity and conversation reads fail closed (empty list, reads denied).
+     */
+    email?: string;
 }
 
 export const ANONYMOUS_PRINCIPAL: Principal = {
@@ -33,11 +41,33 @@ export const ANONYMOUS_PRINCIPAL: Principal = {
 export interface AccessContext {
     principal: Principal;
     isAnonymous: boolean;
+    /**
+     * Whether the server has auth CONFIGURED at all (verifier mode !== `none`), as
+     * opposed to whether this particular connection authenticated. The two anonymous
+     * outcomes need different handling for conversation scoping: auth-off means
+     * single-tenant local/dev, where conversation reads stay unscoped; auth-on with a
+     * bad/absent token means a real multi-tenant server, where reads must fail closed
+     * rather than fall back to everyone's data.
+     */
+    authEnabled: boolean;
 }
 
 export const ANONYMOUS_ACCESS: AccessContext = {
     principal: ANONYMOUS_PRINCIPAL,
     isAnonymous: true,
+    authEnabled: false,
+};
+
+/**
+ * Anonymous on a server that DOES have auth configured — the fail-closed landing spot
+ * for a missing/malformed/expired token. Distinct from {@link ANONYMOUS_ACCESS} only in
+ * `authEnabled`, which keeps conversation reads scoped (and therefore empty/denied)
+ * instead of unscoped.
+ */
+const ANONYMOUS_UNDER_AUTH: AccessContext = {
+    principal: ANONYMOUS_PRINCIPAL,
+    isAnonymous: true,
+    authEnabled: true,
 };
 
 /** The verifier seam. A connection's `?token=` is resolved by one of these. */
@@ -67,12 +97,12 @@ export class NoAuthVerifier implements AuthVerifier {
 export class TrustedTokenVerifier implements AuthVerifier {
     readonly mode = 'trusted';
     resolve(token: string | undefined): AccessContext {
-        if (!token) return ANONYMOUS_ACCESS;
+        if (!token) return ANONYMOUS_UNDER_AUTH;
         try {
             const json = base64UrlDecode(token).toString('utf8');
             return fromClaims(JSON.parse(json));
         } catch {
-            return ANONYMOUS_ACCESS;
+            return ANONYMOUS_UNDER_AUTH;
         }
     }
 }
@@ -92,7 +122,7 @@ export class LocalTokenVerifier implements AuthVerifier {
     }
 
     resolve(token: string | undefined): AccessContext {
-        if (!token) return ANONYMOUS_ACCESS;
+        if (!token) return ANONYMOUS_UNDER_AUTH;
         try {
             const parts = token.split('.');
             if (parts.length !== 3) throw new Error('malformed JWT');
@@ -108,7 +138,7 @@ export class LocalTokenVerifier implements AuthVerifier {
             const claims = JSON.parse(base64UrlDecode(payload).toString('utf8'));
             return fromClaims(claims);
         } catch {
-            return ANONYMOUS_ACCESS;
+            return ANONYMOUS_UNDER_AUTH;
         }
     }
 }
@@ -127,8 +157,11 @@ function fromClaims(claims: Record<string, unknown>): AccessContext {
         org: typeof claims.org === 'string' ? claims.org : 'public',
         role: typeof claims.role === 'string' ? claims.role : 'basic',
         groups,
+        // The scoping identity. A token without an `email` claim yields a principal
+        // with no email — conversation reads then fail closed rather than unscoped.
+        ...(typeof claims.email === 'string' && claims.email.length > 0 ? { email: claims.email } : {}),
     };
-    return { principal, isAnonymous: false };
+    return { principal, isAnonymous: false, authEnabled: true };
 }
 
 /** Decode a base64url string (no padding) to bytes. */

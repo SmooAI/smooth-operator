@@ -528,6 +528,38 @@ impl StorageAdapter for PostgresAdapter {
         rows.iter().map(row_to_conversation).collect()
     }
 
+    /// Per-user scope, pushed down to one query: keep only the org's
+    /// conversations that have a `user` participant with this email. `EXISTS`
+    /// (not a join) so a conversation with several matching participant rows is
+    /// still returned once, without a `DISTINCT` over the json columns.
+    async fn list_conversations_by_org_and_user(
+        &self,
+        organization_id: &str,
+        user_email: &str,
+    ) -> Result<Vec<Conversation>> {
+        // Fail closed: an emailless caller owns nothing (and must not match the
+        // participant rows that carry an empty email).
+        if user_email.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT * FROM conversations c
+                  WHERE c.organization_id = $1
+                    AND EXISTS (
+                          SELECT 1 FROM conversation_participants p
+                           WHERE p.conversation_id = c.id
+                             AND p.type = 'user'
+                             AND lower(btrim(p.email)) = lower(btrim($2))
+                        )
+                  ORDER BY c.created_at DESC",
+                &[&organization_id, &user_email],
+            )
+            .await?;
+        rows.iter().map(row_to_conversation).collect()
+    }
+
     async fn update_conversation(
         &self,
         id: &str,

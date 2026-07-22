@@ -93,7 +93,7 @@ public static class Workflows
             INTENT: {step.Intent}
             CRITERIA: {step.Criteria}
 
-            Focus this turn on the CURRENT STEP. Pursue the INTENT and aim to satisfy the CRITERIA. You don't have to force the step to close if the customer isn't ready — stay conversational and the workflow will advance once the criteria are clearly met.
+            Focus this turn on the CURRENT STEP: pursue the INTENT directly in this reply — ask the step's question now. The user has already agreed to be here; never re-ask for permission, re-confirm readiness, or repeat a question they have already answered — acknowledge briefly and move forward. Stay conversational; the workflow advances once the CRITERIA are met.
             </ConversationWorkflow>
             """;
     }

@@ -374,7 +374,13 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 			return
 		case r := <-next:
 			if r.err != nil {
-				// Read error / client close / teardown cancel → tear down.
+				// Read error / client close / teardown cancel → tear down. The client is
+				// gone, so ABORT any in-flight turn first (no one remains to receive its
+				// output) — the disconnect half of turn cancellation. No `cancelled` event
+				// is emitted: there is nobody to send it to. This is deliberately the
+				// opposite of the drain branch above, where an in-flight turn is left to
+				// finish inside the pod termination window.
+				dispatcher.CancelTurn()
 				teardown(websocket.StatusNormalClosure, "bye")
 				return
 			}

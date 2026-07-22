@@ -194,6 +194,7 @@ fn spawn_turn(
                 auth_gate: None,
                 tool_configs: None,
                 extensions: None,
+                images: vec![],
             },
             &sink,
         )
@@ -251,6 +252,7 @@ async fn submit_frame(state: &AppState, sink: &UnboundedSender<Value>, body: Val
         "conn-1",
         None,
         None,
+        &smooth_operator_server::handler::UserScope::Unscoped,
         &body.to_string(),
         sink,
     )
@@ -554,6 +556,7 @@ async fn create_session_records_the_declared_capabilities() {
         "conn-1",
         None,
         None,
+        &handler::UserScope::Unscoped,
         &json!({
             "action": "create_conversation_session",
             "requestId": "req-create-1",
@@ -583,6 +586,7 @@ async fn create_session_records_the_declared_capabilities() {
         "conn-2",
         None,
         None,
+        &handler::UserScope::Unscoped,
         &json!({
             "action": "create_conversation_session",
             "requestId": "req-create-2",
