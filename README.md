@@ -20,7 +20,7 @@
 
 ---
 
-> **smooth-operator** gives you hybrid retrieval (dense + sparse + rerank), durable agent checkpoints, human-in-the-loop approvals, and multi-participant conversations — one operator binary that runs the same way on **Kubernetes**, **AWS serverless**, or a **single laptop process**. Built in the open, test-first.
+> **A chat loop is a weekend project. A production agent _server_ is not.** Persistent sessions, a wire protocol your clients can actually speak, streaming turns, tools with hard limits on what they may never do, retrieval that respects who's asking. **smooth-operator is that server** — one operator binary that runs the same way on **Kubernetes**, **AWS serverless**, or a **single laptop process**, speaking one protocol to native clients in **five languages**. Built in the open, test-first.
 
 ---
 
@@ -202,6 +202,40 @@ stateDiagram-v2
 ```
 
 Full action/event tables, the `AgentEvent` mapping, and connection-state keys are in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+---
+
+## Extensible — and safe by construction
+
+An agent is only useful when it can *do* things, and only trustworthy when you can say what it may never do. The server gives you both seams — and they're the emotional core of the whole design.
+
+**Give it your tools.** Install a tool provider (the `ToolProvider` seam in Rust, `tools` in the TS/Python/Go/.NET servers) and the runner merges your tools with the built-ins for every turn — scoped to the turn's org and the caller's entitlements, so a per-org CRM lookup or a ticketing action drops in without the shared core ever learning your schema.
+
+**Let it gain tools with no redeploy.** The server hosts **SEP extensions** — out-of-process tool providers discovered at runtime and attached to the turn, their `ui/confirm` prompts bridged straight into the protocol's confirmation frames for human-in-the-loop. It's gated: an extension contributes tools **only** if you name it in `SMOOTH_EXTENSIONS_ALLOW`. Nothing loads by default.
+
+**Then declare the lines it can't cross.** Every tool — built-in, host-provided, or from an extension — flows through the same gates, so the guardrails hold no matter where a tool came from:
+
+- **Per-agent allow-list** — an agent's `tool_config.enabledTools` restricts its turn to exactly those tools. Off the list, off the table.
+- **The auth-level `ToolHook`** — a tool tagged `admin` or `end_user` is *blocked at call time* on a public agent unless the caller is verified (the session's OTP bit, or your `SessionAuthenticator` seam). The hook runs before the tool does, and **fails closed**.
+- **Document-level ACLs** — both retrieval paths read through the storage adapter's access-scoped view, so a document the requester isn't entitled to is dropped before it can reach the model or land in a citation.
+
+That's what "point it at prod" costs here: not a leap of faith, a declaration. You decide what the agent can touch; the runner enforces it. See [`docs/TOOLS.md`](docs/TOOLS.md) and [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md).
+
+---
+
+## Five languages, one protocol
+
+The same server, the same wire protocol, in the language your stack already speaks. Every client connects to every server, unmodified — a *tested* guarantee, since all five servers run the shared [`spec/conformance/scenarios`](spec/conformance/scenarios) corpus.
+
+| Language | Client package | Server package | Registry |
+| --- | --- | --- | --- |
+| **TypeScript** | `@smooai/smooth-operator` | `@smooai/smooth-operator-server` | [npm](https://www.npmjs.com/package/@smooai/smooth-operator) |
+| **Python** | `smooai-smooth-operator` | `smooai-smooth-operator-server` | [PyPI](https://pypi.org/project/smooai-smooth-operator/) |
+| **Rust** | `smooai-smooth-operator` | `smooai-smooth-operator-server` | [crates.io](https://crates.io/crates/smooai-smooth-operator-server) |
+| **.NET** | `SmooAI.SmoothOperator` | `SmooAI.SmoothOperator.Server` | [NuGet](https://www.nuget.org/packages/SmooAI.SmoothOperator) |
+| **Go** | `…/smooth-operator/go` | `…/smooth-operator/go/server` | [pkg.go.dev](https://pkg.go.dev/github.com/SmooAI/smooth-operator/go) |
+
+The clients ship to their registries today; the Rust server crate is published to crates.io, and the other servers live in-repo (`typescript/server`, `python/server`, `go/server`, `dotnet/server`). The TS side also ships a **React binding** and an **embeddable web-component widget** as subpath exports of the same npm package.
 
 ---
 

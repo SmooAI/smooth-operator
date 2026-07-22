@@ -29,6 +29,9 @@ type FrameDispatcher struct {
 	// turn's auto-context citations.
 	knowledge core.Knowledge
 	tools     []core.Tool
+	// hooks are engine ToolHooks threaded into every turn the runner builds (nil →
+	// none). Set by the server after construction, alongside tools.
+	hooks []core.ToolHook
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (empty → HITL off). Threaded into every turn the runner builds.
 	confirmTools []string
@@ -61,6 +64,27 @@ type FrameDispatcher struct {
 	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
 	// loop stays free to receive a confirm_tool_action while a turn is parked).
 	turns sync.WaitGroup
+
+	// turnMu guards current — the connection's single active turn. A send_message turn
+	// runs on its own goroutine while the read loop keeps dispatching frames, so the
+	// slot is written by the reader (on dispatch) and cleared by the turn goroutine
+	// (on completion): both paths must hold the mutex.
+	turnMu sync.Mutex
+	// current is the connection's ONE in-flight agent turn, or nil when idle. A `cancel`
+	// frame cancels its context (aborting the turn at its next context checkpoint) and a
+	// second send_message while it is set is rejected with TURN_IN_PROGRESS rather than
+	// run concurrently. The Go analog of the Rust reader loop's current_turn JoinHandle.
+	current *activeTurn
+}
+
+// activeTurn is the connection's in-flight send_message turn: the requestId echoed on
+// the `cancelled` event, and the cancel func for the turn's context. Cancelling that
+// context is the Go analog of aborting the Rust turn's JoinHandle — the turn unwinds at
+// its next context checkpoint (the runner's event loop, a ctx-aware tool, the model
+// call) and emits no terminal event.
+type activeTurn struct {
+	requestID string
+	cancel    context.CancelFunc
 }
 
 // NewFrameDispatcher binds a dispatcher to a connection's stores + access context. The
@@ -96,6 +120,47 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 // before the writer stops and the backplane detach runs (the graceful-drain contract).
 func (d *FrameDispatcher) WaitForTurns() { d.turns.Wait() }
 
+// takeTurn removes and returns the connection's active turn (nil when idle), so the
+// caller owns cancelling it exactly once.
+func (d *FrameDispatcher) takeTurn() *activeTurn {
+	d.turnMu.Lock()
+	defer d.turnMu.Unlock()
+	turn := d.current
+	d.current = nil
+	return turn
+}
+
+// CancelTurn aborts the connection's in-flight turn WITHOUT emitting a `cancelled`
+// event — the disconnect path (the client is gone, there is nobody to tell). A cancelled
+// turn stops at its next context checkpoint, discards its partial assistant message
+// (never persisted) and emits no terminal event; the user's message stays persisted.
+// A no-op when no turn is running. Idempotent.
+//
+// NOT called on graceful shutdown: a SIGTERM drain deliberately lets an in-flight turn
+// finish within the pod termination window (see the connection loop's drain branch).
+func (d *FrameDispatcher) CancelTurn() {
+	if turn := d.takeTurn(); turn != nil {
+		turn.cancel()
+	}
+}
+
+// handleCancel serves the `cancel` action (the "Stop button"): abort the connection's
+// in-flight turn and emit the terminal `cancelled` event echoing the cancelled turn's
+// requestId (falling back to the cancel frame's own, per the schema). A cancel with no
+// active turn is a harmless no-op that emits NOTHING and leaves the connection live.
+func (d *FrameDispatcher) handleCancel(frame inboundFrame, sink EventSink) {
+	turn := d.takeTurn()
+	if turn == nil {
+		return // nothing running → silent no-op
+	}
+	turn.cancel()
+	echo := turn.requestID
+	if echo == "" {
+		echo = frame.RequestID
+	}
+	sink(cancelled(echo))
+}
+
 // inboundFrame is the minimal envelope shared by every client→server action.
 type inboundFrame struct {
 	Action    string `json:"action"`
@@ -107,8 +172,12 @@ type inboundFrame struct {
 	// create_conversation_session — optional: resume an existing conversation (bind the new
 	// session to it) when known; absent/unknown → a fresh conversation (unchanged). th-d5b446.
 	ConversationID string `json:"conversationId"`
-	// list_conversations — optional max conversations returned (default 50). th-d5b446.
+	// list_conversations / get_conversation_messages — optional max rows returned (default 50).
 	Limit int `json:"limit"`
+	// get_conversation_messages — optional opaque pagination cursor from a prior response's
+	// nextCursor (a message id today); return only messages older than the one it names.
+	// th-669d48.
+	Cursor string `json:"cursor"`
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
@@ -138,8 +207,12 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 		d.handleGetSession(ctx, frame, sink)
 	case "list_conversations":
 		d.handleListConversations(ctx, frame, sink)
+	case "get_conversation_messages":
+		d.handleGetConversationMessages(ctx, frame, sink)
 	case "send_message":
 		d.handleSendMessage(ctx, frame, sink)
+	case "cancel":
+		d.handleCancel(frame, sink)
 	case "confirm_tool_action":
 		d.handleConfirmToolAction(frame, sink)
 	case "verify_otp":
@@ -151,11 +224,36 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 	}
 }
 
+// scopedSession is the ONLY way a handler may turn a client-supplied sessionId into a
+// session. It loads the session and then hides it unless the connection's authenticated
+// principal owns it — returning (nil, nil), exactly what an unknown sessionId returns, so
+// every caller emits the identical SESSION_NOT_FOUND and no caller can distinguish "not
+// yours" from "never existed".
+//
+// Every sessionId-taking handler (get_session, get_conversation_messages, send_message,
+// verify_otp) routes through here rather than calling store.GetSession directly: the check
+// lives once, at the chokepoint, instead of being re-derived — and forgotten — per handler.
+// th-8fe998.
+func (d *FrameDispatcher) scopedSession(ctx context.Context, sessionID string) (*StoredSession, error) {
+	session, err := d.store.GetSession(ctx, sessionID)
+	if err != nil || session == nil {
+		return nil, err
+	}
+	if !d.access.ConversationScope().Allows(session.OwnerEmail) {
+		return nil, nil
+	}
+	return session, nil
+}
+
 func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inboundFrame, sink EventSink) {
 	// Resume when the caller passes a known conversationId (bind the new session to it so
 	// subsequent turns append to its log and the runner replays its history); absent/unknown
 	// → a fresh conversation (byte-for-byte unchanged). th-d5b446.
-	session, _, err := d.store.ResumeSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail, frame.ConversationID)
+	//
+	// Ownership is stamped from the CONNECTION's authenticated principal. frame.UserEmail is
+	// still forwarded as the OTP delivery contact, but it is attacker-chosen and so has no say
+	// in who owns — or may later read — this conversation. th-8fe998.
+	session, _, err := d.store.ResumeSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail, d.access.ConversationScope(), frame.ConversationID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -172,7 +270,7 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 }
 
 func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFrame, sink EventSink) {
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -210,7 +308,9 @@ func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inb
 		limit = frame.Limit
 	}
 
-	summaries, err := d.store.ListConversations(ctx)
+	// Scoped in the store's selection, before the sort+cap below — a filter applied to an
+	// already-capped page would silently return short/empty pages. th-8fe998.
+	summaries, err := d.store.ListConversations(ctx, d.access.ConversationScope())
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "STORAGE_ERROR", "Failed to list conversations."))
 		return
@@ -234,6 +334,108 @@ func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inb
 		})
 	}
 	sink(immediateResponse(frame.RequestID, 200, "Conversations", map[string]any{"conversations": conversations}))
+}
+
+// maxMessageLimit caps get_conversation_messages' limit per the contract (1..100).
+const maxMessageLimit = 100
+
+// handleGetConversationMessages — the conversation-resume substrate. Returns a session's
+// conversation messages NEWEST-first with nextCursor + hasMore, per
+// spec/actions/get-messages.schema.json. Optional input: limit (1..100, default 50) and
+// cursor (opaque — a message id; returns only messages older than the one it names).
+// Mirrors the Rust handle_get_conversation_messages. th-669d48.
+func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, frame inboundFrame, sink EventSink) {
+	if frame.SessionID == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'sessionId'"))
+		return
+	}
+	session, err := d.scopedSession(ctx, frame.SessionID)
+	if err != nil {
+		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		return
+	}
+	if session == nil {
+		sink(errorEvent(frame.RequestID, "SESSION_NOT_FOUND", "Session not found"))
+		return
+	}
+
+	limit := defaultListLimit
+	if frame.Limit > 0 {
+		limit = frame.Limit
+	}
+	if limit > maxMessageLimit {
+		limit = maxMessageLimit
+	}
+
+	// Without a cursor, limit+1 rows are enough — the extra one tells us whether more history
+	// exists. With a cursor we need the whole log to locate the message it names.
+	// ponytail: full-log read when paging; push the cursor into a store method if a
+	// conversation ever gets big enough to care (would change SessionStore for implementers).
+	fetch := limit + 1
+	if frame.Cursor != "" {
+		fetch = 0 // 0 = no cap
+	}
+	stored, err := d.store.ListMessages(ctx, session.ConversationID, fetch)
+	if err != nil {
+		sink(errorEvent(frame.RequestID, "STORAGE_ERROR", "Failed to list messages."))
+		return
+	}
+
+	// Store returns oldest-first; the contract is newest-first.
+	newestFirst := make([]StoredMessage, 0, len(stored))
+	for i := len(stored) - 1; i >= 0; i-- {
+		newestFirst = append(newestFirst, stored[i])
+	}
+
+	// The cursor names one exact message; the page starts immediately on its older side. An id
+	// identifies a single row, so messages sharing a timestamp can neither be skipped nor
+	// repeated — the failure mode a `created_at <` filter has by construction.
+	if frame.Cursor != "" {
+		at := -1
+		for i, m := range newestFirst {
+			if m.ID == frame.Cursor {
+				at = i
+				break
+			}
+		}
+		if at < 0 {
+			sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Unknown 'cursor'"))
+			return
+		}
+		newestFirst = newestFirst[at+1:]
+	}
+
+	hasMore := len(newestFirst) > limit
+	if hasMore {
+		newestFirst = newestFirst[:limit]
+	}
+
+	// nextCursor names the oldest message in this page — non-null exactly when hasMore.
+	var nextCursor any
+	if hasMore {
+		nextCursor = newestFirst[len(newestFirst)-1].ID
+	}
+
+	messages := make([]map[string]any, 0, len(newestFirst))
+	for _, m := range newestFirst {
+		direction := "outbound"
+		if m.Direction == Inbound {
+			direction = "inbound"
+		}
+		messages = append(messages, map[string]any{
+			"id":        m.ID,
+			"direction": direction,
+			"content":   map[string]any{"text": m.Text},
+			// Display only — paging goes through the id cursor. Nano anyway: truncating to
+			// whole seconds throws away ordering information clients render.
+			"createdAt": m.CreatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	sink(immediateResponse(frame.RequestID, 200, "ConversationMessages", map[string]any{
+		"messages":   messages,
+		"nextCursor": nextCursor,
+		"hasMore":    hasMore,
+	}))
 }
 
 // conversationTitle derives a sidebar title: a trimmed, ~60-char preview of the first inbound
@@ -269,11 +471,26 @@ func truncatePreview(s string, max int) string {
 }
 
 func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFrame, sink EventSink) {
+	// ONE active turn per connection: reject a second send_message while one is in
+	// flight rather than run two concurrently (interleaved streams + racing storage
+	// writes). The client must cancel the running turn or wait for it. Checked before
+	// any other validation — and before the 202 ack — so the rejected frame produces
+	// exactly one event. (confirm_tool_action / verify_otp RESUME the active turn, so
+	// they are deliberately unaffected.)
+	d.turnMu.Lock()
+	busy := d.current != nil
+	d.turnMu.Unlock()
+	if busy {
+		sink(errorEvent(frame.RequestID, "TURN_IN_PROGRESS",
+			"a turn is already in progress on this connection; cancel it or wait for it to complete"))
+		return
+	}
+
 	requestID := frame.RequestID
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return
@@ -347,14 +564,46 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	//    Dispatch returns as soon as this goroutine is spawned, and the per-frame ctx
 	//    (ioCtx) stays alive for the whole connection, so the turn keeps the connection's
 	//    lifetime — torn down (and the gate unparked) only when the connection closes.
+	// The turn's OWN cancellable context, derived from the connection's: a `cancel`
+	// frame (or a disconnect) cancels it, unwinding the turn at its next context
+	// checkpoint — the Go analog of aborting the Rust turn's JoinHandle. Registered as
+	// the connection's single active turn before the goroutine starts, so a cancel that
+	// lands immediately after this frame still finds it.
+	turnCtx, turnCancel := context.WithCancel(ctx)
+	turn := &activeTurn{requestID: requestID, cancel: turnCancel}
+	d.turnMu.Lock()
+	d.current = turn
+	d.turnMu.Unlock()
+
 	d.turns.Add(1)
 	go func() {
 		defer d.turns.Done()
+		// Always release the turn's context (a completed turn must not leak it), and
+		// vacate the active-turn slot — but ONLY if it is still ours: a cancel already
+		// took it out, and a later send_message may have installed its own.
+		defer func() {
+			d.turnMu.Lock()
+			if d.current == turn {
+				d.current = nil
+			}
+			d.turnMu.Unlock()
+			turnCancel()
+		}()
 		// Tear the extension host down when the turn finishes: unpark any hung
 		// ui/confirm and shut the subprocesses down. No-op when no host was built.
+		// Uses the connection ctx, not the turn's, so a cancelled turn still cleans up.
 		defer extTurn.Close(ctx)
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
-		result, err := runner.Run(ctx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
+		runner.hooks = d.hooks
+		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
+		// Cancelled turn: the `cancelled` event is the turn's ONE terminal event (emitted
+		// by handleCancel), so emit nothing further here — no eventual_response, and no
+		// INTERNAL_ERROR for the context cancellation that unwound the turn. The partial
+		// assistant reply is discarded (the runner never persisted it); the user's message
+		// stays persisted, per the protocol.
+		if turnCtx.Err() != nil {
+			return
+		}
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean
 			// error and keep the connection alive. Detail stays server-side.
@@ -466,7 +715,7 @@ func (d *FrameDispatcher) handleVerifyOtp(ctx context.Context, frame inboundFram
 	}
 
 	// The session must exist (a code can't verify a session we don't track).
-	session, err := d.store.GetSession(ctx, frame.SessionID)
+	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
 		return

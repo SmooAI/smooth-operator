@@ -58,4 +58,31 @@ public class ProtocolEventsTests
         Assert.Single(citations);
         Assert.Equal("doc-1", citations[0]!["id"]!.GetValue<string>());
     }
+
+    [Fact]
+    public void Cancelled_EchoesRequestId_WithTerminalStatus()
+    {
+        var ev = ProtocolEvents.Cancelled("r1");
+        Assert.Equal("cancelled", ev["type"]!.GetValue<string>());
+        Assert.Equal("r1", ev["requestId"]!.GetValue<string>());
+        Assert.Equal(499, ev["status"]!.GetValue<int>());
+        // requestId + status mirrored inside `data` (envelope convention).
+        Assert.Equal("r1", ev["data"]!["requestId"]!.GetValue<string>());
+        Assert.Equal(499, ev["data"]!["status"]!.GetValue<int>());
+        Assert.True(ev["timestamp"]!.GetValue<long>() > 0);
+        // No answer payload: a cancelled turn produced no assistant message.
+        var data = ev["data"]!.AsObject();
+        Assert.False(data.ContainsKey("messageId"));
+        Assert.False(data.ContainsKey("response"));
+    }
+
+    [Fact]
+    public void Cancelled_WithoutRequestId_OmitsTheField()
+    {
+        var ev = ProtocolEvents.Cancelled(null);
+        Assert.Equal("cancelled", ev["type"]!.GetValue<string>());
+        Assert.False(ev.ContainsKey("requestId"));
+        Assert.False(ev["data"]!.AsObject().ContainsKey("requestId"));
+        Assert.Equal(499, ev["status"]!.GetValue<int>());
+    }
 }

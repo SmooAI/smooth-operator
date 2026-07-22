@@ -3,8 +3,14 @@ using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server;
 
-/// <summary>A raw document pulled from a source, before chunking. </summary>
-public sealed record SourceDocument(string Id, string Source, string Content, DocumentType DocType = DocumentType.Documentation);
+/// <summary>
+/// A raw document pulled from a source, before chunking. <c>Acl</c> holds optional per-document
+/// access-control labels (entitlement groups, e.g. <c>slack:channel:C123</c>) — mirrors the Rust
+/// <c>RawDocument.acl</c>. Carried through for ACL-filtered retrieval; a connector whose documents
+/// have differing access (Slack's per-channel case, Notion's per-root case) stamps them here rather
+/// than relying on a single pipeline-wide ACL.
+/// </summary>
+public sealed record SourceDocument(string Id, string Source, string Content, DocumentType DocType = DocumentType.Documentation, IReadOnlyList<string>? Acl = null);
 
 /// <summary>
 /// A knowledge source the ingest pipeline pulls documents from (GitHub, files, …). Mirrors the

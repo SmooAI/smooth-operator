@@ -337,5 +337,27 @@
       },
       "timestamp": 1749340808000
     }
+  },
+  "cancel_request": {
+    "$schema_ref": "actions/cancel.schema.json#/$defs/Request",
+    "description": "Cancel the in-flight turn, reusing the send_message requestId as the correlation key (the Stop button).",
+    "instance": {
+      "action": "cancel",
+      "requestId": "req-a1b2c3d4-0002"
+    }
+  },
+  "cancelled_event": {
+    "$schema_ref": "events/cancelled.schema.json",
+    "description": "Terminal event for a client-cancelled turn — emitted in place of eventual_response, echoing the cancelled turn's requestId with status 499. No answer payload.",
+    "instance": {
+      "type": "cancelled",
+      "requestId": "req-a1b2c3d4-0002",
+      "status": 499,
+      "data": {
+        "requestId": "req-a1b2c3d4-0002",
+        "status": 499
+      },
+      "timestamp": 1749340809000
+    }
   }
 }

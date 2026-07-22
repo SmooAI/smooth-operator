@@ -14,8 +14,8 @@
         "typecheck": "pnpm -r typecheck",
         "version:sync": "node scripts/sync-versions.mjs",
         "version:bump": "pnpm changeset version && pnpm run version:sync",
-        "ci:publish": "pnpm --filter @smooai/smooth-operator build && pnpm changeset publish",
-        "publish:dry": "pnpm --filter @smooai/smooth-operator publish --dry-run --no-git-checks"
+        "ci:publish": "node scripts/ci-publish.mjs",
+        "publish:dry": "DRY_RUN=1 node scripts/ci-publish.mjs"
     },
     "devDependencies": {
         "@changesets/cli": "^2.28.1"

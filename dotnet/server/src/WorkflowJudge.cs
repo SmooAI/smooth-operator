@@ -66,7 +66,8 @@ public sealed class LlmWorkflowJudge : IWorkflowJudge
             - "yes" -> the criteria are clearly satisfied on the basis of this turn.
             - "no" -> not satisfied, or the agent moved away from the step.
             - "maybe" -> partial/ambiguous progress. The workflow will stay on the current step and try again next turn.
-            - Only mark "yes" when the criteria are objectively met. It is OK to stay on a step for multiple turns.
+            - A brief, informal, or terse user answer that addresses the step's question satisfies it (e.g. "a four", "sure", "not really") — mark "yes"; do not hold out for elaboration or exact wording.
+            - It is OK to stay on a step for multiple turns, but never require the user to re-confirm something they already said.
 
             Reply with ONLY a JSON object: {"verdict":"yes|no|maybe","reason":"one sentence"}.
             """;

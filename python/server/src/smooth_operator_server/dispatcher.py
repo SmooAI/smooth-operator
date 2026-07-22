@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import timezone
 from typing import Any
 
 from smooth_operator_core import Knowledge
@@ -27,7 +28,7 @@ from .agent_config import (
     filter_tools,
     gate_tools,
 )
-from .auth import AccessContext
+from .auth import AccessContext, normalize_email
 from .confirmation import ConfirmationRegistry
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
@@ -80,11 +81,49 @@ class FrameDispatcher:
         #: Fast model for the post-turn workflow judge (None → runner's default).
         self._judge_model = judge_model
         #: Spawned turn tasks kept alive (the event loop only holds weak refs to
-        #: tasks); cleared as each completes so they don't accumulate.
+        #: tasks, and a cancelled turn still needs to run its cancellation to
+        #: completion); cleared as each finishes so they don't accumulate.
         self._turn_tasks: set[asyncio.Task[Any]] = set()
+        #: The connection's single active agent turn, if one is running: the turn's
+        #: ``requestId`` (echoed on the ``cancelled`` event) + its task. Kept as a
+        #: strong ref (the loop only holds weak ones) and cleared when the turn
+        #: completes. Only ONE turn runs at a time — a second ``send_message`` while
+        #: one is in flight is rejected with ``TURN_IN_PROGRESS``, never run
+        #: concurrently. Mirrors the Rust reader loop's ``current_turn`` slot.
+        self._active_turn: tuple[str | None, asyncio.Task[Any]] | None = None
+
+    def _in_flight(self) -> tuple[str | None, asyncio.Task[Any]] | None:
+        """The active turn, or ``None`` if there is none / it already finished. The
+        done check mirrors the Rust ``handle.is_finished()`` guard: the completion
+        callback that clears the slot is scheduled, not immediate, so a frame arriving
+        in that window must not see a finished turn as in-flight."""
+        if self._active_turn is not None and self._active_turn[1].done():
+            self._active_turn = None
+        return self._active_turn
+
+    def cancel_active_turn(self, sink: Sink | None = None) -> bool:
+        """Abort the connection's in-flight turn, if any, and (with a ``sink``) emit
+        the terminal ``cancelled`` event echoing the cancelled turn's ``requestId``.
+
+        Cancelling the task raises :class:`asyncio.CancelledError` inside the turn at
+        its next ``await``, abandoning the in-flight LLM/tool call. The partial
+        assistant reply is discarded — it is persisted only at the END of the turn,
+        which the cancellation skips; the user's message was persisted at the start,
+        so it stays. Returns whether a turn was actually aborted (a cancel with none
+        running is a harmless no-op that emits nothing)."""
+        active = self._in_flight()
+        if active is None:
+            return False
+        turn_request_id, task = active
+        self._active_turn = None
+        task.cancel()
+        if sink is not None:
+            sink(protocol.cancelled(turn_request_id))
+        return True
 
     async def wait_for_turns(self) -> None:
-        """Await every in-flight spawned ``send_message`` turn to completion.
+        """Await every spawned ``send_message`` turn to completion (including one
+        already cancelled, whose cancellation still has to unwind).
 
         ``send_message`` runs its turn as a background task (so the read loop stays
         free to receive a `confirm_tool_action` while a turn is parked). The
@@ -115,10 +154,29 @@ class FrameDispatcher:
                 await self._handle_create_session(frame, request_id, sink)
             elif action == "list_conversations":
                 await self._handle_list_conversations(frame, request_id, sink)
+            elif action == "get_conversation_messages":
+                await self._handle_get_conversation_messages(frame, request_id, sink)
             elif action == "get_session":
                 await self._handle_get_session(frame, request_id, sink)
+            elif action == "cancel":
+                # Client-initiated turn cancellation (the "Stop button"). Connection-
+                # local: aborts the tracked turn task and emits `cancelled`. With no
+                # turn running it is a silent no-op.
+                self.cancel_active_turn(sink)
             elif action == "send_message":
-                await self._handle_send_message(frame, request_id, sink)
+                if self._in_flight() is not None:
+                    # A turn is already running on this connection: reject the second
+                    # one rather than run two concurrently (interleaved streams +
+                    # racing storage writes). The client must cancel it or wait.
+                    sink(
+                        protocol.error(
+                            request_id,
+                            "TURN_IN_PROGRESS",
+                            "a turn is already in progress on this connection; cancel it or wait for it to complete",
+                        )
+                    )
+                else:
+                    await self._handle_send_message(frame, request_id, sink)
             elif action == "confirm_tool_action":
                 self._handle_confirm_tool_action(frame, request_id, sink)
             elif action == "verify_otp":
@@ -133,6 +191,54 @@ class FrameDispatcher:
             # server-side, not leaked over the wire). Mirrors the C#/Rust handler.
             sink(protocol.error(request_id, "INTERNAL_ERROR", "Internal error processing the request."))
 
+    def _scope_email(self) -> str | None:
+        """The email this connection's conversations are scoped to.
+
+        ``None`` means "no owner to match": either auth is disabled (the single-tenant
+        local flavor, where ownership is not consulted at all — see
+        :meth:`_auth_enforced`) or the principal is authenticated but carries no email
+        claim. In the latter case it matches no OWNED conversation, only ownerless ones.
+        th-8fe998, th-909995."""
+        return None if self._access.auth_disabled else self._access.scope_email
+
+    @property
+    def _auth_enforced(self) -> bool:
+        return not self._access.auth_disabled
+
+    async def _visible_session(self, session_id: str) -> Any:
+        """The session, but only if this connection's principal may see it — otherwise
+        ``None``, exactly as for a session id that never existed.
+
+        An OWNED session requires an exact (case/whitespace-insensitive) match against
+        the principal's email. An OWNERLESS session — minted by an anonymous or
+        emailless principal, or predating ownership — stays visible to everyone, as it
+        was before scoping shipped. Refusing those instead locked anonymous and
+        emailless principals out of the sessions they had just created themselves: empty
+        list, no resume, no send_message, i.e. no product. th-909995.
+
+        This is the ONLY permitted way to turn a client-supplied sessionId into a
+        session. Every sessionId-bearing action routes through here so one guard covers
+        them all — calling ``self._store.get_session`` directly from a handler bypasses
+        the ownership check and is a cross-user data leak (th-1b7ed0 was exactly that,
+        in ``get_conversation_messages``). ``test_visible_session_is_the_only_lookup``
+        fails if a second direct call site appears.
+
+        Callers MUST report a miss with the same ``SESSION_NOT_FOUND`` payload they use
+        for a genuinely unknown id: a distinct "forbidden" (or a differently-worded
+        message) turns this endpoint into an existence oracle for enumerating other
+        users' session ids. th-8fe998."""
+        session = await self._store.get_session(session_id)
+        if session is None:
+            return None
+        if not self._auth_enforced:
+            return session  # auth disabled → single tenant, no ownership to check
+        owner = normalize_email(session.owner_email)
+        if owner is None:
+            return session  # ownerless → open, as before scoping (th-909995)
+        # Owned → exact match only. An emailless principal (scope None) matches no
+        # owner, so it still cannot reach anyone else's owned session.
+        return session if owner == self._scope_email() else None
+
     async def _handle_create_session(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # Resume: a `conversationId` naming an existing conversation binds the new session
         # to it (reuses id + history); absent/unknown → a fresh conversation. The response
@@ -140,11 +246,20 @@ class FrameDispatcher:
         # Mirrors the Rust/Go/TS reference. th-d5b446.
         raw_conv_id = frame.get("conversationId")
         conversation_id = raw_conv_id if isinstance(raw_conv_id, str) and raw_conv_id else None
+        # Ownership comes from the AUTHENTICATED PRINCIPAL, never from the frame. The
+        # client-supplied `userEmail` is exactly the spoofing vector this fix closes:
+        # honoring it would let anyone claim (and then list) another user's scope. With
+        # auth on, the principal's email also replaces `userEmail` as the OTP contact,
+        # so a code is never delivered to a client-chosen address. th-8fe998.
+        owner_email = self._scope_email()
+        user_email = owner_email if self._auth_enforced else frame.get("userEmail")
         session = await self._store.create_session(
             frame.get("agentId") or "",
             frame.get("userName"),
-            frame.get("userEmail"),
+            user_email,
             conversation_id,
+            owner_email=owner_email,
+            enforced=self._auth_enforced,
         )
         data = {
             "sessionId": session.session_id,
@@ -161,7 +276,8 @@ class FrameDispatcher:
         if not session_id:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
             return
-        session = await self._store.get_session(session_id)
+        # Not-yours is reported identically to not-found — no existence oracle.
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
@@ -190,7 +306,12 @@ class FrameDispatcher:
             else _DEFAULT_LIST_LIMIT
         )
 
-        summaries = await self._store.list_conversations()
+        # Scope to the authenticated principal: their own conversations plus ownerless
+        # ones (th-909995 — an emailless/anonymous principal must still see the
+        # conversations it created, which are ownerless by construction). The store
+        # applies the filter in its selection, so `limit` below caps an already-scoped
+        # list rather than paging over other users' rows. th-8fe998.
+        summaries = await self._store.list_conversations(self._scope_email(), enforced=self._auth_enforced)
         # Most-recent-first (empties already dropped by the store), then cap.
         summaries.sort(key=lambda c: c.updated_at, reverse=True)
         conversations = [
@@ -204,6 +325,77 @@ class FrameDispatcher:
         ]
         sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": conversations}))
 
+    async def _handle_get_conversation_messages(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``get_conversation_messages`` — the conversation-resume substrate. Returns a
+        session's messages NEWEST-first plus ``nextCursor``/``hasMore``, per
+        ``spec/actions/get-messages.schema.json``: each entry is ``{id, direction,
+        content: {text}, createdAt}``. Optional input: ``limit`` (1..100, default 50) and
+        ``cursor`` (opaque — a message id today; returns the messages older than the one
+        it names). Page by feeding a response's ``nextCursor`` back as the next request's
+        ``cursor``. Deliberately NOT a timestamp cursor: messages can share a
+        ``created_at``, and a ``created_at <`` filter drops or repeats the collisions.
+        Mirrors the Rust ``handle_get_conversation_messages`` and the Go/TS/C# reference.
+        th-89b698, th-ebc251."""
+        session_id = frame.get("sessionId")
+        if not session_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
+            return
+        # Owner-scoped like every other sessionId action — reading someone else's history
+        # is reported identically to a session that never existed. th-1b7ed0.
+        session = await self._visible_session(session_id)
+        if session is None:
+            sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
+            return
+
+        raw_limit = frame.get("limit")
+        limit = (
+            min(raw_limit, _MAX_MESSAGE_LIMIT)
+            if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0
+            else _DEFAULT_LIST_LIMIT
+        )
+
+        raw_cursor = frame.get("cursor")
+        cursor = raw_cursor if isinstance(raw_cursor, str) and raw_cursor else None
+
+        # No cursor: limit+1 rows, where the extra row means "more history exists". With a
+        # cursor we have to locate the named message first, so read the log.
+        # ponytail: cursor paging reads the whole conversation log and slices in memory.
+        # Push it into a cursor-aware store read if conversations outgrow that —
+        # SessionStore is implemented downstream, so widening it is a breaking change.
+        stored = await self._store.list_messages(session.conversation_id, _FULL_LOG if cursor else limit + 1)
+
+        # The store returns oldest-first; the contract is newest-first.
+        newest_first = list(reversed(stored))
+        if cursor is not None:
+            at = next((i for i, m in enumerate(newest_first) if m.id == cursor), None)
+            if at is None:
+                sink(
+                    protocol.error(request_id, "VALIDATION_ERROR", f"unknown 'cursor' '{cursor}' for this conversation")
+                )
+                return
+            newest_first = newest_first[at + 1 :]
+
+        has_more = len(newest_first) > limit
+        page = newest_first[:limit]
+        messages = [
+            {
+                "id": m.id,
+                "direction": m.direction.value,
+                "content": {"text": m.text},
+                "createdAt": m.created_at.astimezone(timezone.utc).isoformat(),
+            }
+            for m in page
+        ]
+        # `nextCursor` names the OLDEST message in this page — non-null iff `hasMore`.
+        sink(
+            protocol.immediate_response(
+                request_id,
+                200,
+                "ConversationMessages",
+                {"messages": messages, "nextCursor": page[-1].id if has_more else None, "hasMore": has_more},
+            )
+        )
+
     async def _handle_send_message(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # requestId is load-bearing for streaming correlation; generate one if the
         # client omitted it (mirrors the C# `requestId ??= Guid`).
@@ -215,7 +407,7 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "missing 'sessionId'"))
             return
 
-        session = await self._store.get_session(session_id)
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
@@ -310,8 +502,18 @@ class FrameDispatcher:
             )
 
         task = asyncio.ensure_future(_run_turn())
+        # Track it as the connection's single active turn so a later `cancel` frame
+        # (or a disconnect) can abort it, and a second `send_message` is rejected.
+        self._active_turn = (request_id_str, task)
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
+        task.add_done_callback(self._clear_active_turn)
+
+    def _clear_active_turn(self, task: asyncio.Task[Any]) -> None:
+        """Free the active-turn slot once its task finishes (only if it is still THIS
+        task's — a cancel already took the slot, and a later turn may own it now)."""
+        if self._active_turn is not None and self._active_turn[1] is task:
+            self._active_turn = None
 
     async def _maybe_offer_otp(self, refusal: OtpRefusal, session: Any, request_id: str, sink: Sink) -> None:
         """Emit the OTP-offer sequence for a turn whose ``end_user`` tool was refused
@@ -376,8 +578,9 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "VALIDATION_ERROR", "verify_otp requires a 'code'"))
             return
 
-        # The session must exist (a code can't authenticate a session we don't track).
-        session = await self._store.get_session(session_id)
+        # The session must exist AND belong to this principal (a code can't authenticate
+        # a session we don't track — or someone else's).
+        session = await self._visible_session(session_id)
         if session is None:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
@@ -447,6 +650,15 @@ class FrameDispatcher:
 
 #: Default cap for list_conversations when the caller doesn't ask for a specific limit.
 _DEFAULT_LIST_LIMIT = 50
+
+#: Contract cap on get_conversation_messages' `limit` (1..100). th-89b698.
+_MAX_MESSAGE_LIMIT = 100
+
+#: Sentinel `limit` meaning "the whole conversation log" — the store contract is "the most
+#: recent N, oldest first", so this just has to exceed any real conversation. Used when
+#: get_conversation_messages has to locate a `cursor` message. th-ebc251.
+_FULL_LOG = 1_000_000
+
 
 #: Max characters in a conversation title preview before it's clipped with an ellipsis.
 _TITLE_MAX = 60

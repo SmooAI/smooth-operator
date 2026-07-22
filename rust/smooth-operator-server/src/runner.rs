@@ -29,7 +29,7 @@ use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::tool::ToolHook;
 use smooth_operator_core::{
     human_channel, Agent, AgentConfig, AgentEvent, ConfirmationHook, HumanRequest, HumanResponse,
-    KnowledgeBase, KnowledgeResult, LlmConfig, Message as EngineMessage, Role, ToolCall,
+    KnowledgeBase, KnowledgeResult, LlmClient, LlmConfig, Message as EngineMessage, Role, ToolCall,
     ToolRegistry, ToolResult,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -111,6 +111,18 @@ const MAX_PRIOR_MESSAGES: usize = 50;
 /// (a timeout). Bounds a stuck turn so a client that never confirms can't pin a
 /// task forever. Generous (5 min) because a human is in the loop.
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `max_tokens` for the fast-model preamble — one short sentence. Pearl th-9a5794.
+const PREAMBLE_MAX_TOKENS: u32 = 64;
+
+/// System prompt for the fast-model preamble (see `SMOOTH_AGENT_PREAMBLE_MODEL`).
+/// One short present-tense sentence describing intent — no answer (it's generated
+/// WITHOUT the tool result), no greeting, no promises.
+const PREAMBLE_SYSTEM_PROMPT: &str = "You are the assistant's voice while it works. \
+In ONE short present-tense sentence (max ~12 words), tell the user what you're about to do to help with their message. \
+Do NOT answer the question, do NOT greet, do NOT promise a specific result or outcome. \
+Example: \"Let me pull up your recent conversations.\" \
+Reply with only that sentence — no quotes, no preamble, no markdown.";
 
 /// Registers a parked turn's [`HumanResponse`] sender under a session id (so a
 /// later `confirm_tool_action` can take it). Typically `AppState::register_confirmation`.
@@ -232,6 +244,12 @@ pub struct TurnResult {
     /// [`crate::suggestions`]). Empty when the model emitted none. Carried onto
     /// the `eventual_response`'s `suggestedNextActions`.
     pub suggested_next_actions: Vec<String>,
+    /// An optional client-side directive a host tool emitted this turn (drained
+    /// from the [`ToolProviderContext::directive_sink`]). Opaque
+    /// `serde_json::Value` (last-write-wins) — carried onto the
+    /// `eventual_response`'s `directive` field. `None` when no host tool wrote
+    /// one (or no tool provider was installed), keeping the event back-compatible.
+    pub directive: Option<serde_json::Value>,
 }
 
 /// One tool call captured during the turn, used to emit a `gen_ai.tool` child
@@ -370,6 +388,12 @@ pub struct TurnRequest<'a> {
     /// [`crate::extensions::build_extension_host`] (only when
     /// `SMOOTH_EXTENSIONS_ALLOW` is non-empty).
     pub extensions: Option<crate::extensions::ExtensionTurn>,
+    /// Image attachments for a multimodal turn. When non-empty, the runner maps
+    /// each onto a core `ImageContent` and attaches them to the engine's user
+    /// message via `AgentConfig::with_user_images`, and also carries them into the
+    /// [`ToolProviderContext`] so a host tool can see them. Empty (the default)
+    /// ⇒ a text-only turn, byte-for-byte unchanged.
+    pub images: Vec<smooth_operator::tool_provider::UserImage>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -419,12 +443,32 @@ pub async fn run_streaming_turn(
         auth_gate,
         tool_configs,
         extensions,
+        images,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
     // the `AgentConfig` and `org_id` into the `ToolProviderContext` below.
     let model_for_span = llm.model.clone();
     let org_id_for_span = org_id.clone();
+
+    // Optional fast-model preamble. When `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a
+    // small fast model (e.g. `groq-gpt-oss-20b`) runs in PARALLEL with the main
+    // turn and streams ONE ephemeral "what I'm about to do" sentence
+    // (`stream_preamble`), covering the reasoning model's time-to-first-token.
+    // Built from a clone of `llm` (same gateway/key) with the model + a tight
+    // token cap overridden. Unset/empty ⇒ off, so default behavior is unchanged.
+    // Skipped when a test provider is injected (no live gateway). Pearl th-9a5794.
+    let preamble_llm = (llm_provider.is_none())
+        .then(|| std::env::var("SMOOTH_AGENT_PREAMBLE_MODEL").ok())
+        .flatten()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .map(|model| {
+            let mut cfg = llm.clone();
+            cfg.model = model;
+            cfg.max_tokens = PREAMBLE_MAX_TOKENS;
+            cfg
+        });
 
     // The ONE ACL-enforcing knowledge handle both retrieval paths read through.
     // Built once from the requester's `AccessContext` so the auto-injected
@@ -444,6 +488,11 @@ pub async fn run_streaming_turn(
     // Sink the knowledge_search tool records its structured results into, for
     // citations built from the sources the agent's searches surfaced.
     let tool_sources: KnowledgeResultSink = Arc::new(Mutex::new(Vec::new()));
+    // Slot a host tool writes a client-side directive into this turn. Drained
+    // after the run into `TurnResult::directive` (Null ⇒ absent). Only threaded
+    // into the `ToolProviderContext` when a provider is installed, so with no
+    // host tools it stays `Null` and the `eventual_response` omits `directive`.
+    let directive_sink = Arc::new(Mutex::new(serde_json::Value::Null));
 
     // 1. Load prior turns for memory BEFORE persisting the new inbound message,
     //    so prior_messages is exactly the history-up-to-now.
@@ -488,12 +537,26 @@ pub async fn run_streaming_turn(
     // that emits no trailer costs nothing and yields empty suggestions.
     sections.push(crate::suggestions::SUGGESTED_REPLIES_PROMPT_SECTION.to_string());
     let resolved_prompt = sections.join("\n\n");
-    let config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
+    let mut config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior)
         // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
         .with_model_ceiling(model_max_output);
+    // Multimodal turn: attach the turn's images to the engine's user message as
+    // OpenAI `image_url` content parts. Empty (the default) leaves the turn
+    // text-only — byte-for-byte unchanged.
+    if !images.is_empty() {
+        config = config.with_user_images(
+            images
+                .iter()
+                .map(|img| smooth_operator_core::conversation::ImageContent {
+                    url: img.url.clone(),
+                    detail: img.detail.clone(),
+                })
+                .collect(),
+        );
+    }
 
     let mut tools = ToolRegistry::new();
     // Build the knowledge_search tool over the SAME ACL-filtered handle, with the
@@ -560,8 +623,13 @@ pub async fn run_streaming_turn(
         // Thread the per-turn handles the runner already has — the conversation
         // this turn runs in and the resolved per-org gateway key — so a host's
         // conversation-persisting / retrieval tools aren't degraded to no-ops.
-        let mut ctx =
-            ToolProviderContext::new(org_id, access.clone()).with_conversation_id(conversation_id);
+        let mut ctx = ToolProviderContext::new(org_id, access.clone())
+            .with_conversation_id(conversation_id)
+            // Directive-over-SEP: give host tools the slot to write a client-side
+            // directive; drained after the turn onto `eventual_response.directive`.
+            .with_directive_sink(Arc::clone(&directive_sink))
+            // Multimodal: let a host tool see the turn's image attachments.
+            .with_images(images.clone());
         if let Some(key) = gateway_key {
             ctx = ctx.with_gateway_key(key);
         }
@@ -686,6 +754,42 @@ pub async fn run_streaming_turn(
     let request_id_owned = request_id.to_string();
     let sink_clone = sink.clone();
 
+    // First-answer-token guard for the optional preamble: the translator flips it
+    // on the first `TokenDelta` so a slow preamble never pops in AFTER the real
+    // answer has already begun streaming. Pearl th-9a5794.
+    let answer_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let answer_started_translator = Arc::clone(&answer_started);
+
+    // Fire the fast-model preamble in PARALLEL with the agent loop (no-op unless
+    // `SMOOTH_AGENT_PREAMBLE_MODEL` is set → `preamble_llm` is `Some`). Best-effort:
+    // any error/slowness is swallowed on its own task, and the guard drops it if the
+    // real answer already started — so it can never block or corrupt the turn.
+    // Pearl th-9a5794.
+    if let Some(pre_cfg) = preamble_llm {
+        let sink_preamble = sink.clone();
+        let request_id_preamble = request_id.to_string();
+        let user_preamble = user_message.to_string();
+        let answer_started_preamble = Arc::clone(&answer_started);
+        tokio::spawn(async move {
+            let client = LlmClient::new(pre_cfg);
+            let sys = EngineMessage::system(PREAMBLE_SYSTEM_PROMPT);
+            let user = EngineMessage::user(user_preamble);
+            match client.chat(&[&sys, &user], &[]).await {
+                Ok(resp) => {
+                    let text = resp.content.trim();
+                    if !text.is_empty()
+                        && !answer_started_preamble.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let _ = sink_preamble
+                            .send(crate::protocol::stream_preamble(&request_id_preamble, text));
+                    }
+                }
+                // Best-effort: a failed/slow preamble must never surface or block.
+                Err(e) => tracing::debug!(error = %e, "preamble generation failed (ignored)"),
+            }
+        });
+    }
+
     // Spawn the event translator so we forward tokens to the client in real
     // time while the agent loop runs concurrently.
     let translator = tokio::spawn(async move {
@@ -728,6 +832,9 @@ pub async fn run_streaming_turn(
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::TokenDelta { content } => {
+                    // Mark the answer as started so a still-in-flight preamble is
+                    // dropped rather than popping in after the reply. Pearl th-9a5794.
+                    answer_started_translator.store(true, std::sync::atomic::Ordering::Relaxed);
                     streamed_reply.push_str(&content);
                     let safe = suppressor.push(&content);
                     if !safe.is_empty() {
@@ -927,7 +1034,26 @@ pub async fn run_streaming_turn(
         _ if !streamed_reply.trim().is_empty() => streamed_reply.as_str(),
         _ => streamed_reasoning.as_str(),
     };
-    let (reply, suggested_next_actions) = crate::suggestions::extract_suggested_replies(final_text);
+    let (reply, mut suggested_next_actions) =
+        crate::suggestions::extract_suggested_replies(final_text);
+
+    // Deterministic workflow chips (th-d57a1d): when the agent is on a workflow
+    // step that declares `suggestedReplies`, those canonical scale answers
+    // OVERRIDE any model-invented chips. This makes chips fire on every such
+    // step (reliable, not model-dependent) AND — crucially — a tapped chip is the
+    // clean input the judge reliably advances on, so the assessment stops
+    // stalling on terse free-text. Free-form steps declare none → model behavior
+    // is unchanged. Uses THIS turn's current step (before the judge advances),
+    // since the reply is pursuing that step's question.
+    if let Some(wt) = workflow.as_ref() {
+        if let Some(step) = resolve_current_step(&wt.workflow, wt.current_step_id.as_deref()) {
+            if let Some(chips) = step.suggested_replies.as_ref() {
+                if !chips.is_empty() {
+                    suggested_next_actions = chips.clone();
+                }
+            }
+        }
+    }
 
     // 5. Persist the outbound reply and capture its id for eventual_response.
     let message_id = if reply.is_empty() {
@@ -953,6 +1079,21 @@ pub async fn run_streaming_turn(
         Err(arc) => arc.lock().unwrap_or_else(|p| p.into_inner()).clone(),
     };
     let citations = collect_citations(&auto_sources, &tool_sources);
+
+    // Drain the directive sink (mirrors the citation drain above). A host tool
+    // that ran this turn may have written a client-side directive; `Null` ⇒ none
+    // was written, so `eventual_response` omits `directive` (back-compat).
+    let directive = match Arc::try_unwrap(directive_sink) {
+        Ok(mutex) => mutex
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        Err(arc) => arc.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+    };
+    let directive = if directive.is_null() {
+        None
+    } else {
+        Some(directive)
+    };
 
     // 6. Conversation-workflow advancement (SMOODEV-590 parity). When the agent
     //    has a workflow, ask the cheap judge whether THIS turn satisfied the
@@ -981,6 +1122,7 @@ pub async fn run_streaming_turn(
         usage,
         next_step_id,
         suggested_next_actions,
+        directive,
     })
 }
 

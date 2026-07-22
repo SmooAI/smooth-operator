@@ -12,7 +12,7 @@
  * `runStream` mapped event-by-event onto protocol events.
  */
 import { approve, deny, SmoothAgent } from '@smooai/smooth-operator-core';
-import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool } from '@smooai/smooth-operator-core';
+import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool, ToolHook } from '@smooai/smooth-operator-core';
 
 import type { ConfirmationRegistry } from './confirmation.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
@@ -66,6 +66,90 @@ export const DEFAULT_SYSTEM_PROMPT =
 /** A sink the runner pushes outbound protocol frames into (single-writer downstream). */
 export type Sink = (frame: Frame) => void;
 
+/** `max_tokens` for the fast-model preamble — one short sentence. Pearl th-9a5794. */
+export const PREAMBLE_MAX_TOKENS = 64;
+
+/**
+ * System prompt for the fast-model preamble (see `SMOOTH_AGENT_PREAMBLE_MODEL`).
+ * One short present-tense sentence describing intent — no answer (it's generated
+ * WITHOUT the tool result), no greeting, no promises. Byte-for-byte the Rust
+ * reference server's `PREAMBLE_SYSTEM_PROMPT`.
+ */
+export const PREAMBLE_SYSTEM_PROMPT =
+    'You are the assistant\'s voice while it works. '
+    + 'In ONE short present-tense sentence (max ~12 words), tell the user what you\'re about to do to help with their message. '
+    + 'Do NOT answer the question, do NOT greet, do NOT promise a specific result or outcome. '
+    + 'Example: "Let me pull up your recent conversations." '
+    + 'Reply with only that sentence — no quotes, no preamble, no markdown.';
+
+/**
+ * The fast preamble model from `SMOOTH_AGENT_PREAMBLE_MODEL`, or `undefined` when
+ * unset/blank — in which case the preamble is OFF: no extra LLM call, no extra
+ * event, behaviour byte-for-byte unchanged. Mirrors the Rust runner's env read.
+ */
+export function preambleModelFromEnv(): string | undefined {
+    const model = process.env.SMOOTH_AGENT_PREAMBLE_MODEL?.trim();
+    return model ? model : undefined;
+}
+
+/**
+ * A one-shot mutable flag flipped on the FIRST real answer token, so a slow preamble
+ * is dropped rather than popping in AFTER the reply has started streaming.
+ */
+export interface AnswerStartedFlag {
+    started: boolean;
+}
+
+/**
+ * Generate + emit the ephemeral preamble on the SAME gateway/key as the turn (only the
+ * model id and token cap differ), from the user's message alone — no tool results, no
+ * history. Runs concurrently with the agent loop and never gates it.
+ *
+ * Best-effort by construction: every failure is swallowed at debug, and the emit is
+ * skipped entirely once `answerStarted.started` flips. Exported so the race + failure
+ * paths are testable deterministically, without sleeping.
+ */
+export async function runPreamble(
+    chatClient: ChatClientLike,
+    model: string,
+    requestId: string,
+    userMessage: string,
+    sink: Sink,
+    answerStarted: AnswerStartedFlag,
+): Promise<void> {
+    try {
+        const response = await chatClient.chat.completions.create({
+            model,
+            max_tokens: PREAMBLE_MAX_TOKENS,
+            messages: [
+                { role: 'system', content: PREAMBLE_SYSTEM_PROMPT },
+                { role: 'user', content: userMessage },
+            ],
+        });
+        const text = response.choices[0]?.message.content?.trim() ?? '';
+        // Re-check the guard AFTER the await: the answer may have started while the
+        // fast model was still thinking, and then the preamble is no longer wanted.
+        if (text.length > 0 && !answerStarted.started) sink(protocol.streamPreamble(requestId, text));
+    } catch (err) {
+        // A failed or slow preamble must never surface to the client or fail the turn.
+        console.debug('[turnRunner] preamble generation failed (ignored):', err);
+    }
+}
+
+/**
+ * Thrown out of {@link TurnRunner.run} when the client cancelled the turn (a `cancel`
+ * action, or a disconnect). The caller swallows it: the terminal `cancelled` event was
+ * already emitted by the dispatcher's cancel handler, and nothing further is emitted or
+ * persisted — the partial assistant reply is DISCARDED (the user's message, persisted at
+ * the start of the turn, stays).
+ */
+export class TurnCancelledError extends Error {
+    constructor() {
+        super('turn cancelled by the client');
+        this.name = 'TurnCancelledError';
+    }
+}
+
 export interface TurnRunnerOptions {
     /** The OpenAI-compatible engine client (gateway in prod, {@link MockLlmProvider} in tests). */
     chatClient: ChatClientLike;
@@ -75,6 +159,14 @@ export interface TurnRunnerOptions {
     systemPrompt?: string;
     /** Tools the agent may call during the turn (default none); passed straight to the engine. */
     tools?: Tool[];
+    /**
+     * Consumer-supplied tool-call surveillance {@link ToolHook}s (default none). Passed
+     * straight to the engine's `toolHooks` seam, so each hook's `preCall` runs before a
+     * tool executes (a throw blocks it) and its `postCall` runs after with a mutable
+     * result it may redact. This is where host-supplied surveillance (Narc, redaction)
+     * plugs into every turn's tool registry. Empty ⇒ behaviour unchanged.
+     */
+    toolHooks?: ToolHook[];
     /**
      * Tool-name substrings gated behind write-confirmation HITL (default empty → no
      * gating, behavior unchanged). A tool whose name contains one of these parks the
@@ -112,6 +204,7 @@ export class TurnRunner {
     private readonly knowledge?: Knowledge;
     private readonly systemPrompt: string;
     private readonly tools: Tool[];
+    private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
     private readonly confirmations?: ConfirmationRegistry;
     private readonly sessionId?: string;
@@ -127,6 +220,7 @@ export class TurnRunner {
         this.knowledge = options.knowledge;
         this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
         this.tools = options.tools ?? [];
+        this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations;
         this.sessionId = options.sessionId;
@@ -144,11 +238,23 @@ export class TurnRunner {
     }
 
     /**
-     * Run the turn, streaming events to `sink`. `signal`, when aborted, cooperatively
-     * stops streaming further events (an in-flight turn drains what it has). Returns
-     * the final reply + citations so the caller can emit the terminal event.
+     * Run the turn, streaming events to `sink`.
+     *
+     * - `signal` (the server-wide DRAIN signal), when aborted, cooperatively stops
+     *   streaming further events — the turn still persists its reply and returns, so a
+     *   SIGTERM drain completes the in-flight turn (unchanged behaviour).
+     * - `cancelSignal` (this turn's OWN signal, aborted by a client `cancel` action or a
+     *   disconnect) throws {@link TurnCancelledError} instead: nothing more is emitted
+     *   and the assistant reply is never persisted.
+     *
+     * ponytail: cancellation is COOPERATIVE — JS can't drop an in-flight `await` the way
+     * Rust drops a future, and neither `@smooai/smooth-operator-core` nor the `Tool`
+     * interface takes an `AbortSignal`. So a turn parked inside a long tool call stops at
+     * the next stream event rather than instantly; the observable protocol contract
+     * (terminal `cancelled`, no `eventual_response`, no persisted reply) holds either way.
+     * Upgrade path: thread an `AbortSignal` through the engine's `runStream` + `Tool.execute`.
      */
-    async run(conversationId: string, requestId: string, userMessage: string, sink: Sink, signal?: AbortSignal): Promise<TurnResult> {
+    async run(conversationId: string, requestId: string, userMessage: string, sink: Sink, signal?: AbortSignal, cancelSignal?: AbortSignal): Promise<TurnResult> {
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust
         //    auto_sources / C# citation build. The engine's Knowledge.query is the
         //    same retriever the agent injects from, so the citations match the
@@ -179,6 +285,9 @@ export class TurnRunner {
         };
         if (this.knowledge) agentOptions.knowledge = this.knowledge;
         if (this.tools.length > 0) agentOptions.tools = this.tools;
+        // Thread consumer-supplied surveillance hooks into the engine's per-turn tool
+        // registry. Empty ⇒ unset ⇒ behaviour unchanged.
+        if (this.toolHooks.length > 0) agentOptions.toolHooks = this.toolHooks;
 
         // Clamp max_tokens to the resolved model's output ceiling (best-effort; a
         // missing/unknown ceiling ⇒ unclamped). Reuses the cached /model/info fetch.
@@ -234,13 +343,29 @@ export class TurnRunner {
         //    call / tool result (the TS parity of the Rust runner translating
         //    ToolCallStart/Complete and the C# FunctionCall/FunctionResult mapping).
         let reply = '';
+
+        // Optional fast-model preamble, fired in PARALLEL with the agent loop. Off unless
+        // `SMOOTH_AGENT_PREAMBLE_MODEL` is set → no extra call, no extra event. Floating by
+        // design (it must never delay or gate the real turn) but self-contained: `runPreamble`
+        // swallows its own failures, so there is no unhandled rejection to leak.
+        // Pearl th-9a5794.
+        const answerStarted: AnswerStartedFlag = { started: false };
+        const preambleModel = preambleModelFromEnv();
+        if (preambleModel) void runPreamble(this.chatClient, preambleModel, requestId, userMessage, sink, answerStarted);
+
         try {
             for await (const event of agent.runStream(userMessage, history)) {
+                // Cancelled: bail BEFORE emitting this event, so nothing follows the
+                // terminal `cancelled` the dispatcher already sent.
+                if (cancelSignal?.aborted) throw new TurnCancelledError();
                 if (signal?.aborted) break;
                 // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from
                 // the gate AFTER `write_confirmation_required`, so the wire order matches
                 // the reference (Rust) server. Non-gated tools emit their chunk inline.
                 if (event.type === 'tool_call' && this.isGated(event.name)) continue;
+                // Mark the answer as started BEFORE emitting, so a preamble that resolves
+                // in this same tick is dropped rather than landing after the reply.
+                if (event.type === 'text') answerStarted.started = true;
                 this.emit(requestId, event, sink);
                 if (event.type === 'text') reply += event.text;
             }
@@ -250,6 +375,10 @@ export class TurnRunner {
             // at turn end). No-op when HITL is off.
             this.confirmations?.clear(confirmSession);
         }
+
+        // A cancel that landed while the stream was blocked (e.g. inside a tool call)
+        // is observed here: DISCARD the partial reply — never persist it, never return.
+        if (cancelSignal?.aborted) throw new TurnCancelledError();
 
         // 5. Persist the outbound reply.
         const outbound = await this.store.appendMessage(conversationId, 'outbound', reply);

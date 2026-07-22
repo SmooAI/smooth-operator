@@ -116,6 +116,14 @@ pub struct Principal {
     /// Optional human-readable name (the JWT `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The principal's email (the JWT `email` claim), when the token carries
+    /// one. This is the **per-user scope key** for conversation reads
+    /// (`list_conversations`, resume, `get_conversation_messages`): it comes
+    /// from the *verified* token and is never read from client-supplied frame
+    /// fields, which a caller can set to anyone's address. Absent ⇒ the
+    /// connection carries no user identity and conversation reads fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     /// The groups the principal belongs to (the JWT `groups` claim). These are
     /// the entitlements the document-level ACL layer matches against: a
     /// document scoped to group `github:owner/repo` is readable only by a
@@ -139,8 +147,18 @@ impl Principal {
             org_id: org_id.into(),
             role,
             display_name,
+            email: None,
             groups: Vec::new(),
         }
+    }
+
+    /// Attach the principal's email (builder) — the per-user conversation scope
+    /// key. Blank/whitespace-only input is treated as absent (fail closed).
+    #[must_use]
+    pub fn with_email(mut self, email: impl Into<String>) -> Self {
+        let email = email.into();
+        self.email = (!email.trim().is_empty()).then_some(email);
+        self
     }
 
     /// Attach group memberships to this principal (builder). The groups flow
@@ -239,6 +257,24 @@ pub trait AuthVerifier: Send + Sync {
     fn mode(&self) -> &'static str;
 }
 
+/// Whether an [`AuthVerifier::mode`] denotes a deployment flavor with **no
+/// per-user identity concept** — local/dev single-tenant, where every connection
+/// is the same human:
+///
+/// - `none` — [`NoAuthVerifier`], `AUTH_MODE=none` dev,
+/// - `disabled` — [`AdminDisabledVerifier`], nothing configured (`/ws` still serves),
+/// - `local-token` — [`LocalTokenVerifier`], the single-user daemon / `LocalServer`.
+///
+/// These are the **only** flavors where conversation reads run unscoped. Every
+/// other mode (`jwt` / `jwks` / `smoo` / `trusted`) is multi-user, so reads are
+/// scoped to the principal's [`email`](Principal::email) and **fail closed**
+/// when there isn't one. An unknown mode is treated as multi-user — a new
+/// verifier fails closed rather than silently unscoped.
+#[must_use]
+pub fn is_single_user_mode(mode: &str) -> bool {
+    matches!(mode, "none" | "disabled" | "local-token")
+}
+
 /// The JWT claim shape both [`JwtVerifier`] and [`SmooIdentityVerifier`] decode.
 /// `org` is the canonical org claim with `org_id` accepted as an alias (SST
 /// OpenAuth and Smoo both emit one or the other).
@@ -253,6 +289,10 @@ struct Claims {
     role: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// The principal's email — the per-user conversation scope key. Optional;
+    /// absent ⇒ conversation reads fail closed (see [`Principal::email`]).
+    #[serde(default)]
+    email: Option<String>,
     /// Group memberships (entitlements) — the document-level ACL layer matches
     /// these against a document's group allow-list. Optional; absent ⇒ no group
     /// entitlements (the principal sees only org-public + user-scoped docs).
@@ -281,6 +321,7 @@ impl Claims {
             org_id,
             role,
             display_name: self.name,
+            email: self.email.filter(|e| !e.trim().is_empty()),
             groups: self.groups,
         })
     }
@@ -1602,6 +1643,67 @@ fabZgkSUBnZ7xCln6zeeWQ==\n\
         assert_eq!(p.org_id, "org-abc");
         assert_eq!(p.role, Role::Curator);
         assert_eq!(p.display_name.as_deref(), Some("Ada Lovelace"));
+    }
+
+    // ---- per-user conversation scope (SECURITY, pearl th-b2c60b) ----------
+
+    #[test]
+    fn jwt_verifier_extracts_the_email_claim() {
+        // The `email` claim is the per-user conversation scope key — it must
+        // come from the verified token, never from a client-supplied field.
+        let verifier = JwtVerifier::hs256(SECRET, None, None);
+        let token = sign(json!({
+            "sub": "user-123",
+            "org": "org-abc",
+            "role": "basic",
+            "email": "ada@example.com",
+            "exp": future_exp(),
+        }));
+        let p = verifier.verify(&token).expect("verify");
+        assert_eq!(p.email.as_deref(), Some("ada@example.com"));
+    }
+
+    #[test]
+    fn a_token_without_a_usable_email_yields_no_scope_key() {
+        // Absent OR blank ⇒ `None`, so the caller fails closed rather than
+        // scoping to an empty-string "user" that could match participant rows
+        // carrying an empty email.
+        let verifier = JwtVerifier::hs256(SECRET, None, None);
+        for claim in [json!(null), json!(""), json!("   ")] {
+            let token = sign(json!({
+                "sub": "user-123",
+                "org": "org-abc",
+                "role": "basic",
+                "email": claim,
+                "exp": future_exp(),
+            }));
+            let p = verifier.verify(&token).expect("verify");
+            assert_eq!(p.email, None, "blank/absent email must not become a scope");
+        }
+    }
+
+    #[test]
+    fn only_the_identity_less_flavors_are_single_user() {
+        // These three have no per-user identity concept, so conversation reads
+        // stay unscoped (local daemon / dev). Everything else — including an
+        // unknown future mode — is multi-user and must be scoped.
+        for mode in ["none", "disabled", "local-token"] {
+            assert!(is_single_user_mode(mode), "{mode} should be single-user");
+        }
+        for mode in ["jwt", "jwks", "smoo", "trusted", "some-future-mode", ""] {
+            assert!(
+                !is_single_user_mode(mode),
+                "{mode} must be treated as multi-user (fail closed)"
+            );
+        }
+    }
+
+    #[test]
+    fn with_email_treats_blank_as_absent() {
+        let p = Principal::new("u", "o", Role::Basic, None).with_email("   ");
+        assert_eq!(p.email, None);
+        let p = Principal::new("u", "o", Role::Basic, None).with_email("a@b.com");
+        assert_eq!(p.email.as_deref(), Some("a@b.com"));
     }
 
     #[test]

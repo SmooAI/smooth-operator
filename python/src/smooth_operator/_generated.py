@@ -50,6 +50,7 @@ class Action(StrEnum):
     get_conversation_messages = 'get_conversation_messages'
     confirm_tool_action = 'confirm_tool_action'
     verify_otp = 'verify_otp'
+    submit_interaction = 'submit_interaction'
     ping = 'ping'
 
 
@@ -79,6 +80,8 @@ class Type(StrEnum):
     otp_sent = 'otp_sent'
     otp_verified = 'otp_verified'
     otp_invalid = 'otp_invalid'
+    interaction_required = 'interaction_required'
+    interaction_invalid = 'interaction_invalid'
     error = 'error'
     pong = 'pong'
 
@@ -123,6 +126,25 @@ class EventEnvelope(BaseModel):
     timestamp: int | None = None
     """
     Unix epoch milliseconds. Present on `pong` events and optionally on others.
+    """
+
+
+class CancelRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    action: Literal['cancel']
+    """
+    Action discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    The requestId of the in-flight `send_message` turn to cancel. Echoed back on the `cancelled` event so the client correlates the reset.
+    """
+    session_id: Annotated[str | None, Field(alias='sessionId')] = None
+    """
+    Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
     """
 
 
@@ -204,6 +226,10 @@ class CreateConversationSessionRequest(BaseModel):
     """
     Browser fingerprint string (e.g. from ThumbmarkJS) used for anonymous user correlation across sessions.
     """
+    supports: list[str] | None = None
+    """
+    Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
+    """
     metadata: dict[str, Any] | None = None
     """
     Arbitrary key/value metadata to attach to the session.
@@ -266,9 +292,11 @@ class GetMessagesRequest(BaseModel):
     """
     Maximum number of messages to return per page. Must be 1–100; defaults to 50.
     """
-    before: AwareDatetime | None = None
+    cursor: str | None = None
     """
-    ISO 8601 cursor: return only messages created strictly before this timestamp. Omit to start from the most recent message.
+    Opaque pagination cursor from a prior response's `nextCursor`. Returns only messages older than the one the cursor names. Treat it as opaque — its encoding is storage-defined (a message id today) and may change. Omit to start from the most recent message.
+
+    Deliberately NOT a timestamp: two messages can share a timestamp at any precision the wire format keeps, so a `created_at < cursor` filter either drops or repeats the messages that collide. An id cursor identifies exactly one message and cannot.
     """
 
 
@@ -429,6 +457,27 @@ class PongResponse(BaseModel):
     """
 
 
+class Detail(StrEnum):
+    low = 'low'
+    high = 'high'
+    auto = 'auto'
+
+
+class Image(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    url: str
+    """
+    A `data:image/...;base64,...` URL or a remote `https` image URL. Emitted to the model as an OpenAI `image_url` content part.
+    """
+    detail: Detail | None = None
+    """
+    Optional OpenAI vision detail hint. Omitted when absent.
+    """
+
+
 class SendMessageRequest(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -453,6 +502,14 @@ class SendMessageRequest(BaseModel):
     stream: bool | None = True
     """
     Whether to receive incremental `stream_chunk` and `stream_token` events. Defaults to `true`. Set to `false` to receive only the final `eventual_response`.
+    """
+    model: str | None = None
+    """
+    Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model.
+    """
+    images: list[Image] | None = None
+    """
+    Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
     """
 
 
@@ -499,6 +556,45 @@ class GeneralAgentResponse(BaseModel):
     """
 
 
+class SubmitInteractionRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    action: Literal['submit_interaction']
+    """
+    Action discriminator.
+    """
+    request_id: Annotated[str, Field(alias='requestId')]
+    """
+    Must match the `requestId` from the `interaction_required` event being responded to.
+    """
+    session_id: Annotated[UUID, Field(alias='sessionId')]
+    """
+    Session ID of the parked session.
+    """
+    interaction_id: Annotated[str, Field(alias='interactionId')]
+    """
+    Must match the `interactionId` from the `interaction_required` event, so a stale submit can never resolve a newer park.
+    """
+    kind: str | None = None
+    """
+    Optional interaction kind, for cross-checking; the server already knows the parked interaction's kind. When present and mismatched, the submit is rejected.
+    """
+    values: dict[str, Any] | None = None
+    """
+    Kind-specific submitted values. Required unless `declined` is true. Shape per `interactions/<kind>.schema.json#/$defs/Values` (e.g. identity_intake's `{ name?, email?, phone? }`). Validated server-side by the kind's validator.
+    """
+    declined: bool | None = None
+    """
+    True when the visitor refused the interaction. The turn resumes with a declined payload so the agent can proceed gracefully. When true, `values` is ignored.
+    """
+
+
+class SubmitInteractionResponse(ConfirmToolActionResponse):
+    pass
+
+
 class VerifyOtpRequest(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -524,6 +620,48 @@ class VerifyOtpRequest(BaseModel):
 
 class VerifyOtpResponse(ConfirmToolActionResponse):
     pass
+
+
+class Data(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Echoes the cancelled turn's requestId.
+    """
+    status: Literal[499]
+    """
+    Terminal cancellation status.
+    """
+
+
+class Cancelled(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    type: Literal['cancelled']
+    """
+    Event type discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Echoes the `requestId` of the cancelled `send_message` turn (falls back to the `cancel` frame's own requestId). Absent only if neither carried one.
+    """
+    status: Literal[499]
+    """
+    Terminal cancellation status ("client closed request"). Distinct from 200 (eventual_response) and from error codes.
+    """
+    timestamp: int | None = None
+    """
+    Server-side Unix epoch milliseconds when the event was emitted.
+    """
+    data: Data | None = None
+    """
+    Cancellation payload (mirrors `requestId` + `status` for clients that only inspect `data`).
+    """
 
 
 class Error1(BaseModel):
@@ -556,7 +694,7 @@ class Error2(BaseModel):
     """
 
 
-class Data(BaseModel):
+class Data1(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -592,13 +730,32 @@ class Error(BaseModel):
     """
     Top-level error object (duplicate of `data.error`; kept for clients that pattern-match on the envelope-level `error` field).
     """
-    data: Data
+    data: Data1
     """
     Full error payload.
     """
     timestamp: int | None = None
     """
     Unix epoch milliseconds when the event was emitted.
+    """
+
+
+class Usage(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    cost_usd: Annotated[float | None, Field(alias='costUsd')] = None
+    """
+    Accumulated cost in USD across every LLM call in this turn (gateway-priced).
+    """
+    prompt_tokens: Annotated[int | None, Field(alias='promptTokens')] = None
+    """
+    Accumulated prompt (input) tokens across every LLM call in this turn.
+    """
+    completion_tokens: Annotated[int | None, Field(alias='completionTokens')] = None
+    """
+    Accumulated completion (output) tokens across every LLM call in this turn.
     """
 
 
@@ -629,7 +786,7 @@ class Citation(BaseModel):
     """
 
 
-class Data2(BaseModel):
+class Data3(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -650,13 +807,21 @@ class Data2(BaseModel):
     """
     Human-readable escalation reason when `needsEscalation` is true.
     """
+    usage: Usage | None = None
+    """
+    Per-turn token accounting and cost, captured from the engine's terminal completion event. Lets a client accumulate live session cost. Optional and back-compatible: absent when the engine reported no usage for the turn (e.g. an offline/mock turn).
+    """
     citations: list[Citation] | None = None
     """
     The sources that grounded this answer, when any were retrieved. Collected by the runtime from the documents that actually grounded the turn — the auto-injected `[Relevant knowledge]` context and any `knowledge_search` tool results — deduplicated by source id and capped. Optional and back-compatible: absent when the turn used no knowledge sources. Each item is a `Citation` (see `domain/citation.schema.json`).
     """
+    directive: dict[str, Any] | None = None
+    """
+    An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+    """
 
 
-class Data1(BaseModel):
+class Data2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -669,7 +834,7 @@ class Data1(BaseModel):
     """
     HTTP-like status. Typically 200.
     """
-    data: Data2
+    data: Data3
     """
     The final agent output.
     """
@@ -692,7 +857,7 @@ class EventualResponse(BaseModel):
     """
     HTTP-like status. Always 200 for a successful eventual response.
     """
-    data: Data1
+    data: Data2
     """
     The terminal response payload.
     """
@@ -733,7 +898,144 @@ class ImmediateResponse(BaseModel):
     """
 
 
-class Data3(BaseModel):
+class Error3(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    field: str
+    """
+    The kind-specific field that failed validation.
+    """
+    message: str
+    """
+    Human-readable validation message for this field.
+    """
+
+
+class Data5(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    interaction_id: Annotated[str, Field(alias='interactionId')]
+    """
+    The interaction instance the rejected submit targeted.
+    """
+    kind: str
+    """
+    The interaction kind (e.g. `identity_intake`).
+    """
+    errors: Annotated[list[Error3], Field(min_length=1)]
+    """
+    One entry per failed field. `field` is a kind-specific field key (identity_intake: `name` | `email` | `phone`).
+    """
+    message: str
+    """
+    Human-readable summary suitable for a card-level error line.
+    """
+
+
+class Data4(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    request_id: Annotated[str, Field(alias='requestId')]
+    """
+    The request ID this interaction belongs to.
+    """
+    data: Data5
+    """
+    Per-field validation errors.
+    """
+
+
+class InteractionInvalid(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    type: Literal['interaction_invalid']
+    """
+    Event type discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Echoes the `requestId` of the parked turn (same correlation as the `interaction_required` event).
+    """
+    data: Data4
+    """
+    Validation failure details.
+    """
+    timestamp: int | None = None
+    """
+    Unix epoch milliseconds when the event was emitted.
+    """
+
+
+class Data7(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    interaction_id: Annotated[str, Field(alias='interactionId')]
+    """
+    Server-generated ID for this specific interaction instance. Must be echoed on the `submit_interaction` reply so a stale submit can never resolve a newer park.
+    """
+    kind: str
+    """
+    The interaction kind (e.g. `identity_intake`). Selects the client's card component and the server's validator. The kind catalog lives in `spec/interactions/`.
+    """
+    spec: dict[str, Any]
+    """
+    Kind-specific render spec. Shape per `interactions/<kind>.schema.json#/$defs/Spec` (e.g. identity_intake's `{ fields: [...] }`).
+    """
+    reason: str
+    """
+    Human-readable reason the agent raised this interaction, suitable for the card header (e.g. `to send you the quote`).
+    """
+
+
+class Data6(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    request_id: Annotated[str, Field(alias='requestId')]
+    """
+    The request ID this interaction belongs to.
+    """
+    data: Data7
+    """
+    The interaction the client should render.
+    """
+
+
+class InteractionRequired(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    type: Literal['interaction_required']
+    """
+    Event type discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Echoes the `requestId` from the originating `send_message` action. Must be included in the `submit_interaction` reply.
+    """
+    data: Data6
+    """
+    Interaction prompt details.
+    """
+    timestamp: int | None = None
+    """
+    Unix epoch milliseconds when the event was emitted.
+    """
+
+
+class Data8(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -757,7 +1059,7 @@ class Keepalive(BaseModel):
     """
     The `requestId` of the in-flight request this keepalive is associated with.
     """
-    data: Data3
+    data: Data8
     """
     Keepalive payload.
     """
@@ -767,19 +1069,19 @@ class Keepalive(BaseModel):
     """
 
 
-class Error3(StrEnum):
+class Error4(StrEnum):
     invalid_code = 'INVALID_CODE'
     max_attempts = 'MAX_ATTEMPTS'
     not_found = 'NOT_FOUND'
     expired = 'EXPIRED'
 
 
-class Data5(BaseModel):
+class Data10(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
     )
-    error: Error3 | None = None
+    error: Error4 | None = None
     """
     Machine-readable failure reason. Absent if the server cannot determine a specific cause.
     """
@@ -793,7 +1095,7 @@ class Data5(BaseModel):
     """
 
 
-class Data4(BaseModel):
+class Data9(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -802,7 +1104,7 @@ class Data4(BaseModel):
     """
     The request ID this verification belongs to.
     """
-    data: Data5
+    data: Data10
     """
     OTP invalid payload.
     """
@@ -821,7 +1123,7 @@ class OtpInvalid(BaseModel):
     """
     Echoes the `requestId` from the originating `verify_otp` action.
     """
-    data: Data4
+    data: Data9
     """
     Failure details.
     """
@@ -836,7 +1138,7 @@ class Channel(StrEnum):
     sms = 'sms'
 
 
-class Data7(BaseModel):
+class Data12(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -851,7 +1153,7 @@ class Data7(BaseModel):
     """
 
 
-class Data6(BaseModel):
+class Data11(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -860,7 +1162,7 @@ class Data6(BaseModel):
     """
     The request ID this OTP delivery belongs to.
     """
-    data: Data7
+    data: Data12
     """
     Delivery details.
     """
@@ -879,7 +1181,7 @@ class OtpSent(BaseModel):
     """
     Echoes the `requestId` from the originating action.
     """
-    data: Data6
+    data: Data11
     """
     OTP send acknowledgement details.
     """
@@ -889,7 +1191,7 @@ class OtpSent(BaseModel):
     """
 
 
-class Data9(BaseModel):
+class Data14(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -914,7 +1216,7 @@ class Data9(BaseModel):
     """
 
 
-class Data8(BaseModel):
+class Data13(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -923,7 +1225,7 @@ class Data8(BaseModel):
     """
     The request ID this verification belongs to.
     """
-    data: Data9
+    data: Data14
     """
     Details about the authentication requirement.
     """
@@ -942,7 +1244,7 @@ class OtpVerificationRequired(BaseModel):
     """
     Echoes the `requestId` from the originating `send_message` action. Must be included in the `verify_otp` reply.
     """
-    data: Data8
+    data: Data13
     """
     Verification prompt details.
     """
@@ -952,7 +1254,7 @@ class OtpVerificationRequired(BaseModel):
     """
 
 
-class Data11(BaseModel):
+class Data16(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -963,7 +1265,7 @@ class Data11(BaseModel):
     """
 
 
-class Data10(BaseModel):
+class Data15(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -972,7 +1274,7 @@ class Data10(BaseModel):
     """
     The request ID this verification belongs to.
     """
-    data: Data11
+    data: Data16
     """
     Success payload.
     """
@@ -991,7 +1293,7 @@ class OtpVerified(BaseModel):
     """
     Echoes the `requestId` from the originating `verify_otp` action.
     """
-    data: Data10
+    data: Data15
     """
     Verification success details.
     """
@@ -1001,7 +1303,7 @@ class OtpVerified(BaseModel):
     """
 
 
-class Data12(BaseModel):
+class Data17(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -1029,7 +1331,7 @@ class Pong(BaseModel):
     """
     Server-side Unix epoch milliseconds when the pong was emitted.
     """
-    data: Data12 | None = None
+    data: Data17 | None = None
     """
     Pong payload (mirrors top-level `timestamp` for clients that only inspect `data`).
     """
@@ -1068,7 +1370,7 @@ class State(BaseModel):
     """
 
 
-class Data13(BaseModel):
+class Data18(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -1108,7 +1410,7 @@ class StreamChunk(BaseModel):
     """
     Name of the workflow node that just completed and produced this chunk.
     """
-    data: Data13
+    data: Data18
     """
     The per-node state snapshot.
     """
@@ -1118,7 +1420,91 @@ class StreamChunk(BaseModel):
     """
 
 
-class Data14(BaseModel):
+class Data19(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    request_id: Annotated[str, Field(alias='requestId')]
+    """
+    The request ID this preamble token belongs to.
+    """
+    token: str
+    """
+    The raw preamble token text.
+    """
+
+
+class StreamPreamble(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    type: Literal['stream_preamble']
+    """
+    Event type discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Echoes the `requestId` from the originating `send_message` action.
+    """
+    token: str | None = None
+    """
+    The raw preamble token text. Also present inside `data.token` for consumers that only inspect `data`.
+    """
+    data: Data19
+    """
+    Preamble token event payload.
+    """
+    timestamp: int | None = None
+    """
+    Unix epoch milliseconds when the event was emitted.
+    """
+
+
+class Data20(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    request_id: Annotated[str, Field(alias='requestId')]
+    """
+    The request ID this reasoning token belongs to.
+    """
+    token: str
+    """
+    The raw reasoning token text.
+    """
+
+
+class StreamReasoning(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    type: Literal['stream_reasoning']
+    """
+    Event type discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Echoes the `requestId` from the originating `send_message` action.
+    """
+    token: str | None = None
+    """
+    The raw reasoning token text. Also present inside `data.token` for consumers that only inspect `data`.
+    """
+    data: Data20
+    """
+    Reasoning token event payload.
+    """
+    timestamp: int | None = None
+    """
+    Unix epoch milliseconds when the event was emitted.
+    """
+
+
+class Data21(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -1150,7 +1536,7 @@ class StreamToken(BaseModel):
     """
     The raw token text. Also present inside `data.token` for consumers that only inspect `data`.
     """
-    data: Data14
+    data: Data21
     """
     Token event payload.
     """
@@ -1160,7 +1546,7 @@ class StreamToken(BaseModel):
     """
 
 
-class Data16(BaseModel):
+class Data23(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -1175,7 +1561,7 @@ class Data16(BaseModel):
     """
 
 
-class Data15(BaseModel):
+class Data22(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
         populate_by_name=True,
@@ -1184,7 +1570,7 @@ class Data15(BaseModel):
     """
     The request ID this confirmation belongs to.
     """
-    data: Data16
+    data: Data23
     """
     Details about the pending write that the user must approve or reject.
     """
@@ -1203,7 +1589,7 @@ class WriteConfirmationRequired(BaseModel):
     """
     Echoes the `requestId` from the originating `send_message` action. Must be included in the `confirm_tool_action` reply.
     """
-    data: Data15
+    data: Data22
     """
     Confirmation prompt details.
     """
@@ -1472,6 +1858,10 @@ class Session(BaseModel):
     """
     The conversation this session is attached to.
     """
+    organization_id: Annotated[UUID, Field(alias='organizationId')]
+    """
+    The organization that owns this session. Mirrors `organizationId` on the conversation, participants, and messages so org-scoping is uniform across every domain type and storage backends can write the session's org directly.
+    """
     agent_id: Annotated[UUID, Field(alias='agentId')]
     """
     The agent handling this session.
@@ -1537,9 +1927,13 @@ class GetMessagesResponse(BaseModel):
     """
     Ordered list of messages (newest-first up to `limit`).
     """
+    next_cursor: Annotated[str | None, Field(alias='nextCursor')] = None
+    """
+    Opaque cursor naming the oldest message in this page. Pass it as the next request's `cursor` to fetch the page before this one. Present (non-null) if and only if `hasMore` is true.
+    """
     has_more: Annotated[bool, Field(alias='hasMore')]
     """
-    True if more messages exist before the oldest message in this page. Use the oldest `createdAt` as the next `before` cursor.
+    True if more messages exist before the oldest message in this page — equivalently, if `nextCursor` is non-null.
     """
 
 
@@ -1563,6 +1957,10 @@ class SendMessageResponse(BaseModel):
     escalation_reason: Annotated[str | None, Field(alias='escalationReason')] = None
     """
     Human-readable reason when `needsEscalation` is true.
+    """
+    directive: dict[str, Any] | None = None
+    """
+    An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Absent when the turn produced no directive. Last-write-wins when multiple were emitted.
     """
 
 

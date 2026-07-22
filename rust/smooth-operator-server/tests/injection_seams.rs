@@ -141,6 +141,7 @@ async fn run_turn_with_key(
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )
@@ -364,6 +365,7 @@ async fn injected_tool_hook_observes_tool_calls() {
             conversation_id: "conv-hook",
             request_id: "req-hook",
             user_message: "look me up",
+            images: vec![],
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock)),

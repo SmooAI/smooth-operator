@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * `create-smooth-extension` — scaffold a new SEP (Smooth Extension Protocol)
- * extension. `npm create smooth-extension <name> -- --template <kind>`.
+ * extension. `npm create @smooai/smooth-extension <name> -- --template <kind>`.
  *
  * Deliberately tiny: Node fs + one arg parse + literal template files under
  * `templates/<kind>/` (plus shared files under `templates/_shared/`) with a

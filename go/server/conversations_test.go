@@ -52,11 +52,11 @@ func TestListConversationsFiltersEmpties(t *testing.T) {
 	store := NewInMemorySessionStore()
 
 	// A: empty conversation (created, never messaged) → excluded.
-	if _, err := store.CreateSession(ctx, "agent", "U", "u@example.com"); err != nil {
+	if _, err := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true}); err != nil {
 		t.Fatalf("create A: %v", err)
 	}
 	// B: has messages → included, title from first inbound.
-	b, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	b, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	if _, err := store.AppendMessage(ctx, b.ConversationID, Inbound, "## First user line"); err != nil {
 		t.Fatalf("append B in: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestListConversationsFiltersEmpties(t *testing.T) {
 		t.Fatalf("append B out: %v", err)
 	}
 
-	summaries, err := store.ListConversations(ctx)
+	summaries, err := store.ListConversations(ctx, ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -90,9 +90,9 @@ func TestListConversationsSortedMostRecentFirst(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 
-	older, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	older, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, older.ConversationID, Inbound, "older")
-	newer, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	newer, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, newer.ConversationID, Inbound, "newer")
 	// Touch `older` again so it becomes the most recently active.
 	_, _ = store.AppendMessage(ctx, older.ConversationID, Outbound, "older reply")
@@ -127,7 +127,7 @@ func TestListConversationsRespectsLimit(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	for i := 0; i < 5; i++ {
-		s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+		s, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 		_, _ = store.AppendMessage(ctx, s.ConversationID, Inbound, "msg")
 	}
 
@@ -145,11 +145,11 @@ func TestResumeSessionBindsExistingConversation(t *testing.T) {
 	store := NewInMemorySessionStore()
 
 	// Seed a conversation with history.
-	orig, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	orig, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, orig.ConversationID, Inbound, "prior turn")
 
 	t.Run("known conversationId resumes and preserves history", func(t *testing.T) {
-		resumed, wasResumed, err := store.ResumeSession(ctx, "agent", "U", "u@example.com", orig.ConversationID)
+		resumed, wasResumed, err := store.ResumeSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true}, orig.ConversationID)
 		if err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestResumeSessionBindsExistingConversation(t *testing.T) {
 	})
 
 	t.Run("unknown conversationId falls back to a fresh conversation", func(t *testing.T) {
-		s, wasResumed, _ := store.ResumeSession(ctx, "agent", "U", "u@example.com", "does-not-exist")
+		s, wasResumed, _ := store.ResumeSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true}, "does-not-exist")
 		if wasResumed {
 			t.Fatal("wasResumed = true for an unknown conversation")
 		}
@@ -183,7 +183,7 @@ func TestResumeSessionBindsExistingConversation(t *testing.T) {
 	})
 
 	t.Run("empty conversationId mints fresh (create_conversation_session default)", func(t *testing.T) {
-		s, wasResumed, _ := store.ResumeSession(ctx, "agent", "U", "u@example.com", "")
+		s, wasResumed, _ := store.ResumeSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true}, "")
 		if wasResumed {
 			t.Fatal("wasResumed = true for an empty conversationId")
 		}
@@ -196,7 +196,7 @@ func TestResumeSessionBindsExistingConversation(t *testing.T) {
 func TestCreateSessionResumeEchoesConversationId(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	orig, _ := store.CreateSession(ctx, "agent", "U", "u@example.com")
+	orig, _ := store.CreateSession(ctx, "agent", "U", "u@example.com", ConversationScope{Unscoped: true})
 	_, _ = store.AppendMessage(ctx, orig.ConversationID, Inbound, "hi")
 
 	sink, events := capture()

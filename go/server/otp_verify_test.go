@@ -59,7 +59,7 @@ func dispatchJSON(t *testing.T, d *FrameDispatcher, frame map[string]any, sink E
 // newSession creates a session in the store and returns its id (contact email captured).
 func newSession(t *testing.T, store SessionStore, email string) string {
 	t.Helper()
-	s, err := store.CreateSession(context.Background(), "agent-1", "Alice", email)
+	s, err := store.CreateSession(context.Background(), "agent-1", "Alice", email, ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

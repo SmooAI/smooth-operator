@@ -10,7 +10,7 @@
  * the `?token=` slot), so retrieval for each turn is scoped to it — ACL is enforced
  * on the live chat path, not just at ingest.
  */
-import type { ChatClientLike, Knowledge, Tool } from '@smooai/smooth-operator-core';
+import type { ChatClientLike, Knowledge, Tool, ToolHook } from '@smooai/smooth-operator-core';
 import { randomUUID } from 'node:crypto';
 
 import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
@@ -24,7 +24,7 @@ import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
 import type { Sink } from './turnRunner.js';
-import { DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
+import { DEFAULT_SYSTEM_PROMPT, TurnCancelledError, TurnRunner } from './turnRunner.js';
 
 /**
  * A knowledge provider that yields a retriever SCOPED to a given access context —
@@ -44,6 +44,13 @@ export interface FrameDispatcherOptions {
     systemPrompt?: string;
     /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
     tools?: Tool[];
+    /**
+     * Consumer-supplied tool-call surveillance {@link ToolHook}s (default none). Forwarded
+     * verbatim to every turn's {@link TurnRunner} — unlike {@link tools}, hooks are NOT
+     * subject to the per-agent enabled-tools filter or auth gating: they observe/redact
+     * every tool call. Empty ⇒ behaviour unchanged.
+     */
+    toolHooks?: ToolHook[];
     /**
      * SMOODEV-590 — resolves a session's `agentId` into its per-agent config
      * (instructions, conversationWorkflow, greeting, personality, tool allow-list).
@@ -95,6 +102,7 @@ export class FrameDispatcher {
     private readonly access: AccessContext;
     private readonly systemPrompt?: string;
     private readonly tools: Tool[];
+    private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
     private readonly confirmations: ConfirmationRegistry;
     private readonly agentConfig?: AgentConfigResolver;
@@ -105,6 +113,13 @@ export class FrameDispatcher {
     private readonly modelCeiling?: ModelCeilingResolver;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
+    /**
+     * The connection's SINGLE active agent turn, if one is running. A connection runs at
+     * most one turn at a time: a second `send_message` mid-turn is rejected with
+     * `TURN_IN_PROGRESS` rather than run concurrently (interleaved streams + racing
+     * storage writes). A `cancel` action — or a disconnect — aborts this turn.
+     */
+    private activeTurn: { requestId: string; controller: AbortController; promise: Promise<void> } | undefined;
 
     constructor(options: FrameDispatcherOptions) {
         this.store = options.store;
@@ -113,6 +128,7 @@ export class FrameDispatcher {
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
         this.tools = options.tools ?? [];
+        this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations ?? new ConfirmationRegistry();
         this.agentConfig = options.agentConfig;
@@ -142,6 +158,32 @@ export class FrameDispatcher {
      */
     rejectPendingConfirmations(): void {
         this.confirmations.rejectAll();
+    }
+
+    /**
+     * Abort the connection's in-flight turn, if any, WITHOUT emitting anything. Returns
+     * whether a turn was actually aborted.
+     *
+     * The turn's own {@link AbortController} is fired, so the runner throws
+     * {@link TurnCancelledError} at its next stream event — no further protocol events,
+     * and the partial assistant reply is never persisted. Any confirmation the turn is
+     * parked on is rejected so it unparks and reaches that check. The turn is also
+     * dropped from the drain set: {@link waitForTurns} must not block teardown on a turn
+     * nobody is waiting for.
+     *
+     * Used by the `cancel` action (which then emits the terminal `cancelled` event) and
+     * by the connection loop on a client DISCONNECT (no client remains to receive the
+     * turn's output). Graceful drain deliberately does NOT call this — an in-flight turn
+     * finishes on SIGTERM.
+     */
+    cancelActiveTurn(): boolean {
+        const turn = this.activeTurn;
+        if (!turn) return false;
+        this.activeTurn = undefined;
+        turn.controller.abort();
+        this.confirmations.rejectAll();
+        this.turns.delete(turn.promise);
+        return true;
     }
 
     /**
@@ -180,8 +222,27 @@ export class FrameDispatcher {
                 case 'list_conversations':
                     await this.handleListConversations(frame, requestId, sink);
                     break;
+                case 'get_conversation_messages':
+                    await this.handleGetConversationMessages(frame, requestId, sink);
+                    break;
                 case 'send_message':
+                    // One active turn per connection: reject a second one rather than run
+                    // two concurrently. (`confirm_tool_action` / `verify_otp` are turn
+                    // RESUMES, not new turns, so they're unaffected.)
+                    if (this.activeTurn) {
+                        sink(
+                            protocol.error(
+                                requestId,
+                                'TURN_IN_PROGRESS',
+                                'a turn is already in progress on this connection; cancel it or wait for it to complete',
+                            ),
+                        );
+                        break;
+                    }
                     await this.handleSendMessage(frame, requestId, sink, signal);
+                    break;
+                case 'cancel':
+                    this.handleCancel(requestId, sink);
                     break;
                 case 'confirm_tool_action':
                     this.handleConfirmToolAction(frame, requestId, sink);
@@ -205,16 +266,91 @@ export class FrameDispatcher {
         }
     }
 
+    /**
+     * `cancel` — stop the connection's in-flight turn (the "Stop button").
+     *
+     * Per `spec/actions/cancel.schema.json` the client sends `{action, requestId}`,
+     * reusing the `send_message`'s `requestId` as the correlation key. We abort the
+     * tracked turn and emit the terminal `cancelled` event (status 499) echoing the
+     * CANCELLED TURN's requestId — it replaces the `eventual_response` that turn would
+     * otherwise have sent, so a turn emits exactly one terminal event. A cancel with no
+     * active turn is a silent no-op: nothing is emitted and the connection stays live.
+     */
+    private handleCancel(requestId: string | undefined, sink: Sink): void {
+        const turnRequestId = this.activeTurn?.requestId;
+        // Echo the cancelled turn's requestId, falling back to the cancel frame's own.
+        if (this.cancelActiveTurn()) sink(protocol.cancelled(turnRequestId ?? requestId));
+    }
+
+    /**
+     * The email conversations are scoped to on this connection, or `undefined` for
+     * unscoped. Driven by the connection's AUTHENTICATED PRINCIPAL — never by a frame
+     * field, which the client controls.
+     *
+     * Unscoped is reachable ONLY with auth disabled (single-tenant local/dev). With auth
+     * enabled and no email claim the caller is scoped to a value nothing can own, so the
+     * LIST comes back empty rather than falling back to everyone's data — and, just as
+     * importantly, rather than pooling every anonymous visitor's chats into one bucket
+     * they could all read. Reaching an OWNERLESS conversation still works, but only by
+     * holding its (unguessable) id — see {@link mayRead}.
+     */
+    private scopeEmail(): string | undefined {
+        if (!this.access.authEnabled) return undefined;
+        return this.access.principal.email ?? NO_OWNER_SENTINEL;
+    }
+
+    /**
+     * Whether this connection may read a conversation owned by `ownerEmail`.
+     *
+     * A conversation that HAS an owner is owner-checked; one with NO owner (anonymous,
+     * emailless-authenticated, or legacy) is allowed. Denying the ownerless case instead
+     * locks anonymous and emailless principals out of the sessions they just created —
+     * they can't converse at all on an auth-enabled server, which killed anonymous
+     * public-agent chat (see PRs #308/#309). The reported attack — authenticated A
+     * touching authenticated B's OWNED session — is still closed, and an emailless scope
+     * (the sentinel) still matches no real owner.
+     *
+     * Emails compare case-insensitively; OIDC providers vary on the casing they emit for
+     * the same identity, and .NET/Python already compare this way.
+     *
+     * Callers turn `false` into the SAME `SESSION_NOT_FOUND` they emit for an id that
+     * never existed. A distinct "forbidden" code — or a different message — would be an
+     * existence oracle: an attacker could enumerate other users' conversation ids by
+     * diffing the two responses. Not-yours and not-there must be indistinguishable.
+     */
+    private mayRead(ownerEmail: string | undefined): boolean {
+        const scope = this.scopeEmail();
+        if (scope === undefined) return true; // auth not configured — unscoped
+        if (!ownerEmail) return true; // no owner to enforce
+        return ownerEmail.toLowerCase() === scope.toLowerCase();
+    }
+
     private async handleCreateSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         // Resume: a `conversationId` naming an existing conversation binds the new
         // session to it (reuses id + history); absent/unknown → a fresh conversation.
         // The response echoes `conversationId` either way, so a resuming client sees
         // the same id it passed. Mirrors the Rust reference's resume branch.
-        const conversationId = typeof frame.conversationId === 'string' && frame.conversationId.length > 0 ? frame.conversationId : undefined;
+        const requested = typeof frame.conversationId === 'string' && frame.conversationId.length > 0 ? frame.conversationId : undefined;
+
+        // Someone else's conversation is treated as an id we don't know: we drop it and
+        // mint a fresh conversation, which is byte-for-byte what an unknown id already
+        // does. Erroring here instead would tell the attacker their guessed id was real.
+        let conversationId = requested;
+        if (requested !== undefined && this.scopeEmail() !== undefined) {
+            const conv = await this.store.getConversation(requested);
+            if (!conv || !this.mayRead(conv.userEmail)) conversationId = undefined;
+        }
+
+        // The session's owner is the PRINCIPAL's email, not the frame's `userEmail` —
+        // trusting the frame is the spoofing vector this whole change exists to close.
+        // With auth disabled there's no principal, so the frame value stands (unscoped
+        // single-tenant behavior, unchanged).
+        const ownerEmail = this.access.authEnabled ? this.access.principal.email : typeof frame.userEmail === 'string' ? frame.userEmail : undefined;
+
         const session = await this.store.createSession(
             typeof frame.agentId === 'string' ? frame.agentId : '',
             typeof frame.userName === 'string' ? frame.userName : undefined,
-            typeof frame.userEmail === 'string' ? frame.userEmail : undefined,
+            ownerEmail,
             conversationId,
         );
         sink(
@@ -232,7 +368,8 @@ export class FrameDispatcher {
     private async handleGetSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        // Not-yours collapses into not-found: same code, same message, same shape.
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -260,7 +397,9 @@ export class FrameDispatcher {
         const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
         const limit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_LIMIT;
 
-        const summaries = await this.store.listConversations();
+        // Scoped to the connection's principal. Applied in the store selection, ahead of
+        // the limit below — filtering after a limit silently yields short/empty pages.
+        const summaries = await this.store.listConversations(this.scopeEmail());
         const conversations = summaries
             .filter((c) => c.messageCount > 0)
             .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
@@ -275,11 +414,76 @@ export class FrameDispatcher {
         sink(protocol.immediateResponse(requestId, 200, 'Conversations', { conversations }));
     }
 
+    /**
+     * `get_conversation_messages` — the conversation-resume substrate. Returns the
+     * session's conversation messages NEWEST-first plus a `hasMore` flag, per
+     * `spec/actions/get-messages.schema.json`. Optional input: `limit` (1..100,
+     * default 50) and `cursor` (an opaque prior-response `nextCursor`, a message id
+     * — returns only messages older than the one it names). The response carries
+     * `nextCursor` = the oldest message in the page, non-null iff `hasMore`.
+     *
+     * The cursor is deliberately NOT a timestamp: two messages can share a
+     * `createdAt` at wire precision, so a `createdAt < cursor` filter drops or
+     * repeats the collision. An id names exactly one message. th-75eda5, th-54d039.
+     */
+    private async handleGetConversationMessages(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
+        if (!sessionId) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "Missing 'sessionId'"));
+            return;
+        }
+        const session = await this.store.getSession(sessionId);
+        // Not-yours collapses into not-found: same code, same message, same shape.
+        if (!session || !this.mayRead(session.userEmail)) {
+            sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
+            return;
+        }
+
+        const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
+        const limit = Math.min(rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
+
+        const cursor = typeof frame.cursor === 'string' && frame.cursor.length > 0 ? frame.cursor : undefined;
+
+        // No cursor: limit+1 rows is enough — the extra row is the `hasMore` probe.
+        // With a cursor we must locate the named message in the log, so read it whole.
+        // ponytail: whole-log read per cursored page; push the cursor into the store
+        // when a conversation gets big enough to care (that breaks `SessionStore` for
+        // downstream implementers, so not until it earns it).
+        const stored = await this.store.listMessages(session.conversationId, cursor === undefined ? limit + 1 : Number.MAX_SAFE_INTEGER);
+
+        // The store returns oldest-first; the contract is newest-first.
+        const newestFirst = stored
+            .map((m) => ({ id: m.id, direction: m.direction, content: { text: m.text }, createdAt: m.createdAt ?? EPOCH_ISO }))
+            .reverse();
+
+        let page = newestFirst;
+        if (cursor !== undefined) {
+            const at = newestFirst.findIndex((m) => m.id === cursor);
+            if (at === -1) {
+                sink(protocol.error(requestId, 'VALIDATION_ERROR', `Unknown 'cursor' '${cursor}'`));
+                return;
+            }
+            page = newestFirst.slice(at + 1);
+        }
+
+        const hasMore = page.length > limit;
+        const messages = hasMore ? page.slice(0, limit) : page;
+        sink(
+            protocol.immediateResponse(requestId, 200, 'ConversationMessages', {
+                messages,
+                nextCursor: hasMore ? (messages[messages.length - 1]?.id ?? null) : null,
+                hasMore,
+            }),
+        );
+    }
+
     private async handleSendMessage(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink, signal?: AbortSignal): Promise<void> {
         const reqId = requestId ?? randomUUID();
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        // Not-yours collapses into not-found — otherwise a caller could post turns into
+        // (and read the streamed replies from) another user's conversation.
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(reqId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -335,6 +539,7 @@ export class FrameDispatcher {
             knowledge: scopedKnowledge,
             systemPrompt: effectiveSystemPrompt,
             tools: effectiveTools,
+            toolHooks: this.toolHooks,
             confirmTools: this.confirmTools,
             confirmations: this.confirmations,
             sessionId,
@@ -355,9 +560,14 @@ export class FrameDispatcher {
         // `eventual_response` is emitted from the task on completion. The connection
         // loop awaits all tracked turns on teardown ({@link waitForTurns}) so an
         // in-flight turn finishes before the writer stops (graceful drain).
+        // This turn's own cancel handle — fired by a `cancel` action or a disconnect (NOT
+        // by the server-wide drain `signal`, which lets an in-flight turn finish).
+        const controller = new AbortController();
+        let settled = false;
+
         const turn = (async (): Promise<void> => {
             try {
-                const result = await runner.run(session.conversationId, reqId, message, sink, signal);
+                const result = await runner.run(session.conversationId, reqId, message, sink, signal, controller.signal);
                 // SMOODEV-590 — persist the workflow pointer the judge advanced to, so the
                 // next turn on this conversation resumes on the right step. No-op for
                 // freeform agents (nextStepId undefined) or a store without setCurrentStep.
@@ -380,11 +590,18 @@ export class FrameDispatcher {
                 }
                 sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
             } catch (err) {
+                // Cancelled: the terminal `cancelled` event was already emitted by the
+                // cancel handler (or the client is gone) — emit nothing more.
+                if (err instanceof TurnCancelledError) return;
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean
                 // error and keeps the connection alive (detail stays server-side).
                 console.error('[frameDispatcher] turn failed:', err);
                 sink(protocol.error(reqId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
             } finally {
+                settled = true;
+                // Only clear the slot if it's still OURS: a cancel already took it (and a
+                // later `send_message` may have installed its own).
+                if (this.activeTurn?.controller === controller) this.activeTurn = undefined;
                 // SEP — kill this turn's extension subprocesses and drop any `ui/confirm`
                 // responder it left parked (mirrors the Rust `(ext.clear)` + host drop).
                 if (extHost) {
@@ -393,6 +610,9 @@ export class FrameDispatcher {
                 }
             }
         })();
+        // Track it as the connection's single active turn — unless it already finished
+        // synchronously, in which case there is nothing to cancel.
+        if (!settled) this.activeTurn = { requestId: reqId, controller, promise: turn };
         this.turns.add(turn);
         void turn.finally(() => this.turns.delete(turn));
     }
@@ -486,9 +706,11 @@ export class FrameDispatcher {
             return;
         }
 
-        // The session must exist (a code can't verify a session we don't track).
+        // The session must exist (a code can't verify a session we don't track) AND
+        // belong to this caller — otherwise OTP codes could be burned against, and
+        // verification claimed on, someone else's session.
         const session = await this.store.getSession(sessionId);
-        if (!session) {
+        if (!session || !this.mayRead(session.userEmail)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -512,6 +734,23 @@ export class FrameDispatcher {
 }
 
 const TITLE_MAX = 60;
+
+/** `get_conversation_messages` page size when the client sends no `limit`. */
+const DEFAULT_MESSAGE_LIMIT = 50;
+/** Contract ceiling on `get_conversation_messages`' `limit` (1..100). */
+const MAX_MESSAGE_LIMIT = 100;
+/** Reported `createdAt` for a message a pre-th-75eda5 store left untimestamped. */
+const EPOCH_ISO = new Date(0).toISOString();
+
+/**
+ * The scope used for an authenticated connection whose principal carries NO email —
+ * a value no conversation can be owned by, so the list comes back empty instead of
+ * falling back to unscoped (or pooling every emailless caller together), and an
+ * OWNED conversation stays unreachable. Randomized per process so it can't be forged
+ * by a caller who influences their own `email` claim. Still load-bearing under the
+ * owner-checked-only-if-owned rule: it is what makes an emailless scope match nothing.
+ */
+const NO_OWNER_SENTINEL = ` no-owner:${randomUUID()}`;
 
 /**
  * Derive a `list_conversations` entry title from the first inbound message text,

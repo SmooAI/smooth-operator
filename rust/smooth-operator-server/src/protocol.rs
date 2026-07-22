@@ -80,6 +80,23 @@ pub fn stream_reasoning(request_id: &str, token: &str) -> Value {
     })
 }
 
+/// `stream_preamble` — a single streamed token of the fast-model *preamble*: a
+/// short "what I'm about to do" sentence generated in parallel with the main turn
+/// to cover the reasoning model's time-to-first-token. Shaped exactly like
+/// `stream_token`, but on a distinct `type` so clients render it as an *ephemeral*
+/// status line that the real answer replaces — never folded into the answer.
+/// Clients that don't know the type simply ignore it. Pearl th-9a5794.
+#[must_use]
+pub fn stream_preamble(request_id: &str, token: &str) -> Value {
+    json!({
+        "type": "stream_preamble",
+        "requestId": request_id,
+        "token": token,
+        "data": { "requestId": request_id, "token": token },
+        "timestamp": now_ms(),
+    })
+}
+
 /// `stream_chunk` — a per-node state snapshot. `node` is mirrored at the
 /// envelope level and inside `data` (per `stream-chunk.schema.json`). `state`
 /// only carries safe-to-expose fields.
@@ -121,6 +138,12 @@ pub struct TurnUsage {
 /// client can accumulate live session cost. Absent when the engine reported no
 /// usage (e.g. an offline mock turn), keeping the event back-compatible with
 /// clients that predate cost reporting.
+///
+/// `directive`, when `Some`, attaches an opaque client-side directive a host tool
+/// emitted this turn as a sibling `data.data.directive` value. The protocol layer
+/// never interprets the shape (the host client owns it, like `response`). Absent
+/// when the turn produced no directive, keeping the event back-compatible with
+/// clients that predate directives.
 #[must_use]
 pub fn eventual_response(
     request_id: &str,
@@ -130,6 +153,7 @@ pub fn eventual_response(
     needs_escalation: bool,
     citations: &[smooth_operator::domain::Citation],
     usage: Option<TurnUsage>,
+    directive: Option<Value>,
 ) -> Value {
     let mut inner = json!({
         "messageId": message_id,
@@ -147,6 +171,10 @@ pub fn eventual_response(
             "promptTokens": usage.prompt_tokens,
             "completionTokens": usage.completion_tokens,
         });
+    }
+    // Optional + back-compat: only emit `directive` when a host tool wrote one.
+    if let Some(directive) = directive {
+        inner["directive"] = directive;
     }
     json!({
         "type": "eventual_response",
@@ -372,6 +400,37 @@ pub fn error(request_id: Option<&str>, code: &str, message: &str) -> Value {
     ev
 }
 
+/// `cancelled` — the terminal event of a turn the client aborted with a `cancel`
+/// action. Emitted **in place of** the `eventual_response` a completed turn would
+/// send: it echoes the cancelled `send_message`'s `requestId` so the client can
+/// correlate it to the in-flight turn and reset its UI (drop the streaming
+/// indicator, re-enable input).
+///
+/// Status `499` mirrors nginx's "client closed request" — a terminal,
+/// non-`200` outcome distinct from a server error. The `requestId` is echoed at
+/// the envelope level and inside `data` (envelope convention). No answer payload:
+/// a cancelled turn produced no assistant message (the streamed tokens were
+/// ephemeral and are NOT persisted; the user's message stays persisted).
+///
+/// A cancel with no active turn is a no-op and emits nothing — this constructor
+/// is only called when a live turn was actually aborted.
+#[must_use]
+pub fn cancelled(request_id: Option<&str>) -> Value {
+    let ts = now_ms();
+    let mut data = json!({ "status": 499 });
+    if let Some(rid) = request_id {
+        data["requestId"] = json!(rid);
+    }
+    let mut ev = json!({
+        "type": "cancelled",
+        "status": 499,
+        "data": data,
+        "timestamp": ts,
+    });
+    set_request_id(&mut ev, request_id);
+    ev
+}
+
 fn set_request_id(ev: &mut Value, request_id: Option<&str>) {
     if let Some(rid) = request_id {
         ev["requestId"] = json!(rid);
@@ -412,6 +471,44 @@ mod tests {
     }
 
     #[test]
+    fn stream_preamble_is_distinct_type_but_mirrors_token() {
+        let ev = stream_preamble("r1", "Let me pull up your recent conversations.");
+        // Distinct type so clients render it as an ephemeral status line…
+        assert_eq!(ev["type"], "stream_preamble");
+        // …but shaped exactly like stream_token so they can reuse the render path.
+        assert_eq!(ev["token"], "Let me pull up your recent conversations.");
+        assert_eq!(
+            ev["data"]["token"],
+            "Let me pull up your recent conversations."
+        );
+        assert_eq!(ev["data"]["requestId"], "r1");
+    }
+
+    #[test]
+    fn cancelled_echoes_request_id_with_terminal_status() {
+        let ev = cancelled(Some("r1"));
+        assert_eq!(ev["type"], "cancelled");
+        assert_eq!(ev["requestId"], "r1");
+        assert_eq!(ev["status"], 499);
+        // requestId + status mirrored inside `data` (envelope convention).
+        assert_eq!(ev["data"]["requestId"], "r1");
+        assert_eq!(ev["data"]["status"], 499);
+        assert!(ev["timestamp"].is_i64());
+        // No answer payload: a cancelled turn produced no assistant message.
+        assert!(ev["data"]["messageId"].is_null());
+        assert!(ev["data"]["response"].is_null());
+    }
+
+    #[test]
+    fn cancelled_without_request_id_omits_the_field() {
+        let ev = cancelled(None);
+        assert_eq!(ev["type"], "cancelled");
+        assert!(ev.get("requestId").is_none());
+        assert!(ev["data"].get("requestId").is_none());
+        assert_eq!(ev["status"], 499);
+    }
+
+    #[test]
     fn stream_chunk_mirrors_node() {
         let ev = stream_chunk("r1", "knowledge_search", json!({ "rawResponse": "x" }));
         assert_eq!(ev["type"], "stream_chunk");
@@ -429,6 +526,7 @@ mod tests {
             json!({"responseParts": ["hi"]}),
             false,
             &[],
+            None,
             None,
         );
         assert_eq!(ev["type"], "eventual_response");
@@ -449,6 +547,7 @@ mod tests {
             false,
             &[],
             None,
+            None,
         );
         assert!(
             ev["data"]["data"].get("citations").is_none(),
@@ -466,6 +565,7 @@ mod tests {
             json!({"responseParts": ["hi"]}),
             false,
             &[],
+            None,
             None,
         );
         assert!(
@@ -489,6 +589,7 @@ mod tests {
             false,
             &[],
             Some(usage),
+            None,
         );
         let u = &ev["data"]["data"]["usage"];
         assert!(
@@ -527,6 +628,7 @@ mod tests {
             false,
             &citations,
             None,
+            None,
         );
         let cites = &ev["data"]["data"]["citations"];
         assert!(cites.is_array(), "citations should be an array");
@@ -553,6 +655,41 @@ mod tests {
             "a urless citation should omit `url`, not emit null"
         );
         assert_eq!(cites[1]["id"], "doc-2");
+    }
+
+    #[test]
+    fn eventual_response_omits_directive_when_none() {
+        // Back-compat: no `directive` key at all when no host tool wrote one.
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            ev["data"]["data"].get("directive").is_none(),
+            "directive must be absent when None for back-compat"
+        );
+    }
+
+    #[test]
+    fn eventual_response_attaches_directive_when_present() {
+        let directive = json!({"kind": "Navigate", "path": "/crm/contacts/42"});
+        let ev = eventual_response(
+            "r1",
+            200,
+            "m1",
+            json!({"responseParts": ["hi"]}),
+            false,
+            &[],
+            None,
+            Some(directive.clone()),
+        );
+        assert_eq!(ev["data"]["data"]["directive"], directive);
     }
 
     #[test]

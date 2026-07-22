@@ -600,6 +600,25 @@ struct WsQuery {
 struct ConnectionAuth {
     access: AccessContext,
     org_id: Option<String>,
+    /// The connection's per-user conversation-read scope (see
+    /// [`handler::UserScope`]), derived from the verified principal only.
+    user_scope: handler::UserScope,
+}
+
+/// The conversation-read scope for a connection with **no** verified principal
+/// (no token, or a token that failed verification and degraded to anonymous).
+///
+/// On a single-user deployment (`none` / `disabled` / `local-token`) there is no
+/// identity concept at all, so reads stay unscoped — the daemon / `LocalServer`
+/// embedding is unchanged. On any multi-user deployment this **fails closed**:
+/// an anonymous connection lists nothing and can open nothing. It can still
+/// create a fresh session, so the anonymous widget flow keeps working.
+fn anonymous_scope(state: &AppState) -> handler::UserScope {
+    if smooth_operator::auth::is_single_user_mode(state.auth.mode()) {
+        handler::UserScope::Unscoped
+    } else {
+        handler::UserScope::Denied
+    }
 }
 
 /// Resolve the connection's access from `?token=`.
@@ -626,11 +645,23 @@ fn resolve_ws_access(state: &AppState, query: &WsQuery) -> Result<ConnectionAuth
         return Ok(ConnectionAuth {
             access: AccessContext::anonymous(),
             org_id: None,
+            user_scope: anonymous_scope(state),
         });
     };
     match state.auth.verify(token) {
         Ok(principal) => Ok(ConnectionAuth {
             access: principal.access_context(),
+            // A verified principal scopes reads to its own email. Single-user
+            // flavors have no email (and no other user to leak to) → unscoped;
+            // a multi-user principal WITHOUT an `email` claim fails closed
+            // rather than silently seeing the whole org.
+            user_scope: match principal.email {
+                Some(email) => handler::UserScope::User(email),
+                None if smooth_operator::auth::is_single_user_mode(state.auth.mode()) => {
+                    handler::UserScope::Unscoped
+                }
+                None => handler::UserScope::Denied,
+            },
             org_id: Some(principal.org_id),
         }),
         Err(e) => {
@@ -647,6 +678,7 @@ fn resolve_ws_access(state: &AppState, query: &WsQuery) -> Result<ConnectionAuth
             Ok(ConnectionAuth {
                 access: AccessContext::anonymous(),
                 org_id: None,
+                user_scope: anonymous_scope(state),
             })
         }
     }
@@ -662,7 +694,11 @@ async fn ws_upgrade(
     Query(query): Query<WsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let ConnectionAuth { access, org_id } = match resolve_ws_access(&state, &query) {
+    let ConnectionAuth {
+        access,
+        org_id,
+        user_scope,
+    } = match resolve_ws_access(&state, &query) {
         Ok(auth) => auth,
         // Strict auth refused the connection (missing/invalid token).
         Err(()) => return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
@@ -674,7 +710,7 @@ async fn ws_upgrade(
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    ws.on_upgrade(move |socket| connection_loop(socket, state, access, org_id, origin))
+    ws.on_upgrade(move |socket| connection_loop(socket, state, access, org_id, user_scope, origin))
 }
 
 /// Drive one WebSocket connection: split into reader + writer, joined by an
@@ -688,6 +724,7 @@ async fn connection_loop(
     state: AppState,
     access: AccessContext,
     auth_org: Option<String>,
+    user_scope: handler::UserScope,
     origin: Option<String>,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -721,38 +758,49 @@ async fn connection_loop(
         }
     });
 
+    // The connection's single active agent turn, if one is running: the cancelled
+    // turn's `requestId` (echoed on the `cancelled` event) + its task handle. A
+    // `send_message` spawns a turn (so the reader stays free to receive
+    // `confirm_tool_action` while the turn parks); we track that handle here so a
+    // later `cancel` frame — or a disconnect — can abort it, dropping the turn
+    // future at its next `.await` (abandoning the in-flight LLM/tool call). Only
+    // ONE turn runs at a time: a second `send_message` while one is in flight is
+    // rejected, never run concurrently.
+    let mut current_turn: Option<(Option<String>, tokio::task::JoinHandle<()>)> = None;
+
     // Reader: dispatch inbound frames. Handlers emit events via `sink_tx`.
     //
     // The `select!` lets a graceful shutdown (SIGTERM/ctrl_c → `state.shutdown`
-    // cancelled by the serve loop) break this loop so the connection drains: it
-    // stops reading new frames, falls out, and detaches below. `biased` so the
-    // shutdown branch wins a tie. Crucially, `handle_frame(...).await` stays
-    // INSIDE the frame arm (not a `select!` condition), so a turn already in
-    // flight when the cancel fires runs to completion before the next loop
-    // iteration observes the cancellation — that is the in-flight drain.
+    // cancelled by the serve loop) break this loop so the connection drains.
+    // `biased` so the shutdown branch wins a tie. On shutdown we do NOT abort an
+    // in-flight turn: the detached turn task holds a `sink` clone, so the writer
+    // (and `writer.await` below) blocks until it finishes — that is the in-flight
+    // drain the k8s termination window relies on. A client *disconnect*
+    // (Close/Err/None), by contrast, DOES abort the turn — no client remains to
+    // receive its output.
     loop {
         tokio::select! {
             biased;
 
             () = state.shutdown.cancelled() => {
                 // Pod is terminating: stop accepting frames on this connection.
-                // Returning closes the socket (the writer task ends when
-                // `sink_tx` drops below); any turn that was mid-flight already
-                // finished in the frame arm before we got here.
+                // Leave any in-flight turn running so it drains (see above).
                 break;
             }
 
             frame = ws_rx.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        handler::handle_frame(
+                        current_turn = handle_text_frame(
                             &state,
                             &access,
                             &conn_id,
                             origin.as_deref(),
                             auth_org.as_deref(),
+                            &user_scope,
                             text.as_str(),
                             &sink_tx,
+                            current_turn,
                         )
                         .await;
                     }
@@ -763,12 +811,16 @@ async fn connection_loop(
                             "binary frames are not supported; send JSON text frames",
                         ));
                     }
-                    Some(Ok(Message::Close(_))) => break,
+                    // Client disconnected mid-turn: abort the in-flight turn so it
+                    // stops generating (no client remains to receive its output).
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                        if let Some((_, handle)) = current_turn.take() {
+                            handle.abort();
+                        }
+                        break;
+                    }
                     // Ping/Pong control frames are handled by axum automatically.
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
-                    // Stream ended (peer hung up).
-                    None => break,
                 }
             }
         }
@@ -780,6 +832,95 @@ async fn connection_loop(
     state.backplane.detach(&conn_id).await;
     drop(sink_tx);
     let _ = writer.await;
+}
+
+/// Peek a frame's `action` + `requestId` without doing full dispatch parsing —
+/// used by the connection loop to route `cancel` and enforce the single-active-
+/// turn rule *before* delegating other frames to [`handler::handle_frame`].
+/// Returns `(None, None)` for a non-object / unparseable frame (which
+/// `handle_frame` then rejects with a proper `error` event on the normal path).
+fn frame_action_and_request_id(raw: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (None, None);
+    };
+    let action = v.get("action").and_then(|a| a.as_str()).map(str::to_string);
+    let request_id = v
+        .get("requestId")
+        .and_then(|a| a.as_str())
+        .map(str::to_string);
+    (action, request_id)
+}
+
+/// Handle one inbound text frame, threading the connection's single-active-turn
+/// slot through and returning the (possibly updated) slot.
+///
+/// - `cancel` → abort the in-flight turn (if any) and emit a `cancelled` event
+///   echoing its `requestId`; a cancel with no active turn is a silent no-op.
+/// - `send_message` while a turn is already in flight → reject with a
+///   `TURN_IN_PROGRESS` error (never run two turns concurrently on one socket);
+///   otherwise dispatch and track the spawned turn's handle.
+/// - anything else (including `confirm_tool_action`, which resumes the active
+///   turn) → dispatch via [`handler::handle_frame`], which returns no handle.
+#[allow(clippy::too_many_arguments)]
+async fn handle_text_frame(
+    state: &AppState,
+    access: &AccessContext,
+    conn_id: &str,
+    origin: Option<&str>,
+    auth_org: Option<&str>,
+    user_scope: &handler::UserScope,
+    text: &str,
+    sink_tx: &tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    mut current_turn: Option<(Option<String>, tokio::task::JoinHandle<()>)>,
+) -> Option<(Option<String>, tokio::task::JoinHandle<()>)> {
+    // Forget a handle whose turn already finished, so the single-active-turn
+    // guard below only trips on a genuinely in-flight turn.
+    if current_turn.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+        current_turn = None;
+    }
+
+    let (action, request_id) = frame_action_and_request_id(text);
+
+    match action.as_deref() {
+        Some("cancel") => {
+            if let Some((turn_req_id, handle)) = current_turn.take() {
+                // `abort()` drops the turn future at its next `.await`, abandoning
+                // the in-flight LLM/tool call. Echo the cancelled turn's requestId
+                // (falling back to the cancel frame's own) so the client correlates
+                // the reset.
+                handle.abort();
+                let echo = turn_req_id.or(request_id);
+                let _ = sink_tx.send(crate::protocol::cancelled(echo.as_deref()));
+            }
+            // else: no active turn → harmless no-op (emit nothing).
+            None
+        }
+        Some("send_message") if current_turn.is_some() => {
+            // A turn is already running on this connection: reject the second one
+            // rather than run two concurrently (interleaved streams + racing
+            // storage writes). The client must cancel it or wait for it to finish.
+            let _ = sink_tx.send(crate::protocol::error(
+                request_id.as_deref(),
+                "TURN_IN_PROGRESS",
+                "a turn is already in progress on this connection; cancel it or wait for it to complete",
+            ));
+            current_turn
+        }
+        _ => {
+            // Normal dispatch. For a valid `send_message` this returns the spawned
+            // turn's handle (tracked as the new active turn); for every other
+            // action (and a rejected send_message) it's `None`, leaving
+            // `current_turn` unchanged.
+            let spawned = handler::handle_frame(
+                state, access, conn_id, origin, auth_org, user_scope, text, sink_tx,
+            )
+            .await;
+            match spawned {
+                Some(handle) => Some((request_id, handle)),
+                None => current_turn,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -819,5 +960,101 @@ mod tests {
         };
         let state = build_state(cfg);
         assert!(!state.config.has_llm());
+    }
+
+    // ---- per-user conversation scope (SECURITY, pearl th-b2c60b) ---------
+
+    fn test_config() -> ServerConfig {
+        ServerConfig {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            gateway_url: "https://example.test/v1".into(),
+            gateway_key: None,
+            model: "m".into(),
+            seed_kb: false,
+            max_iterations: 4,
+            max_tokens: 128,
+            storage: crate::config::StorageBackend::Memory,
+            widget_auth_strict: false,
+            confirm_tools: Vec::new(),
+            judge_model: "claude-haiku-4-5".to_string(),
+        }
+    }
+
+    fn state_with(verifier: Arc<dyn smooth_operator::auth::AuthVerifier>) -> AppState {
+        AppState::new(Arc::new(InMemoryStorageAdapter::new()), test_config()).with_auth(verifier)
+    }
+
+    /// A `trusted`-mode identity blob: base64url(JSON claims), no signing —
+    /// which is exactly how [`TrustedIdentityVerifier`] consumes it.
+    fn trusted_identity(claims: &serde_json::Value) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    }
+
+    fn scope_for(state: &AppState, token: Option<&str>) -> handler::UserScope {
+        resolve_ws_access(
+            state,
+            &WsQuery {
+                token: token.map(str::to_string),
+            },
+        )
+        .expect("lenient auth never rejects")
+        .user_scope
+    }
+
+    #[test]
+    fn tokenless_connection_is_unscoped_only_when_auth_is_disabled() {
+        // No auth configured (dev / local daemon): no identity concept, so the
+        // LocalServer + `th`-daemon embedding keeps its unscoped reads.
+        let dev = state_with(Arc::new(smooth_operator::auth::NoAuthVerifier::default()));
+        assert_eq!(scope_for(&dev, None), handler::UserScope::Unscoped);
+
+        // Auth configured: an anonymous connection must NOT inherit the org's
+        // conversations — it fails closed.
+        let multi = state_with(Arc::new(
+            smooth_operator::auth::TrustedIdentityVerifier::new(),
+        ));
+        assert_eq!(scope_for(&multi, None), handler::UserScope::Denied);
+    }
+
+    #[test]
+    fn a_verified_principal_is_scoped_to_its_own_email() {
+        let state = state_with(Arc::new(
+            smooth_operator::auth::TrustedIdentityVerifier::new(),
+        ));
+        let token = trusted_identity(&serde_json::json!({
+            "sub": "u1", "org": "org-1", "role": "basic", "email": "alice@example.com",
+        }));
+        assert_eq!(
+            scope_for(&state, Some(&token)),
+            handler::UserScope::User("alice@example.com".into())
+        );
+    }
+
+    #[test]
+    fn a_verified_principal_without_an_email_fails_closed() {
+        // The dangerous case: auth IS enabled, the token IS valid, but there is
+        // no user identity to scope by. Falling back to org scope here would
+        // reopen the leak for every emailless token.
+        let state = state_with(Arc::new(
+            smooth_operator::auth::TrustedIdentityVerifier::new(),
+        ));
+        let token = trusted_identity(&serde_json::json!({
+            "sub": "u1", "org": "org-1", "role": "basic",
+        }));
+        assert_eq!(scope_for(&state, Some(&token)), handler::UserScope::Denied);
+    }
+
+    #[test]
+    fn an_invalid_token_does_not_widen_scope() {
+        let state = state_with(Arc::new(
+            smooth_operator::auth::TrustedIdentityVerifier::new(),
+        ));
+        assert_eq!(
+            scope_for(&state, Some("not-a-valid-identity-blob")),
+            handler::UserScope::Denied,
+            "a failed verification degrades to anonymous, which sees nothing"
+        );
     }
 }

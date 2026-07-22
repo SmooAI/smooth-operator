@@ -142,6 +142,7 @@ async fn run(
             auth_gate,
             tool_configs,
             extensions: None,
+            images: vec![],
         },
         &tx,
     )

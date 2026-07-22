@@ -108,6 +108,39 @@ principal's **groups**, parsed from a `groups` claim on the JWT (`auth.rs`,
 `github:owner/repo` document ACL — a private-repo doc scoped to that group is
 readable only by a principal carrying it.
 
+### Conversations are scoped per user, not just per org
+
+Document ACLs are one dimension; **conversation history is another**. Org
+scoping alone is not access control here — every member of an org shares one
+org id, so an org-only filter lets any authenticated member enumerate and open
+every other member's conversations.
+
+So `list_conversations`, resume-by-`conversationId`, and
+`get_conversation_messages` are ALSO scoped to the connection's principal, by
+its **`email` claim**, matched against the conversation's owning `user`
+participant (`StorageAdapter::list_conversations_by_org_and_user`; Postgres
+pushes it into the query, other adapters filter participants).
+
+The rules, in order:
+
+| connection | conversation reads |
+| --- | --- |
+| auth **disabled** (`AUTH_MODE=none`, unconfigured, or the single-user `local-token` daemon) | **unscoped** — no identity concept exists. The only unscoped case. |
+| auth **enabled**, principal with an `email` | scoped to that email (on top of the org scope) |
+| auth **enabled**, no principal or no `email` claim | **fails closed** — empty list, every read is not-found. Never falls back to the org. |
+
+Two properties worth keeping in mind if you touch this path:
+
+- **The principal wins over the frame.** `create_conversation_session` accepts a
+  `userEmail` field; it is caller-controlled, so an authenticated connection
+  always stamps the *principal's* email instead. Otherwise anyone could mint a
+  conversation under someone else's identity — or read one back.
+- **Not-yours is indistinguishable from not-found.** Reading another user's
+  session returns the byte-identical `SESSION_NOT_FOUND` a session id that never
+  existed returns, and resuming another user's conversation mints a fresh one
+  exactly as an unknown id does. A distinct "forbidden" would be an existence
+  oracle: it confirms which ids are real, which is all enumeration needs.
+
 ### Bring-your-own auth — the JWT contract
 
 smooth-operator does **not** require you to adopt its identity provider. Point it
@@ -131,11 +164,12 @@ needs a key to verify them and a handful of claims:
   "role":   "basic",                              // admin | curator | basic (admin-API RBAC)
   "groups": ["github:topstep/svc-pricing",        // → the entitlements that gate document access;
              "github:topstep/svc-orders"],        //   a doc scoped to a group is readable only by a carrier
+  "email":  "ada@topstep.com",                    // → the per-user CONVERSATION scope (see below)
   "exp":    1750000000                            // required
 }
 ```
 
-That's the whole contract: **`sub` + `org` + `role` + `groups` + `exp`.** Your IdP
+That's the whole contract: **`sub` + `org` + `role` + `groups` + `email` + `exp`.** Your IdP
 decides which `groups` each user carries (e.g. map your SSO groups / GitHub team
 membership to `github:owner/repo` strings) — the server enforces them at retrieval
 with zero additional code. The widget/clients send the token on the `/ws` `?token=`

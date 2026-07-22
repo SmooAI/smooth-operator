@@ -60,6 +60,22 @@ func streamToken(requestID, token string) map[string]any {
 	}
 }
 
+// streamPreamble is one token of the optional fast-model preamble — an EPHEMERAL
+// "what I'm about to do" line that the real answer replaces. Shaped identically to
+// streamToken (token duplicated at the top level and under data) so clients can reuse
+// the render path, but on a distinct type so it is never folded into the answer and
+// never appears in eventual_response. Matches spec/events/stream-preamble.schema.json
+// and the Rust protocol::stream_preamble.
+func streamPreamble(requestID, token string) map[string]any {
+	return map[string]any{
+		"type":      "stream_preamble",
+		"requestId": requestID,
+		"token":     token,
+		"data":      map[string]any{"requestId": requestID, "token": token},
+		"timestamp": nowMs(),
+	}
+}
+
 // streamChunk is a workflow-node update (here: a tool call or a tool result),
 // carrying an opaque state object under data.state.
 func streamChunk(requestID, node string, state map[string]any) map[string]any {
@@ -207,6 +223,32 @@ func otpInvalid(requestID string, errorCode OtpErrorCode, attemptsRemaining int,
 		},
 		"timestamp": nowMs(),
 	}
+}
+
+// cancelled is the terminal event of a turn the client aborted with a `cancel` action —
+// emitted IN PLACE OF the eventual_response a completed turn would send. It echoes the
+// cancelled send_message's requestId so the client correlates the reset (drop the
+// streaming indicator, re-enable input), at the envelope level AND inside `data` (the
+// envelope convention). Status 499 mirrors nginx's "client closed request": a terminal,
+// non-200 outcome distinct from a server error. There is NO answer payload — a cancelled
+// turn produced no assistant message (the streamed tokens were ephemeral and are never
+// persisted; the user's message stays persisted).
+//
+// Only built when a live turn was actually aborted; a cancel with no active turn is a
+// no-op that emits nothing. Mirrors the Rust reference's protocol::cancelled.
+func cancelled(requestID string) map[string]any {
+	data := map[string]any{"status": 499}
+	ev := map[string]any{
+		"type":      "cancelled",
+		"status":    499,
+		"data":      data,
+		"timestamp": nowMs(),
+	}
+	if requestID != "" {
+		data["requestId"] = requestID
+		ev["requestId"] = requestID
+	}
+	return ev
 }
 
 // errorEvent reports a handler/validation failure without dropping the connection.

@@ -1,11 +1,11 @@
-# create-smooth-extension
+# @smooai/create-smooth-extension
 
 Scaffold a new [SEP (Smooth Extension Protocol)](https://github.com/SmooAI/smooth-operator/tree/main/spec/extension) extension.
 
 ```bash
-npm create smooth-extension@latest my-extension -- --template tool
-# or: pnpm create smooth-extension my-extension --template tool
-# or: yarn create smooth-extension my-extension --template tool
+npm create @smooai/smooth-extension@latest my-extension -- --template tool
+# or: pnpm create @smooai/smooth-extension my-extension --template tool
+# or: yarn create @smooai/smooth-extension my-extension --template tool
 ```
 
 Run with no arguments to be prompted for the name and template.
