@@ -130,6 +130,7 @@ async fn run_turn_with_key(
             confirmation: None,
             interactions: None,
             tool_provider,
+            tool_hooks: Vec::new(),
             system_prompt,
             org_id,
             gateway_key,
@@ -279,5 +280,130 @@ async fn persona_overrides_const_prompt() {
     assert!(
         !prompt.starts_with(CONST_PROMPT_OPENING),
         "the const prompt must NOT leak through when a persona is set"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Host tool-hook injection (`.tool_hooks(..)` → every turn's registry)
+// ---------------------------------------------------------------------------
+
+/// A spy `ToolHook` that records whether its `pre_call`/`post_call` fired. This
+/// is the seam Big Smooth's narc-judge + auto-mode ride on: an injected hook must
+/// observe every tool call the turn makes.
+#[derive(Default)]
+struct SpyHook {
+    pre_fired: std::sync::atomic::AtomicBool,
+    post_fired: std::sync::atomic::AtomicBool,
+    seen_tool: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl smooth_operator_core::tool::ToolHook for SpyHook {
+    async fn pre_call(&self, call: &smooth_operator_core::tool::ToolCall) -> anyhow::Result<()> {
+        self.pre_fired
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.seen_tool.lock().unwrap() = Some(call.name.clone());
+        Ok(())
+    }
+    async fn post_call(
+        &self,
+        _call: &smooth_operator_core::tool::ToolCall,
+        _result: &mut smooth_operator_core::tool::ToolResult,
+    ) -> anyhow::Result<()> {
+        self.post_fired
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// An injected `ToolHook` fires `pre_call` + `post_call` for every tool the turn
+/// executes. The mock is scripted to call the host tool (turn 1) then answer
+/// (turn 2); the spy hook, installed via `TurnRequest::tool_hooks`, must observe
+/// the call.
+#[tokio::test]
+async fn injected_tool_hook_observes_tool_calls() {
+    use smooth_operator_core::tool::ToolHook;
+
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
+
+    // Turn 1: the model calls `host_crm_lookup`. Turn 2: it answers.
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "host_crm_lookup".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk: "{}".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ])
+    .push_stream(vec![
+        StreamEvent::Delta {
+            content: "Done.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+
+    let provider = Arc::new(StubProvider {
+        seen: Arc::new(std::sync::Mutex::new(SeenCtx::default())),
+    });
+    let spy = Arc::new(SpyHook::default());
+
+    let (tx, mut rx): (_, UnboundedReceiver<Value>) = unbounded_channel();
+    runner::run_streaming_turn(
+        TurnRequest {
+            storage,
+            llm: mock_llm(),
+            max_iterations: 4,
+            conversation_id: "conv-hook",
+            request_id: "req-hook",
+            user_message: "look me up",
+            images: vec![],
+            model_max_output: None,
+            access: AccessContext::anonymous(),
+            llm_provider: Some(Arc::new(mock)),
+            reranker: None,
+            confirmation: None,
+            interactions: None,
+            tool_provider: Some(provider),
+            tool_hooks: vec![spy.clone() as Arc<dyn ToolHook>],
+            system_prompt: None,
+            org_id: None,
+            gateway_key: None,
+            workflow: None,
+            judge: None,
+            greeting_section: None,
+            enabled_tools: None,
+            auth_gate: None,
+            tool_configs: None,
+            extensions: None,
+        },
+        &tx,
+    )
+    .await
+    .expect("run_streaming_turn");
+
+    drop(tx);
+    while rx.recv().await.is_some() {}
+
+    assert!(
+        spy.pre_fired.load(std::sync::atomic::Ordering::SeqCst),
+        "the injected hook's pre_call must fire on a tool call"
+    );
+    assert!(
+        spy.post_fired.load(std::sync::atomic::Ordering::SeqCst),
+        "the injected hook's post_call must fire on a tool call"
+    );
+    assert_eq!(
+        spy.seen_tool.lock().unwrap().as_deref(),
+        Some("host_crm_lookup"),
+        "the hook must observe the tool that was called"
     );
 }

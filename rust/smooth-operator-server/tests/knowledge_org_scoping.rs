@@ -213,6 +213,7 @@ async fn run_turn_as(storage: Arc<dyn StorageAdapter>, access: AccessContext) {
             confirmation: None,
             interactions: None,
             tool_provider: None,
+            tool_hooks: vec![],
             system_prompt: None,
             org_id: Some(TURN_ORG.to_string()),
             gateway_key: None,
