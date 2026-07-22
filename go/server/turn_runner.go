@@ -51,6 +51,10 @@ type TurnRunner struct {
 	store        SessionStore
 	systemPrompt string
 	tools        []core.Tool
+	// hooks are engine ToolHooks passed straight to AgentOptions.Hooks so they run
+	// around every tool the agent dispatches this turn (nil → none). Set by the
+	// dispatcher after construction, alongside tools.
+	hooks []core.ToolHook
 	// knowledge is the retriever (already SCOPED to the connection's access) the agent
 	// grounds on. When set, the runner also queries it with the user message (top
 	// autoContextLimit) to build the turn's auto-context citations — the sources the
@@ -167,7 +171,7 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	//    knowledge feeds the engine's grounding so its auto-injected context matches the
 	//    citations built above. r.systemPrompt is already assembled (base + per-agent
 	//    config + current workflow step) by the caller.
-	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge}
+	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge, Hooks: r.hooks}
 	// Raised, no-longer-starving turn defaults (8192 / 20), with max_tokens clamped to
 	// the model's output ceiling when known (nil ⇒ the raised default). Setting these
 	// explicitly (rather than relying on the engine defaults) keeps the server robust

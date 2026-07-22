@@ -29,6 +29,9 @@ type FrameDispatcher struct {
 	// turn's auto-context citations.
 	knowledge core.Knowledge
 	tools     []core.Tool
+	// hooks are engine ToolHooks threaded into every turn the runner builds (nil →
+	// none). Set by the server after construction, alongside tools.
+	hooks []core.ToolHook
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (empty → HITL off). Threaded into every turn the runner builds.
 	confirmTools []string
@@ -591,6 +594,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// Uses the connection ctx, not the turn's, so a cancelled turn still cleans up.
 		defer extTurn.Close(ctx)
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
+		runner.hooks = d.hooks
 		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		// Cancelled turn: the `cancelled` event is the turn's ONE terminal event (emitted
 		// by handleCancel), so emit nothing further here — no eventual_response, and no

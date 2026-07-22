@@ -30,6 +30,12 @@ type Server struct {
 	// runner already maps its tool-call/tool-result stream events to stream_chunk frames.
 	tools []core.Tool
 
+	// hooks are engine ToolHooks (pre/post-call surveillance + the redaction seam)
+	// threaded into every turn via the dispatcher → turn runner → engine
+	// AgentOptions.Hooks (default none → no hooks, behavior unchanged). A host
+	// installs Narc-style hooks with WithToolHooks.
+	hooks []core.ToolHook
+
 	// knowledge is the retriever the agent grounds on (default nil → no grounding). The
 	// dispatcher threads it into the turn runner, which both passes it to the engine
 	// AgentOptions for grounding AND queries it to build the turn's auto-context
@@ -106,6 +112,13 @@ func WithSystemPrompt(p string) Option { return func(srv *Server) { srv.systemP 
 // WithTools registers the engine tools the agent may call during a turn (default none).
 // Threaded into every turn via the dispatcher → turn runner → engine AgentOptions.
 func WithTools(tools []core.Tool) Option { return func(srv *Server) { srv.tools = tools } }
+
+// WithToolHooks installs engine ToolHooks run around every dispatched tool call
+// (default none). Each PreCall gates the call (an error blocks it) and each
+// PostCall may redact the result before it reaches the model — the seam a host
+// uses to add Narc-style surveillance. Threaded into every turn via the
+// dispatcher → turn runner → engine AgentOptions.Hooks.
+func WithToolHooks(hooks ...core.ToolHook) Option { return func(srv *Server) { srv.hooks = hooks } }
 
 // WithKnowledge sets the retriever the agent grounds on (default none). Threaded into
 // every turn via the dispatcher → turn runner: it both grounds the engine AND sources
@@ -305,6 +318,10 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// within it), so the registry need not be server-wide.
 	confirmations := NewConfirmationRegistry()
 	dispatcher := NewFrameDispatcher(s.store, s.client, access, s.systemP, s.knowledge, s.tools, s.confirmTools, confirmations, s.agentConfigs, s.judgeModel, s.authRequiringTools, s.sessionAuth, s.otpService, s.modelCeiling)
+	// Hooks ride the same connection-scoped seam as tools, set right after
+	// construction (before the dispatcher serves any frame) to avoid churning the
+	// long constructor signature. Nil → no hooks.
+	dispatcher.hooks = s.hooks
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits
