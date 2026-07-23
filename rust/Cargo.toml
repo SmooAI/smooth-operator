@@ -95,3 +95,13 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "trace",
     "grpc-tonic",
 ] }
+
+# ─── DO NOT MERGE ───────────────────────────────────────────────────────────
+# Temporary override: this branch consumes `AgentConfig::with_metadata` /
+# `LlmClient::with_metadata`, which are unpublished (they land in the
+# smooth-operator-core PR "per-agent LLM request metadata passthrough").
+# Point at that branch so the workspace + CI compile against the real new API.
+# BEFORE MERGE: bump the `smooai-smooth-operator-core` pin above to the version
+# that ships those methods, then DELETE this entire patch section.
+[patch.crates-io]
+smooai-smooth-operator-core = { git = "https://github.com/SmooAI/smooth-operator-core.git", branch = "llm-request-metadata" }

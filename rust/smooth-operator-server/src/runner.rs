@@ -345,6 +345,12 @@ pub struct TurnRequest<'a> {
     /// [`crate::extensions::build_extension_host`] (only when
     /// `SMOOTH_EXTENSIONS_ALLOW` is non-empty).
     pub extensions: Option<crate::extensions::ExtensionTurn>,
+    /// Per-agent passthrough LLM-request metadata (spend attribution etc),
+    /// forwarded verbatim as top-level `metadata` on the `/chat/completions`
+    /// body via the engine's `AgentConfig::with_metadata`. `None`/empty ⇒ no
+    /// `metadata` field (byte-for-byte unchanged). Sourced from the resolved
+    /// [`AgentBehaviorConfig::llm_metadata`](smooth_operator::agent_config::AgentBehaviorConfig).
+    pub request_metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -393,6 +399,7 @@ pub async fn run_streaming_turn(
         auth_gate,
         tool_configs,
         extensions,
+        request_metadata,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
@@ -486,7 +493,10 @@ pub async fn run_streaming_turn(
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior)
         // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
-        .with_model_ceiling(model_max_output);
+        .with_model_ceiling(model_max_output)
+        // Per-agent LLM-request metadata (spend attribution etc); None/empty ⇒
+        // no `metadata` on the wire.
+        .with_metadata(request_metadata);
 
     let mut tools = ToolRegistry::new();
     // Build the knowledge_search tool over the SAME ACL-filtered handle, with the

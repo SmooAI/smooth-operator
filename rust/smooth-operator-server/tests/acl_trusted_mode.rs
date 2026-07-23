@@ -145,6 +145,7 @@ async fn run_turn_as(
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            request_metadata: None,
         },
         &tx,
     )

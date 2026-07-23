@@ -54,7 +54,11 @@ pub struct ConversationWorkflowStep {
     /// (th-d57a1d: a tapped scale answer is the clean input the judge reliably
     /// advances on). Free-form steps (name/role/org) omit this. Mirrors
     /// `suggestedReplies` on the TS `ConversationWorkflowStep`.
-    #[serde(default, rename = "suggestedReplies", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "suggestedReplies",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub suggested_replies: Option<Vec<String>>,
 }
 
@@ -329,6 +333,13 @@ pub struct AgentBehaviorConfig {
     /// `1..=64` (see [`from_row_values`](Self::from_row_values)).
     #[serde(default)]
     pub max_iterations: Option<u32>,
+    /// `llm_metadata` — arbitrary key/values forwarded verbatim as top-level
+    /// `metadata` on this agent's LLM requests. A host resolver sets it per turn
+    /// (e.g. `{ "smooai_agent_slug": "observability-analyst" }`) so the LiteLLM
+    /// gateway can attribute spend per agent; `None`/empty ⇒ no metadata.
+    /// Threaded to the engine via `AgentConfig::with_metadata`.
+    #[serde(default)]
+    pub llm_metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl AgentBehaviorConfig {
@@ -344,6 +355,7 @@ impl AgentBehaviorConfig {
             && self.enabled_extensions.is_empty()
             && self.model.is_none()
             && self.max_iterations.is_none()
+            && self.llm_metadata.is_none()
     }
 
     /// Build the per-agent system prompt from `instructions` (+ optional persona),
@@ -534,6 +546,10 @@ impl AgentBehaviorConfig {
             enabled_extensions,
             model,
             max_iterations,
+            // Not a jsonb-row column: `llm_metadata` is set programmatically by a
+            // host resolver (e.g. copilot-ws's per-agent resolver), never parsed
+            // from the DB agent row. DB-resolved agents carry no metadata.
+            llm_metadata: None,
         }
     }
 }
@@ -1144,6 +1160,30 @@ mod tests {
             apply_step_cap(&w, Some("summary"), "summary", 2, WORKFLOW_STEP_ATTEMPT_CAP),
             ("summary".to_string(), 3)
         );
+    }
+
+    #[test]
+    fn llm_metadata_defaults_none_and_deserializes() {
+        // Absent ⇒ None: nothing threaded to the engine, byte-identical wire.
+        let bare: AgentBehaviorConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(bare.llm_metadata, None);
+        assert!(bare.is_empty());
+
+        // Present ⇒ carried verbatim and marks the config non-empty. A host
+        // resolver stamps this (e.g. the analyst's spend-attribution slug); the
+        // runner forwards it to `AgentConfig::with_metadata`.
+        let tagged: AgentBehaviorConfig = serde_json::from_value(
+            json!({ "llm_metadata": { "smooai_agent_slug": "observability-analyst" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            tagged
+                .llm_metadata
+                .as_ref()
+                .and_then(|m| m.get("smooai_agent_slug")),
+            Some(&json!("observability-analyst"))
+        );
+        assert!(!tagged.is_empty());
     }
 
     #[test]

@@ -4094,8 +4094,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-core"
 version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d04127c32b5bd73ebb0c85084bfe36a2f203c94a7cda919a21f44769fbbc1495"
+source = "git+https://github.com/SmooAI/smooth-operator-core.git?branch=llm-request-metadata#c9e5537447c890e12de4f49e55c43f55b72940fd"
 dependencies = [
  "anyhow",
  "async-trait",

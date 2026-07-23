@@ -223,6 +223,7 @@ async fn run_turn_as(storage: Arc<dyn StorageAdapter>, access: AccessContext) {
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            request_metadata: None,
         },
         &tx,
     )

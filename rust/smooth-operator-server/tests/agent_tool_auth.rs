@@ -141,6 +141,7 @@ async fn run(
             auth_gate,
             tool_configs,
             extensions: None,
+            request_metadata: None,
         },
         &tx,
     )
