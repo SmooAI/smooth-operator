@@ -146,6 +146,7 @@ async fn run_turn_with_key(
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )

@@ -405,6 +405,12 @@ pub struct TurnRequest<'a> {
     /// [`ToolProviderContext`] so a host tool can persist them. Empty (the
     /// default) ⇒ byte-for-byte unchanged.
     pub files: Vec<smooth_operator::tool_provider::UserFile>,
+    /// Per-agent passthrough LLM-request metadata (spend attribution etc),
+    /// forwarded verbatim as top-level `metadata` on the `/chat/completions`
+    /// body via the engine's `AgentConfig::with_metadata`. `None`/empty ⇒ no
+    /// `metadata` field (byte-for-byte unchanged). Sourced from the resolved
+    /// [`AgentBehaviorConfig::llm_metadata`](smooth_operator::agent_config::AgentBehaviorConfig).
+    pub request_metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -457,6 +463,7 @@ pub async fn run_streaming_turn(
         extensions,
         images,
         files,
+        request_metadata,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
@@ -561,7 +568,10 @@ pub async fn run_streaming_turn(
         .with_knowledge(Arc::clone(&knowledge))
         .with_prior_messages(prior)
         // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
-        .with_model_ceiling(model_max_output);
+        .with_model_ceiling(model_max_output)
+        // Per-agent LLM-request metadata (spend attribution etc); None/empty ⇒
+        // no `metadata` on the wire.
+        .with_metadata(request_metadata);
     // Durable auto-recall: when the storage adapter exposes a memory handle for
     // this requester, hand it to the engine so `build_context_messages` injects
     // recalled memories into the turn. `None` (the default for every backend

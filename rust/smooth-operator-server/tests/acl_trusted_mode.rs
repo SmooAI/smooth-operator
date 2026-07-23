@@ -149,6 +149,7 @@ async fn run_turn_as(
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )

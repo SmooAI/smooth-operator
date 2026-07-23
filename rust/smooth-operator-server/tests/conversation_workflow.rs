@@ -109,6 +109,7 @@ async fn run_turn(
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )
@@ -291,6 +292,7 @@ async fn run_turn_on(
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )

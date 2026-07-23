@@ -93,6 +93,7 @@ async fn run_against(chunks: Vec<String>) -> (String, Vec<String>, Vec<String>, 
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )

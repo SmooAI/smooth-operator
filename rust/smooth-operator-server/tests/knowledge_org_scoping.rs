@@ -227,6 +227,7 @@ async fn run_turn_as(storage: Arc<dyn StorageAdapter>, access: AccessContext) {
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )

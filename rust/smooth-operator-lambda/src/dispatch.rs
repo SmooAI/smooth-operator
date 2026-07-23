@@ -593,6 +593,7 @@ async fn send_message(
             // The lambda flavor is text-only; no multimodal attachments.
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )
