@@ -14,9 +14,12 @@
  *   SMOOAI_GATEWAY_URL     OpenAI-compatible base URL (enables live turns with a key)
  *   SMOOAI_GATEWAY_KEY     gateway API key
  *   SMOOAI_MODEL           model id    (default claude-haiku-4-5)
+ *   SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)
+ *   SMOOTH_NO_TOOLS        set to "1" to serve a chat-only agent (no coding tools)
  */
-import type { ChatClientLike } from '@smooai/smooth-operator-core';
+import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
 
+import { codingTools } from './codingTools.js';
 import { createGatewayModelCeilingResolver, type ModelCeilingResolver } from './modelCeiling.js';
 import { serveLocal } from './server.js';
 
@@ -97,12 +100,27 @@ async function buildChatClient(): Promise<ChatClientLike> {
     }
 }
 
+/**
+ * Give the agent a workspace-confined coding toolset (read/write/edit/list/grep/bash) so
+ * it can actually edit files — without `tools` the local agent is chat-only and replies
+ * "I don't have file editing tools" (th-82ad57). Confined to `SMOOTH_WORKSPACE` (default:
+ * the process cwd, which is what the bench launches the server in). Mirrors the Go serve
+ * binary's env contract.
+ */
+function buildTools(): Tool[] | undefined {
+    if (process.env.SMOOTH_NO_TOOLS === '1') return undefined;
+    const workspace = process.env.SMOOTH_WORKSPACE || process.cwd();
+    // eslint-disable-next-line no-console
+    console.log(`coding tools enabled, confined to workspace: ${workspace}`);
+    return codingTools(workspace);
+}
+
 async function main(): Promise<void> {
     const host = process.env.SMOOTH_OPERATOR_HOST ?? '127.0.0.1';
     const port = Number(process.env.SMOOTH_OPERATOR_PORT ?? '8787');
     const chatClient = await buildChatClient();
 
-    const server = await serveLocal({ chatClient, host, port, model: resolveModel(), modelCeiling: buildModelCeiling() });
+    const server = await serveLocal({ chatClient, host, port, model: resolveModel(), modelCeiling: buildModelCeiling(), tools: buildTools() });
     // eslint-disable-next-line no-console
     console.log(`smooth-operator-server (TypeScript, local flavor) listening on ${server.url}`);
     // serveLocal already wires SIGTERM/SIGINT → graceful drain + close.
