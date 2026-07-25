@@ -8,6 +8,8 @@
 //	SMOOAI_GATEWAY_URL     OpenAI-compatible gateway base URL
 //	SMOOAI_GATEWAY_KEY     gateway API key (absent → keyless; turns error cleanly)
 //	SMOOTH_PERSONA         system prompt for the agent (optional)
+//	SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)
+//	SMOOTH_NO_TOOLS        set to "1" to serve a chat-only agent (no coding tools)
 package main
 
 import (
@@ -31,6 +33,23 @@ func main() {
 	}
 	if persona := os.Getenv("SMOOTH_PERSONA"); persona != "" {
 		opts = append(opts, server.WithLocalServerOption(server.WithSystemPrompt(persona)))
+	}
+
+	// Give the agent a workspace-confined coding toolset (read/write/edit/list/grep/bash)
+	// so it can actually edit files — without WithTools the local agent is chat-only and
+	// replies "I don't have file editing tools" (th-82ad57). Confined to SMOOTH_WORKSPACE
+	// (default: the process cwd, which is what the bench launches the server in).
+	if os.Getenv("SMOOTH_NO_TOOLS") != "1" {
+		workspace := os.Getenv("SMOOTH_WORKSPACE")
+		if workspace == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				workspace = cwd
+			} else {
+				workspace = "."
+			}
+		}
+		opts = append(opts, server.WithLocalServerOption(server.WithTools(server.CodingTools(workspace))))
+		log.Printf("coding tools enabled, confined to workspace: %s", workspace)
 	}
 
 	log.Printf("smooth-operator-server (Go, local flavor) listening on ws://%s/ws", addr)
