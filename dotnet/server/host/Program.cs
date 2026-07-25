@@ -125,6 +125,16 @@ int? modelCeiling = string.IsNullOrEmpty(gatewayKey)
     : await ModelInfo.FetchCeilingAsync(EmbeddingHttpClient(gatewayUrl, gatewayKey), model);
 builder.Services.AddSingleton(new TurnLimits(maxTokens, maxIterations, modelCeiling));
 
+// ── Coding tools: a workspace-confined read/write/edit/list/grep/bash set (th-82ad57) so the agent
+//    can actually do work — without them it is chat-only and replies "I don't have file editing
+//    tools". Confined to SMOOTH_WORKSPACE (default: the process cwd, which is what the parity bench
+//    launches the host in); SMOOTH_NO_TOOLS=1 opts back out. Mirrors the Go host's main.go. ──
+if (Get("SMOOTH_NO_TOOLS") != "1")
+{
+    var workspace = Get("SMOOTH_WORKSPACE", Directory.GetCurrentDirectory());
+    builder.Services.AddSingleton<IReadOnlyList<AITool>>(CodingTools.Create(workspace));
+}
+
 builder.Services.AddSmoothOperatorServer();
 
 var app = builder.Build();
