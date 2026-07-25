@@ -32,6 +32,7 @@ from smooth_operator_core import Knowledge
 from .agent_config import AgentConfigResolver, NoSessionAuthenticator, SessionAuthenticator, StaticAgentConfigResolver
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
+from .coding_tools import coding_tools_from_env
 from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
 from .otp import OtpService
@@ -312,13 +313,23 @@ async def serve_local(addr: str = f"{DEFAULT_HOST}:{DEFAULT_PORT}", *, seed_kb: 
     if seed_kb:
         knowledge = _seed_knowledge()
 
+    # Give the agent a workspace-confined coding toolset (read/write/edit/list/grep/bash)
+    # so it can actually edit files — without tools the local agent is chat-only and
+    # replies "I don't have file editing tools" (th-82ad57). Confined to SMOOTH_WORKSPACE
+    # (default: the process cwd, which is what the bench launches the server in);
+    # SMOOTH_NO_TOOLS=1 opts back out. Mirrors the Go serve binary's env contract.
+    tools = coding_tools_from_env()
+
     state = ServerState(
         store=store,
         chat_client=_build_gateway_client(),
         knowledge=knowledge,
         auth=NoAuthVerifier(),
+        tools=list(tools),
     )
     server = await serve(state, host, port, install_signal_handlers=True)
+    if tools:
+        print(f"coding tools enabled, confined to workspace: {os.environ.get('SMOOTH_WORKSPACE') or os.getcwd()}")
     print(f"smooth-operator-server (local flavor, python) listening on {server.ws_url()}")
     await server.wait_closed()
 
