@@ -47,7 +47,7 @@ func leakTool(text string) core.Tool {
 func runHookedTurn(t *testing.T, tools []core.Tool, hooks []core.ToolHook) *core.MockLlmProvider {
 	t.Helper()
 	store := NewInMemorySessionStore()
-	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com")
+	session, err := store.CreateSession(context.Background(), "agent-1", "Alice", "alice@example.com", ConversationScope{Unscoped: true})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}

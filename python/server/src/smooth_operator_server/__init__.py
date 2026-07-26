@@ -25,6 +25,7 @@ from .auth import (
     Principal,
 )
 from .backplane import Backplane, InMemoryBackplane
+from .coding_tools import coding_tools, coding_tools_from_env, resolve_workspace_path
 from .dispatcher import FrameDispatcher
 from .otp import (
     OtpChannel,
@@ -62,6 +63,9 @@ __all__ = [
     "Principal",
     "Backplane",
     "InMemoryBackplane",
+    "coding_tools",
+    "coding_tools_from_env",
+    "resolve_workspace_path",
     "FrameDispatcher",
     "OtpChannel",
     "OtpContact",
