@@ -19,7 +19,7 @@ use smooth_operator::adapter::{
 };
 use smooth_operator::domain::{Conversation, Message, Participant, Session};
 use smooth_operator_core::{
-    CheckpointStore, InMemoryKnowledge, KnowledgeBase, MemoryCheckpointStore,
+    CheckpointStore, InMemoryKnowledge, KnowledgeBase, Memory, MemoryCheckpointStore,
 };
 
 #[derive(Default)]
@@ -45,6 +45,11 @@ pub struct InMemoryStorageAdapter {
     /// it. `knowledge()` returns the **ingest handle** (records ACLs as docs are
     /// seeded), so the side table is populated within this single process.
     knowledge: AclKnowledgeStore,
+    /// Optional durable-recall handle. `None` (the default) ⇒ the adapter reports
+    /// no memory, so turns run without auto-recall — matching every other
+    /// backend's default. Set via [`with_memory`](Self::with_memory) to exercise
+    /// the [`memory_for_access`](StorageAdapter::memory_for_access) seam.
+    memory: Option<Arc<dyn Memory>>,
 }
 
 impl InMemoryStorageAdapter {
@@ -53,7 +58,18 @@ impl InMemoryStorageAdapter {
             tables: RwLock::new(Tables::default()),
             checkpoints: Arc::new(MemoryCheckpointStore::new()),
             knowledge: AclKnowledgeStore::new(Arc::new(InMemoryKnowledge::new())),
+            memory: None,
         }
+    }
+
+    /// Attach a [`Memory`] handle so the adapter exposes it through
+    /// [`memory_for_access`](StorageAdapter::memory_for_access) — the engine then
+    /// auto-recalls from it into every turn. Mirrors how Big Smooth's daemon
+    /// hands its SQLite-backed store to the runner.
+    #[must_use]
+    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = Some(memory);
+        self
     }
 }
 
@@ -343,5 +359,11 @@ impl StorageAdapter for InMemoryStorageAdapter {
         // before truncating. The side table was populated at ingest (above), so
         // this enforces real within-org document-level access control.
         self.knowledge.reader(access.clone())
+    }
+
+    fn memory_for_access(&self, _access: &AccessContext) -> Option<Arc<dyn Memory>> {
+        // Single, unscoped store (this is a test/baseline adapter); `None` unless
+        // one was attached via `with_memory`.
+        self.memory.clone()
     }
 }

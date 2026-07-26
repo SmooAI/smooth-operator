@@ -25,7 +25,9 @@ use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
 use smooth_operator_core::llm::StreamEvent;
 use smooth_operator_core::llm_provider::MockLlmClient;
-use smooth_operator_core::{LlmConfig, Role, Tool, ToolSchema};
+use smooth_operator_core::{
+    InMemoryMemory, LlmConfig, Memory, MemoryEntry, MemoryType, Role, Tool, ToolSchema,
+};
 
 use smooth_operator_server::runner::{self, TurnRequest, TurnResult};
 
@@ -173,6 +175,122 @@ fn tool_names_seen(mock: &MockLlmClient) -> Vec<String> {
     let calls = mock.calls();
     let first = calls.first().expect("at least one LLM call");
     first.tools.iter().map(|t| t.name.clone()).collect()
+}
+
+/// The concatenated content of every message the model saw on the first call —
+/// used to assert whether the engine auto-injected recalled memories.
+fn all_message_content_seen(mock: &MockLlmClient) -> String {
+    let calls = mock.calls();
+    let first = calls.first().expect("at least one LLM call");
+    first
+        .messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Drive one turn against an explicit storage adapter and user message (the
+/// memory seam needs a message that lexically overlaps the stored memory, which
+/// the fixed-input [`run_turn`] can't provide).
+async fn run_turn_with_storage(
+    storage: Arc<dyn StorageAdapter>,
+    user_message: &str,
+) -> MockLlmClient {
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::Delta {
+            content: "Done.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+
+    let (tx, mut rx): (_, UnboundedReceiver<Value>) = unbounded_channel();
+    runner::run_streaming_turn(
+        TurnRequest {
+            storage,
+            llm: mock_llm(),
+            max_iterations: 4,
+            conversation_id: "conv-mem",
+            request_id: "req-mem",
+            user_message,
+            model_max_output: None,
+            access: AccessContext::anonymous(),
+            llm_provider: Some(Arc::new(mock.clone())),
+            reranker: None,
+            confirmation: None,
+            interactions: None,
+            tool_provider: None,
+            tool_hooks: Vec::new(),
+            system_prompt: None,
+            org_id: None,
+            gateway_key: None,
+            workflow: None,
+            judge: None,
+            greeting_section: None,
+            enabled_tools: None,
+            auth_gate: None,
+            tool_configs: None,
+            extensions: None,
+            images: vec![],
+        },
+        &tx,
+    )
+    .await
+    .expect("run_streaming_turn");
+
+    drop(tx);
+    while rx.recv().await.is_some() {}
+    mock
+}
+
+// ---------------------------------------------------------------------------
+// SEAM 3 — durable memory auto-recall (StorageAdapter::memory_for_access)
+// ---------------------------------------------------------------------------
+
+/// Default: an adapter with no memory ⇒ no auto-recall, so the model sees no
+/// `[Recalled memories]` block. Guards against the seam injecting when absent.
+#[tokio::test]
+async fn no_memory_means_no_recall_injection() {
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
+    let mock = run_turn_with_storage(storage, "add shows to my watchlist").await;
+    assert!(
+        !all_message_content_seen(&mock).contains("[Recalled memories]"),
+        "with no memory attached the turn must carry no auto-recall block"
+    );
+}
+
+/// When the adapter exposes a memory via `memory_for_access`, the engine
+/// auto-recalls entries relevant to the user message and injects them into the
+/// turn — the seam that lights up Big Smooth's durable auto-recall (th-374b27).
+#[tokio::test]
+async fn attached_memory_is_auto_recalled_into_the_turn() {
+    let memory = Arc::new(InMemoryMemory::new());
+    memory
+        .store(MemoryEntry::new(
+            "always add shows to the smoo-hub watchlist",
+            MemoryType::Project,
+        ))
+        .expect("store memory");
+
+    let storage: Arc<dyn StorageAdapter> =
+        Arc::new(InMemoryStorageAdapter::new().with_memory(memory as Arc<dyn Memory>));
+
+    // The message shares "add", "shows", "watchlist" with the stored memory, so
+    // the engine's word-overlap recall surfaces it.
+    let mock = run_turn_with_storage(storage, "add shows to my watchlist").await;
+
+    let seen = all_message_content_seen(&mock);
+    assert!(
+        seen.contains("[Recalled memories]"),
+        "an attached memory must inject a recall block, got: {seen}"
+    );
+    assert!(
+        seen.contains("always add shows to the smoo-hub watchlist"),
+        "the recalled memory's content must reach the model, got: {seen}"
+    );
 }
 
 // ---------------------------------------------------------------------------
