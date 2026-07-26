@@ -18,7 +18,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use smooth_operator_core::{CheckpointStore, KnowledgeBase};
+use smooth_operator_core::{CheckpointStore, KnowledgeBase, Memory};
 
 use crate::access_control::AccessContext;
 use crate::domain::{Conversation, Message, Participant, Session, SessionStatus};
@@ -231,5 +231,25 @@ pub trait StorageAdapter: Send + Sync {
     /// process boundary.
     fn knowledge_for_access(&self, access: &AccessContext) -> Arc<dyn KnowledgeBase> {
         crate::access_control::AclKnowledgeStore::new(self.knowledge()).reader(access.clone())
+    }
+
+    /// A durable [`Memory`] handle for the requester, ready to hand to a
+    /// smooth-operator `AgentConfig` via `AgentConfig::with_memory`. When
+    /// `Some`, the engine auto-recalls relevant memories into every turn
+    /// (`build_context_messages` → `memory.recall(msg, 5)`); when `None` (the
+    /// default) the turn carries no auto-recall.
+    ///
+    /// Defaults to `None` so no existing backend changes behavior — auto-recall
+    /// across all hosted orgs is a deliberate product decision, not a side
+    /// effect of adding this seam. Big Smooth's single-tenant SQLite adapter
+    /// overrides this to return its store, lighting up auto-recall for the
+    /// personal daemon.
+    ///
+    /// `access` is threaded (mirroring [`knowledge_for_access`](Self::knowledge_for_access))
+    /// so a multi-tenant backend can bind memory to the requester's org/user;
+    /// single-tenant adapters ignore it.
+    fn memory_for_access(&self, access: &AccessContext) -> Option<Arc<dyn Memory>> {
+        let _ = access;
+        None
     }
 }

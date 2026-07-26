@@ -543,6 +543,14 @@ pub async fn run_streaming_turn(
         .with_prior_messages(prior)
         // Clamp max_tokens to the model's output ceiling (None ⇒ unclamped).
         .with_model_ceiling(model_max_output);
+    // Durable auto-recall: when the storage adapter exposes a memory handle for
+    // this requester, hand it to the engine so `build_context_messages` injects
+    // recalled memories into the turn. `None` (the default for every backend
+    // except Big Smooth's single-tenant SQLite adapter) leaves the turn without
+    // auto-recall — byte-for-byte unchanged.
+    if let Some(memory) = storage.memory_for_access(&access) {
+        config = config.with_memory(memory);
+    }
     // Multimodal turn: attach the turn's images to the engine's user message as
     // OpenAI `image_url` content parts. Empty (the default) leaves the turn
     // text-only — byte-for-byte unchanged.
