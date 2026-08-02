@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
 
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{ConversationUpdate, StorageAdapter};
@@ -30,6 +31,10 @@ use crate::state::AppState;
 
 /// The agent's display name for the reference server.
 const AGENT_NAME: &str = "smooth-agent";
+
+/// The reply text an interrupted turn closes out with, so the transcript records
+/// that the user stopped the turn rather than the agent falling silent.
+const INTERRUPTED_REPLY: &str = "Stopped.";
 
 /// Parse and dispatch a single inbound text frame. Any produced events are sent
 /// through `sink`. Returns `Ok(())` always — protocol-level failures are
@@ -83,6 +88,9 @@ pub async fn handle_frame(
         }
         Some("confirm_tool_action") => {
             handle_confirm_tool_action(state, &parsed, request_id, sink);
+        }
+        Some("interrupt") => {
+            handle_interrupt(state, &parsed, request_id, sink);
         }
         Some("verify_otp") => {
             handle_verify_otp(state, &parsed, request_id, sink).await;
@@ -1328,6 +1336,12 @@ async fn handle_send_message(
     let request_id_owned = request_id.to_string();
     let conversation_id = session.conversation_id.clone();
 
+    // Arm the Stop button BEFORE the turn is spawned, so there is no window in
+    // which a turn is running but not interruptible. The token is raced against
+    // the turn future below; `turn_seq` scopes the cleanup to this turn.
+    let interrupt_token = CancellationToken::new();
+    let turn_seq = state.register_turn(&conversation_id, interrupt_token.clone());
+
     tokio::spawn(async move {
         // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW
         // is set; `None` otherwise, zero overhead). The delegate is bound to THIS
@@ -1345,7 +1359,7 @@ async fn handle_send_message(
         // None ⇒ unclamped). Reuses the cached /model/info fetch. EPIC th-1cc9fa.
         let model_max_output =
             crate::admin::model_output_ceiling(&state_for_turn, &llm.model).await;
-        let result = runner::run_streaming_turn(
+        let turn = runner::run_streaming_turn(
             TurnRequest {
                 storage: state_for_turn.storage.clone(),
                 llm,
@@ -1399,8 +1413,45 @@ async fn handle_send_message(
                 images,
             },
             &sink_owned,
-        )
-        .await;
+        );
+
+        // The interrupt seam. `select!` races the user's Stop against the turn;
+        // when the token wins, the turn future is DROPPED — cancelling it at
+        // whatever await point it had reached (mid-LLM-stream, or between tool
+        // steps) — and we close the request out ourselves so the client isn't
+        // left streaming forever. `biased` makes an already-cancelled token win
+        // deterministically rather than by poll order.
+        let result = tokio::select! {
+            biased;
+            () = interrupt_token.cancelled() => {
+                // Emit a normal `eventual_response` rather than a bespoke event:
+                // every existing client (th code, the widget, the generated
+                // SDKs) already terminates its streaming state on this, so a
+                // Stop works on clients that know nothing about `interrupt`.
+                let response = runner::general_agent_response(INTERRUPTED_REPLY, &[]);
+                let _ = sink_owned.send(protocol::eventual_response(
+                    &request_id_owned,
+                    200,
+                    // No assistant message was persisted — the turn was cut off
+                    // — so there is no message id to echo.
+                    "",
+                    response,
+                    false,
+                    &[],
+                    None,
+                    None,
+                ));
+                state_for_turn.clear_turn(&conversation_id, turn_seq);
+                // A turn parked on a confirmation/interaction is gone with the
+                // dropped future; drop its registration too so a late verdict
+                // can't mis-route into the next turn.
+                state_for_turn.clear_confirmation(&session_id_owned);
+                state_for_turn.clear_interaction(&session_id_owned);
+                return;
+            }
+            result = turn => result,
+        };
+        state_for_turn.clear_turn(&conversation_id, turn_seq);
 
         match result {
             Ok(turn) => {
@@ -1488,6 +1539,68 @@ async fn handle_send_message(
             }
         }
     });
+}
+
+/// `interrupt` — stop the agent turn currently running on a conversation.
+///
+/// Per `spec/actions/interrupt.schema.json` the client sends
+/// `{ action, requestId, sessionId | conversationId }`. Either handle is
+/// accepted: `conversationId` is used directly when given, otherwise the
+/// session is resolved to its conversation — a widget only ever knows its
+/// `sessionId`, while a reconnected client may hold the conversation.
+///
+/// The running turn is racing a [`CancellationToken`] against its turn future,
+/// so cancelling here drops that future at its next await point and the turn
+/// task emits the closing `eventual_response` itself (on the turn's own
+/// `requestId`, so the client's streaming state resolves). We only ack.
+///
+/// Interrupting is idempotent from the client's side: a second `interrupt`
+/// after the turn has already ended reports `NO_ACTIVE_TURN` rather than
+/// silently succeeding, so a UI can tell "stopped it" from "nothing to stop".
+fn handle_interrupt(
+    state: &AppState,
+    parsed: &Value,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    let conversation_id = match parsed.get("conversationId").and_then(Value::as_str) {
+        Some(id) => id.to_string(),
+        None => {
+            let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
+                let _ = sink.send(protocol::error(
+                    request_id,
+                    "VALIDATION_ERROR",
+                    "interrupt requires a 'conversationId' or a 'sessionId'",
+                ));
+                return;
+            };
+            let Some(session) = state.get_session(session_id) else {
+                let _ = sink.send(protocol::error(
+                    request_id,
+                    "SESSION_NOT_FOUND",
+                    &format!("session '{session_id}' does not exist"),
+                ));
+                return;
+            };
+            session.conversation_id
+        }
+    };
+
+    if !state.interrupt_turn(&conversation_id) {
+        let _ = sink.send(protocol::error(
+            request_id,
+            "NO_ACTIVE_TURN",
+            &format!("no agent turn is running for conversation '{conversation_id}'"),
+        ));
+        return;
+    }
+
+    let _ = sink.send(protocol::immediate_response(
+        request_id,
+        200,
+        "interrupting the running turn",
+        json!({ "conversationId": conversation_id }),
+    ));
 }
 
 /// `confirm_tool_action` — resume a turn parked on a write-tool confirmation.

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/actions/interrupt.schema.json",
+  "title": "Interrupt",
+  "description": "Action: `interrupt`. Stops the agent turn currently running on a conversation — the protocol's Stop button. The running turn is cancelled at its next await point (mid-LLM-stream, or between tool steps) and closes out with a normal `eventual_response`, so clients that predate this action still resolve their streaming state correctly. A turn already interrupted or already finished reports `NO_ACTIVE_TURN`.",
+
+  "$defs": {
+    "Request": {
+      "title": "InterruptRequest",
+      "description": "Fields sent by the client to stop the running turn. Exactly one of `conversationId` or `sessionId` identifies the target; `conversationId` wins when both are present. A widget typically only holds its `sessionId`, while a reconnected client may hold the conversation directly.",
+      "type": "object",
+      "required": ["action", "requestId"],
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["conversationId"] },
+        { "required": ["sessionId"] }
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "interrupt",
+          "description": "Action discriminator."
+        },
+        "requestId": {
+          "type": "string",
+          "description": "Correlation id for THIS interrupt frame — the server's `immediate_response` ack echoes it. Note this is not the interrupted turn's `requestId`: the cancelled turn closes itself out on its own `requestId`, which is what the client's streaming state is keyed by."
+        },
+        "conversationId": {
+          "type": "string",
+          "description": "Conversation whose running turn should be stopped. Preferred when known — turns are tracked per conversation, so this keeps working across a reconnect that minted a new session."
+        },
+        "sessionId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Session whose conversation's running turn should be stopped. Resolved server-side to the session's `conversationId`. Unknown sessions report `SESSION_NOT_FOUND`."
+        }
+      }
+    },
+
+    "Response": {
+      "title": "InterruptResponse",
+      "description": "The server acks with an `immediate_response` (status 200, `data.conversationId`) once the running turn has been signalled. The stop itself surfaces on the INTERRUPTED TURN's `requestId` as an `eventual_response` whose `responseParts` records that the turn was stopped — no dedicated event type, so existing clients need no changes. Errors: `VALIDATION_ERROR` (neither handle given), `SESSION_NOT_FOUND`, `NO_ACTIVE_TURN` (nothing was running).",
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Response" }
+  ]
+}

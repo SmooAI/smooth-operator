@@ -12,6 +12,7 @@
 //! Postgres.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use smooth_operator_core::HumanResponse;
@@ -166,6 +167,28 @@ pub struct AppState {
     /// decline) to resume the parked turn. One outstanding interaction per
     /// session (mirrors `pending_confirmations`).
     pending_interactions: Arc<RwLock<HashMap<String, PendingInteraction>>>,
+    /// **Active agent turns**: `conversationId` → the running turn's
+    /// [`CancellationToken`] plus a monotonic sequence number. A turn registers
+    /// here immediately *before* it is spawned and clears its own entry when it
+    /// ends. An `interrupt` action looks the conversation up and cancels the
+    /// token; the turn task is racing that token against the turn future in a
+    /// `tokio::select!`, so cancelling drops the turn future at its next await
+    /// point — mid-LLM-stream, or between tool steps — and the user gets their
+    /// "stop being weird" button.
+    ///
+    /// Keyed by CONVERSATION rather than session so a reconnect (which mints a
+    /// fresh session for the same conversation) can still stop the turn it is
+    /// watching stream, matching how the workflow step pointer is keyed
+    /// (th-c12df5).
+    ///
+    /// The sequence number makes cleanup safe under the concurrent turns this
+    /// server allows: a finishing turn removes the entry only while it is still
+    /// *its own*, so a slow turn A can never clear newer turn B's token and
+    /// silently disarm the Stop button.
+    active_turns: Arc<RwLock<HashMap<String, ActiveTurn>>>,
+    /// Monotonic source for [`ActiveTurn::seq`]. Shared across clones of the
+    /// state so every turn on this server gets a distinct sequence number.
+    turn_seq: Arc<AtomicU64>,
     /// When `true`, the router mounts the embedded widget host page at `/` and
     /// the widget bundle at `/chat-widget.iife.js`. Off by default (the
     /// K8s/Lambda flavors never serve the widget); the local flavor opts in via
@@ -207,6 +230,17 @@ pub struct AppState {
 #[must_use]
 pub fn scoped_connector_key(org_id: &str, connector_name: &str) -> String {
     format!("IXCONN#{org_id}\u{1}{connector_name}")
+}
+
+/// A turn currently running on a conversation: the token that cancels it and
+/// the sequence number identifying *which* turn registered it (see
+/// [`AppState::register_turn`]).
+#[derive(Clone, Debug)]
+pub struct ActiveTurn {
+    /// Monotonic id for this turn, used to make deregistration self-only.
+    pub seq: u64,
+    /// Cancelled by `interrupt`; the turn task selects on it.
+    pub token: CancellationToken,
 }
 
 /// A turn parked on a Rich Interaction: the interaction instance (id + kind +
@@ -265,6 +299,8 @@ impl AppState {
             connectors: Arc::new(RwLock::new(HashMap::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
             pending_interactions: Arc::new(RwLock::new(HashMap::new())),
+            active_turns: Arc::new(RwLock::new(HashMap::new())),
+            turn_seq: Arc::new(AtomicU64::new(0)),
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
@@ -725,6 +761,64 @@ impl AppState {
         }
     }
 
+    /// Register `token` as the cancellation handle for the turn about to run on
+    /// `conversation_id`, returning the turn's sequence number (pass it back to
+    /// [`clear_turn`](Self::clear_turn) when the turn ends).
+    ///
+    /// Called *before* `tokio::spawn`, so there is no window in which a turn is
+    /// running but not interruptible. Any prior entry for the conversation is
+    /// replaced: the newest turn is the one the Stop button acts on, and the
+    /// displaced turn's own `clear_turn` becomes a no-op via the sequence guard.
+    pub fn register_turn(
+        &self,
+        conversation_id: impl Into<String>,
+        token: CancellationToken,
+    ) -> u64 {
+        let seq = self.turn_seq.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut map) = self.active_turns.write() {
+            map.insert(conversation_id.into(), ActiveTurn { seq, token });
+        }
+        seq
+    }
+
+    /// Cancel the turn currently running on `conversation_id`. Returns `false`
+    /// when no turn is active (the caller reports `NO_ACTIVE_TURN`), `true` when
+    /// a token was cancelled.
+    ///
+    /// The entry is deliberately left in place — the turn task owns its own
+    /// removal, so an interrupt that lands microseconds before the turn finishes
+    /// naturally cannot clear a *later* turn's registration.
+    #[must_use]
+    pub fn interrupt_turn(&self, conversation_id: &str) -> bool {
+        let Ok(map) = self.active_turns.read() else {
+            return false;
+        };
+        let Some(active) = map.get(conversation_id) else {
+            return false;
+        };
+        active.token.cancel();
+        true
+    }
+
+    /// Deregister the turn identified by `seq` on `conversation_id`. A no-op
+    /// unless that turn is still the registered one, so a straggler cannot
+    /// disarm the Stop button for the turn that replaced it.
+    pub fn clear_turn(&self, conversation_id: &str, seq: u64) {
+        if let Ok(mut map) = self.active_turns.write() {
+            if map.get(conversation_id).is_some_and(|a| a.seq == seq) {
+                map.remove(conversation_id);
+            }
+        }
+    }
+
+    /// Whether a turn is currently registered as running on `conversation_id`.
+    #[must_use]
+    pub fn has_active_turn(&self, conversation_id: &str) -> bool {
+        self.active_turns
+            .read()
+            .is_ok_and(|map| map.contains_key(conversation_id))
+    }
+
     /// The client render capabilities this session declared in `supports` at
     /// `create_conversation_session` (read from the session's
     /// `metadata.supports`). Empty for unknown sessions and text-only channels
@@ -1100,5 +1194,100 @@ mod tests {
             resolve_gateway_key(&state.gateway_key_resolver, "org-a", env).await,
             None
         );
+    }
+
+    // ---- active-turn registry (interrupt / Stop button, th-3a912a) ----------
+
+    #[test]
+    fn register_then_interrupt_cancels_that_conversations_token() {
+        let state = state_with(config_with_env_key(None));
+        let token = CancellationToken::new();
+        let seq = state.register_turn("conv-a", token.clone());
+
+        assert!(state.has_active_turn("conv-a"));
+        assert!(!token.is_cancelled(), "registration must not pre-cancel");
+
+        assert!(
+            state.interrupt_turn("conv-a"),
+            "a running turn is stoppable"
+        );
+        assert!(token.is_cancelled(), "the turn task's token is cancelled");
+
+        // The interrupt leaves deregistration to the turn task, which owns it.
+        assert!(state.has_active_turn("conv-a"));
+        state.clear_turn("conv-a", seq);
+        assert!(!state.has_active_turn("conv-a"));
+    }
+
+    #[test]
+    fn interrupt_without_a_registered_turn_is_false() {
+        let state = state_with(config_with_env_key(None));
+        assert!(!state.interrupt_turn("conv-nobody"));
+
+        // And after a turn has cleaned itself up.
+        let seq = state.register_turn("conv-a", CancellationToken::new());
+        state.clear_turn("conv-a", seq);
+        assert!(!state.interrupt_turn("conv-a"));
+    }
+
+    #[test]
+    fn interrupt_only_cancels_the_named_conversation() {
+        let state = state_with(config_with_env_key(None));
+        let a = CancellationToken::new();
+        let b = CancellationToken::new();
+        state.register_turn("conv-a", a.clone());
+        state.register_turn("conv-b", b.clone());
+
+        assert!(state.interrupt_turn("conv-a"));
+        assert!(a.is_cancelled());
+        assert!(!b.is_cancelled(), "a sibling conversation is untouched");
+    }
+
+    #[test]
+    fn a_stale_turn_cannot_clear_the_turn_that_replaced_it() {
+        // The bug this guards: two concurrent turns on one conversation. Turn A
+        // finishes late, after turn B registered. Without the sequence guard A's
+        // cleanup would remove B's token and silently disarm the Stop button.
+        let state = state_with(config_with_env_key(None));
+        let a_seq = state.register_turn("conv-a", CancellationToken::new());
+        let b_token = CancellationToken::new();
+        let b_seq = state.register_turn("conv-a", b_token.clone());
+        assert_ne!(a_seq, b_seq, "sequence numbers are monotonic");
+
+        state.clear_turn("conv-a", a_seq);
+
+        assert!(
+            state.has_active_turn("conv-a"),
+            "the stale cleanup must be a no-op"
+        );
+        assert!(state.interrupt_turn("conv-a"));
+        assert!(b_token.is_cancelled(), "B is still the interruptible turn");
+
+        state.clear_turn("conv-a", b_seq);
+        assert!(
+            !state.has_active_turn("conv-a"),
+            "B cleans up its own entry"
+        );
+    }
+
+    #[test]
+    fn clearing_an_unregistered_conversation_is_a_no_op() {
+        let state = state_with(config_with_env_key(None));
+        state.clear_turn("conv-nobody", 0);
+        assert!(!state.has_active_turn("conv-nobody"));
+    }
+
+    #[test]
+    fn turn_registrations_are_shared_across_state_clones() {
+        // The handler interrupts through one clone of the state while the turn
+        // task registered through another; the registry must be shared.
+        let state = state_with(config_with_env_key(None));
+        let clone = state.clone();
+        let token = CancellationToken::new();
+        state.register_turn("conv-a", token.clone());
+
+        assert!(clone.has_active_turn("conv-a"));
+        assert!(clone.interrupt_turn("conv-a"));
+        assert!(token.is_cancelled());
     }
 }
