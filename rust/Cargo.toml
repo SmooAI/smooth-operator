@@ -77,6 +77,17 @@ sha2 = "0.10"
 hex = "0.4"
 # Mock GitHub API server for the offline connector contract test.
 wiremock = "0.6"
+# MCP client (`mcp.rs`): connect Model Context Protocol servers and surface
+# their tools to the engine. `default-features = false` drops rmcp's own server
+# half from the lib build — the in-process test fixture re-enables `server` as a
+# dev-dep. The HTTP transport rides the workspace's existing rustls reqwest.
+rmcp = { version = "1.8", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+# Parsing `mcp.toml` (the same `[[servers]]` shape Smooth's `th mcp` writes).
+toml = "0.9"
 # rustls is in the graph twice (octocrab's hyper-rustls + reqwest), and the
 # workspace also pulls aws-lc-rs (via the OTLP/tonic stack) alongside ring — so
 # rustls 0.23 can't auto-pick a process-level CryptoProvider. The GitHub client
