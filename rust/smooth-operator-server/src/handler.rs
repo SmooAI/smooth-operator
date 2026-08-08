@@ -2292,7 +2292,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: "claude-haiku-4-5".to_string(),
             max_tokens: 512,
-            temperature: 0.0,
+            temperature: crate::config::DEFAULT_TEMPERATURE,
             retry_policy: RetryPolicy::default(),
             api_format: ApiFormat::OpenAiCompat,
         }
