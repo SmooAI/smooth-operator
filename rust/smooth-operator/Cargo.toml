@@ -40,6 +40,10 @@ jsonwebtoken = { workspace = true }
 # Install the `ring` rustls CryptoProvider before the GitHub client's first TLS
 # use (the workspace graph has both ring + aws-lc-rs, so rustls can't auto-pick).
 rustls = { workspace = true }
+# `mcp`: MCP client (stdio child process + streamable HTTP with bearer auth)
+# plus `mcp.toml` parsing, so configured MCP servers surface as engine tools.
+rmcp = { workspace = true }
+toml = { workspace = true }
 
 # OpenTelemetry GenAI instrumentation (`telemetry.rs`): tracing spans mapped to
 # OTLP via tracing-opentelemetry. The OTLP exporter is gated on
@@ -64,3 +68,7 @@ smooai-smooth-operator-adapter-memory = { path = "../adapters/in-memory" }
 futures-util = "0.3"
 # Mock HTTP policy service for the HttpWidgetAuth tests (no network).
 wiremock = { workspace = true }
+# The MCP end-to-end test stands up a real MCP server on an in-memory duplex
+# pipe, so the client half is exercised over the actual protocol (no network,
+# no spawned process). Only the tests need rmcp's server half.
+rmcp = { workspace = true, features = ["server"] }

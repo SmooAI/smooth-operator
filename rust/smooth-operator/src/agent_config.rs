@@ -54,7 +54,11 @@ pub struct ConversationWorkflowStep {
     /// (th-d57a1d: a tapped scale answer is the clean input the judge reliably
     /// advances on). Free-form steps (name/role/org) omit this. Mirrors
     /// `suggestedReplies` on the TS `ConversationWorkflowStep`.
-    #[serde(default, rename = "suggestedReplies", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "suggestedReplies",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub suggested_replies: Option<Vec<String>>,
 }
 

@@ -31,6 +31,7 @@ pub mod embedding;
 pub mod gateway_key;
 pub mod identity_intake;
 pub mod interaction;
+pub mod mcp;
 pub mod otp;
 pub mod rerank;
 pub mod runtime;
@@ -75,6 +76,7 @@ pub use interaction::{
     InteractionFieldError, InteractionKind, InteractionOutcome, InteractionRegistry,
     InteractionRequest,
 };
+pub use mcp::{ChainedToolProvider, McpConfig, McpServerConfig, McpToolProvider};
 pub use otp::{OtpChannel, OtpContact, OtpDelivery, OtpError, OtpService, OtpVerifyOutcome};
 pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker};
 pub use runtime::{
