@@ -1235,6 +1235,36 @@ async fn handle_send_message(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Optional named skill. The wire carries the INTENT ("use skill X"); the
+    // server resolves the body here and composes it into the turn's system
+    // prompt below, so `message` stays exactly what the user typed (and is what
+    // gets persisted + replayed as history).
+    //
+    // Fail-CLOSED, unlike `images`: an unresolvable skill aborts the turn rather
+    // than quietly answering without it. A caller that asked for a code review
+    // recipe and got a freeform answer has no way to tell.
+    let skill_section = match parsed
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(name) => {
+            match crate::skills::resolve_section(state.skill_resolver.as_ref(), name).await {
+                Some(section) => Some(section),
+                None => {
+                    let _ = sink.send(protocol::error(
+                        Some(request_id),
+                        "SKILL_NOT_FOUND",
+                        &format!("skill '{name}' is not available on this server"),
+                    ));
+                    return None;
+                }
+            }
+        }
+        None => None,
+    };
+
     // Ownership is checked BEFORE any turn is spawned or any message persisted:
     // sending into another user's session would replay their history as context
     // and stream the reply back to the sender, so an unscoped write here is also
@@ -1587,6 +1617,9 @@ async fn handle_send_message(
                 judge,
                 // SEAM 3 — per-agent first-turn greeting + tool allow-list.
                 greeting_section,
+                // The turn's resolved skill, rendered as a prompt section
+                // (None ⇒ unchanged).
+                skill_section,
                 enabled_tools,
                 // SEAM 3 — authLevel gate + per-tool config delivery.
                 auth_gate,

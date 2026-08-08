@@ -367,6 +367,12 @@ pub struct TurnRequest<'a> {
     /// system prompt ONLY when this conversation has no prior messages, so the
     /// agent opens with it once. `None` ⇒ no greeting.
     pub greeting_section: Option<String>,
+    /// The turn's resolved **skill**, already rendered as a prompt section by
+    /// [`crate::skills::skill_section`]. Appended to the system prompt for THIS
+    /// turn only, so the persisted user message stays exactly what the user
+    /// typed and the skill's prose never accumulates in conversation history.
+    /// `None` (the default) ⇒ no section, byte-for-byte unchanged.
+    pub skill_section: Option<String>,
     /// Per-agent tool allow-list (snake_case ids). `Some` restricts the turn's
     /// registry to those tools (built-ins + host tools alike); `None` ⇒ the full
     /// tool set (unchanged). Unknown ids simply match nothing.
@@ -439,6 +445,7 @@ pub async fn run_streaming_turn(
         workflow,
         judge,
         greeting_section,
+        skill_section,
         enabled_tools,
         auth_gate,
         tool_configs,
@@ -531,6 +538,12 @@ pub async fn run_streaming_turn(
             &wt.workflow,
             wt.current_step_id.as_deref(),
         ));
+    }
+    // The turn's invoked skill (`send_message.skill`), last before the trailer
+    // contract so it is the most salient instruction the model carries into the
+    // turn. `None` for an ordinary turn.
+    if let Some(skill) = skill_section.as_deref() {
+        sections.push(skill.to_string());
     }
     // Suggested quick replies: teach the model the machine-parsed trailer
     // contract (see `crate::suggestions`). Appended unconditionally — a model

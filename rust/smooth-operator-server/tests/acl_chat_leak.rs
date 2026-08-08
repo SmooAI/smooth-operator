@@ -137,6 +137,7 @@ async fn run_turn_as(
             workflow: None,
             judge: None,
             greeting_section: None,
+            skill_section: None,
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
