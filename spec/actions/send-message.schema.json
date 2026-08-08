@@ -41,6 +41,12 @@
           "type": "string",
           "description": "Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model."
         },
+        "skill": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "description": "Optional name of a skill (a reusable recipe) to run THIS turn under. The SERVER resolves the name to the skill's markdown body and composes it into the turn's system prompt, so the wire carries the intent (\"use skill X\") rather than the client prepending the skill's prose to `message` — and the persisted user message stays exactly what the user typed. Absent → an ordinary turn (byte-identical to before this field existed). Fail-closed, unlike `images`: a skill the server cannot resolve returns a `SKILL_NOT_FOUND` error and the turn does NOT run, since silently answering without the requested recipe is indistinguishable from answering with it.",
+          "examples": ["code-review", "add-show"]
+        },
         "images": {
           "type": "array",
           "description": "Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.",

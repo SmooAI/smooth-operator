@@ -92,6 +92,7 @@ pub struct LocalServerBuilder {
     auth: Option<Arc<dyn AuthVerifier>>,
     tool_provider: Option<Arc<dyn ToolProvider>>,
     tool_hooks: Vec<Arc<dyn ToolHook>>,
+    skill_resolver: Option<Arc<dyn crate::skills::SkillResolver>>,
     serve_widget: bool,
     widget_token: Option<String>,
     strict_auth: bool,
@@ -126,6 +127,7 @@ impl Default for LocalServerBuilder {
             auth: None,
             tool_provider: None,
             tool_hooks: Vec::new(),
+            skill_resolver: None,
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
@@ -190,6 +192,16 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn tool_hooks(mut self, hooks: Vec<Arc<dyn ToolHook>>) -> Self {
         self.tool_hooks = hooks;
+        self
+    }
+
+    /// Install a [`SkillResolver`](crate::skills::SkillResolver) so a
+    /// `send_message` naming a `skill` resolves against the host's own skill
+    /// discovery. Unset ⇒ the filesystem default (`SMOOTH_SKILLS_DIR`) if the
+    /// env names roots, else `skill` is rejected with `SKILL_NOT_FOUND`.
+    #[must_use]
+    pub fn skill_resolver(mut self, resolver: Arc<dyn crate::skills::SkillResolver>) -> Self {
+        self.skill_resolver = Some(resolver);
         self
     }
 
@@ -316,6 +328,9 @@ impl LocalServerBuilder {
         }
         if !self.tool_hooks.is_empty() {
             state = state.with_tool_hooks(self.tool_hooks.clone());
+        }
+        if let Some(resolver) = &self.skill_resolver {
+            state = state.with_skill_resolver(Arc::clone(resolver));
         }
         if self.serve_widget {
             state = state.with_widget(self.widget_token.clone());

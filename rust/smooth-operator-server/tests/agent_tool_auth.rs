@@ -138,6 +138,7 @@ async fn run(
             workflow: None,
             judge: None,
             greeting_section: None,
+            skill_section: None,
             enabled_tools: None,
             auth_gate,
             tool_configs,

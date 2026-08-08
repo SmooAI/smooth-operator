@@ -38,7 +38,7 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | action | purpose | key request fields | response |
 | ------ | ------- | ------------------ | -------- |
 | `create_conversation_session` | start a session | `agentId`, `userName?`, `userEmail?`, `browserFingerprint?`, `metadata?`, `supports?` (per-kind Rich-Interaction render capabilities, e.g. `["identity_form"]`) | `sessionId`, `conversationId`, `agentId`, `userParticipantId`, `agentParticipantId` |
-| `send_message` | a turn | `sessionId`, `message`, `stream?` | streamed events, then `eventual_response` |
+| `send_message` | a turn | `sessionId`, `message`, `stream?`, `model?`, `images?`, `skill?` | streamed events, then `eventual_response` |
 | `get_session` | fetch session | `sessionId` | session snapshot |
 | `get_messages` | history | `sessionId`, paging | messages |
 | `confirm_tool_action` | resume after a write-confirmation | `sessionId`, `requestId`, `approved` | resumed stream |
@@ -108,6 +108,25 @@ Flow:
 3. Once verified, the client **re-sends** its original `send_message`; the gate now passes and the tool runs.
 
 > **Reference-server note:** the reference server does not park/auto-resume the original turn across the OTP round-trip (step 3 is a client re-send). Parking + automatic resume is a host concern behind the same events. With no `OtpService` installed, the gate stays fail-closed (the `end_user` tool is refused, no OTP offered), and a stray `verify_otp` returns `otp_invalid` / `NOT_FOUND`. The reference server currently offers only the `email` channel (`create_conversation_session` captures no phone).
+
+## Skills on `send_message`
+
+A **skill** is a named, reusable recipe (a markdown body). `send_message` takes an optional `skill`:
+
+```jsonc
+{ "action": "send_message", "requestId": "…", "sessionId": "…", "message": "review my diff", "skill": "code-review" }
+```
+
+The **server** resolves the name to the skill's body and composes it into that turn's *system prompt*. Two consequences worth knowing:
+
+- **The wire carries intent, not prose.** Clients used to prepend the skill body to `message` themselves; they no longer need to (or should).
+- **The persisted user message stays exactly what the user typed.** The skill's markdown never enters conversation history, so it is not replayed as context on every later turn.
+
+Resolution goes through a host seam (`AppState::with_skill_resolver` / `LocalServerBuilder::skill_resolver`). The built-in default reads `<root>/<name>/SKILL.md` over the `:`-separated roots in **`SMOOTH_SKILLS_DIR`** (first match wins, YAML frontmatter stripped). With the env var unset no resolver is installed, so a multi-tenant deploy never serves host skills by accident.
+
+`skill` is **fail-closed**, unlike `images`: a name that does not resolve returns `error { code: "SKILL_NOT_FOUND" }` and the turn does **not** run — answering without the requested recipe is indistinguishable to the caller from answering with it. Names are restricted to `[A-Za-z0-9_-]{1,128}`, which makes path traversal unrepresentable.
+
+> **Polyglot parity:** Rust is the reference implementation. The TS / Python / Go / .NET servers do not yet resolve `skill` (same staging as `images`, which only Rust serves today) — they ignore the field, which degrades to an ordinary turn.
 
 ## Rich Interactions (structured cards, channel-normalized)
 

@@ -25,6 +25,8 @@
 //!   `deploy/k8s` and `deploy/sst`): an embeddable, fully in-memory, auth-off
 //!   server. [`local::serve_local`] runs it to completion;
 //!   [`local::LocalServer::builder`] boots it in-process with a shutdown handle.
+//! - [`skills`] — the `send_message.skill` resolution seam ([`SkillResolver`](skills::SkillResolver))
+//!   plus the default filesystem resolver (`SMOOTH_SKILLS_DIR`).
 //! - [`admin`] — the auth-gated admin HTTP API (Phase 12) mounted under
 //!   `/admin`: whoami, chat history, indexing status, document sets. Consumed by
 //!   the Next.js management console (increment 2). See `docs/ADMIN-API.md`.
@@ -45,6 +47,7 @@ pub mod protocol;
 pub mod reranker;
 pub mod runner;
 pub mod server;
+pub mod skills;
 pub mod state;
 pub mod suggestions;
 
@@ -56,4 +59,5 @@ pub use server::{
     bind, build_state, build_state_from_env, build_state_from_env_async, router, run, serve_state,
     serve_state_on,
 };
+pub use skills::{DirSkillResolver, SkillResolver};
 pub use state::AppState;

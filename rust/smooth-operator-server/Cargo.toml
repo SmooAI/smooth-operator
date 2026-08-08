@@ -93,3 +93,5 @@ http-body-util = "0.1"
 jsonwebtoken = { workspace = true }
 # Encode the base64url(JSON) forwarded-identity blob in the trusted-mode ACL test.
 base64 = { workspace = true }
+# Throwaway skill roots for the DirSkillResolver / skill-field tests.
+tempfile = "3"

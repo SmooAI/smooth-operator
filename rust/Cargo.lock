@@ -4231,6 +4231,7 @@ dependencies = [
  "smooai-smooth-operator-adapter-postgres",
  "smooai-smooth-operator-core",
  "smooai-smooth-operator-ingestion",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tokio-util",

@@ -109,7 +109,7 @@ pub const SEED_ORG_ID: &str = "reference-org";
 pub fn build_state(config: ServerConfig) -> AppState {
     let seed = config.seed_kb;
     let storage = Arc::new(InMemoryStorageAdapter::new());
-    let state = AppState::new(storage.clone(), config);
+    let state = install_skill_resolver_from_env(AppState::new(storage.clone(), config));
     if seed {
         seed_knowledge(storage.as_ref());
         // Record the seeded docs' document-set membership for the admin API
@@ -132,6 +132,19 @@ pub fn build_state_from_env(config: ServerConfig) -> Result<AppState> {
         .map_err(|e| anyhow::anyhow!("auth configuration error: {e}"))?;
     let state = install_widget_auth_from_env(build_state(config));
     Ok(state.with_auth(Arc::from(verifier)))
+}
+
+/// Install the default filesystem [`DirSkillResolver`](crate::skills::DirSkillResolver)
+/// when `SMOOTH_SKILLS_DIR` names at least one root, so `send_message.skill`
+/// works with no host code. Unset ⇒ no resolver, and a `skill` field is a clean
+/// `SKILL_NOT_FOUND` — a multi-tenant deploy never serves host skills by
+/// accident. A host wanting its own discovery installs one via
+/// [`AppState::with_skill_resolver`].
+fn install_skill_resolver_from_env(state: AppState) -> AppState {
+    match crate::skills::DirSkillResolver::from_env() {
+        Some(resolver) => state.with_skill_resolver(Arc::new(resolver)),
+        None => state,
+    }
 }
 
 /// Install an [`HttpWidgetAuth`](smooth_operator::widget_auth::HttpWidgetAuth)

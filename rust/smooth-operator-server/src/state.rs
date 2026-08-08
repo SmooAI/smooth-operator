@@ -125,6 +125,15 @@ pub struct AppState {
     /// offered. Installed via [`with_otp_service`](Self::with_otp_service). The
     /// reference server never holds a code; the host owns generation/expiry.
     pub otp_service: Option<Arc<dyn OtpService>>,
+    /// **Skill-resolution seam** for `send_message.skill`. When `Some`, a turn
+    /// naming a skill has its body resolved here and composed into the turn's
+    /// system prompt, so the wire carries the *intent* ("use skill X") rather
+    /// than the client prepending the skill's prose to the message. `None` (the
+    /// default) ⇒ any `skill` field is a clean `SKILL_NOT_FOUND` error and no
+    /// turn runs. Installed via [`with_skill_resolver`](Self::with_skill_resolver);
+    /// [`build_state`](crate::server::build_state) installs the filesystem
+    /// default when `SMOOTH_SKILLS_DIR` is set.
+    pub skill_resolver: Option<Arc<dyn crate::skills::SkillResolver>>,
     /// Graceful-shutdown signal, shared across every per-connection clone of this
     /// state. On SIGTERM/ctrl_c the serve loop cancels this token; each
     /// connection's reader loop selects on [`CancellationToken::cancelled`] so it
@@ -254,6 +263,7 @@ impl AppState {
             chat_provider: None,
             gateway_key_resolver,
             otp_service: None,
+            skill_resolver: None,
             interactions: Arc::new(InteractionRegistry::default()),
             // A fresh, never-cancelled token: every clone of this state shares
             // its cancellation state, so the serve loop cancelling once fans out
@@ -386,6 +396,16 @@ impl AppState {
     #[must_use]
     pub fn with_agent_config(mut self, provider: Arc<dyn AgentConfigResolver>) -> Self {
         self.agent_config = provider;
+        self
+    }
+
+    /// Install the skill resolver (builder) backing `send_message.skill`. A host
+    /// (Big Smooth) installs one over its own skill discovery; without it, a
+    /// `skill` field is rejected with `SKILL_NOT_FOUND` rather than silently
+    /// running an unskilled turn.
+    #[must_use]
+    pub fn with_skill_resolver(mut self, resolver: Arc<dyn crate::skills::SkillResolver>) -> Self {
+        self.skill_resolver = Some(resolver);
         self
     }
 

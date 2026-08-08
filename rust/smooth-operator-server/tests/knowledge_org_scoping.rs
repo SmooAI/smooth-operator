@@ -220,6 +220,7 @@ async fn run_turn_as(storage: Arc<dyn StorageAdapter>, access: AccessContext) {
             workflow: None,
             judge: None,
             greeting_section: None,
+            skill_section: None,
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,

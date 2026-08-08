@@ -184,6 +184,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             workflow: None,
             judge: None,
             greeting_section: None,
+            skill_section: None,
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
