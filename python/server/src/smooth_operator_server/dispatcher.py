@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import timezone
 from typing import Any
@@ -33,6 +34,11 @@ from .confirmation import ConfirmationRegistry
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
 from .turn_runner import Sink, TurnRunner
+
+#: An ``INTERNAL_ERROR`` on the wire must leave a traceback behind here. The wire message stays
+#: generic (no detail leaks to the client), but a server whose every turn fails has to say WHY
+#: somewhere, or the failure is undiagnosable — th-e7ef23.
+_log = logging.getLogger(__name__)
 
 
 class FrameDispatcher:
@@ -188,7 +194,9 @@ class FrameDispatcher:
         except Exception:
             # A handler failed mid-turn. Emit a clean error and KEEP the connection
             # alive — never drop the socket with no signal (exception detail stays
-            # server-side, not leaked over the wire). Mirrors the C#/Rust handler.
+            # server-side, not leaked over the wire — but LOGGED, see th-e7ef23).
+            # Mirrors the C#/Rust handler.
+            _log.exception("INTERNAL_ERROR handling action %r (requestId %r)", action, request_id)
             sink(protocol.error(request_id, "INTERNAL_ERROR", "Internal error processing the request."))
 
     def _scope_email(self) -> str | None:
@@ -481,7 +489,9 @@ class FrameDispatcher:
                 )
             except Exception:
                 # Mirror the dispatcher's outer guard: a turn failure surfaces a clean
-                # error and keeps the connection alive (detail stays server-side).
+                # error and keeps the connection alive (detail stays server-side — but
+                # LOGGED, see th-e7ef23).
+                _log.exception("INTERNAL_ERROR running turn (requestId %r)", request_id_str)
                 sink(protocol.error(request_id_str, "INTERNAL_ERROR", "Internal error processing the request."))
                 return
             # If the gate refused an `end_user` tool this turn for lack of a verified

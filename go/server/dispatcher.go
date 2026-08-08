@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -224,6 +225,16 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 	}
 }
 
+// internalError is the ONE place a failure becomes a protocol INTERNAL_ERROR — so it is
+// also the one place it MUST be recorded. The wire message stays generic (no detail leaks
+// to the client), but the underlying error goes to the host log at Error level. A server
+// that fails every turn while logging nothing is undiagnosable — th-e7ef23, where the .NET
+// sibling did exactly that and hid a 401 from the gateway for the whole bench run.
+func (d *FrameDispatcher) internalError(sink EventSink, requestID, action string, err error) {
+	slog.Error("INTERNAL_ERROR handling frame", "action", action, "requestId", requestID, "err", err)
+	sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+}
+
 // scopedSession is the ONLY way a handler may turn a client-supplied sessionId into a
 // session. It loads the session and then hides it unless the connection's authenticated
 // principal owns it — returning (nil, nil), exactly what an unknown sessionId returns, so
@@ -255,7 +266,7 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 	// in who owns — or may later read — this conversation. th-8fe998.
 	session, _, err := d.store.ResumeSession(ctx, frame.AgentID, frame.UserName, frame.UserEmail, d.access.ConversationScope(), frame.ConversationID)
 	if err != nil {
-		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		d.internalError(sink, frame.RequestID, "create_conversation_session", err)
 		return
 	}
 	data := map[string]any{
@@ -272,7 +283,7 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFrame, sink EventSink) {
 	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
-		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		d.internalError(sink, frame.RequestID, "get_session", err)
 		return
 	}
 	if session == nil {
@@ -351,7 +362,7 @@ func (d *FrameDispatcher) handleGetConversationMessages(ctx context.Context, fra
 	}
 	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
-		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		d.internalError(sink, frame.RequestID, "get_conversation_messages", err)
 		return
 	}
 	if session == nil {
@@ -492,7 +503,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	}
 	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
-		sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		d.internalError(sink, requestID, "send_message", err)
 		return
 	}
 	if session == nil {
@@ -607,7 +618,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean
 			// error and keep the connection alive. Detail stays server-side.
-			sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+			d.internalError(sink, requestID, "send_message", err)
 			return
 		}
 		// SMOODEV-590 — persist the workflow pointer the judge advanced to, so the next
@@ -717,7 +728,7 @@ func (d *FrameDispatcher) handleVerifyOtp(ctx context.Context, frame inboundFram
 	// The session must exist (a code can't verify a session we don't track).
 	session, err := d.scopedSession(ctx, frame.SessionID)
 	if err != nil {
-		sink(errorEvent(frame.RequestID, "INTERNAL_ERROR", "Internal error processing the request."))
+		d.internalError(sink, frame.RequestID, "verify_otp", err)
 		return
 	}
 	if session == nil {

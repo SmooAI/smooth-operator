@@ -20,3 +20,8 @@ turn hit the gateway with the literal key `"unset"` and got back `HTTP 401 … L
 — surfaced as a bare `INTERNAL_ERROR` with zero tool calls. The host now reads `SMOOAI_GATEWAY_URL` /
 `SMOOAI_GATEWAY_KEY` / `SMOOAI_MODEL` first, with the `SMOOTH_*` names kept as a fallback for existing
 deployments.
+
+**Same swallow in the siblings.** The Go dispatcher dropped the `err` at all seven of its
+`INTERNAL_ERROR` sites and the Python dispatcher dropped the exception at both of its own; both now
+log it (Go through a single `internalError` chokepoint using `log/slog`, Python via
+`logging.exception`). TypeScript already logged via `console.error`; Rust puts the detail on the wire.
