@@ -258,7 +258,28 @@ public sealed class FrameDispatcher
             // A handler failed mid-turn (retrieval/embedding/model/DB error, or a bug). Emit a clean
             // error and KEEP the connection alive — never drop the socket with no signal to the
             // client. (Generic message: exception detail stays server-side, not leaked over the wire.)
+            // …but "server-side" must mean LOGGED, not swallowed: an INTERNAL_ERROR with no stack
+            // anywhere is undiagnosable (th-e7ef23 — every .NET turn failed and the log said nothing).
+            LogInternalError(action, requestId, ex);
             sink(ProtocolEvents.Error(requestId, "INTERNAL_ERROR", "Internal error processing the request."));
+        }
+    }
+
+    /// <summary>
+    /// The one place an exception becomes a protocol <c>INTERNAL_ERROR</c> — so it is also the one
+    /// place it MUST be recorded. The wire message stays generic (no detail leaks to the client), but
+    /// the exception and its stack go to the host log at Error level. Falls back to stderr when no
+    /// <see cref="ILogger"/> was supplied, because a silent INTERNAL_ERROR is undiagnosable (th-e7ef23).
+    /// </summary>
+    private void LogInternalError(string? action, string? requestId, Exception ex)
+    {
+        if (_logger is not null)
+        {
+            _logger.LogError(ex, "INTERNAL_ERROR handling action '{Action}' (requestId {RequestId}): {Message}", action ?? "<none>", requestId ?? "<none>", ex.Message);
+        }
+        else
+        {
+            Console.Error.WriteLine($"[smooth-operator] INTERNAL_ERROR handling action '{action ?? "<none>"}' (requestId {requestId ?? "<none>"}): {ex}");
         }
     }
 
@@ -721,10 +742,11 @@ public sealed class FrameDispatcher
                 // partial assistant message — no eventual_response, nothing persisted. The `cancelled`
                 // event is emitted by the cancel path itself (a disconnect emits nothing: no client).
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // Mirror the dispatcher's outer guard: a turn failure surfaces a clean error and
-                // keeps the connection alive (detail stays server-side).
+                // keeps the connection alive (detail stays server-side — but LOGGED, see th-e7ef23).
+                LogInternalError("send_message", requestIdStr, ex);
                 turnSink(ProtocolEvents.Error(requestIdStr, "INTERNAL_ERROR", "Internal error processing the request."));
             }
             finally
