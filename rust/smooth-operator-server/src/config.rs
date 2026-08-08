@@ -88,6 +88,43 @@ pub enum StorageBackend {
     Dynamodb,
 }
 
+/// The temperature every server-built [`LlmConfig`] uses.
+///
+/// **1.0, not 0.0.** Agentic work wants determinism, which is why this
+/// was 0.0 — but a growing set of frontier models accept only their
+/// default temperature and 400 the entire request:
+///
+/// ```text
+/// Unsupported value: 'temperature' does not support 0 with this model.
+/// Only the default (1) value is supported.
+/// ```
+///
+/// The symptom does not look like a config error: the server boots,
+/// accepts the turn, every LLM call 400s, and the user sees an assistant
+/// that silently says nothing. Any model picker offering these models is
+/// a no-op or worse.
+///
+/// A per-model allowlist is the obvious fix and is provably wrong — the
+/// behaviour does not follow the names. Measured against llm.smoo.ai on
+/// 2026-08-07:
+///
+/// | rejects `temperature: 0` | accepts it |
+/// |---|---|
+/// | `gpt-5.1`, `gpt-5.4-pro`, `gpt-5.5` | `gpt-5`, `gpt-5.2`, `gpt-5.4` |
+/// | `claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-fable-5` | `claude-haiku-4-5`, `claude-sonnet-4-5/4-6`, `claude-opus-4-6` |
+///
+/// `gpt-5.1` rejects while `gpt-5.2` accepts; `gpt-5.4` accepts while
+/// `gpt-5.4-pro` rejects. There is no prefix rule to write.
+///
+/// `1.0` was accepted by all 12 models tested across 6 families, so it is
+/// the single value that works everywhere. The cost is losing
+/// temperature-0 determinism on models that would allow it — a fair
+/// trade against "only the default model works at all".
+///
+/// The cleaner long-term shape is `Option<f32>` on `LlmConfig`, so we
+/// send nothing and take each provider's own default.
+pub const DEFAULT_TEMPERATURE: f32 = 1.0;
+
 impl StorageBackend {
     /// Parse from the `SMOOTH_AGENT_STORAGE` wire value (case-insensitive).
     /// Unknown / empty falls back to [`StorageBackend::Memory`].
@@ -283,7 +320,7 @@ impl ServerConfig {
             api_key: key,
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            temperature: 0.0,
+            temperature: DEFAULT_TEMPERATURE,
             retry_policy: RetryPolicy::default(),
             api_format: ApiFormat::OpenAiCompat,
         }
@@ -303,7 +340,7 @@ impl ServerConfig {
             api_key: "mock-no-network".to_string(),
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            temperature: 0.0,
+            temperature: DEFAULT_TEMPERATURE,
             retry_policy: RetryPolicy::default(),
             api_format: ApiFormat::OpenAiCompat,
         }
@@ -391,4 +428,18 @@ mod tests {
         assert_eq!(StorageBackend::parse("sqlite"), StorageBackend::Memory);
         assert_eq!(StorageBackend::parse(""), StorageBackend::Memory);
     }
+    /// Every model the server can be pointed at must accept the
+    /// temperature we send, and 1.0 is the only value that does. Pinned
+    /// in a test so a future "make it deterministic again" has to read
+    /// why it isn't: gpt-5.1/5.5, claude-opus-4-7/4-8, claude-sonnet-5
+    /// and others 400 the whole request on anything else, which surfaces
+    /// as an assistant that says nothing at all.
+    #[test]
+    fn default_temperature_is_the_universally_accepted_value() {
+        assert!(
+            (DEFAULT_TEMPERATURE - 1.0).abs() < f32::EPSILON,
+            "temperature must be 1.0; see DEFAULT_TEMPERATURE for the measured table"
+        );
+    }
+
 }
