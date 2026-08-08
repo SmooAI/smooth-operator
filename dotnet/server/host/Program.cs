@@ -20,9 +20,15 @@ string Get(string key, string? fallback = null) =>
     config[key] is { Length: > 0 } value ? value : fallback ?? string.Empty;
 
 // ── Model: an OpenAI-compatible gateway (the smooth gateway, Azure OpenAI, Ollama, …) ──
-var gatewayUrl = Get("SMOOTH_GATEWAY_URL", "https://llm.smoo.ai/v1");
-var gatewayKey = Get("SMOOTH_GATEWAY_KEY");
-var model = Get("SMOOTH_MODEL", "claude-haiku-4-5");
+// The gateway/model triple is the CROSS-ENGINE contract: rust, go, ts and python all read the
+// SMOOAI_* spelling (rust/smooth-operator-server/src/local.rs, go/server/cmd/serve/main.go,
+// typescript/server/src/main.ts, python/.../server.py). This host used to read only SMOOTH_*, so
+// every launcher/bench that exports the shared names left it keyless — every turn 401'd and came
+// back as INTERNAL_ERROR (th-df7007). SMOOAI_* wins; SMOOTH_* stays as a fallback for existing
+// deployments that set it.
+var gatewayUrl = Get("SMOOAI_GATEWAY_URL", Get("SMOOTH_GATEWAY_URL", "https://llm.smoo.ai/v1"));
+var gatewayKey = Get("SMOOAI_GATEWAY_KEY", Get("SMOOTH_GATEWAY_KEY"));
+var model = Get("SMOOAI_MODEL", Get("SMOOTH_MODEL", "claude-haiku-4-5"));
 builder.Services.AddSingleton<IChatClient>(_ =>
     new OpenAIClient(
             new ApiKeyCredential(string.IsNullOrEmpty(gatewayKey) ? "unset" : gatewayKey),
