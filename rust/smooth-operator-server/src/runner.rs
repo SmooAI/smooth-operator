@@ -162,6 +162,35 @@ pub struct ConfirmationConfig {
     /// turn ends (typically `AppState::clear_confirmation`), so a stale sender
     /// can't mis-route a later confirmation.
     pub clear: ClearConfirmation,
+    /// Channels belonging to a HOST-installed hook that wants its own `Ask`
+    /// verdicts routed through this same bridge (th-be3f55).
+    ///
+    /// The motivating case is Big Smooth's auto-mode gate: the core
+    /// [`PermissionHook`] can classify a call as `Ask`, but with no approver
+    /// wired it fails closed, which is why the daemon had to run in `Bypass` and
+    /// never asked at all. A host that supplies the receiving ends here gets the
+    /// exact HITL the tool-pattern path already has — the turn parks, a
+    /// `confirm_tool_action_required` event goes out, and `confirm_tool_action`
+    /// resumes it.
+    ///
+    /// The receiver is shared because the host's hook lives for the whole
+    /// process while a bridge is per-turn: each turn's bridge locks and drains
+    /// it, and only the turn that is actually parked has a request to read.
+    ///
+    /// `None` (the default) changes nothing.
+    ///
+    /// [`PermissionHook`]: smooth_operator::permission::PermissionHook
+    pub host_approver: Option<HostApprover>,
+}
+
+/// The receiving ends of a host hook's approver channel — the halves the runner
+/// needs in order to bridge it (see [`ConfirmationConfig::host_approver`]).
+#[derive(Clone)]
+pub struct HostApprover {
+    /// Requests emitted by the host's hook. Shared: the hook outlives any turn.
+    pub request_rx: Arc<tokio::sync::Mutex<UnboundedReceiver<HumanRequest>>>,
+    /// Where the human's verdict goes back to the host's hook.
+    pub response_tx: UnboundedSender<HumanResponse>,
 }
 
 /// Registers a parked interaction (id + kind + spec + [`InteractionOutcome`]
@@ -731,6 +760,23 @@ pub async fn run_streaming_turn(
     //     event + a registered resumable `HumanResponse` sender. With no
     //     `confirmation` (the default) or empty patterns, no hook is installed —
     //     no tool parks the turn, byte-for-byte unchanged from before HITL.
+    // 3a-bis. Bridge a HOST hook's approver channel through the same HITL path
+    //     (th-be3f55). Independent of `tool_patterns`: a host that classifies
+    //     calls itself (Big Smooth's auto-mode gate) needs the bridge WITHOUT
+    //     also parking every call whose name matches a pattern.
+    let host_approver_bridge = confirmation.as_ref().and_then(|cfg| {
+        cfg.host_approver.as_ref().map(|ha| {
+            spawn_host_approver_bridge(
+                Arc::clone(&ha.request_rx),
+                ha.response_tx.clone(),
+                sink.clone(),
+                request_id.to_string(),
+                cfg.session_id.clone(),
+                Arc::clone(&cfg.register),
+            )
+        })
+    });
+
     let confirmation_bridge = match &confirmation {
         Some(cfg) if !cfg.tool_patterns.is_empty() => {
             let pair = human_channel();
@@ -1007,6 +1053,14 @@ pub async fn run_streaming_turn(
         let _ = handle.await;
         (cfg.clear)(&cfg.session_id);
     }
+    // The HOST approver bridge cannot be awaited (th-be3f55): its request sender
+    // belongs to a hook that outlives the turn, so the channel never closes and
+    // `await` would hang here forever. Abort instead — that also drops the
+    // receiver guard so the next turn's bridge can take it.
+    if let (Some(handle), Some(cfg)) = (host_approver_bridge, confirmation.as_ref()) {
+        handle.abort();
+        (cfg.clear)(&cfg.session_id);
+    }
     // Same teardown for the interaction bridge: dropping the agent closed the
     // raise tools' request sender, so the bridge drains and finishes; then clear
     // any interaction registration the turn left parked.
@@ -1230,6 +1284,40 @@ async fn judge_next_step(
 /// tool name is a stable, sufficient correlation key for the resume. The bridge
 /// loops until the request channel closes (the hook/agent dropped at turn end),
 /// then returns — letting the caller clear the registration.
+/// Bridge a HOST hook's approver channel to the chat HITL (th-be3f55).
+///
+/// Identical in effect to [`spawn_confirmation_bridge`], but reads from a
+/// SHARED receiver: the host's hook is process-lived while this bridge is
+/// per-turn, so each turn locks the receiver and only the parked turn has a
+/// request waiting.
+fn spawn_host_approver_bridge(
+    request_rx: Arc<tokio::sync::Mutex<UnboundedReceiver<HumanRequest>>>,
+    response_tx: UnboundedSender<HumanResponse>,
+    sink: UnboundedSender<serde_json::Value>,
+    request_id: String,
+    session_id: String,
+    register: RegisterConfirmation,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = request_rx.lock().await;
+        while let Some(req) = rx.recv().await {
+            match req {
+                HumanRequest::Confirm { tool_name, prompt, .. } => {
+                    register(&session_id, response_tx.clone());
+                    let _ = sink.send(crate::protocol::write_confirmation_required(&request_id, &tool_name, &prompt));
+                }
+                // No chat affordance for free-form input; decline rather than
+                // hang the turn (mirrors the tool-pattern bridge).
+                HumanRequest::Input { .. } => {
+                    let _ = response_tx.send(HumanResponse::Denied {
+                        reason: "free-form input is not supported over chat".to_string(),
+                    });
+                }
+            }
+        }
+    })
+}
+
 fn spawn_confirmation_bridge(
     mut request_rx: UnboundedReceiver<HumanRequest>,
     response_tx: UnboundedSender<HumanResponse>,

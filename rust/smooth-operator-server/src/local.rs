@@ -93,6 +93,7 @@ pub struct LocalServerBuilder {
     tool_provider: Option<Arc<dyn ToolProvider>>,
     tool_hooks: Vec<Arc<dyn ToolHook>>,
     skill_resolver: Option<Arc<dyn crate::skills::SkillResolver>>,
+    host_approver: Option<crate::runner::HostApprover>,
     serve_widget: bool,
     widget_token: Option<String>,
     strict_auth: bool,
@@ -128,6 +129,7 @@ impl Default for LocalServerBuilder {
             tool_provider: None,
             tool_hooks: Vec::new(),
             skill_resolver: None,
+            host_approver: None,
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
@@ -202,6 +204,19 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn skill_resolver(mut self, resolver: Arc<dyn crate::skills::SkillResolver>) -> Self {
         self.skill_resolver = Some(resolver);
+    /// Route a host hook's `Ask` verdicts through the chat HITL (th-be3f55).
+    ///
+    /// The companion to [`tool_hooks`](Self::tool_hooks): that seam lets a host
+    /// install a permission gate, but a gate that can only allow or deny is a
+    /// gate that must be run in bypass. Supplying the receiving ends of the
+    /// hook's approver channel here gives its `Ask` the same treatment the
+    /// tool-pattern HITL already gets — the turn parks, the client is sent
+    /// `confirm_tool_action_required`, and `confirm_tool_action` resumes it.
+    ///
+    /// Unset ⇒ unchanged behavior (a host `Ask` still fails closed).
+    #[must_use]
+    pub fn host_approver(mut self, approver: crate::runner::HostApprover) -> Self {
+        self.host_approver = Some(approver);
         self
     }
 
@@ -325,6 +340,9 @@ impl LocalServerBuilder {
         }
         if let Some(provider) = &self.tool_provider {
             state = state.with_tools(Arc::clone(provider));
+        }
+        if let Some(ha) = self.host_approver.clone() {
+            state.host_approver = Some(ha);
         }
         if !self.tool_hooks.is_empty() {
             state = state.with_tool_hooks(self.tool_hooks.clone());
