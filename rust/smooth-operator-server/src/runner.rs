@@ -183,14 +183,102 @@ pub struct ConfirmationConfig {
     pub host_approver: Option<HostApprover>,
 }
 
+/// Where a parked approval should be sent: the live turn's event sink and the
+/// ids needed to correlate the client's answer back to it.
+#[derive(Clone)]
+struct TurnTarget {
+    sink: UnboundedSender<serde_json::Value>,
+    request_id: String,
+    session_id: String,
+    register: RegisterConfirmation,
+}
+
 /// The receiving ends of a host hook's approver channel — the halves the runner
 /// needs in order to bridge it (see [`ConfirmationConfig::host_approver`]).
+///
+/// The drain task is spawned ONCE (not per turn) and owns the receiver for the
+/// process's life; turns publish themselves into [`current`](Self::current)
+/// instead. th-2105e9: the first cut gave each turn's bridge the receiver for
+/// its whole lifetime, so a turn parked awaiting a human held it — and any
+/// other turn needing approval in that window (a proactive/scheduled one, most
+/// likely, with nobody watching) never emitted its request and stalled to the
+/// full timeout.
 #[derive(Clone)]
 pub struct HostApprover {
     /// Requests emitted by the host's hook. Shared: the hook outlives any turn.
     pub request_rx: Arc<tokio::sync::Mutex<UnboundedReceiver<HumanRequest>>>,
     /// Where the human's verdict goes back to the host's hook.
     pub response_tx: UnboundedSender<HumanResponse>,
+    /// The turn currently able to show a prompt, if any.
+    current: Arc<std::sync::Mutex<Option<TurnTarget>>>,
+    /// Whether the single drain task has been spawned yet.
+    drain_started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HostApprover {
+    /// Build an approver from a host hook's channel ends.
+    #[must_use]
+    pub fn new(request_rx: UnboundedReceiver<HumanRequest>, response_tx: UnboundedSender<HumanResponse>) -> Self {
+        Self {
+            request_rx: Arc::new(tokio::sync::Mutex::new(request_rx)),
+            response_tx,
+            current: Arc::new(std::sync::Mutex::new(None)),
+            drain_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Publish `target` as the turn that should show prompts, spawning the drain
+    /// task the first time. Returns the previous target so the caller can put it
+    /// back (it never does today — turns are sequential — but clearing to `None`
+    /// on end is what stops a stale sink receiving a later prompt).
+    fn activate(&self, target: TurnTarget) {
+        if let Ok(mut cur) = self.current.lock() {
+            *cur = Some(target);
+        }
+        if !self.drain_started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.spawn_drain();
+        }
+    }
+
+    /// Stop routing prompts to the turn that just ended.
+    fn deactivate(&self) {
+        if let Ok(mut cur) = self.current.lock() {
+            *cur = None;
+        }
+    }
+
+    /// The single long-lived reader. Owns the receiver forever, so no turn can
+    /// starve another by holding it.
+    fn spawn_drain(&self) {
+        let rx = Arc::clone(&self.request_rx);
+        let response_tx = self.response_tx.clone();
+        let current = Arc::clone(&self.current);
+        tokio::spawn(async move {
+            let mut rx = rx.lock().await;
+            while let Some(req) = rx.recv().await {
+                let target = current.lock().ok().and_then(|c| c.clone());
+                match (req, target) {
+                    (HumanRequest::Confirm { tool_name, prompt, .. }, Some(t)) => {
+                        (t.register)(&t.session_id, response_tx.clone());
+                        let _ = t.sink.send(crate::protocol::write_confirmation_required(&t.request_id, &tool_name, &prompt));
+                    }
+                    // Nothing is listening — a turn running with no client
+                    // attached (a scheduled wake-up). Deny promptly with a
+                    // reason instead of stalling until the hook times out.
+                    (HumanRequest::Confirm { .. }, None) => {
+                        let _ = response_tx.send(HumanResponse::Denied {
+                            reason: "no client is connected to approve this action".to_string(),
+                        });
+                    }
+                    (HumanRequest::Input { .. }, _) => {
+                        let _ = response_tx.send(HumanResponse::Denied {
+                            reason: "free-form input is not supported over chat".to_string(),
+                        });
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Registers a parked interaction (id + kind + spec + [`InteractionOutcome`]
@@ -732,16 +820,15 @@ pub async fn run_streaming_turn(
     //     (th-be3f55). Independent of `tool_patterns`: a host that classifies
     //     calls itself (Big Smooth's auto-mode gate) needs the bridge WITHOUT
     //     also parking every call whose name matches a pattern.
-    let host_approver_bridge = confirmation.as_ref().and_then(|cfg| {
+    let host_approver = confirmation.as_ref().and_then(|cfg| {
         cfg.host_approver.as_ref().map(|ha| {
-            spawn_host_approver_bridge(
-                Arc::clone(&ha.request_rx),
-                ha.response_tx.clone(),
-                sink.clone(),
-                request_id.to_string(),
-                cfg.session_id.clone(),
-                Arc::clone(&cfg.register),
-            )
+            ha.activate(TurnTarget {
+                sink: sink.clone(),
+                request_id: request_id.to_string(),
+                session_id: cfg.session_id.clone(),
+                register: Arc::clone(&cfg.register),
+            });
+            ha.clone()
         })
     });
 
@@ -1016,12 +1103,11 @@ pub async fn run_streaming_turn(
         let _ = handle.await;
         (cfg.clear)(&cfg.session_id);
     }
-    // The HOST approver bridge cannot be awaited (th-be3f55): its request sender
-    // belongs to a hook that outlives the turn, so the channel never closes and
-    // `await` would hang here forever. Abort instead — that also drops the
-    // receiver guard so the next turn's bridge can take it.
-    if let (Some(handle), Some(cfg)) = (host_approver_bridge, confirmation.as_ref()) {
-        handle.abort();
+    // Stop routing approval prompts at this turn's (now dead) sink. The drain
+    // task itself is process-lived and deliberately NOT stopped — see
+    // `HostApprover` (th-2105e9).
+    if let (Some(ha), Some(cfg)) = (host_approver, confirmation.as_ref()) {
+        ha.deactivate();
         (cfg.clear)(&cfg.session_id);
     }
     // Same teardown for the interaction bridge: dropping the agent closed the
@@ -1247,40 +1333,6 @@ async fn judge_next_step(
 /// tool name is a stable, sufficient correlation key for the resume. The bridge
 /// loops until the request channel closes (the hook/agent dropped at turn end),
 /// then returns — letting the caller clear the registration.
-/// Bridge a HOST hook's approver channel to the chat HITL (th-be3f55).
-///
-/// Identical in effect to [`spawn_confirmation_bridge`], but reads from a
-/// SHARED receiver: the host's hook is process-lived while this bridge is
-/// per-turn, so each turn locks the receiver and only the parked turn has a
-/// request waiting.
-fn spawn_host_approver_bridge(
-    request_rx: Arc<tokio::sync::Mutex<UnboundedReceiver<HumanRequest>>>,
-    response_tx: UnboundedSender<HumanResponse>,
-    sink: UnboundedSender<serde_json::Value>,
-    request_id: String,
-    session_id: String,
-    register: RegisterConfirmation,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut rx = request_rx.lock().await;
-        while let Some(req) = rx.recv().await {
-            match req {
-                HumanRequest::Confirm { tool_name, prompt, .. } => {
-                    register(&session_id, response_tx.clone());
-                    let _ = sink.send(crate::protocol::write_confirmation_required(&request_id, &tool_name, &prompt));
-                }
-                // No chat affordance for free-form input; decline rather than
-                // hang the turn (mirrors the tool-pattern bridge).
-                HumanRequest::Input { .. } => {
-                    let _ = response_tx.send(HumanResponse::Denied {
-                        reason: "free-form input is not supported over chat".to_string(),
-                    });
-                }
-            }
-        }
-    })
-}
-
 fn spawn_confirmation_bridge(
     mut request_rx: UnboundedReceiver<HumanRequest>,
     response_tx: UnboundedSender<HumanResponse>,
