@@ -1143,9 +1143,17 @@ async fn handle_send_message(
     // can never be read). Spawning frees the reader to receive the confirmation
     // while the turn streams its events through the (cloned) sink. Pearl: HITL
     // pause/resume.
-    let confirmation = state.config.confirmation_tool_patterns().map(|patterns| {
+    // th-be3f55: build the confirmation config when EITHER tool patterns are
+    // configured OR a host hook supplied approver channels. Previously this was
+    // patterns-only, so a host that classifies calls itself (Big Smooth's
+    // auto-mode gate) could never get a bridge — which is why its `Ask` verdicts
+    // failed closed and the daemon had to run in `Bypass`.
+    let host_approver = state.host_approver.clone();
+    let patterns = state.config.confirmation_tool_patterns();
+    let confirmation = (patterns.is_some() || host_approver.is_some()).then(|| {
         crate::runner::ConfirmationConfig {
-            tool_patterns: patterns,
+            tool_patterns: patterns.unwrap_or_default(),
+            host_approver,
             session_id: session.session_id.clone(),
             register: {
                 let state = state.clone();
