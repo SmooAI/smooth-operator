@@ -1235,6 +1235,15 @@ async fn handle_send_message(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Optional non-image file attachments (`files[]`: `{name, mimeType?, url}`).
+    // Fail-soft like `images`: absent ⇒ none, a malformed array is dropped rather
+    // than rejecting the turn. Files never reach the model — they ride the
+    // tool-provider context so a host tool can persist them.
+    let files: Vec<smooth_operator::tool_provider::UserFile> = parsed
+        .get("files")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
     // Optional named skill. The wire carries the INTENT ("use skill X"); the
     // server resolves the body here and composes it into the turn's system
     // prompt below, so `message` stays exactly what the user typed (and is what
@@ -1628,6 +1637,9 @@ async fn handle_send_message(
                 extensions,
                 // Optional multimodal attachments (empty ⇒ text-only, unchanged).
                 images,
+                // Optional non-image file attachments (empty ⇒ none). Never sent
+                // to the model — carried onto the tool-provider context only.
+                files,
             },
             &sink_owned,
         )
@@ -2255,6 +2267,36 @@ fn build_judge_provider(state: &AppState, turn_llm: &LlmConfig) -> Arc<dyn LlmPr
 mod tests {
     use super::*;
     use smooth_operator_core::llm::{ApiFormat, RetryPolicy};
+
+    /// The `send_message.files[]` parse (mirrors the inline handler expression):
+    /// a well-formed array parses onto the turn context, a malformed array is
+    /// dropped rather than rejecting the turn, and an absent key ⇒ empty.
+    #[test]
+    fn files_array_parses_fail_soft() {
+        use smooth_operator::tool_provider::UserFile;
+        let parse = |v: Value| -> Vec<UserFile> {
+            v.get("files")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        };
+
+        // Well-formed: `mimeType` maps onto `mime`; missing MIME ⇒ None.
+        let files = parse(json!({
+            "files": [
+                { "name": "report.pdf", "mimeType": "application/pdf", "url": "https://x/report.pdf" },
+                { "name": "notes.txt", "url": "data:text/plain;base64,AAAA" }
+            ]
+        }));
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "report.pdf");
+        assert_eq!(files[0].mime.as_deref(), Some("application/pdf"));
+        assert_eq!(files[1].mime, None);
+
+        // Malformed entry (missing required `url`) drops the whole array, like `images`.
+        assert!(parse(json!({ "files": [{ "name": "x" }] })).is_empty());
+        // Absent key ⇒ empty.
+        assert!(parse(json!({})).is_empty());
+    }
 
     /// The durable workflow pointer round-trips through conversation metadata and
     /// a FRESH load resumes on it — the whole point of moving it off the per-pod

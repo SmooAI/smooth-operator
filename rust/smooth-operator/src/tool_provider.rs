@@ -55,6 +55,22 @@ pub struct UserImage {
     pub detail: Option<String>,
 }
 
+/// A non-image file attachment on a turn's user message (the `send_message`
+/// `files[]` array). Unlike [`UserImage`], a file is NOT emitted to the model —
+/// it only rides the [`ToolProviderContext`] so the host can persist it. `url`
+/// is a `data:`/`https` URL; `mime` is the optional MIME type (`mimeType` on the
+/// wire, per the spec), omitted when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserFile {
+    /// A human-facing file name.
+    pub name: String,
+    /// Optional MIME type. Wire key is `mimeType` (spec); local field is `mime`.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// A `data:`/`https` URL locating the file's bytes.
+    pub url: String,
+}
+
 /// The per-turn context a [`ToolProvider`] sees when asked for tools.
 ///
 /// Carries everything a host needs to decide which tools a turn gets WITHOUT
@@ -99,6 +115,10 @@ pub struct ToolProviderContext {
     /// read them; empty for the text-only common case. The runner also maps these
     /// onto the engine's user message via core `with_user_images`.
     pub images: Vec<UserImage>,
+    /// The non-image file attachments this turn carried. Unlike `images`, these
+    /// are NOT sent to the model — they ride the context only so a host tool can
+    /// persist them. Empty for the common case.
+    pub files: Vec<UserFile>,
 }
 
 impl ToolProviderContext {
@@ -118,6 +138,7 @@ impl ToolProviderContext {
             tool_specific_config: std::collections::HashMap::new(),
             directive_sink: None,
             images: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -157,6 +178,14 @@ impl ToolProviderContext {
     #[must_use]
     pub fn with_images(mut self, images: Vec<UserImage>) -> Self {
         self.images = images;
+        self
+    }
+
+    /// Set the turn's [`files`](Self::files) — the non-image attachments the turn
+    /// carried, for the host to persist. Never sent to the model.
+    #[must_use]
+    pub fn with_files(mut self, files: Vec<UserFile>) -> Self {
+        self.files = files;
         self
     }
 }
@@ -239,6 +268,7 @@ mod tests {
         assert_eq!(ctx.gateway_key, None);
         assert!(ctx.directive_sink.is_none());
         assert!(ctx.images.is_empty());
+        assert!(ctx.files.is_empty());
     }
 
     #[test]
@@ -269,6 +299,39 @@ mod tests {
         assert_eq!(ctx.images.len(), 1);
         assert_eq!(ctx.images[0].url, "https://x/y.png");
         assert_eq!(ctx.images[0].detail.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn builder_sets_files() {
+        let ctx = ToolProviderContext::new(Some("org-a".into()), AccessContext::anonymous())
+            .with_files(vec![UserFile {
+                name: "report.pdf".into(),
+                mime: Some("application/pdf".into()),
+                url: "https://x/report.pdf".into(),
+            }]);
+        assert_eq!(ctx.files.len(), 1);
+        assert_eq!(ctx.files[0].name, "report.pdf");
+        assert_eq!(ctx.files[0].mime.as_deref(), Some("application/pdf"));
+        assert_eq!(ctx.files[0].url, "https://x/report.pdf");
+    }
+
+    #[test]
+    fn user_file_round_trips_with_mime_type_wire_key() {
+        // Wire key is `mimeType` (spec); absent MIME omits the key entirely.
+        let v = serde_json::to_value(UserFile {
+            name: "a.txt".into(),
+            mime: Some("text/plain".into()),
+            url: "data:text/plain;base64,AAAA".into(),
+        })
+        .unwrap();
+        assert_eq!(v["mimeType"], "text/plain");
+        assert!(v.get("mime").is_none());
+
+        let back: UserFile =
+            serde_json::from_value(serde_json::json!({"name": "a.txt", "url": "u"})).unwrap();
+        assert_eq!(back.name, "a.txt");
+        assert_eq!(back.url, "u");
+        assert!(back.mime.is_none());
     }
 
     #[test]

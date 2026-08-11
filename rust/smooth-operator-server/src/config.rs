@@ -436,7 +436,9 @@ mod tests {
     /// which surfaces as an assistant that says nothing at all.
     #[test]
     fn default_temperature_is_the_universally_accepted_value() {
-        assert!((DEFAULT_TEMPERATURE - 1.0).abs() < f32::EPSILON, "temperature must be 1.0; see DEFAULT_TEMPERATURE for the measured table");
+        assert!(
+            (DEFAULT_TEMPERATURE - 1.0).abs() < f32::EPSILON,
+            "temperature must be 1.0; see DEFAULT_TEMPERATURE for the measured table"
+        );
     }
-
 }

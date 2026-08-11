@@ -382,6 +382,7 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )

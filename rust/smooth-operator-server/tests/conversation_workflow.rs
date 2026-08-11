@@ -108,6 +108,7 @@ async fn run_turn(
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )
@@ -289,6 +290,7 @@ async fn run_turn_on(
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )

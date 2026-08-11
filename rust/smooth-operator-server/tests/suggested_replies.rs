@@ -72,6 +72,7 @@ async fn run_turn(deltas: &[&str]) -> (TurnResult, Vec<String>, String) {
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )

@@ -145,6 +145,7 @@ async fn run_turn_with_key(
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )
@@ -237,6 +238,7 @@ async fn run_turn_with_storage(
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )
@@ -486,6 +488,7 @@ async fn injected_tool_hook_observes_tool_calls() {
             request_id: "req-hook",
             user_message: "look me up",
             images: vec![],
+            files: vec![],
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock)),
