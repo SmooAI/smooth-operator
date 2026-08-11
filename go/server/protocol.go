@@ -91,7 +91,13 @@ func streamChunk(requestID, node string, state map[string]any) map[string]any {
 // eventualResponse is the terminal turn event. Matches the Rust/C# shape: a
 // triple-nested data.data carrying messageId, the agent response, needsEscalation,
 // and (only when non-empty) the citations array.
-func eventualResponse(requestID string, status int, messageID string, response map[string]any, needsEscalation bool, citations []Citation) map[string]any {
+//
+// directive is an opaque host-written client-side directive drained from the turn's
+// TurnContext (the send_file convention et al). It is emitted under data.data.directive
+// only when a host tool wrote one this turn — passing (nil, false) omits the field,
+// keeping the wire byte-for-byte unchanged for the common no-directive turn. Mirrors the
+// Rust protocol::eventual_response `directive: Option<Value>` (protocol.rs).
+func eventualResponse(requestID string, status int, messageID string, response map[string]any, needsEscalation bool, citations []Citation, directive any, hasDirective bool) map[string]any {
 	inner := map[string]any{
 		"messageId":       messageID,
 		"response":        response,
@@ -103,6 +109,9 @@ func eventualResponse(requestID string, status int, messageID string, response m
 			arr = append(arr, citationObject(c))
 		}
 		inner["citations"] = arr
+	}
+	if hasDirective {
+		inner["directive"] = directive
 	}
 	return map[string]any{
 		"type":      "eventual_response",
