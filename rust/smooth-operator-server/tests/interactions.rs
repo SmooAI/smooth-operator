@@ -197,6 +197,7 @@ fn spawn_turn(
                 tool_configs: None,
                 extensions: None,
                 images: vec![],
+                files: vec![],
             },
             &sink,
         )

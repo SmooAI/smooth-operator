@@ -144,6 +144,7 @@ async fn run(
             tool_configs,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )

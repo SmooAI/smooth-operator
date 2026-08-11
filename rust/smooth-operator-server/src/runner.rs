@@ -400,6 +400,11 @@ pub struct TurnRequest<'a> {
     /// [`ToolProviderContext`] so a host tool can see them. Empty (the default)
     /// ⇒ a text-only turn, byte-for-byte unchanged.
     pub images: Vec<smooth_operator::tool_provider::UserImage>,
+    /// Non-image file attachments for this turn. Unlike [`images`](Self::images),
+    /// these are NOT sent to the model — the runner only carries them into the
+    /// [`ToolProviderContext`] so a host tool can persist them. Empty (the
+    /// default) ⇒ byte-for-byte unchanged.
+    pub files: Vec<smooth_operator::tool_provider::UserFile>,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -451,6 +456,7 @@ pub async fn run_streaming_turn(
         tool_configs,
         extensions,
         images,
+        files,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
@@ -650,7 +656,10 @@ pub async fn run_streaming_turn(
             // directive; drained after the turn onto `eventual_response.directive`.
             .with_directive_sink(Arc::clone(&directive_sink))
             // Multimodal: let a host tool see the turn's image attachments.
-            .with_images(images.clone());
+            .with_images(images.clone())
+            // File transfer: carry the turn's non-image attachments so a host
+            // tool can persist them. These never reach the model.
+            .with_files(files.clone());
         if let Some(key) = gateway_key {
             ctx = ctx.with_gateway_key(key);
         }

@@ -143,6 +143,7 @@ async fn run_turn_as(
             tool_configs: None,
             extensions: None,
             images: vec![],
+            files: vec![],
         },
         &tx,
     )
