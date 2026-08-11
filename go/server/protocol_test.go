@@ -78,14 +78,14 @@ func TestEmittedEventsValidateAgainstSpec(t *testing.T) {
 		{
 			name:      "eventual_response",
 			schemaRef: "events/eventual-response.schema.json",
-			event:     eventualResponse("req-2", 200, "m1", generalResponse("hi there"), false, nil),
+			event:     eventualResponse("req-2", 200, "m1", generalResponse("hi there"), false, nil, nil, false),
 		},
 		{
 			name:      "eventual_response_with_citations",
 			schemaRef: "events/eventual-response.schema.json",
 			event: eventualResponse("req-3", 200, "m2", generalResponse("returns are 17 days"), false, []Citation{
 				{ID: "doc-1", Title: "policies/returns.md", URL: "https://example.com/returns.md", Snippet: "17 days", Score: 0.9},
-			}),
+			}, nil, false),
 		},
 		{
 			name:      "error",
@@ -144,7 +144,7 @@ func TestEmittedEventsRoundTripIntoClientTypes(t *testing.T) {
 	}
 
 	t.Run("eventual_response", func(t *testing.T) {
-		frame := marshal(t, eventualResponse("req-1", 200, "msg-123", generalResponse("hi"), false, nil))
+		frame := marshal(t, eventualResponse("req-1", 200, "msg-123", generalResponse("hi"), false, nil, nil, false))
 		ev, err := protocol.ParseServerEvent(frame)
 		if err != nil {
 			t.Fatalf("parse: %v", err)

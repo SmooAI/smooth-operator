@@ -182,6 +182,14 @@ type inboundFrame struct {
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
+	// send_message — optional multimodal/file attachments. Captured RAW and parsed
+	// separately (fail-soft) in handleSendMessage: a malformed images/files array is
+	// dropped without rejecting the turn, mirroring the Rust reference's
+	// from_value(...).ok().unwrap_or_default(). Folding them into this struct directly
+	// would make a malformed array fail the whole-frame unmarshal, which is NOT
+	// fail-soft.
+	Images json.RawMessage `json:"images"`
+	Files  json.RawMessage `json:"files"`
 	// confirm_tool_action — *bool so a missing verdict is distinguishable from
 	// false (fail closed: a missing/garbled approved must NOT silently approve).
 	Approved *bool `json:"approved"`
@@ -581,6 +589,28 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	// the connection's single active turn before the goroutine starts, so a cancel that
 	// lands immediately after this frame still finds it.
 	turnCtx, turnCancel := context.WithCancel(ctx)
+	// Per-turn host context: the turn's image + file attachments (surfaced to host
+	// tools) and the directive sink (where a host tool writes a client-side directive
+	// that lands on the terminal eventual_response). Parsed fail-soft — a malformed
+	// images/files array is dropped, never rejecting the turn — mirroring the Rust
+	// reference (handler.rs images parse + tool_provider.rs ToolProviderContext). The
+	// engine dispatches every tool with turnCtx, so a host tool reads this via
+	// TurnContextFrom(ctx). Empty attachments + no directive ⇒ behavior unchanged.
+	turnState := &TurnContext{}
+	// Drop a malformed array wholesale (Go's Unmarshal partially populates a slice on a
+	// bad element, so discard the partial result) — matching the Rust reference's
+	// from_value(...).ok().unwrap_or_default() all-or-nothing fail-soft.
+	if len(frame.Images) > 0 {
+		if err := json.Unmarshal(frame.Images, &turnState.Images); err != nil {
+			turnState.Images = nil
+		}
+	}
+	if len(frame.Files) > 0 {
+		if err := json.Unmarshal(frame.Files, &turnState.Files); err != nil {
+			turnState.Files = nil
+		}
+	}
+	turnCtx = withTurnContext(turnCtx, turnState)
 	turn := &activeTurn{requestID: requestID, cancel: turnCancel}
 	d.turnMu.Lock()
 	d.current = turn
@@ -639,8 +669,12 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 				d.offerOtp(ctx, session.SessionID, tool, contact, requestID, sink)
 			}
 		}
-		// 3. Terminal eventual_response.
-		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations))
+		// 3. Terminal eventual_response. Drain the turn's directive sink (a host tool may
+		//    have written a send_file / navigation directive); absent ⇒ the field is
+		//    omitted (back-compat). Mirrors the Rust runner draining directive_sink onto
+		//    eventual_response (runner.rs / protocol.rs).
+		directive, hasDirective := turnState.Directive()
+		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations, directive, hasDirective))
 	}()
 }
 

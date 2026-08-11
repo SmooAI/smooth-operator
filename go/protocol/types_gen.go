@@ -535,6 +535,11 @@ type EventualResponseDataData struct {
 	// like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the
 	// host client and validated there. Optional and back-compatible: absent when the
 	// turn produced no directive. Last-write-wins when multiple were emitted.
+	//
+	// Recognized host directive `send_file` (agent → user file delivery): `{ "type":
+	// "send_file", "files": [{ "name": string, "mimeType"?: string, "url":
+	// "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the
+	// turn's directive sink; faces render each file as a download/share.
 	Directive *EventualResponseDataDataDirective `json:"directive,omitempty,omitzero"`
 
 	// Human-readable escalation reason when `needsEscalation` is true.
@@ -588,6 +593,11 @@ type EventualResponseDataDataCitationsElem struct {
 // `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host
 // client and validated there. Optional and back-compatible: absent when the turn
 // produced no directive. Last-write-wins when multiple were emitted.
+//
+// Recognized host directive `send_file` (agent → user file delivery): `{ "type":
+// "send_file", "files": [{ "name": string, "mimeType"?: string, "url":
+// "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the
+// turn's directive sink; faces render each file as a download/share.
 type EventualResponseDataDataDirective map[string]interface{}
 
 // Per-turn token accounting and cost, captured from the engine's terminal
@@ -1388,6 +1398,20 @@ type RequestAuthContext struct {
 	UserID string `json:"userId"`
 }
 
+type RequestFilesElem struct {
+	// Optional MIME type hint (e.g. `text/csv`, `application/pdf`). Omitted when
+	// unknown.
+	MimeType *string `json:"mimeType,omitempty,omitzero"`
+
+	// Suggested filename (basename only; the host sanitizes and confines it to the
+	// workspace).
+	Name string `json:"name"`
+
+	// A `data:<mime>;base64,...` URL (or a remote `https` URL) carrying the file
+	// bytes. The host reads/persists the bytes; it is NOT emitted to the model.
+	URL string `json:"url"`
+}
+
 type RequestImagesElem struct {
 	// Optional OpenAI vision detail hint. Omitted when absent.
 	Detail *RequestImagesElemDetail `json:"detail,omitempty,omitzero"`
@@ -1416,6 +1440,14 @@ type RequestValues map[string]interface{}
 // `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host
 // client and validated there. Absent when the turn produced no directive.
 // Last-write-wins when multiple were emitted.
+//
+// Recognized host directive `send_file` (agent → user file delivery): `{ "type":
+// "send_file", "files": [{ "name": string, "mimeType"?: string, "url":
+// "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the
+// turn's directive sink; faces render each file as a download/share. Multiple
+// files may be delivered in one directive; last-write-wins across turns means a
+// tool that sends several files should emit them in one directive, not one per
+// call.
 type ResponseDirective map[string]interface{}
 
 // Opaque cursor naming the oldest message in this page. Pass it as the next
@@ -1433,6 +1465,15 @@ const ResponseStatusIdle ResponseStatus = "idle"
 type SendMessageRequest struct {
 	// Action discriminator.
 	Action string `json:"action"`
+
+	// Optional non-image file attachments for this turn. Unlike `images` (which are
+	// sent to the model as vision content parts), each file is surfaced to the host
+	// on the tool-provider context so the host can persist it into the agent's
+	// workspace, where ordinary tools (read_file, bash, …) can then read it. The
+	// protocol layer does NOT send file bytes to the model. Absent/empty → no files
+	// (byte-identical to before this field existed). Fail-soft: a malformed entry is
+	// ignored rather than rejecting the turn.
+	Files []RequestFilesElem `json:"files,omitempty,omitzero"`
 
 	// Optional image attachments for a multimodal turn. Each item is a `data:` or
 	// `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty →
@@ -1453,6 +1494,17 @@ type SendMessageRequest struct {
 	// Session ID returned by `create_conversation_session`.
 	SessionID string `json:"sessionId"`
 
+	// Optional name of a skill (a reusable recipe) to run THIS turn under. The SERVER
+	// resolves the name to the skill's markdown body and composes it into the turn's
+	// system prompt, so the wire carries the intent ("use skill X") rather than the
+	// client prepending the skill's prose to `message` — and the persisted user
+	// message stays exactly what the user typed. Absent → an ordinary turn
+	// (byte-identical to before this field existed). Fail-closed, unlike `images`: a
+	// skill the server cannot resolve returns a `SKILL_NOT_FOUND` error and the turn
+	// does NOT run, since silently answering without the requested recipe is
+	// indistinguishable from answering with it.
+	Skill *string `json:"skill,omitempty,omitzero"`
+
 	// Whether to receive incremental `stream_chunk` and `stream_token` events.
 	// Defaults to `true`. Set to `false` to receive only the final
 	// `eventual_response`.
@@ -1467,6 +1519,14 @@ type SendMessageResponse struct {
 	// like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the
 	// host client and validated there. Absent when the turn produced no directive.
 	// Last-write-wins when multiple were emitted.
+	//
+	// Recognized host directive `send_file` (agent → user file delivery): `{ "type":
+	// "send_file", "files": [{ "name": string, "mimeType"?: string, "url":
+	// "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the
+	// turn's directive sink; faces render each file as a download/share. Multiple
+	// files may be delivered in one directive; last-write-wins across turns means a
+	// tool that sends several files should emit them in one directive, not one per
+	// call.
 	Directive *ResponseDirective `json:"directive,omitempty,omitzero"`
 
 	// Human-readable reason when `needsEscalation` is true.
