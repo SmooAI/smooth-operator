@@ -607,6 +607,12 @@ public sealed class FrameDispatcher
 
         var message = frame["message"]?.GetValue<string>() ?? string.Empty;
 
+        // Optional multimodal attachments. Fail-soft, per the spec: absent ⇒ a text-only turn; a
+        // malformed entry is dropped rather than rejecting the turn. `images` become vision content parts
+        // on the user turn; `files` are surfaced to host tools via the turn context (never sent to the model).
+        var images = ParseImages(frame["images"]);
+        var files = ParseFiles(frame["files"]);
+
         // 1. Immediate ack (202).
         sink(ProtocolEvents.ImmediateResponse(requestId, 202, "Processing your request...", new JsonObject()));
 
@@ -712,7 +718,7 @@ public sealed class FrameDispatcher
         {
             try
             {
-                var result = await runner.RunAsync(conversationId, requestIdStr, message, turnSink, sessionIdStr, turnCts.Token).ConfigureAwait(false);
+                var result = await runner.RunAsync(conversationId, requestIdStr, message, turnSink, sessionIdStr, turnCts.Token, images, files).ConfigureAwait(false);
 
                 // If the auth gate refused an end_user tool this turn for lack of a verified session,
                 // and a host OTP service is installed and the session has a contact to reach, offer the
@@ -734,7 +740,8 @@ public sealed class FrameDispatcher
                     result.MessageId,
                     ProtocolEvents.GeneralResponse(result.Reply),
                     needsEscalation: false,
-                    result.Citations));
+                    result.Citations,
+                    result.Directive));
             }
             catch (OperationCanceledException)
             {
@@ -775,6 +782,75 @@ public sealed class FrameDispatcher
         {
             turn.Task = task;
         }
+    }
+
+    /// <summary>
+    /// Parse <c>send_message.images[]</c> into <see cref="UserImage"/>s. Fail-soft: a non-array, or an
+    /// entry without a non-empty <c>url</c>, is dropped rather than rejecting the turn.
+    /// </summary>
+    private static IReadOnlyList<UserImage> ParseImages(JsonNode? node)
+    {
+        if (node is not JsonArray array)
+        {
+            return Array.Empty<UserImage>();
+        }
+        var images = new List<UserImage>(array.Count);
+        foreach (var item in array)
+        {
+            try
+            {
+                if (item is not JsonObject obj)
+                {
+                    continue;
+                }
+                var url = obj["url"]?.GetValue<string>();
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    continue;
+                }
+                images.Add(new UserImage(url, obj["detail"]?.GetValue<string>()));
+            }
+            catch
+            {
+                // Malformed entry (wrong node type for a field) → drop it, never fail the turn.
+            }
+        }
+        return images;
+    }
+
+    /// <summary>
+    /// Parse <c>send_message.files[]</c> into <see cref="UserFile"/>s. Fail-soft: a non-array, or an
+    /// entry without a non-empty <c>name</c> AND <c>url</c>, is dropped rather than rejecting the turn.
+    /// </summary>
+    private static IReadOnlyList<UserFile> ParseFiles(JsonNode? node)
+    {
+        if (node is not JsonArray array)
+        {
+            return Array.Empty<UserFile>();
+        }
+        var files = new List<UserFile>(array.Count);
+        foreach (var item in array)
+        {
+            try
+            {
+                if (item is not JsonObject obj)
+                {
+                    continue;
+                }
+                var name = obj["name"]?.GetValue<string>();
+                var url = obj["url"]?.GetValue<string>();
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(url))
+                {
+                    continue;
+                }
+                files.Add(new UserFile(name, obj["mimeType"]?.GetValue<string>(), url));
+            }
+            catch
+            {
+                // Malformed entry → drop it, never fail the turn.
+            }
+        }
+        return files;
     }
 
     /// <summary>
