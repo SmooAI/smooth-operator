@@ -523,10 +523,22 @@ namespace SmooAI.SmoothOperator.Generated
         public string? Model { get; set; } = default!;
 
         /// <summary>
+        /// Optional name of a skill (a reusable recipe) to run THIS turn under. The SERVER resolves the name to the skill's markdown body and composes it into the turn's system prompt, so the wire carries the intent ("use skill X") rather than the client prepending the skill's prose to `message` — and the persisted user message stays exactly what the user typed. Absent → an ordinary turn (byte-identical to before this field existed). Fail-closed, unlike `images`: a skill the server cannot resolve returns a `SKILL_NOT_FOUND` error and the turn does NOT run, since silently answering without the requested recipe is indistinguishable from answering with it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skill")]
+        public string? Skill { get; set; } = default!;
+
+        /// <summary>
         /// Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("images")]
         public System.Collections.Generic.ICollection<Images>? Images { get; set; } = default!;
+
+        /// <summary>
+        /// Optional non-image file attachments for this turn. Unlike `images` (which are sent to the model as vision content parts), each file is surfaced to the host on the tool-provider context so the host can persist it into the agent's workspace, where ordinary tools (read_file, bash, …) can then read it. The protocol layer does NOT send file bytes to the model. Absent/empty → no files (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("files")]
+        public System.Collections.Generic.ICollection<Files>? Files { get; set; } = default!;
 
     }
 
@@ -563,6 +575,8 @@ namespace SmooAI.SmoothOperator.Generated
 
         /// <summary>
         /// An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+        /// <br/>
+        /// <br/>Recognized host directive `send_file` (agent → user file delivery): `{ "type": "send_file", "files": [{ "name": string, "mimeType"?: string, "url": "data:&lt;mime&gt;;base64,..." }] }`. A host `send_file` tool writes this onto the turn's directive sink; faces render each file as a download/share. Multiple files may be delivered in one directive; last-write-wins across turns means a tool that sends several files should emit them in one directive, not one per call.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("directive")]
         public object? Directive { get; set; } = default!;
@@ -2075,6 +2089,30 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class Files
+    {
+
+        /// <summary>
+        /// Suggested filename (basename only; the host sanitizes and confines it to the workspace).
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = default!;
+
+        /// <summary>
+        /// Optional MIME type hint (e.g. `text/csv`, `application/pdf`). Omitted when unknown.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("mimeType")]
+        public string? MimeType { get; set; } = default!;
+
+        /// <summary>
+        /// A `data:&lt;mime&gt;;base64,...` URL (or a remote `https` URL) carrying the file bytes. The host reads/persists the bytes; it is NOT emitted to the model.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("url")]
+        public string Url { get; set; } = default!;
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
     public enum GeneralAgentResponseResolutionStatus
     {
 
@@ -2750,6 +2788,8 @@ namespace SmooAI.SmoothOperator.Generated
 
         /// <summary>
         /// An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+        /// <br/>
+        /// <br/>Recognized host directive `send_file` (agent → user file delivery): `{ "type": "send_file", "files": [{ "name": string, "mimeType"?: string, "url": "data:&lt;mime&gt;;base64,..." }] }`. A host `send_file` tool writes this onto the turn's directive sink; faces render each file as a download/share.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("directive")]
         public object? Directive { get; set; } = default!;

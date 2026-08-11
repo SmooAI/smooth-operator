@@ -8,8 +8,10 @@ using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server;
 
-/// <summary>What a completed turn produced (the analog of the Rust <c>TurnResult</c>).</summary>
-public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<JsonObject> Citations);
+/// <summary>What a completed turn produced (the analog of the Rust <c>TurnResult</c>). <see cref="Directive"/>
+/// is the opaque client-side directive a host tool wrote onto the turn's <see cref="TurnContext"/>
+/// (<c>null</c> ⇒ none; drained onto <c>eventual_response.directive</c>).</summary>
+public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<JsonObject> Citations, JsonNode? Directive = null);
 
 /// <summary>
 /// Drives one <c>send_message</c> turn: load prior history, retrieve grounding knowledge, run the
@@ -59,7 +61,7 @@ public sealed class TurnRunner
     private readonly IChatClient _preambleChatClient;
 
     /// <summary>
-    /// The fire-and-forget preamble task from the most recent <see cref="RunAsync(string,string,string,Action{JsonObject},string,CancellationToken)"/>
+    /// The fire-and-forget preamble task from the most recent <see cref="RunAsync(string,string,string,Action{JsonObject},string,CancellationToken,IReadOnlyList{UserImage},IReadOnlyList{UserFile})"/>
     /// (a completed task when the feature is off). Exposed purely so tests — and diagnostics — can
     /// observe when the parallel preamble has finished; the turn itself NEVER awaits it, so it can
     /// neither delay nor fail the answer.
@@ -149,7 +151,13 @@ public sealed class TurnRunner
     public Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, CancellationToken cancellationToken = default) =>
         RunAsync(conversationId, requestId, userMessage, sink, sessionId: conversationId, cancellationToken);
 
-    public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, string sessionId, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Run one turn. <c>images</c> (from <c>send_message.images[]</c>) attach to the user turn as OpenAI
+    /// <c>image_url</c> content parts; <c>files</c> (from <c>send_message.files[]</c>) surface on the
+    /// per-turn <see cref="TurnContext"/> for host tools and are never sent to the model. Both empty/null
+    /// ⇒ a text-only turn, unchanged.
+    /// </summary>
+    public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, string sessionId, CancellationToken cancellationToken = default, IReadOnlyList<UserImage>? images = null, IReadOnlyList<UserFile>? files = null)
     {
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources.
         //    With a reranker configured, fetch a wider candidate pool and let it reorder down to
@@ -272,6 +280,33 @@ public sealed class TurnRunner
             thread.Add(new ChatMessage(role, message.Text));
         }
 
+        // Multimodal: the engine builds the LIVE user turn from the `userMessage` STRING (it can carry no
+        // content parts), so we can't attach images to it directly. Instead we seat an image-only user
+        // message on the thread immediately before the text turn — the model sees the image(s) adjacent to
+        // the question, no empty/duplicate message. Ephemeral (thread is rebuilt from the store each turn),
+        // so images are per-turn and never persisted — the persisted user message stays the typed text.
+        // Fail-soft: entries that don't map to an image part are dropped, never rejecting the turn.
+        if (images is { Count: > 0 })
+        {
+            var parts = new List<AIContent>(images.Count);
+            foreach (var image in images)
+            {
+                if (TryImageContent(image) is { } content)
+                {
+                    parts.Add(content);
+                }
+            }
+            if (parts.Count > 0)
+            {
+                thread.Add(new ChatMessage(ChatRole.User, parts));
+            }
+        }
+
+        // Per-turn tool context: the parsed files (host tools may land them in a workspace) plus the
+        // directive sink a host tool writes onto. Published as the ambient TurnContext around the run so a
+        // tool the engine invokes reaches it, then drained after the turn onto eventual_response.directive.
+        var turnContext = new TurnContext(files);
+
         // 3. Persist the inbound user message.
         await _store.AppendMessageAsync(conversationId, MessageDirection.Inbound, userMessage, cancellationToken).ConfigureAwait(false);
 
@@ -327,6 +362,9 @@ public sealed class TurnRunner
 
         try
         {
+            // Publish the per-turn context so any host tool the engine invokes below sees this turn's
+            // files and can write a directive onto the sink. Restored when the run's enumeration ends.
+            using var _ = turnContext.Enter();
             await foreach (var update in agent.RunStreamingAsync(userMessage, thread, cancellationToken).ConfigureAwait(false))
             {
                 var text = update.Text;
@@ -383,7 +421,90 @@ public sealed class TurnRunner
             await AdvanceWorkflowAsync(conversationId, currentStepId, userMessage, replyText, cancellationToken).ConfigureAwait(false);
         }
 
-        return new TurnResult(replyText, outbound.Id, citations);
+        // Drain the directive sink (mirrors the Rust runner draining directive_sink after the turn). A host
+        // tool that ran this turn may have written a client-side directive; null ⇒ none, so eventual_response
+        // omits directive (back-compat). Last-write-wins is inherent — the sink holds the final write.
+        return new TurnResult(replyText, outbound.Id, citations, turnContext.Directive);
+    }
+
+    /// <summary>
+    /// Map a parsed <see cref="UserImage"/> to an OpenAI <c>image_url</c> content part — a
+    /// <see cref="DataContent"/> for a <c>data:</c> URL or a <see cref="UriContent"/> for an
+    /// <c>http(s)</c> one; any other scheme, or a build failure, yields <c>null</c> (fail-soft, the entry
+    /// is dropped). The optional vision <c>detail</c> hint rides on <see cref="AIContent.AdditionalProperties"/>.
+    /// </summary>
+    private static AIContent? TryImageContent(UserImage image)
+    {
+        try
+        {
+            var url = image.Url?.Trim();
+            if (string.IsNullOrEmpty(url))
+            {
+                return null;
+            }
+
+            AIContent content;
+            if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                content = new DataContent(url, MediaTypeFromDataUri(url) ?? "image/*");
+            }
+            else if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                content = new UriContent(url, MediaTypeFromExtension(url));
+            }
+            else
+            {
+                return null; // unsupported scheme → drop
+            }
+
+            if (!string.IsNullOrWhiteSpace(image.Detail))
+            {
+                (content.AdditionalProperties ??= new()).Add("detail", image.Detail);
+            }
+            return content;
+        }
+        catch
+        {
+            return null; // malformed URL / bad media type → drop, never fail the turn
+        }
+    }
+
+    /// <summary>The media type declared inside a <c>data:&lt;mime&gt;;...</c> URL, or <c>null</c> if absent.</summary>
+    private static string? MediaTypeFromDataUri(string dataUri)
+    {
+        var semicolon = dataUri.IndexOf(';', StringComparison.Ordinal);
+        var comma = dataUri.IndexOf(',', StringComparison.Ordinal);
+        var end = semicolon >= 0 ? semicolon : comma;
+        if (end <= 5)
+        {
+            return null;
+        }
+        var mediaType = dataUri.Substring(5, end - 5).Trim();
+        return mediaType.Length > 0 && mediaType.Contains('/', StringComparison.Ordinal) ? mediaType : null;
+    }
+
+    /// <summary>A best-effort image media type guessed from a remote URL's extension (default <c>image/jpeg</c>,
+    /// which OpenAI-compatible providers ignore in favor of the fetched bytes — the hint just satisfies the
+    /// <see cref="UriContent"/> contract).</summary>
+    private static string MediaTypeFromExtension(string url)
+    {
+        var path = url;
+        var query = path.IndexOfAny(['?', '#']);
+        if (query >= 0)
+        {
+            path = path[..query];
+        }
+        var dot = path.LastIndexOf('.');
+        var ext = dot >= 0 ? path[(dot + 1)..].ToLowerInvariant() : string.Empty;
+        return ext switch
+        {
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "bmp" => "image/bmp",
+            _ => "image/jpeg",
+        };
     }
 
     /// <summary>

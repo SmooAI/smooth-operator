@@ -70,9 +70,11 @@ public static class ProtocolEvents
     /// <summary>
     /// The terminal turn event. Matches the Rust shape: a triple-nested
     /// <c>data.data</c> carrying <c>messageId</c>, the agent <c>response</c>, <c>needsEscalation</c>,
-    /// and (only when non-empty) the <c>citations</c> array.
+    /// (only when non-empty) the <c>citations</c> array, and (only when a host tool emitted one) the
+    /// opaque <c>directive</c> — e.g. a <c>send_file</c> object. Absent <c>directive</c> ⇒ omitted, so
+    /// the event stays back-compatible with clients that predate directives.
     /// </summary>
-    public static JsonObject EventualResponse(string requestId, int status, string messageId, JsonNode response, bool needsEscalation, IReadOnlyList<JsonObject>? citations)
+    public static JsonObject EventualResponse(string requestId, int status, string messageId, JsonNode response, bool needsEscalation, IReadOnlyList<JsonObject>? citations, JsonNode? directive = null)
     {
         var inner = new JsonObject
         {
@@ -88,6 +90,11 @@ public static class ProtocolEvents
                 array.Add(citation);
             }
             inner["citations"] = array;
+        }
+        if (directive is not null)
+        {
+            // Re-root the node: a JsonNode drained from the tool's TurnContext may already be parented.
+            inner["directive"] = directive.DeepClone();
         }
 
         return new JsonObject
