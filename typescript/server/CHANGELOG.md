@@ -1,5 +1,12 @@
 # @smooai/smooth-operator-server
 
+## 1.5.0
+
+### Minor Changes
+
+- 5e7b891: Protocol: bidirectional file transfer. Add `send_message.files[]` (non-image attachments the host lands in the agent workspace, distinct from vision `images[]`) and document the `send_file` host directive convention on `eventual_response.directive` (agent → user file delivery). Spec-only in this change; per-language server behavior (parse `files`, wire the directive sink so a host `send_file` tool can emit) follows.
+- 20e8c1f: Python server: file-transfer parity with the Rust reference. `send_message.images[]` now attach to the model's user message as OpenAI `image_url` content parts (multimodal turns), `send_message.files[]` are surfaced on the per-turn tool-provider context (a host tool lands them in the workspace; never sent to the model), and a host tool can write a client-side directive (e.g. the `send_file` convention) onto the turn's directive sink — drained after the turn onto `eventual_response.directive`. All fail-soft and back-compatible: a text-only turn with no attachments is byte-identical to before. Regenerated the Python SDK types from the updated spec (`files[]` + directive docs).
+
 ## 1.4.1
 
 ### Patch Changes
