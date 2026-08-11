@@ -19,6 +19,7 @@ import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Citation, Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
+import { withUserImages, type UserImage } from './toolContext.js';
 import { advanceStep, judgeStep, resolveCurrentStep, type ConversationWorkflow } from './workflow.js';
 
 /** What a completed turn produced (the analog of the C#/Rust `TurnResult`). */
@@ -196,6 +197,13 @@ export interface TurnRunnerOptions {
      * the engine's `modelMaxOutput`. Absent (tests, keyless local) ⇒ unclamped (EPIC th-1cc9fa).
      */
     modelCeiling?: ModelCeilingResolver;
+    /**
+     * Multimodal image attachments for this turn (contract PR #342). When non-empty,
+     * they're attached to the turn's user message as OpenAI `image_url` content parts
+     * via {@link withUserImages}; the plain text still drives retrieval/memory. Empty
+     * (the default) ⇒ a text-only turn, byte-for-byte unchanged.
+     */
+    images?: UserImage[];
 }
 
 export class TurnRunner {
@@ -213,6 +221,7 @@ export class TurnRunner {
     private readonly judgeModel?: string;
     private readonly model: string;
     private readonly modelCeiling?: ModelCeilingResolver;
+    private readonly images: UserImage[];
 
     constructor(options: TurnRunnerOptions) {
         this.chatClient = options.chatClient;
@@ -229,6 +238,7 @@ export class TurnRunner {
         this.judgeModel = options.judgeModel;
         this.model = options.model ?? DEFAULT_MODEL;
         this.modelCeiling = options.modelCeiling;
+        this.images = options.images ?? [];
     }
 
     /** True when `name` matches a confirmation-gated pattern (substring, like the Rust hook). */
@@ -328,7 +338,12 @@ export class TurnRunner {
             };
         }
 
-        const agent = new SmoothAgent(this.chatClient, agentOptions);
+        // Multimodal: attach this turn's images to the user message the MODEL sees
+        // (OpenAI `image_url` content parts) without disturbing the engine's
+        // text-based retrieval/memory. The preamble + judge keep the unwrapped
+        // client (text-only). Empty images ⇒ the client is returned unwrapped.
+        const agentClient = withUserImages(this.chatClient, this.images);
+        const agent = new SmoothAgent(agentClient, agentOptions);
 
         const prior = await this.store.listMessages(conversationId, MAX_PRIOR_MESSAGES);
         const history = prior.map((m) => ({

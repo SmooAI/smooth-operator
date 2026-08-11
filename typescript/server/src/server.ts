@@ -28,6 +28,7 @@ import type { SessionAuthenticator } from './toolGating.js';
 import type { OtpService } from './otp.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
+import type { ToolContext, ToolProvider } from './toolContext.js';
 import type { Frame } from './protocol.js';
 import type { ChatClientLike, Tool, ToolHook } from '@smooai/smooth-operator-core';
 import type { AuthVerifier } from './auth.js';
@@ -94,6 +95,14 @@ export interface ServerOptions {
      * (EPIC th-1cc9fa). Absent (tests, keyless local) ⇒ unclamped, behaviour unchanged.
      */
     modelCeiling?: ModelCeilingResolver;
+    /**
+     * Per-turn host tool seam (contract PR #342). Called once per `send_message` with
+     * the turn's {@link ToolContext} (`files`/`images` attachments + a directive sink);
+     * the returned tools merge into that turn's registry and may read the attachments
+     * and write `ctx.directive` (drained onto `eventual_response.directive`). Undefined
+     * ⇒ no host tools, behaviour unchanged. Mirrors the Rust `ToolProvider`.
+     */
+    toolProvider?: ToolProvider;
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -158,6 +167,7 @@ export function buildServer(options: ServerOptions): {
             otpService: options.otpService,
             model: options.model,
             modelCeiling: options.modelCeiling,
+            toolProvider: options.toolProvider,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);

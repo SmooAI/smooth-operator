@@ -355,6 +355,10 @@ export interface SendMessageRequest {
      */
     model?: string;
     /**
+     * Optional name of a skill (a reusable recipe) to run THIS turn under. The SERVER resolves the name to the skill's markdown body and composes it into the turn's system prompt, so the wire carries the intent ("use skill X") rather than the client prepending the skill's prose to `message` — and the persisted user message stays exactly what the user typed. Absent → an ordinary turn (byte-identical to before this field existed). Fail-closed, unlike `images`: a skill the server cannot resolve returns a `SKILL_NOT_FOUND` error and the turn does NOT run, since silently answering without the requested recipe is indistinguishable from answering with it.
+     */
+    skill?: string;
+    /**
      * Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
      */
     images?: {
@@ -366,6 +370,23 @@ export interface SendMessageRequest {
          * Optional OpenAI vision detail hint. Omitted when absent.
          */
         detail?: 'low' | 'high' | 'auto';
+    }[];
+    /**
+     * Optional non-image file attachments for this turn. Unlike `images` (which are sent to the model as vision content parts), each file is surfaced to the host on the tool-provider context so the host can persist it into the agent's workspace, where ordinary tools (read_file, bash, …) can then read it. The protocol layer does NOT send file bytes to the model. Absent/empty → no files (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
+     */
+    files?: {
+        /**
+         * Suggested filename (basename only; the host sanitizes and confines it to the workspace).
+         */
+        name: string;
+        /**
+         * Optional MIME type hint (e.g. `text/csv`, `application/pdf`). Omitted when unknown.
+         */
+        mimeType?: string;
+        /**
+         * A `data:<mime>;base64,...` URL (or a remote `https` URL) carrying the file bytes. The host reads/persists the bytes; it is NOT emitted to the model.
+         */
+        url: string;
     }[];
 }
 
@@ -389,6 +410,8 @@ export interface SendMessageResponse {
     escalationReason?: string;
     /**
      * An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+     *
+     * Recognized host directive `send_file` (agent → user file delivery): `{ "type": "send_file", "files": [{ "name": string, "mimeType"?: string, "url": "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the turn's directive sink; faces render each file as a download/share. Multiple files may be delivered in one directive; last-write-wins across turns means a tool that sends several files should emit them in one directive, not one per call.
      */
     directive?: {} | null;
 }
@@ -1097,6 +1120,8 @@ export interface EventualResponse {
             }[];
             /**
              * An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+             *
+             * Recognized host directive `send_file` (agent → user file delivery): `{ "type": "send_file", "files": [{ "name": string, "mimeType"?: string, "url": "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the turn's directive sink; faces render each file as a download/share.
              */
             directive?: {} | null;
         };

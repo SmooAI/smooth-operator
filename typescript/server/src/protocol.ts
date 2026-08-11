@@ -88,7 +88,13 @@ export function streamChunk(requestId: string, node: string, state: Record<strin
 /**
  * The terminal turn event. Matches the Rust/C# shape: a triple-nested `data.data`
  * carrying `messageId`, the agent `response`, `needsEscalation`, and — only when
- * non-empty — the `citations` array.
+ * non-empty — the `citations` array and (contract PR #342) the host `directive`.
+ *
+ * `directive` is an opaque client-side directive a host tool wrote onto the turn's
+ * directive sink (a navigation / `send_file` / view-application instruction).
+ * Omitted when the turn produced none (`undefined`/`null`) so the wire is
+ * byte-identical to before the field existed. Mirrors the Rust runner draining
+ * `directive_sink` onto `eventual_response.directive`.
  */
 export function eventualResponse(
     requestId: string,
@@ -97,10 +103,14 @@ export function eventualResponse(
     response: Record<string, unknown>,
     needsEscalation: boolean,
     citations?: Citation[],
+    directive?: unknown,
 ): Frame {
     const inner: Record<string, unknown> = { messageId, response, needsEscalation };
     if (citations && citations.length > 0) {
         inner.citations = citations.map((c) => citation(c.id, c.title, c.url, c.snippet, c.score));
+    }
+    if (directive !== undefined && directive !== null) {
+        inner.directive = directive;
     }
 
     return {
