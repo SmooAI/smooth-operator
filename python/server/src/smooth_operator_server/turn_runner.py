@@ -131,6 +131,40 @@ def preamble_model() -> str | None:
 Sink = Callable[[dict[str, Any]], None]
 
 
+@dataclass
+class TurnContext:
+    """Per-turn host context — the Python analog of the Rust server's
+    ``ToolProviderContext`` for the file-transfer surface (``send_message.files[]`` +
+    the ``send_file`` directive convention, spec PR #342).
+
+    Carries the turn's attachments and the directive sink so a host tool can see what
+    the turn brought in and hand a client-side directive back out:
+
+    * :attr:`images` — the multimodal image attachments; the runner maps these onto
+      the model's user message (OpenAI ``image_url`` content parts).
+    * :attr:`files` — non-image file attachments, surfaced here for a host tool to
+      land into the agent's workspace. NOT sent to the model.
+    * :attr:`directive` — the **directive sink**: a host tool writes a dict here
+      (via :meth:`set_directive`); the runner drains it after the turn onto
+      :attr:`TurnResult.directive`, which the dispatcher attaches to
+      ``eventual_response.directive``. ``None`` (the default) ⇒ no host directive.
+
+    A host tool that needs any of this is constructed per turn closing over the
+    context, exactly as the Rust provider builds tools from ``ToolProviderContext``.
+    """
+
+    images: list[dict[str, Any]] = field(default_factory=list)
+    files: list[dict[str, Any]] = field(default_factory=list)
+    directive: dict[str, Any] | None = None
+
+    def set_directive(self, value: dict[str, Any]) -> None:
+        """Write a client-side directive onto the sink. Last-write-wins across the
+        turn (mirrors the Rust ``directive_sink`` ``Mutex<Value>`` semantics), so a
+        tool delivering several files should emit them in ONE directive, not one per
+        call."""
+        self.directive = value
+
+
 @dataclass(frozen=True)
 class TurnResult:
     """What a completed turn produced (the analog of the Rust/C# ``TurnResult``)."""
@@ -138,6 +172,10 @@ class TurnResult:
     reply: str
     message_id: str
     citations: list[dict[str, Any]] = field(default_factory=list)
+    #: Client-side directive drained from the turn's :class:`TurnContext` sink (a host
+    #: tool wrote it — e.g. ``send_file``). ``None`` ⇒ no directive; the dispatcher
+    #: then omits ``eventual_response.directive`` (back-compat).
+    directive: dict[str, Any] | None = None
 
 
 class TurnRunner:
@@ -194,6 +232,7 @@ class TurnRunner:
         user_message: str,
         sink: Sink,
         session_id: str | None = None,
+        context: TurnContext | None = None,
     ) -> TurnResult:
         # 0. Auto-context citations (what grounded the answer). Mirrors the TS
         #    server's citation build / the Rust auto_sources / the C# citation build.
@@ -336,11 +375,29 @@ class TurnRunner:
                 self._run_preamble(fast_model, request_id, user_message, sink, answer_started)
             )
 
+        # Multimodal turn: when the turn carried image attachments, hand the engine's
+        # user message an OpenAI content-parts list (text + `image_url` parts) instead
+        # of the bare string, so the model actually sees the images. Mirrors the Rust
+        # server's `with_user_images`, but attached in-tree here (the pinned published
+        # core takes `run_stream(message)` and drops it straight onto the user message,
+        # so no core release is needed).
+        #
+        # Guard (pinned-core limitation): that core reuses the SAME `message` for its
+        # knowledge/memory retrieval query, which tokenizes it as a string — a content
+        # list would crash `kb.query`. So attach the multimodal payload only when no
+        # knowledge base is wired (the LocalServer/daemon flavor, and every images test).
+        # With knowledge wired we fall back to text-only rather than crash — fail-soft,
+        # matching the `images` schema. (Clean fix lands when the core grows a dedicated
+        # user-images seam; feature-detect it then, as with `_CORE_SUPPORTS_*`.)
+        model_message: Any = user_message
+        if context is not None and context.images and self._knowledge is None:
+            model_message = _build_user_content(user_message, context.images)
+
         try:
             # 3. Persist the inbound user message.
             await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
 
-            async for event in agent.run_stream(user_message, thread=thread):
+            async for event in agent.run_stream(model_message, thread=thread):
                 if isinstance(event, TextEvent):
                     if event.text:
                         # Close the preamble window BEFORE the first answer token
@@ -393,7 +450,13 @@ class TurnRunner:
         if workflow is not None:
             await self._advance_workflow(conversation_id, workflow, current_step_id, user_message, reply)
 
-        return TurnResult(reply=reply, message_id=outbound.id, citations=citations)
+        # 7. Drain the directive sink (mirrors the Rust runner's post-turn drain). A
+        #    host tool that ran this turn may have written a client-side directive onto
+        #    the context (e.g. `send_file`); `None` ⇒ none was written, so the
+        #    dispatcher omits `eventual_response.directive` (back-compat).
+        directive = context.directive if context is not None else None
+
+        return TurnResult(reply=reply, message_id=outbound.id, citations=citations, directive=directive)
 
     async def _run_preamble(
         self,
@@ -509,6 +572,31 @@ class TurnRunner:
                 citation["url"] = hit.source
             citations.append(citation)
         return citations
+
+
+def _build_user_content(text: str, images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build an OpenAI multimodal user-message ``content`` list from the turn's text
+    and image attachments: a leading ``text`` part, then one ``image_url`` part per
+    image (``{url, detail?}`` → ``{"image_url": {"url": ..., "detail"?: ...}}``, the
+    ``detail`` hint omitted when absent). Mirrors the Rust ``UserImage`` → engine
+    ``ImageContent`` mapping.
+
+    Fail-soft (per the ``images`` schema): an entry without a usable string ``url`` is
+    skipped rather than rejecting the turn; a ``detail`` that is not a string is
+    dropped. A leading text part is always present so the message is never image-only."""
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        url = image.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        image_url: dict[str, Any] = {"url": url}
+        detail = image.get("detail")
+        if isinstance(detail, str) and detail:
+            image_url["detail"] = detail
+        parts.append({"type": "image_url", "image_url": image_url})
+    return parts
 
 
 def _truncate(value: str, max_chars: int) -> str:

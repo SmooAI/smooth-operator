@@ -33,7 +33,7 @@ from .auth import AccessContext, normalize_email
 from .confirmation import ConfirmationRegistry
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
-from .turn_runner import Sink, TurnRunner
+from .turn_runner import Sink, TurnContext, TurnRunner
 
 #: An ``INTERNAL_ERROR`` on the wire must leave a traceback behind here. The wire message stays
 #: generic (no detail leaks to the client), but a server whose every turn fails has to say WHY
@@ -458,6 +458,16 @@ class FrameDispatcher:
         # wrap survivors to enforce per-tool authLevel + deliver per-tool config.
         agent_tools = filter_tools(self._tools, agent_config)
         agent_tools = gate_tools(agent_tools, agent_config, session_authed, otp_refusal)
+        # Multimodal / file-transfer context (spec PR #342): parse the turn's optional
+        # image + file attachments fail-soft (a malformed entry is dropped, never fails
+        # the turn — per the schema) and carry them on the per-turn TurnContext. Images
+        # reach the model as `image_url` parts; files are surfaced for a host tool to
+        # land into the workspace; the context's directive sink lets a host tool hand a
+        # client-side directive (e.g. `send_file`) back onto `eventual_response`.
+        turn_context = TurnContext(
+            images=_parse_attachments(frame.get("images"), ("url",)),
+            files=_parse_attachments(frame.get("files"), ("name", "url")),
+        )
         runner = TurnRunner(
             self._chat_client,
             self._store,
@@ -485,7 +495,12 @@ class FrameDispatcher:
         async def _run_turn() -> None:
             try:
                 result = await runner.run(
-                    session.conversation_id, request_id_str, message, sink, session_id=session_id_str
+                    session.conversation_id,
+                    request_id_str,
+                    message,
+                    sink,
+                    session_id=session_id_str,
+                    context=turn_context,
                 )
             except Exception:
                 # Mirror the dispatcher's outer guard: a turn failure surfaces a clean
@@ -508,6 +523,7 @@ class FrameDispatcher:
                     protocol.general_agent_response(result.reply),
                     needs_escalation=False,
                     citations=result.citations or None,
+                    directive=result.directive,
                 )
             )
 
@@ -677,6 +693,26 @@ _TITLE_MAX = 60
 #: as clean text (heading #, bullets *-, quote >, emphasis _~, code `, cursor ▎). Only
 #: LEADING chars are touched — inline markdown mid-text is left alone.
 _LEADING_MARKUP = "#*>-_~`▎ "
+
+
+def _parse_attachments(raw: Any, required: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Parse a ``send_message`` attachment array (``images`` / ``files``) fail-soft.
+
+    Keeps only object entries carrying every ``required`` key as a non-empty string
+    (``("url",)`` for images; ``("name", "url")`` for files) and shallow-copies each so
+    the caller owns the dicts. A non-list ``raw`` (absent/``None``/garbage) or a
+    malformed entry is dropped rather than rejecting the turn — the fail-soft contract
+    the ``images``/``files`` schema mandates. The protocol layer never inspects the
+    shape further; the model-attach (images) and host (files) consume it downstream."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        if all(isinstance(entry.get(k), str) and entry.get(k) for k in required):
+            out.append(dict(entry))
+    return out
 
 
 def _conversation_title(first_inbound_text: str | None, fallback: str) -> str:
