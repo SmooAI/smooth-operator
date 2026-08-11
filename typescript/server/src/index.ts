@@ -64,3 +64,6 @@ export type { Backplane, BackplaneSink } from './backplane.js';
 
 export * as protocol from './protocol.js';
 export type { Citation, Frame } from './protocol.js';
+
+export { parseFiles, parseImages, withUserImages } from './toolContext.js';
+export type { ImageDetail, ToolContext, ToolProvider, UserFile, UserImage } from './toolContext.js';

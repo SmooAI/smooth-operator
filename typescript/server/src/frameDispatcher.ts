@@ -23,6 +23,7 @@ import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
+import { parseFiles, parseImages, type ToolContext, type ToolProvider } from './toolContext.js';
 import type { Sink } from './turnRunner.js';
 import { DEFAULT_SYSTEM_PROMPT, TurnCancelledError, TurnRunner } from './turnRunner.js';
 
@@ -93,6 +94,15 @@ export interface FrameDispatcherOptions {
     model?: string;
     /** Best-effort per-model output-ceiling resolver; forwarded to the {@link TurnRunner} (EPIC th-1cc9fa). */
     modelCeiling?: ModelCeilingResolver;
+    /**
+     * Per-turn host tool seam (contract PR #342). Called once per `send_message` with
+     * the turn's {@link ToolContext} (its `files`/`images` attachments + a directive
+     * sink); the returned tools are MERGED into this turn's registry and may close over
+     * the context — reading the attachments and writing `ctx.directive`, which the
+     * dispatcher drains onto `eventual_response.directive`. Undefined ⇒ no host tools,
+     * behaviour unchanged. Mirrors the Rust `ToolProvider::tools_for`.
+     */
+    toolProvider?: ToolProvider;
 }
 
 export class FrameDispatcher {
@@ -111,6 +121,7 @@ export class FrameDispatcher {
     private readonly otpService?: OtpService;
     private readonly model?: string;
     private readonly modelCeiling?: ModelCeilingResolver;
+    private readonly toolProvider?: ToolProvider;
     /** In-flight spawned `send_message` turns, tracked so teardown can await them. */
     private readonly turns = new Set<Promise<void>>();
     /**
@@ -137,6 +148,7 @@ export class FrameDispatcher {
         this.otpService = options.otpService;
         this.model = options.model;
         this.modelCeiling = options.modelCeiling;
+        this.toolProvider = options.toolProvider;
     }
 
     /**
@@ -490,6 +502,29 @@ export class FrameDispatcher {
 
         const message = typeof frame.message === 'string' ? frame.message : '';
 
+        // File-transfer contract (PR #342). Parse the turn's attachments fail-soft
+        // (a malformed entry is dropped, never rejects the turn) and build the
+        // per-turn tool context: `images` are also attached to the model's user
+        // message downstream; `files` are host-only (never sent to the model); a host
+        // tool writes `ctx.directive`, drained onto `eventual_response.directive`
+        // after the turn. Mirrors the Rust `ToolProviderContext`.
+        const ctx: ToolContext = {
+            images: parseImages(frame.images),
+            files: parseFiles(frame.files),
+            directive: undefined,
+        };
+        // Per-turn host tools bound to this context (may read the attachments + write
+        // the directive). Fail-soft: a provider that throws degrades to no host tools
+        // rather than failing the turn. Undefined provider ⇒ no host tools.
+        let hostTools: Tool[] = [];
+        if (this.toolProvider) {
+            try {
+                hostTools = await this.toolProvider(ctx);
+            } catch (err) {
+                console.error('[frameDispatcher] toolProvider failed (ignored):', err);
+            }
+        }
+
         // 1. Immediate ack (202).
         sink(protocol.immediateResponse(reqId, 202, 'Processing your request...', {}));
 
@@ -517,7 +552,9 @@ export class FrameDispatcher {
         // connection. Its eager tools join the base set BEFORE the enabled_tools filter,
         // so a per-agent allow-list drops them exactly like a built-in (SMOODEV-590 parity).
         const extHost = await buildExtensionHost({ confirmations: this.confirmations, sessionId, requestId: reqId, sink });
-        const baseTools = extHost ? [...this.tools, ...extHost.tools()] : this.tools;
+        // Static tools + this turn's SEP extension tools + per-turn host-provider tools.
+        // All go through the same enabled-tools filter + auth gate below.
+        const baseTools = [...this.tools, ...(extHost ? extHost.tools() : []), ...hostTools];
         const enabledTools = agentConfig?.enabledTools;
         const filteredTools = enabledTools?.length
             ? baseTools.filter((t) => enabledTools.some((e) => e.enabled && e.toolId === t.name))
@@ -548,6 +585,7 @@ export class FrameDispatcher {
             judgeModel: this.judgeModel,
             model: this.model,
             modelCeiling: this.modelCeiling,
+            images: ctx.images,
         });
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
@@ -588,7 +626,10 @@ export class FrameDispatcher {
                         await this.offerOtp(sessionId, otpRefusal.refusedTool, contact, reqId, sink);
                     }
                 }
-                sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations));
+                // Drain the directive sink (mirrors the Rust runner's post-turn drain):
+                // a host tool that ran this turn may have written a client-side directive
+                // onto `ctx.directive` (last-write-wins). `undefined` ⇒ omitted.
+                sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations, ctx.directive));
             } catch (err) {
                 // Cancelled: the terminal `cancelled` event was already emitted by the
                 // cancel handler (or the client is gone) — emit nothing more.
