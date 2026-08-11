@@ -478,6 +478,25 @@ class Image(BaseModel):
     """
 
 
+class File(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    name: Annotated[str, Field(max_length=255, min_length=1)]
+    """
+    Suggested filename (basename only; the host sanitizes and confines it to the workspace).
+    """
+    mime_type: Annotated[str | None, Field(alias='mimeType')] = None
+    """
+    Optional MIME type hint (e.g. `text/csv`, `application/pdf`). Omitted when unknown.
+    """
+    url: str
+    """
+    A `data:<mime>;base64,...` URL (or a remote `https` URL) carrying the file bytes. The host reads/persists the bytes; it is NOT emitted to the model.
+    """
+
+
 class SendMessageRequest(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -507,9 +526,20 @@ class SendMessageRequest(BaseModel):
     """
     Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset). Absent → the server's configured default model.
     """
+    skill: Annotated[
+        str | None,
+        Field(examples=['code-review', 'add-show'], pattern='^[A-Za-z0-9_-]{1,128}$'),
+    ] = None
+    """
+    Optional name of a skill (a reusable recipe) to run THIS turn under. The SERVER resolves the name to the skill's markdown body and composes it into the turn's system prompt, so the wire carries the intent ("use skill X") rather than the client prepending the skill's prose to `message` — and the persisted user message stays exactly what the user typed. Absent → an ordinary turn (byte-identical to before this field existed). Fail-closed, unlike `images`: a skill the server cannot resolve returns a `SKILL_NOT_FOUND` error and the turn does NOT run, since silently answering without the requested recipe is indistinguishable from answering with it.
+    """
     images: list[Image] | None = None
     """
     Optional image attachments for a multimodal turn. Each item is a `data:` or `https` image URL with an optional OpenAI vision `detail` hint. Absent/empty → a text-only turn (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
+    """
+    files: list[File] | None = None
+    """
+    Optional non-image file attachments for this turn. Unlike `images` (which are sent to the model as vision content parts), each file is surfaced to the host on the tool-provider context so the host can persist it into the agent's workspace, where ordinary tools (read_file, bash, …) can then read it. The protocol layer does NOT send file bytes to the model. Absent/empty → no files (byte-identical to before this field existed). Fail-soft: a malformed entry is ignored rather than rejecting the turn.
     """
 
 
@@ -818,6 +848,8 @@ class Data3(BaseModel):
     directive: dict[str, Any] | None = None
     """
     An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Optional and back-compatible: absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+
+    Recognized host directive `send_file` (agent → user file delivery): `{ "type": "send_file", "files": [{ "name": string, "mimeType"?: string, "url": "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the turn's directive sink; faces render each file as a download/share.
     """
 
 
@@ -1961,6 +1993,8 @@ class SendMessageResponse(BaseModel):
     directive: dict[str, Any] | None = None
     """
     An optional client-side directive the agent emitted for this turn (e.g. a navigation or view-application instruction). Opaque at the protocol layer — like `response`, the concrete shape (Navigate / ApplyView / …) is owned by the host client and validated there. Absent when the turn produced no directive. Last-write-wins when multiple were emitted.
+
+    Recognized host directive `send_file` (agent → user file delivery): `{ "type": "send_file", "files": [{ "name": string, "mimeType"?: string, "url": "data:<mime>;base64,..." }] }`. A host `send_file` tool writes this onto the turn's directive sink; faces render each file as a download/share. Multiple files may be delivered in one directive; last-write-wins across turns means a tool that sends several files should emit them in one directive, not one per call.
     """
 
 

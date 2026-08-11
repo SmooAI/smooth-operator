@@ -427,7 +427,7 @@ wheels = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.36.10"
+version = "1.38.0"
 source = { editable = "." }
 dependencies = [
     { name = "smooai-smooth-operator-core" },

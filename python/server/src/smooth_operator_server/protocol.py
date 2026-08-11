@@ -94,13 +94,20 @@ def eventual_response(
     response: Any,
     needs_escalation: bool,
     citations: list[dict[str, Any]] | None,
+    directive: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``eventual_response`` — the terminal event of a streaming turn. The payload
     is double-nested (``data.data``) per ``eventual-response.schema.json``.
 
     ``citations`` are attached to the inner ``data.data.citations`` array ONLY when
     non-empty — absent otherwise, keeping the event back-compatible with clients
-    that predate citations (matching the Rust ref)."""
+    that predate citations (matching the Rust ref).
+
+    ``directive`` is an opaque client-side directive a host tool wrote onto the
+    turn's directive sink (e.g. the ``send_file`` convention — agent→user file
+    delivery). Attached to ``data.data.directive`` ONLY when non-``None`` — absent
+    otherwise, keeping the event back-compatible with clients that predate
+    directives (mirrors the Rust ref's ``protocol.rs`` directive handling)."""
     inner: dict[str, Any] = {
         "messageId": message_id,
         "response": response,
@@ -108,6 +115,8 @@ def eventual_response(
     }
     if citations:
         inner["citations"] = citations
+    if directive is not None:
+        inner["directive"] = directive
     return {
         "type": "eventual_response",
         "requestId": request_id,
