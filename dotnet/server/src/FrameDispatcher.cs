@@ -34,6 +34,7 @@ public sealed class FrameDispatcher
     private readonly IOtpService? _otpService;
     private readonly TurnLimits _limits;
     private readonly ILogger? _logger;
+    private readonly ISkillResolver? _skillResolver;
 
     // The connection's SINGLE in-flight send_message turn, if one is running. A turn that calls a
     // confirmation-gated tool parks awaiting a later confirm_tool_action frame, so the turn runs as a
@@ -74,13 +75,15 @@ public sealed class FrameDispatcher
         IOtpService? otpService = null,
         TurnLimits? limits = null,
         ILogger? logger = null,
-        IReadOnlyList<IToolHook>? toolHooks = null)
+        IReadOnlyList<IToolHook>? toolHooks = null,
+        ISkillResolver? skillResolver = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _knowledge = knowledge;
         _access = access ?? AccessContext.Anonymous;
         _systemPrompt = systemPrompt;
+        _skillResolver = skillResolver;
         _reranker = reranker;
         _tools = tools ?? Array.Empty<AITool>();
         // Tool-call hooks (surveillance / redaction) forwarded to every turn's registry (empty → no
@@ -613,6 +616,24 @@ public sealed class FrameDispatcher
         var images = ParseImages(frame["images"]);
         var files = ParseFiles(frame["files"]);
 
+        // Optional named skill. The wire carries the INTENT ("use skill X"); the server resolves the body
+        // here and composes it into the turn's system prompt, so `message` stays exactly what the user typed
+        // (and is what gets persisted + replayed as history).
+        //
+        // Fail-CLOSED, unlike `images`: an unresolvable skill aborts the turn rather than quietly answering
+        // without it. A caller that asked for a code-review recipe and got a freeform answer has no way to tell.
+        string? skillSection = null;
+        var skillName = frame["skill"]?.GetValue<string>()?.Trim();
+        if (!string.IsNullOrEmpty(skillName))
+        {
+            skillSection = await Skills.ResolveSectionAsync(_skillResolver, skillName).ConfigureAwait(false);
+            if (skillSection is null)
+            {
+                sink(ProtocolEvents.Error(requestId, "SKILL_NOT_FOUND", $"skill '{skillName}' is not available on this server"));
+                return;
+            }
+        }
+
         // 1. Immediate ack (202).
         sink(ProtocolEvents.ImmediateResponse(requestId, 202, "Processing your request...", new JsonObject()));
 
@@ -718,7 +739,7 @@ public sealed class FrameDispatcher
         {
             try
             {
-                var result = await runner.RunAsync(conversationId, requestIdStr, message, turnSink, sessionIdStr, turnCts.Token, images, files).ConfigureAwait(false);
+                var result = await runner.RunAsync(conversationId, requestIdStr, message, turnSink, sessionIdStr, turnCts.Token, images, files, skillSection).ConfigureAwait(false);
 
                 // If the auth gate refused an end_user tool this turn for lack of a verified session,
                 // and a host OTP service is installed and the session has a contact to reach, offer the
