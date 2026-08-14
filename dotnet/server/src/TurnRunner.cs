@@ -61,7 +61,7 @@ public sealed class TurnRunner
     private readonly IChatClient _preambleChatClient;
 
     /// <summary>
-    /// The fire-and-forget preamble task from the most recent <see cref="RunAsync(string,string,string,Action{JsonObject},string,CancellationToken,IReadOnlyList{UserImage},IReadOnlyList{UserFile})"/>
+    /// The fire-and-forget preamble task from the most recent <see cref="RunAsync(string,string,string,Action{JsonObject},string,CancellationToken,IReadOnlyList{UserImage},IReadOnlyList{UserFile},string)"/>
     /// (a completed task when the feature is off). Exposed purely so tests — and diagnostics — can
     /// observe when the parallel preamble has finished; the turn itself NEVER awaits it, so it can
     /// neither delay nor fail the answer.
@@ -115,7 +115,7 @@ public sealed class TurnRunner
     /// (agentInstructions + workflowSection). With an empty <see cref="AgentConfig"/> this returns the
     /// default persona verbatim — behavior unchanged.
     /// </summary>
-    private string BuildSystemPrompt(string? currentStepId, bool isFirstTurn)
+    private string BuildSystemPrompt(string? currentStepId, bool isFirstTurn, string? skillSection = null)
     {
         var basePrompt = string.IsNullOrWhiteSpace(_agentConfig.InstructionsPrompt) ? _systemPrompt : _agentConfig.InstructionsPrompt!;
         var builder = new StringBuilder(basePrompt);
@@ -140,6 +140,12 @@ public sealed class TurnRunner
                 builder.Append("\n\n").Append(section);
             }
         }
+        // The turn's invoked skill (`send_message.skill`), appended LAST so it is the most salient
+        // instruction the model carries into the turn. Null for an ordinary turn ⇒ byte-for-byte unchanged.
+        if (!string.IsNullOrEmpty(skillSection))
+        {
+            builder.Append("\n\n").Append(skillSection);
+        }
         return builder.ToString();
     }
 
@@ -157,7 +163,7 @@ public sealed class TurnRunner
     /// per-turn <see cref="TurnContext"/> for host tools and are never sent to the model. Both empty/null
     /// ⇒ a text-only turn, unchanged.
     /// </summary>
-    public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, string sessionId, CancellationToken cancellationToken = default, IReadOnlyList<UserImage>? images = null, IReadOnlyList<UserFile>? files = null)
+    public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, string sessionId, CancellationToken cancellationToken = default, IReadOnlyList<UserImage>? images = null, IReadOnlyList<UserFile>? files = null, string? skillSection = null)
     {
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources.
         //    With a reranker configured, fetch a wider candidate pool and let it reorder down to
@@ -221,7 +227,7 @@ public sealed class TurnRunner
         // Prior history drives both the memory replay (below) and the first-turn greeting seed: an
         // empty history means this is the agent's first reply, so the greeting section is rendered.
         var priorMessages = await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false);
-        var resolvedPrompt = BuildSystemPrompt(currentStepId, isFirstTurn: priorMessages.Count == 0);
+        var resolvedPrompt = BuildSystemPrompt(currentStepId, isFirstTurn: priorMessages.Count == 0, skillSection: skillSection);
         // MaxOutputTokens is clamped to the model's ModelMaxOutputTokens ceiling by the engine so a
         // budget never exceeds what the model can physically emit (EPIC th-1cc9fa). The raised defaults
         // (8192 / 20) give reasoning models room to think AND answer, and iterations to actually use tools.

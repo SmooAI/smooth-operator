@@ -199,39 +199,6 @@ public class FileTransferTests
 
     // ── test doubles ─────────────────────────────────────────────────────────
 
-    /// <summary>Captures the full message list each turn hands the model (for asserting attached content).</summary>
-    private sealed class RecordingChatClient : IChatClient
-    {
-        private readonly string _reply;
-
-        public RecordingChatClient(string reply) => _reply = reply;
-
-        public IReadOnlyList<ChatMessage> LastMessages { get; private set; } = Array.Empty<ChatMessage>();
-
-        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
-        {
-            LastMessages = messages.ToList();
-            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)) { ModelId = "record" });
-        }
-
-        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-            IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            LastMessages = messages.ToList();
-            foreach (var update in new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)).ToChatResponseUpdates())
-            {
-                await Task.Yield();
-                yield return update;
-            }
-        }
-
-        public object? GetService(Type serviceType, object? serviceKey = null) => null;
-
-        public void Dispose()
-        {
-        }
-    }
-
     /// <summary>Emits one tool call on the first streamed turn, then plain text on the next — driving the
     /// engine's agentic loop to invoke a host tool exactly once. Records the final message list.</summary>
     private sealed class ToolThenTextChatClient : IChatClient

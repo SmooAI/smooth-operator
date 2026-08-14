@@ -111,7 +111,12 @@ public static class SmoothOperatorWebSocketExtensions
             // Tool-call hooks (surveillance / redaction) applied to every turn's registry. A host that
             // registered an IReadOnlyList<IToolHook> gets them; absent one ⇒ no hooks (unchanged). The
             // DI analog of the Rust operative installing NarcHook on its ToolRegistry.
-            toolHooks: services.GetService<IReadOnlyList<IToolHook>>());
+            toolHooks: services.GetService<IReadOnlyList<IToolHook>>(),
+            // Skill resolution for `send_message.skill`. A host-registered ISkillResolver wins; otherwise
+            // fall back to the env-configured directory resolver (SMOOTH_SKILLS_DIR). Unset ⇒ null ⇒ any
+            // `skill` field is a clean SKILL_NOT_FOUND, so a multi-tenant deploy never serves host skills
+            // by accident. Mirrors Rust's install_skill_resolver_from_env.
+            skillResolver: services.GetService<ISkillResolver>() ?? DirSkillResolver.FromEnv());
     }
 
     private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
