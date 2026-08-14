@@ -14,6 +14,7 @@ import type { ChatClientLike, Knowledge, Tool, ToolHook } from '@smooai/smooth-o
 import { randomUUID } from 'node:crypto';
 
 import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
+import { resolveSection, type SkillResolver } from './skills.js';
 import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
@@ -43,6 +44,11 @@ export interface FrameDispatcherOptions {
     knowledge?: AccessKnowledge;
     access?: AccessContext;
     systemPrompt?: string;
+    /**
+     * Resolves `send_message.skill` to a markdown body. Absent ⇒ any `skill` field is a clean
+     * `SKILL_NOT_FOUND`, so a multi-tenant deploy never serves host skills by accident.
+     */
+    skillResolver?: SkillResolver;
     /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
     tools?: Tool[];
     /**
@@ -111,6 +117,7 @@ export class FrameDispatcher {
     private readonly knowledge?: AccessKnowledge;
     private readonly access: AccessContext;
     private readonly systemPrompt?: string;
+    private readonly skillResolver?: SkillResolver;
     private readonly tools: Tool[];
     private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
@@ -138,6 +145,7 @@ export class FrameDispatcher {
         this.knowledge = options.knowledge;
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
+        this.skillResolver = options.skillResolver;
         this.tools = options.tools ?? [];
         this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
@@ -516,6 +524,24 @@ export class FrameDispatcher {
         // Per-turn host tools bound to this context (may read the attachments + write
         // the directive). Fail-soft: a provider that throws degrades to no host tools
         // rather than failing the turn. Undefined provider ⇒ no host tools.
+        // Optional named skill (PR #338). The wire carries the INTENT ("use skill X"); the server
+        // resolves the body here and composes it into the turn's system prompt below, so `message`
+        // stays exactly what the user typed (and is what gets persisted + replayed as history).
+        //
+        // Fail-CLOSED, unlike `images`: an unresolvable skill aborts the turn rather than quietly
+        // answering without it. A caller that asked for a code-review recipe and got a freeform answer
+        // has no way to tell. Resolved BEFORE the 202 ack so the client never sees "accepted" for a
+        // turn that was never going to run.
+        const skillName = typeof frame.skill === 'string' ? frame.skill.trim() : '';
+        let skillSectionForTurn: string | undefined;
+        if (skillName) {
+            skillSectionForTurn = await resolveSection(this.skillResolver, skillName);
+            if (skillSectionForTurn === undefined) {
+                sink(protocol.error(reqId, 'SKILL_NOT_FOUND', `skill '${skillName}' is not available on this server`));
+                return;
+            }
+        }
+
         let hostTools: Tool[] = [];
         if (this.toolProvider) {
             try {
@@ -545,7 +571,12 @@ export class FrameDispatcher {
         // AFTER this). Gates the greeting to turn one only, matching the Python server.
         const isFirstTurn = (await this.store.listMessages(session.conversationId, 1)).length === 0;
         const baseSystemPrompt = this.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-        const effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
+        let effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
+
+        if (skillSectionForTurn) {
+            // Appended LAST so it is the most salient instruction the model carries into the turn.
+            effectiveSystemPrompt = `${effectiveSystemPrompt}\n\n${skillSectionForTurn}`;
+        }
         // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW is
         // set; undefined otherwise, zero overhead). The delegate is bound to THIS turn's
         // sink/request/session so a hosted extension's `ui/confirm` routes back over this

@@ -30,6 +30,7 @@ export { ConfirmationRegistry } from './confirmation.js';
 export { DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
 export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
 
+export { DirSkillResolver, isValidSkillName, resolveSection, skillSection, stripFrontmatter, SKILLS_DIR_ENV, type SkillResolver } from './skills.js';
 export { assembleSystemPrompt, parseAgentConfig, StaticAgentConfigResolver } from './agentConfig.js';
 export type { AgentConfig, AgentConfigResolver, EnabledTool } from './agentConfig.js';
 

@@ -27,6 +27,7 @@ import type { AgentConfigResolver } from './agentConfig.js';
 import type { SessionAuthenticator } from './toolGating.js';
 import type { OtpService } from './otp.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
+import { DirSkillResolver, type SkillResolver } from './skills.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
 import type { ToolContext, ToolProvider } from './toolContext.js';
 import type { Frame } from './protocol.js';
@@ -103,6 +104,12 @@ export interface ServerOptions {
      * ⇒ no host tools, behaviour unchanged. Mirrors the Rust `ToolProvider`.
      */
     toolProvider?: ToolProvider;
+    /**
+     * Resolves `send_message.skill` to its markdown body. Omitted ⇒ falls back to the env-configured
+     * `DirSkillResolver` (`SMOOTH_SKILLS_DIR`); with neither, any `skill` field is a clean
+     * `SKILL_NOT_FOUND`, so a multi-tenant deploy never serves host skills by accident.
+     */
+    skillResolver?: SkillResolver;
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -168,6 +175,8 @@ export function buildServer(options: ServerOptions): {
             model: options.model,
             modelCeiling: options.modelCeiling,
             toolProvider: options.toolProvider,
+            // Mirrors Rust's install_skill_resolver_from_env: explicit wins, else env, else off.
+            skillResolver: options.skillResolver ?? DirSkillResolver.fromEnv(),
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);
