@@ -12,6 +12,7 @@
  * Cargo.toml, a pyproject.toml, etc.).
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const anchorUrl = new URL('../typescript/package.json', import.meta.url);
 const version = JSON.parse(readFileSync(anchorUrl, 'utf8')).version;
@@ -145,7 +146,7 @@ function readVersion(text) {
  * so we fail loudly instead. `anchor` matching but the version already equal is fine —
  * that's a legitimate no-op, not a missing anchor.
  */
-const targets = [
+export const targets = [
     // The published .NET SERVER package (SmooAI.SmoothOperator.Server). Stamp its
     // <Version> ELEMENT only — NOT the `SmooAI.SmoothOperator.Core Version="…"`
     // PackageReference attribute (that engine ships on its own cadence from the
@@ -233,6 +234,15 @@ const targets = [
     },
 ];
 
+// Importable: `check-changeset-anchor.mjs` reads `targets` to learn which trees are
+// lockstep-stamped, so the guard can never drift from the list that actually stamps.
+// The stamping itself must only happen when this file is RUN, never when imported.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+    main();
+}
+
+function main() {
 let changed = 0;
 for (const target of targets) {
     const before = readFileSync(target.url, 'utf8');
@@ -250,3 +260,4 @@ for (const target of targets) {
 }
 
 console.log(`version-sync: anchor @smooai/smooth-operator@${version}, ${changed} file(s) updated.`);
+}
