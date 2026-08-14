@@ -1,0 +1,35 @@
+# Lockstep-anchor guard.
+#
+# Every smooth-operator artifact ships at ONE shared version, held in `@smooai/smooth-operator`
+# (typescript/package.json). Changesets versions only npm packages, so scripts/sync-versions.mjs
+# stamps that number onto every other published manifest (.NET csprojs, Cargo.tomls, python, go).
+# A changeset that does not name the anchor therefore republishes NOTHING outside npm — silently,
+# with a green release. PR #348 and #352 both landed .NET features that stayed unpublished for days
+# because their changesets named `@smooai/smooth-operator-server` (which is the TYPESCRIPT server).
+#
+# Deliberately NOT path-filtered: the guard has to see the whole diff to know which stamped trees a
+# PR touched, and a path filter would make it skip exactly the PRs it exists to judge.
+name: Anchor Guard
+
+on:
+    pull_request:
+
+jobs:
+    anchor-guard:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  # Full history: the guard diffs against the merge base, not the tip.
+                  fetch-depth: 0
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+
+            - name: Self-check the guard
+              run: node scripts/check-changeset-anchor.test.mjs
+
+            - name: Check this PR names the lockstep anchor
+              run: node scripts/check-changeset-anchor.mjs "origin/${{ github.base_ref }}"
