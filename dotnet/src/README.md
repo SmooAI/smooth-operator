@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
   <a href="https://www.nuget.org/packages/SmooAI.SmoothOperator"><img src="https://img.shields.io/nuget/v/SmooAI.SmoothOperator?style=for-the-badge&labelColor=020618&color=00A6A6" alt="NuGet"></a>
   <a href="https://dotnet.microsoft.com"><img src="https://img.shields.io/badge/.NET-%E2%89%A58.0-00A6A6?style=for-the-badge&labelColor=020618" alt=".NET ≥ 8.0"></a>
 </p>
@@ -188,7 +188,7 @@ Live tests are **gated, never silently skipped** — they run with `SMOOTH_AGENT
 
 ## Smoo-powered or bring-your-own
 
-Point `Url` at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` (AWS Lambda or k8s) — same protocol, same client.
+Point `Url` at your own self-hosted `smooth-operator-server` (AWS Lambda or k8s) — same protocol, same client.
 
 ## 🧩 Part of Smoo AI
 
@@ -196,7 +196,7 @@ Point `Url` at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at
 
 - 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, server, the five clients, AWS/k8s deploy)
 - 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
-- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+- ☁️ **Hosted by Smoo** — smooth-operator runs the [Smoo AI](https://smoo.ai) platform in production
 
 ## 🔗 Links
 

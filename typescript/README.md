@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
   <a href="https://www.npmjs.com/package/@smooai/smooth-operator"><img src="https://img.shields.io/npm/v/@smooai/smooth-operator?style=for-the-badge&labelColor=020618&color=00A6A6" alt="npm"></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node-%E2%89%A522-00A6A6?style=for-the-badge&labelColor=020618" alt="Node ≥ 22"></a>
 </p>
@@ -172,7 +172,7 @@ The generated types are committed; CI runs `pnpm generate` + `git diff --exit-co
 
 ## Smoo-powered or bring-your-own
 
-Point the client at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` (AWS Lambda or k8s) — same protocol, same client, same code.
+Point the client at your own self-hosted `smooth-operator-server` (AWS Lambda or k8s) — same protocol, same client, same code.
 
 ## 🧩 Part of Smoo AI
 
@@ -180,7 +180,7 @@ Point the client at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, 
 
 - 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, server, the five clients, AWS/k8s deploy)
 - 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
-- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+- ☁️ **Hosted by Smoo** — smooth-operator runs the [Smoo AI](https://smoo.ai) platform in production
 
 ## 🔗 Links
 

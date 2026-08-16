@@ -137,7 +137,7 @@ Every native client — [TypeScript](https://www.npmjs.com/package/@smooai/smoot
 
 ---
 
-Part of the **[smooth-operator](https://github.com/SmooAI/smooth-operator)** service — Smoo AI's polyglot AI agent service. See the [repository](https://github.com/SmooAI/smooth-operator) for the architecture, protocol, storage adapters, and the eval harness. Don't want to run it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** hosts it for you.
+Part of the **[smooth-operator](https://github.com/SmooAI/smooth-operator)** service — Smoo AI's polyglot AI agent service. See the [repository](https://github.com/SmooAI/smooth-operator) for the architecture, protocol, storage adapters, and the eval harness. smooth-operator powers the **[Smoo AI](https://smoo.ai)** platform in production.
 
 ## License
 

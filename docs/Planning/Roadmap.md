@@ -77,10 +77,12 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 - ⬜ Keep Postgres/pgvector in smooai; verify retrieval parity (Voyage + hybrid + rerank).
 - ⬜ Cut over behind a flag; verify on a customer site.
 
-## Phase 8 — Managed offering (`lom.smoo.ai`)
+## Phase 8 — Hosted posture (the Smoo AI platform)
 
-- ⬜ Stand up the hosted control plane + the SST stack as the multi-tenant backend.
-- ⬜ Landing page + docs + self-serve onboarding.
+There is no separate managed offering: the hosted incarnation of smooth-operator
+IS the [Smoo AI](https://smoo.ai) platform, which runs this code in production.
+(An earlier draft imagined a standalone multi-tenant domain for this; dropped
+2026-08-16 — the platform already covers it.)
 
 ## Phase 9 — Stretch goals
 
@@ -97,7 +99,7 @@ Every client is generated from `spec/` (protocol-first) and validates the shared
 
 ## Phase 11 — Knowledge depth (feature parity)
 
-Recurring principle: **"Smoo-powered or bring-your-own"** — hosted lom.smoo.ai wires Smoo's apps (identity, GitHub App, Slack App, managed parsing); self-host brings their own. Same code, two postures.
+Recurring principle: **"Smoo-powered or bring-your-own"** — the Smoo AI platform wires Smoo's apps (identity, GitHub App, Slack App, managed parsing); self-host brings their own. Same code, two postures.
 
 - 🟡 **Background / incremental indexing** — engine done (`smooth_operator_ingestion::indexing`: `IndexingService::run_once` = `latest_cursor` → `pull(since)` → idempotent `ingest` → `IndexingRun`; `IndexingStore` trait + `InMemoryIndexingStore`; `IndexingProgress` seam for `job_status_updated`; cursor + failure-path + progress tests). See [[Indexing]]. Persistent `IndexingStore` adapters (Postgres/DynamoDB `indexing_runs`) ✅ shipped (Phase 12 follow-up — see below). Remaining: the EventBridge Scheduler → Step Functions/Lambda (k8s: CronJob+worker) wiring.
 - ⬜ **Structured citations** (do early — sources are already retrieved): `citations[]` (id/title/url/snippet/score) in `eventual_response` + widget rendering.

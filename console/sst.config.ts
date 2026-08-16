@@ -15,7 +15,7 @@
  *   - The **OpenAuth issuer** — for production (`CONSOLE_AUTH` unset ⇒ openauth),
  *     an `sst.aws.Auth` component issues the BYO JWTs the console exchanges. We
  *     reference its issuer URL + a client id here. The Smoo-identity (hosted)
- *     alternative points `OPENAUTH_ISSUER` at `lom.smoo.ai` instead and skips
+ *     alternative points `OPENAUTH_ISSUER` at `auth.smoo.ai` instead and skips
  *     the local `sst.aws.Auth`.
  *
  * NEVER deploy locally — CI owns deploys. Verification here is `npx tsc --noEmit`
@@ -45,7 +45,7 @@ export default $config({
         // --- BYO auth issuer (SST OpenAuth) ----------------------------------
         // `sst.aws.Auth` runs the OpenAuth issuer (authorize/token endpoints) the
         // console drives. For the Smoo-identity (hosted) path, drop this and set
-        // OPENAUTH_ISSUER = 'https://lom.smoo.ai' on the site env instead.
+        // OPENAUTH_ISSUER = 'https://auth.smoo.ai' on the site env instead.
         const auth = new (sst as any).aws.Auth('ConsoleAuth', {
             // The issuer authorizer function lives in this repo's deploy package;
             // see deploy/sst/README.md. Placeholder handler path until the

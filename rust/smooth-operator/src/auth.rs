@@ -14,7 +14,7 @@
 //!     own IdP. SST OpenAuth (`@openauthjs/openauth` + `sst.aws.Auth`) issues
 //!     exactly these. HS256 (shared secret) and RS256 (public key) supported.
 //!   - [`SmooIdentityVerifier`] — **hosted** path: validates a Smoo-issued JWT
-//!     keyed to Smoo's issuer/audience (lom.smoo.ai wires Smoo's identity). The
+//!     keyed to Smoo's issuer/audience (the Smoo AI platform wires Smoo's identity). The
 //!     live token-introspection variant is documented + stubbed (it needs a
 //!     network call to the auth server's `/introspect`).
 //!   - [`NoAuthVerifier`] — **dev only**: returns a fixed `Admin` principal.
@@ -815,7 +815,7 @@ impl AuthVerifier for JwtVerifier {
     }
 }
 
-/// Validates a **Smoo-issued** token — the hosted path (lom.smoo.ai wires Smoo's
+/// Validates a **Smoo-issued** token — the Smoo-identity path (the platform wires Smoo's
 /// identity). Implemented as JWT validation keyed to Smoo's issuer/audience,
 /// reusing [`JwtVerifier`]'s internals.
 ///

@@ -6,7 +6,7 @@
   <a href="../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/tests-126%20passing-success" alt="126 tests passing" />
   <img src="https://img.shields.io/badge/serverless%20%C2%B7%20polyglot%20%C2%B7%20TDD-6f42c1" alt="serverless · polyglot · TDD" />
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-0aa" alt="lom.smoo.ai" /></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
 </p>
 
 ---
@@ -189,7 +189,7 @@ The runtime takes an OpenAI-compatible gateway client — point it at `llm.smoo.
 ## Learn more
 
 - [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) · [`docs/STORAGE.md`](../docs/STORAGE.md) · [`docs/TOOLS.md`](../docs/TOOLS.md) · [`docs/INGESTION.md`](../docs/INGESTION.md) · [`docs/OBSERVABILITY.md`](../docs/OBSERVABILITY.md) · [`docs/EVALS.md`](../docs/EVALS.md)
-- **[lom.smoo.ai](https://lom.smoo.ai)** — run it hosted.
+- **[smoo.ai](https://smoo.ai)** — the platform smooth-operator runs in production.
 
 ## License
 

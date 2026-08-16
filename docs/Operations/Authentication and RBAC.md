@@ -42,7 +42,7 @@ transport layer:
 | Mode (`AUTH_MODE`) | Verifier | Path |
 | --- | --- | --- |
 | `jwt` | `JwtVerifier` | **BYO** — validate a JWT from your own IdP (SST OpenAuth recommended; any OIDC works). HS256 or RS256. |
-| `smoo` | `SmooIdentityVerifier` | **Hosted** — validate a Smoo-issued JWT (`lom.smoo.ai`). |
+| `smoo` | `SmooIdentityVerifier` | **Smoo identity** — validate a Smoo-issued JWT (issuer: `auth.smoo.ai`). |
 | `none` | `NoAuthVerifier` | **Dev only** — fixed `Admin` principal; reachable only via explicit `AUTH_MODE=none`. |
 | `trusted` | *(transport)* | **Proxied** — an upstream that already authenticated the user forwards a `base64url(JSON)` identity; trusted without signature/`exp`. See [[Integrating into an Existing App]]. |
 

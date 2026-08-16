@@ -69,7 +69,7 @@ Three implementations cover the deployment shapes:
 | Verifier | `AUTH_MODE` | Path | What it does |
 | --- | --- | --- | --- |
 | **`JwtVerifier`** | `jwt` | **BYO** | Validates a JWT issued by the customer's own IdP. **SST OpenAuth** (`@openauthjs/openauth` + `sst.aws.Auth`; OIDC/OAuth/password, SAML via OIDC bridge) issues exactly these. **HS256** (shared secret) and **RS256** (PEM public key) supported. Extracts `sub`→`user_id`, `org`/`org_id`→`org_id`, `role`→`Role`, `name`→`display_name`. |
-| **`SmooIdentityVerifier`** | `smoo` | **Hosted** | Validates a **Smoo-issued** JWT keyed to Smoo's issuer/audience — `lom.smoo.ai` wires Smoo's identity. Reuses `JwtVerifier` internals (Smoo signs a JWT; we verify it locally with Smoo's public key / shared secret — no per-request network call). The opaque-token **live introspection** (RFC 7662) variant is documented + stubbed (`introspect()` returns `Misconfigured`) because it needs a network call to `{auth_server}/introspect`. |
+| **`SmooIdentityVerifier`** | `smoo` | **Hosted** | Validates a **Smoo-issued** JWT keyed to Smoo's issuer/audience — the Smoo AI platform wires Smoo's identity (issuer: `auth.smoo.ai`). Reuses `JwtVerifier` internals (Smoo signs a JWT; we verify it locally with Smoo's public key / shared secret — no per-request network call). The opaque-token **live introspection** (RFC 7662) variant is documented + stubbed (`introspect()` returns `Misconfigured`) because it needs a network call to `{auth_server}/introspect`. |
 | **`NoAuthVerifier`** | `none` | **Dev only** | Returns a fixed `Admin` principal for any (or no) token. Reachable **only** via an explicit `AUTH_MODE=none`. |
 
 ### BYO (SST OpenAuth) vs Smoo-identity duality
@@ -82,8 +82,8 @@ There are two ways to authenticate, and the service supports both via the
   IdP that emits a JWT with `sub` / `org` / `role` claims works. The service only
   needs the verification key (HS256 secret or RS256 public key) and optionally an
   `iss` / `aud` to constrain.
-- **Hosted** (`smoo`) — Smoo's identity issues the token; `lom.smoo.ai` (the
-  managed offering) wires this. Same JWT validation, keyed to Smoo's issuer.
+- **Smoo identity** (`smoo`) — Smoo's identity (`auth.smoo.ai`) issues the token;
+  the Smoo AI platform wires this. Same JWT validation, keyed to Smoo's issuer.
 
 ### Secure-by-default
 

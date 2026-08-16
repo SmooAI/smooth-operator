@@ -118,7 +118,7 @@ dotnet test dotnet/SmooAI.SmoothOperator.slnx
 
 ---
 
-Part of the **[smooth-operator](https://github.com/SmooAI/smooth-operator)** service — Smoo AI's polyglot AI agent service. Don't want to run it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** hosts it for you.
+Part of the **[smooth-operator](https://github.com/SmooAI/smooth-operator)** service — Smoo AI's polyglot AI agent service. smooth-operator powers the **[Smoo AI](https://smoo.ai)** platform in production.
 
 ## License
 

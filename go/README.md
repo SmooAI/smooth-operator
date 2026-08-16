@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
   <a href="https://pkg.go.dev/github.com/SmooAI/smooth-operator/go"><img src="https://img.shields.io/badge/pkg.go.dev-reference-00A6A6?style=for-the-badge&labelColor=020618" alt="pkg.go.dev"></a>
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-%E2%89%A51.26-00A6A6?style=for-the-badge&labelColor=020618" alt="Go ≥ 1.26"></a>
 </p>
@@ -172,14 +172,14 @@ The script documents its own flags. The two that matter: `--only-models` (plain 
 
 ## Smoo-powered or bring-your-own
 
-Point the transport at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` — same protocol, same client.
+Point the transport at your own self-hosted `smooth-operator-server` — same protocol, same client.
 
 Authenticating to a token-gated server? Pass a connection `Token` — it rides the `?token=` query slot of the WS URL (browsers can't set WebSocket headers):
 
 ```go
 c, _ := protocol.New(protocol.Options{
 	Transport: protocol.NewWebSocketTransportWithOptions(
-		"wss://lom.smoo.ai/ws",
+		"wss://your-operator.example.com/ws",
 		protocol.WebSocketOptions{Token: connToken},
 	),
 })
@@ -191,7 +191,7 @@ This Go client is built and open-sourced by **[Smoo AI](https://smoo.ai)** — t
 
 - 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, server, the five clients, AWS/k8s deploy)
 - 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
-- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+- ☁️ **Hosted by Smoo** — smooth-operator runs the [Smoo AI](https://smoo.ai) platform in production
 
 ## 🔗 Links
 
