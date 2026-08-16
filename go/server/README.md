@@ -36,6 +36,26 @@ Every event the server emits is validated against the **same `spec/` schemas + c
 
 ---
 
+---
+
+## Run it as a container
+
+```bash
+docker build -f go/server/Dockerfile -t smooth-operator-server-go .   # from the repo ROOT
+docker run --rm -p 8793:8793 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-go
+# ws://127.0.0.1:8793/ws
+```
+
+Build from the repo root — `go/server` has a `replace` onto the sibling client module
+at `go/`, so both have to be in the context.
+
+The image keeps the process's `8793` default port but flips the bind host to
+`0.0.0.0` (`SMOOTH_OPERATOR_BIND=0.0.0.0:8793`), since the process default of
+`127.0.0.1` is unreachable from outside a container. Narrow it back with
+`-e SMOOTH_OPERATOR_BIND=127.0.0.1:8793` when a sidecar fronts it on the pod
+loopback. Runs non-root (uid 10001); the coding tools are confined to `/workspace`,
+so mount your project there: `-v "$PWD:/workspace"`.
+
 ## Extensible — and safe by construction
 
 An agent is only useful when it can *do* things, and only trustworthy when you can say what it may never do. This server gives you both seams.

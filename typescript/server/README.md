@@ -41,6 +41,27 @@ With no gateway key, the whole protocol still works — only `send_message` retu
 
 ---
 
+---
+
+## Run it as a container
+
+```bash
+docker build -f typescript/server/Dockerfile -t smooth-operator-server-ts .   # from the repo ROOT
+docker run --rm -p 8787:8787 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-ts
+# ws://127.0.0.1:8787/ws
+```
+
+Build from the repo root — this is a pnpm workspace member, so the root
+`pnpm-workspace.yaml` and lockfile have to be in the context.
+
+Unlike the Go and Python servers (which take a combined `host:port`), this one reads
+**separate** `SMOOTH_OPERATOR_HOST` / `SMOOTH_OPERATOR_PORT` vars. The image keeps the
+process's `8787` default port but flips the host to `0.0.0.0`, since the process
+default of `127.0.0.1` is unreachable from outside a container. Narrow it back with
+`-e SMOOTH_OPERATOR_HOST=127.0.0.1` when a sidecar fronts it on the pod loopback.
+Runs non-root (uid 10001); the coding tools are confined to `/workspace`, so mount
+your project there: `-v "$PWD:/workspace"`.
+
 ## How a turn flows
 
 ```

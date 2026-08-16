@@ -46,6 +46,23 @@ asyncio.run(main())
 
 ---
 
+---
+
+## Run it as a container
+
+```bash
+docker build -f python/server/Dockerfile -t smooth-operator-server-py .   # from the repo ROOT
+docker run --rm -p 8787:8787 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-py
+# ws://127.0.0.1:8787/ws
+```
+
+The image keeps the process's `8787` default port but flips the bind host to
+`0.0.0.0` (`SMOOTH_OPERATOR_BIND=0.0.0.0:8787`), since the process default of
+`127.0.0.1` is unreachable from outside a container. Narrow it back with
+`-e SMOOTH_OPERATOR_BIND=127.0.0.1:8787` when a sidecar fronts it on the pod
+loopback. Runs non-root (uid 10001); the coding tools are confined to `/workspace`,
+so mount your project there: `-v "$PWD:/workspace"`.
+
 ## Extensible — and safe by construction
 
 An agent is only useful when it can *do* things, and only trustworthy when you can say what it may never do. This server gives you both seams.
