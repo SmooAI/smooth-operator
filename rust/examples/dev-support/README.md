@@ -137,7 +137,7 @@ tools = ["knowledge_search", "github_search"]
 
 ## Smoo-powered or BYO
 
-- **Smoo-powered** — at [lom.smoo.ai](https://lom.smoo.ai), Smoo's first-party
+- **Smoo-powered** — on the [Smoo AI](https://smoo.ai) platform, Smoo's first-party
   GitHub App wires repo access for you in one click (per-customer installation —
   no PAT to mint or rotate). The connector supports this via
   `GithubAuth::AppInstallation`.

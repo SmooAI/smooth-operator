@@ -44,7 +44,7 @@ const MAX_RESULTS: usize = 20;
 /// crate doesn't depend on the ingestion crate):
 /// - [`GithubAuth::Token`] — a personal-access token (self-host's simplest path),
 /// - [`GithubAuth::AppInstallation`] — Smoo's first-party GitHub App, the way
-///   `lom.smoo.ai` wires per-customer access,
+///   the Smoo AI platform wires per-customer access,
 /// - [`GithubAuth::Unauthenticated`] — public search at the anonymous rate limit.
 #[derive(Clone)]
 pub enum GithubAuth {

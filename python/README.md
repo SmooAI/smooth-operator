@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
   <a href="https://pypi.org/project/smooai-smooth-operator/"><img src="https://img.shields.io/pypi/v/smooai-smooth-operator?style=for-the-badge&labelColor=020618&color=00A6A6" alt="PyPI"></a>
   <a href="https://www.python.org"><img src="https://img.shields.io/badge/Python-%E2%89%A53.11-00A6A6?style=for-the-badge&labelColor=020618" alt="Python ≥ 3.11"></a>
 </p>
@@ -148,7 +148,7 @@ uv run python scripts/generate.py    # regen pydantic models from ../spec via da
 
 ## Smoo-powered or bring-your-own
 
-Point `url` at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at your own self-hosted `smooth-operator-server` — same protocol, same client.
+Point `url` at your own self-hosted `smooth-operator-server` — same protocol, same client.
 
 ## 🧩 Part of Smoo AI
 
@@ -156,7 +156,7 @@ Point `url` at the hosted **[lom.smoo.ai](https://lom.smoo.ai)** endpoint, or at
 
 - 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, server, the five clients, AWS/k8s deploy)
 - 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
-- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+- ☁️ **Hosted by Smoo** — smooth-operator runs the [Smoo AI](https://smoo.ai) platform in production
 
 ## 🔗 Links
 

@@ -24,7 +24,7 @@
 //! - [`GithubAuth::Token`] — a personal-access token (PAT). The simplest
 //!   self-host path: bring your own token.
 //! - [`GithubAuth::AppInstallation`] — a GitHub App installation (app id +
-//!   PEM private key + installation id). This is how **lom.smoo.ai** wires
+//!   PEM private key + installation id). This is how the **Smoo AI platform** wires
 //!   Smoo's GitHub App: the platform owns one App, and each customer installs
 //!   it on their org so Smoo can index their repos without sharing a PAT. A
 //!   self-hosted deployment can use either path.
@@ -90,7 +90,7 @@ pub enum GithubAuth {
     /// A personal-access token (PAT). Self-host's simplest path.
     Token(String),
     /// A GitHub App installation: app id, PEM private key, installation id.
-    /// How `lom.smoo.ai` wires Smoo's first-party GitHub App per customer org.
+    /// How the Smoo AI platform wires Smoo's first-party GitHub App per customer org.
     AppInstallation {
         /// The GitHub App's numeric id.
         app_id: u64,

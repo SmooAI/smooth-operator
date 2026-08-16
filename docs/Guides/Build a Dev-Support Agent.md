@@ -82,7 +82,7 @@ Everything lives in `dev-support.toml` (secrets read from env, so the file is sa
 to commit): the repo + auth mode + content tiers (`[github]`), and the model +
 system prompt + enabled tools (`[agent]`).
 
-- **Smoo-powered** — at [lom.smoo.ai](https://lom.smoo.ai), Smoo's first-party
+- **Smoo-powered** — on the [Smoo AI](https://smoo.ai) platform, Smoo's first-party
   GitHub App wires repo access in one click (per-customer installation, no PAT to
   rotate) via `GithubAuth::AppInstallation`.
 - **BYO (self-host)** — a PAT (`auth = "token"` + `$GITHUB_TOKEN`) or public-only

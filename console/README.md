@@ -70,7 +70,7 @@ The console supports the same auth duality as the backend, switched by
 | Mode | `CONSOLE_AUTH` | Backend `AUTH_MODE` | How it works |
 | --- | --- | --- | --- |
 | **OpenAuth (BYO)** | *(default / `openauth`)* | `jwt` | `/api/auth/login` redirects to the SST OpenAuth issuer (OAuth code flow). `/api/auth/callback` exchanges the code for the OpenAuth-issued JWT (carrying `sub`/`org`/`role`), stored in an httpOnly session cookie and forwarded as the admin-API bearer. |
-| **Smoo identity (hosted)** | `openauth` | `smoo` | Identical flow, but `OPENAUTH_ISSUER` points at Smoo's hosted issuer (`lom.smoo.ai`) instead of a self-hosted `sst.aws.Auth`. Same JWT contract. |
+| **Smoo identity (hosted)** | `openauth` | `smoo` | Identical flow, but `OPENAUTH_ISSUER` points at Smoo's identity issuer (`auth.smoo.ai`) instead of a self-hosted `sst.aws.Auth`. Same JWT contract. |
 | **Dev** | `dev` | `none` | A username form mints a local session with the bearer `dev`. Only reachable when `CONSOLE_AUTH=dev`; never the production default. Used by the smoke test. |
 
 The console **never trusts the token itself** — it only forwards it. The admin
@@ -212,7 +212,7 @@ The reusable wiring could later move into a `Console` construct in
 | --- | --- |
 | `CONSOLE_AUTH` | `openauth` (prod) — the dev path is never deployed. |
 | `ADMIN_API_URL` | Base URL of the running `smooth-operator-server`. |
-| `OPENAUTH_ISSUER` | The SST OpenAuth issuer URL (or `lom.smoo.ai` for hosted Smoo identity). |
+| `OPENAUTH_ISSUER` | The SST OpenAuth issuer URL (or `auth.smoo.ai` for Smoo identity). |
 | `OPENAUTH_CLIENT_ID` | The OpenAuth client id. |
 | `BACKEND_AUTH_MODE` | The backend's auth mode (display, settings page). |
 

@@ -94,7 +94,7 @@ pub enum GithubAuth {
 - **`Token(pat)`** — the simplest **self-host** path: bring your own personal-access
   token scoped to the repos you want indexed.
 - **`AppInstallation { … }`** — a **GitHub App installation** (app id + PEM private
-  key + installation id). This is how **lom.smoo.ai** wires it: Smoo owns **one**
+  key + installation id). This is how the **Smoo AI platform** wires it: Smoo owns **one**
   first-party GitHub App, and each customer **installs** it on their org so Smoo can
   index their repos **without anyone sharing a PAT**. The connector builds an app
   JWT from the PEM key and scopes down to the installation. A self-hosted

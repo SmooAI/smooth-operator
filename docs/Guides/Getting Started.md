@@ -7,8 +7,8 @@ for production auth see [[Self-Hosting]] and [[Integrating into an Existing App]
 ## Prerequisites
 
 - Rust (stable) + `cargo`.
-- An OpenAI-compatible **LLM gateway key**. Hosted users get one from
-  [lom.smoo.ai](https://lom.smoo.ai) (`SMOOAI_GATEWAY_KEY`); self-hosters point
+- An OpenAI-compatible **LLM gateway key**. Smoo's gateway is
+  [llm.smoo.ai](https://llm.smoo.ai) (`SMOOAI_GATEWAY_KEY`); self-hosters point
   `SMOOAI_GATEWAY_URL` at any compatible endpoint and use that provider's key.
 
 > The server **boots without a key** and answers every protocol action — only

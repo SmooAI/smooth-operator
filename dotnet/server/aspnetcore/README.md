@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="https://github.com/SmooAI/smooth-operator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
   <a href="https://www.nuget.org/packages/SmooAI.SmoothOperator.Server.AspNetCore"><img src="https://img.shields.io/nuget/v/SmooAI.SmoothOperator.Server.AspNetCore?style=for-the-badge&labelColor=020618&color=00A6A6" alt="NuGet"></a>
   <a href="https://dotnet.microsoft.com"><img src="https://img.shields.io/badge/.NET-8.0-00A6A6?style=for-the-badge&labelColor=020618" alt=".NET 8.0"></a>
 </p>
@@ -99,7 +99,7 @@ Built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered busi
 
 - 🌐 **The service** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (protocol, servers, the five clients, AWS/k8s deploy)
 - 🛰️ **Protocol** — [`docs/PROTOCOL.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/PROTOCOL.md)
-- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+- ☁️ **Hosted by Smoo** — smooth-operator runs the [Smoo AI](https://smoo.ai) platform in production
 - 💬 **Issues** — [github.com/SmooAI/smooth-operator/issues](https://github.com/SmooAI/smooth-operator/issues)
 
 ## 📄 License
