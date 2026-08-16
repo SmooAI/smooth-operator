@@ -33,7 +33,9 @@ async fn spawn_capturing_mock(body_tx: oneshot::Sender<Value>) -> String {
             let mut buf = Vec::new();
             let mut tmp = [0u8; 8192];
             loop {
-                let Ok(n) = sock.read(&mut tmp).await else { break };
+                let Ok(n) = sock.read(&mut tmp).await else {
+                    break;
+                };
                 if n == 0 {
                     break;
                 }
@@ -100,10 +102,14 @@ async fn capture_request_body(request_metadata: Option<serde_json::Map<String, V
             workflow: None,
             judge: None,
             greeting_section: None,
+            skill_section: None,
+            tool_hooks: vec![],
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            images: vec![],
+            files: vec![],
             request_metadata,
         },
         &tx,

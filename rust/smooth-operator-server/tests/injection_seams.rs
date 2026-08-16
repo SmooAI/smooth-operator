@@ -240,6 +240,7 @@ async fn run_turn_with_storage(
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )
@@ -509,6 +510,7 @@ async fn injected_tool_hook_observes_tool_calls() {
             auth_gate: None,
             tool_configs: None,
             extensions: None,
+            request_metadata: None,
         },
         &tx,
     )
