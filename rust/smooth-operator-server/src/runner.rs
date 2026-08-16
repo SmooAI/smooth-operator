@@ -871,7 +871,7 @@ pub async fn run_streaming_turn(
         let mut streamed_reasoning = String::new();
         while let Some(event) = rx.recv().await {
             match event {
-                AgentEvent::TokenDelta { content } => {
+                AgentEvent::TokenDelta { content, .. } => {
                     // Mark the answer as started so a still-in-flight preamble is
                     // dropped rather than popping in after the reply. Pearl th-9a5794.
                     answer_started_translator.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -882,7 +882,7 @@ pub async fn run_streaming_turn(
                             .send(crate::protocol::stream_token(&request_id_owned, &safe));
                     }
                 }
-                AgentEvent::ReasoningDelta { content } => {
+                AgentEvent::ReasoningDelta { content, .. } => {
                     // Reasoning rides its own protocol message so the client shows
                     // it as "thinking", never as the answer (th-4d8682).
                     if !content.is_empty() {
@@ -897,6 +897,7 @@ pub async fn run_streaming_turn(
                     iteration,
                     tool_name,
                     arguments,
+                    ..
                 } => {
                     if tool_name == "knowledge_search" {
                         invoked_knowledge_search = true;
