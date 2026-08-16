@@ -12,50 +12,18 @@
 //! - **indexing runs**: `record_run` → `list_runs` (oldest-first) → upsert by id;
 //!   `latest_cursor` = max cursor over **succeeded** runs only.
 //!
-//! Skips (returns Ok) when Docker is unavailable.
+//! Skips (returns Ok) when Docker is unavailable, or when the container's
+//! mapped port never becomes reachable — see `tests/common/mod.rs`.
 
 use chrono::{TimeZone, Utc};
-use serde_json::json;
 
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage};
+mod common;
+use serde_json::json;
 
 use smooth_operator::connector_config::{ConnectorConfig, ConnectorConfigStore, ConnectorKind};
 use smooth_operator::settings::{AgentSettings, SettingsStore, DEFAULT_MODEL};
-use smooth_operator_adapter_dynamodb::DynamoDbAdapter;
 use smooth_operator_ingestion::indexing::{IndexingRun, IndexingRunStatus, IndexingStore};
 use smooth_operator_ingestion::Timestamp;
-
-async fn start_dynamodb() -> anyhow::Result<Option<(ContainerAsync<GenericImage>, String)>> {
-    let image = GenericImage::new("amazon/dynamodb-local", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
-        .with_exposed_port(8000.tcp());
-    match image.start().await {
-        Ok(node) => {
-            let host = node.get_host().await?;
-            let port = node.get_host_port_ipv4(8000).await?;
-            Ok(Some((node, format!("http://{host}:{port}"))))
-        }
-        Err(e) => {
-            eprintln!("SKIP: could not start dynamodb-local container (Docker unavailable?): {e}");
-            Ok(None)
-        }
-    }
-}
-
-async fn connect(endpoint: &str) -> anyhow::Result<DynamoDbAdapter> {
-    // SAFETY: dummy creds for a throwaway local container; the SDK only needs
-    // them present. Distinct table name so a parallel storage-conformance run
-    // doesn't collide.
-    std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    std::env::set_var("SMOOTH_AGENT_DDB_TABLE", "smooth-operator-admin-test");
-    let adapter = DynamoDbAdapter::from_env(Some(endpoint)).await?;
-    adapter.create_table().await?;
-    Ok(adapter)
-}
 
 fn connector(
     org: &str,
@@ -98,11 +66,9 @@ fn run(name: &str, status: IndexingRunStatus, cursor: Option<Timestamp>) -> Inde
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn admin_stores_round_trip_through_dynamodb() -> anyhow::Result<()> {
-    let Some((_node, endpoint)) = start_dynamodb().await? else {
-        return Ok(()); // Docker unavailable — skip, don't fail.
+    let Some((_node, store)) = common::start().await? else {
+        return Ok(()); // Docker unavailable or port unreachable — skip, don't fail.
     };
-
-    let store = connect(&endpoint).await?;
 
     // The store traits are synchronous and bridge to the async SDK internally;
     // drive them off the async worker threads exactly as the admin API would.

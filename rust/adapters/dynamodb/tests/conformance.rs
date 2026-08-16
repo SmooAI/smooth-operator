@@ -12,14 +12,14 @@
 //! - **knowledge ingest + brute-force retrieve** with the `DeterministicEmbedder`,
 //!   asserting a distinctive seeded doc ranks first.
 //!
-//! The container requires a running Docker daemon. If Docker is unavailable the
-//! test **skips** (prints a notice and returns Ok) rather than failing.
+//! The container requires a running Docker daemon. If Docker is unavailable — or
+//! the container starts but its mapped port never becomes reachable — the test
+//! **skips** (prints a notice and returns Ok) rather than failing. See
+//! `tests/common/mod.rs` for that policy.
 
 use chrono::Utc;
 
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage};
+mod common;
 
 use smooth_operator_core::{
     Checkpoint, Conversation as EngineConversation, Document, DocumentType,
@@ -30,7 +30,6 @@ use smooth_operator::domain::{
     Conversation, Direction, Message, MessageContent, Participant, ParticipantType, Platform,
     Session, SessionStatus,
 };
-use smooth_operator_adapter_dynamodb::DynamoDbAdapter;
 
 fn conversation(id: &str, org: &str) -> Conversation {
     Conversation {
@@ -83,49 +82,11 @@ fn message(id: &str, conv: &str, dir: Direction, text: &str) -> Message {
     }
 }
 
-/// Spin up a throwaway `amazon/dynamodb-local` container. Returns `Ok(None)` if
-/// Docker is unavailable so the caller can skip rather than fail.
-async fn start_dynamodb() -> anyhow::Result<Option<(ContainerAsync<GenericImage>, String)>> {
-    let image = GenericImage::new("amazon/dynamodb-local", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
-        .with_exposed_port(8000.tcp());
-
-    match image.start().await {
-        Ok(node) => {
-            let host = node.get_host().await?;
-            let port = node.get_host_port_ipv4(8000).await?;
-            let endpoint = format!("http://{host}:{port}");
-            Ok(Some((node, endpoint)))
-        }
-        Err(e) => {
-            eprintln!("SKIP: could not start dynamodb-local container (Docker unavailable?): {e}");
-            Ok(None)
-        }
-    }
-}
-
-/// Build an adapter pointed at DynamoDB-Local with dummy static credentials
-/// (DynamoDB-Local ignores them but the SDK requires *some* credentials).
-async fn connect(endpoint: &str) -> anyhow::Result<DynamoDbAdapter> {
-    // SAFETY: these are dummy creds for a throwaway local container; the SDK only
-    // needs them to be present. Set before building the adapter's AWS config.
-    std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    std::env::set_var("SMOOTH_AGENT_DDB_TABLE", "smooth-operator-test");
-
-    let adapter = DynamoDbAdapter::from_env(Some(endpoint)).await?;
-    adapter.create_table().await?;
-    Ok(adapter)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_lifecycle_through_the_dynamodb_adapter() -> anyhow::Result<()> {
-    let Some((_node, endpoint)) = start_dynamodb().await? else {
-        return Ok(()); // Docker unavailable — skip, don't fail.
+    let Some((_node, store)) = common::start().await? else {
+        return Ok(()); // Docker unavailable or port unreachable — skip, don't fail.
     };
-
-    let store = connect(&endpoint).await?;
 
     // --- conversation create/get/list/update ---
     let conv = store
