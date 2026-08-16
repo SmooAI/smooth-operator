@@ -1514,23 +1514,16 @@ async fn handle_send_message(
     // Captured for the post-turn per-step attempt cap (moved into the spawn): the
     // workflow (to compute a force-advance target), the step we started this turn
     // on, and the carried consecutive-hold count. See `apply_step_cap`.
+    //
+    // The count MUST come from `loaded_attempts` (durable conversation metadata),
+    // not the per-pod session map — that is the whole point of th-c12df5, and a
+    // duplicate of this block reading the session map shadowed this one until
+    // th-fc07ac.
     let (cap_workflow, cap_step_before, cap_attempts) = match workflow.as_ref() {
         Some(wt) => (
             Some(wt.workflow.clone()),
             wt.current_step_id.clone(),
             loaded_attempts,
-        ),
-        None => (None, None, 0),
-    };
-
-    // Captured for the post-turn per-step attempt cap (moved into the spawn): the
-    // workflow (to compute a force-advance target), the step we started this turn
-    // on, and the carried consecutive-hold count. See `apply_step_cap`.
-    let (cap_workflow, cap_step_before, cap_attempts) = match workflow.as_ref() {
-        Some(wt) => (
-            Some(wt.workflow.clone()),
-            wt.current_step_id.clone(),
-            state.session_step_attempts(session_id),
         ),
         None => (None, None, 0),
     };
@@ -2363,6 +2356,84 @@ mod tests {
 
         // Unknown conversation → defaults, never panics.
         assert_eq!(load_workflow_step(&storage, "nope").await, (None, 0));
+    }
+
+    /// The attempt cap counts across RECONNECTS: the count the cap sees must come
+    /// from the durable conversation metadata, so a client cannot reset its own cap
+    /// by reconnecting. Drives the exact pipeline the handler runs each turn —
+    /// `load_workflow_step` → `apply_step_cap` → `persist_workflow_step` — with a
+    /// judge that always holds, reloading from storage every turn as a fresh pod
+    /// would. A per-pod (or otherwise always-zero) source makes `next_attempts`
+    /// never reach the cap, so the step never force-advances and this fails.
+    /// Regression test for th-fc07ac.
+    #[tokio::test]
+    async fn step_attempt_cap_counts_across_reconnects_and_force_advances() {
+        use smooth_operator::agent_config::{
+            apply_step_cap, ConversationWorkflow, ConversationWorkflowStep,
+            WORKFLOW_STEP_ATTEMPT_CAP,
+        };
+        use smooth_operator::domain::{Conversation, Platform};
+        use smooth_operator_adapter_memory::InMemoryStorageAdapter;
+
+        let step = |id: &str| ConversationWorkflowStep {
+            id: id.into(),
+            intent: "i".into(),
+            criteria: "c".into(),
+            next: None,
+            suggested_replies: None,
+        };
+        let workflow = ConversationWorkflow {
+            goal: "g".into(),
+            steps: vec![step("greet"), step("collect")],
+        };
+
+        let storage = InMemoryStorageAdapter::new();
+        let conv_id = "conv-cap-1";
+        let ts = chrono::Utc::now();
+        storage
+            .create_conversation(Conversation {
+                id: conv_id.into(),
+                platform: Platform::Web,
+                name: "wf".into(),
+                organization_id: "org-1".into(),
+                idempotency_key: conv_id.into(),
+                metadata_json: None,
+                analytics_json: None,
+                created_at: ts,
+                updated_at: ts,
+            })
+            .await
+            .expect("seed conversation");
+
+        // Each iteration is a separate turn on a freshly-loaded (reconnected) state,
+        // with a judge that never advances — it always re-picks the current step.
+        let mut forced_on_turn = None;
+        for turn in 1..=WORKFLOW_STEP_ATTEMPT_CAP {
+            let (step_before, attempts) = load_workflow_step(&storage, conv_id).await;
+            let judged_next = step_before.clone().unwrap_or_else(|| "greet".to_string());
+            let (persist_step, persist_attempts) = apply_step_cap(
+                &workflow,
+                step_before.as_deref(),
+                &judged_next,
+                attempts,
+                WORKFLOW_STEP_ATTEMPT_CAP,
+            );
+            persist_workflow_step(&storage, conv_id, &persist_step, persist_attempts).await;
+            if persist_step == "collect" && forced_on_turn.is_none() {
+                forced_on_turn = Some(turn);
+            }
+        }
+
+        // The held step force-advanced exactly at the cap, and the counter reset.
+        assert_eq!(
+            forced_on_turn,
+            Some(WORKFLOW_STEP_ATTEMPT_CAP),
+            "a step the judge never advances must force-advance on the capth turn"
+        );
+        assert_eq!(
+            load_workflow_step(&storage, conv_id).await,
+            (Some("collect".to_string()), 0)
+        );
     }
 
     /// A baseline config whose `model` is the server default, so each override
