@@ -582,6 +582,10 @@ async fn send_message(
             workflow: None,
             judge: None,
             greeting_section: None,
+            // Per-agent skill + host tool hooks are WS-server seams (persona
+            // resolution / AppState); the lambda flavor installs neither.
+            skill_section: None,
+            tool_hooks: vec![],
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
