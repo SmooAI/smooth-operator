@@ -5,22 +5,28 @@
 <p align="center">
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
-  <a href="https://lom.smoo.ai"><img src="https://img.shields.io/badge/hosted-lom.smoo.ai-FF6B6C?style=for-the-badge&labelColor=020618" alt="lom.smoo.ai"></a>
+  <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-passing-00A6A6?style=flat-square" alt="tests passing">
+  <a href="https://github.com/SmooAI/smooth-operator/actions/workflows/typescript.yml"><img src="https://github.com/SmooAI/smooth-operator/actions/workflows/typescript.yml/badge.svg" alt="TypeScript CI"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/actions/workflows/go.yml"><img src="https://github.com/SmooAI/smooth-operator/actions/workflows/go.yml/badge.svg" alt="Go CI"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/actions/workflows/python.yml"><img src="https://github.com/SmooAI/smooth-operator/actions/workflows/python.yml/badge.svg" alt="Python CI"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/actions/workflows/dotnet.yml"><img src="https://github.com/SmooAI/smooth-operator/actions/workflows/dotnet.yml/badge.svg" alt=".NET CI"></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Kubernetes_·_serverless_·_local-FF6B6C?style=flat-square" alt="Kubernetes · serverless · local">
   <img src="https://img.shields.io/badge/5_languages_·_one_protocol-F49F0A?style=flat-square" alt="5 languages · one protocol">
 </p>
 
 <p align="center">
-  <a href="#what-is-this"><b>What it is</b></a> &nbsp;·&nbsp; <a href="#30-second-quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp; <a href="#deployment-flavors"><b>Deploy flavors</b></a> &nbsp;·&nbsp; <a href="#architecture"><b>Architecture</b></a> &nbsp;·&nbsp; <a href="#-part-of-smoo-ai"><b>Platform</b></a>
+  <a href="#what-is-this"><b>What it is</b></a> &nbsp;·&nbsp; <a href="#quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp; <a href="#deployment-flavors"><b>Deploy flavors</b></a> &nbsp;·&nbsp; <a href="#architecture"><b>Architecture</b></a> &nbsp;·&nbsp; <a href="#-part-of-smoo-ai"><b>Platform</b></a>
 </p>
 
 ---
 
-> **A chat loop is a weekend project. A production agent _server_ is not.** Persistent sessions, a wire protocol your clients can actually speak, streaming turns, tools with hard limits on what they may never do, retrieval that respects who's asking. **smooth-operator is that server** — one operator binary that runs the same way on **Kubernetes**, **AWS serverless**, or a **single laptop process**, speaking one protocol to native clients in **five languages**. Built in the open, test-first.
+> **A chat loop is a weekend project. An agent you'd let near production is not.** Smooth Operator remembers the whole conversation, retrieves only what the person asking is allowed to see, streams its reasoning as it works — and **stops to ask you before it writes anything**. One operator binary that runs the same way on **Kubernetes**, **AWS serverless**, or a **single laptop process**, speaking one protocol to native clients in **five languages**. Built in the open, test-first.
 
 ---
 
@@ -42,9 +48,20 @@ The same binary picks its flavor from the environment (`SMOOTH_AGENT_STORAGE` ·
 
 ---
 
-## 30-second quickstart
+## Quickstart
 
-Run the reference server **locally** — fully in-memory, no database, no auth, no AWS — and drive a real agent turn. The server talks to the SmooAI LLM gateway (`llm.smoo.ai`); bring a gateway key.
+**Fastest path — Docker.** One command boots the whole stack — Postgres + pgvector, the operator server, and a React chat UI — with token streaming, grounded retrieval with citations, and a human-in-the-loop approval you click yourself. No Rust toolchain required:
+
+```bash
+git clone https://github.com/SmooAI/smooth-operator && cd smooth-operator/examples
+cp .env.example .env               # set SMOOAI_GATEWAY_KEY — any OpenAI-compatible /v1 gateway works
+cd web-chat && docker compose up --build
+# → chat UI on http://localhost:8080
+```
+
+> First run builds the server image (a few minutes), then it's cached. Prefer a terminal? [`examples/tui-chat`](examples/tui-chat/README.md) drives the same stack from a TUI. Full walkthrough: [`examples/README.md`](examples/README.md).
+
+**From source** — run the reference server natively, fully in-memory: no database, no auth, no AWS. The first compile takes a few minutes; after that it's seconds.
 
 ```bash
 git clone https://github.com/SmooAI/smooth-operator && cd smooth-operator/rust
@@ -232,24 +249,18 @@ The same server, the same wire protocol, in the language your stack already spea
 | **TypeScript** | `@smooai/smooth-operator` | `@smooai/smooth-operator-server` | [npm](https://www.npmjs.com/package/@smooai/smooth-operator) |
 | **Python** | `smooai-smooth-operator` | `smooai-smooth-operator-server` | [PyPI](https://pypi.org/project/smooai-smooth-operator/) |
 | **Rust** | `smooai-smooth-operator` | `smooai-smooth-operator-server` | [crates.io](https://crates.io/crates/smooai-smooth-operator-server) |
-| **.NET** | `SmooAI.SmoothOperator` | `SmooAI.SmoothOperator.Server` | [NuGet](https://www.nuget.org/packages/SmooAI.SmoothOperator) |
+| **.NET** | `SmooAI.SmoothOperator` | `SmooAI.SmoothOperator.Server` | [NuGet](https://www.nuget.org/packages/SmooAI.SmoothOperator.Server) |
 | **Go** | `…/smooth-operator/go` | `…/smooth-operator/go/server` | [pkg.go.dev](https://pkg.go.dev/github.com/SmooAI/smooth-operator/go) |
 
-The clients ship to their registries today; the Rust server crate is published to crates.io, and the other servers live in-repo (`typescript/server`, `python/server`, `go/server`, `dotnet/server`). The TS side also ships a **React binding** and an **embeddable web-component widget** as subpath exports of the same npm package.
+Every client ships to its registry today except .NET (in-repo for now). Servers: **Rust on crates.io, Python on PyPI, and three .NET packages on NuGet** (`Server`, `Server.AspNetCore`, `Server.Postgres`); the TypeScript and Go servers live in-repo (`typescript/server`, `go/server`). The TS side also ships a **React binding** and an **embeddable web-component widget** as subpath exports of the same npm package.
 
----
-
-## The polyglot story (honest status)
-
-One protocol, defined once in [`spec/`](spec) (JSON Schema). Everything else is generated or hand-written to match it.
+One protocol, defined once in [`spec/`](spec) (JSON Schema). Everything else is generated or hand-written to match it — here's the honest status of each surface:
 
 | Surface | Status |
 | --- | --- |
 | **Engine** ([`smooth-operator-core`](https://github.com/SmooAI/smooth-operator-core)) | **5-language parity engine** — Rust · C# · Python · TypeScript · Go, each published (crates.io / NuGet / PyPI / npm / Go module). Rust is the reference; the others mirror its surface. |
 | **Protocol clients** | **All five languages** — TypeScript (`@smooai/smooth-operator`), Go, .NET (with a `Microsoft.Extensions.AI` `IChatClient` facade), Python, Rust. The TS side also ships a **React binding** and an **embeddable widget**. |
-| **Servers** | **All five languages** — Rust · C# · Python · TypeScript · Go, each consuming its own language's engine so a host can run the full service in its native stack. Rust + C# carry the full surface (ingestion, admin, ACL, storage adapters); Python/TS/Go are native servers (transport · frame dispatch · per-turn engine · sessions · auth · graceful drain). **All five run the shared scenario conformance corpus** — protocol parity, tested. |
-
-> All five native servers now exist and run the same [`spec/conformance/scenarios`](spec/conformance/scenarios) corpus — driven by the engine's deterministic mock, so they must produce identical protocol output (the corpus already caught and fixed real error-handling divergences in the TS and C# servers). The Rust + C# servers carry the full surface; the Python/TS/Go servers are native and at protocol parity, growing toward the full feature surface. The five clients, five engines, and five servers are all real.
+| **Servers** | **All five languages** — Rust · C# · Python · TypeScript · Go, each consuming its own language's engine so a host can run the full service in its native stack. Rust + C# carry the full surface (ingestion, admin, ACL, storage adapters); Python/TS/Go are native servers (transport · frame dispatch · per-turn engine · sessions · auth · graceful drain). **All five run the shared scenario conformance corpus** — driven by the engine's deterministic mock, so they must produce identical protocol output. The corpus already caught and fixed real error-handling divergences in the TS and C# servers. |
 
 ---
 
@@ -273,7 +284,7 @@ flowchart TD
   class J warm
 ```
 
-All five native servers run a **shared scenario conformance corpus** ([`spec/conformance/scenarios`](spec/conformance/scenarios)) — language-neutral protocol flows driven by the engine's deterministic mock, so every server must produce identical output. That's the polyglot parity oracle, on top of each server's own protocol/ingestion/ACL/rerank/embedder suites and the engine's offline suite ([337 tests](https://github.com/SmooAI/smooth-operator-core) on a deterministic `MockLlmClient`). The five protocol clients are exercised against a real WebSocket in a cross-language E2E harness.
+All five native servers run a **shared scenario conformance corpus** ([`spec/conformance/scenarios`](spec/conformance/scenarios)) — language-neutral protocol flows driven by the engine's deterministic mock, so every server must produce identical output. That's the polyglot parity oracle, on top of each server's own protocol/ingestion/ACL/rerank/embedder suites and the engine's offline suite ([smooth-operator-core](https://github.com/SmooAI/smooth-operator-core), hundreds of tests on a deterministic `MockLlmClient`). The five protocol clients are exercised against a real WebSocket in a cross-language E2E harness.
 
 ### The proof story
 
@@ -341,7 +352,7 @@ smooth-operator/
 
 ## Run it hosted
 
-Don't want to operate it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** runs smooth-operator as a managed, multi-tenant service.
+Don't want to operate it yourself? smooth-operator powers the **[Smoo AI platform](https://smoo.ai)** in production today, and a standalone managed offering is on the [roadmap](docs/Planning/Roadmap.md).
 
 ## Documentation
 
@@ -361,14 +372,14 @@ Don't want to operate it yourself? **[lom.smoo.ai](https://lom.smoo.ai)** runs s
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | The three deploy flavors + the shared `SmooAI/deploy` package |
 | [`docs/Planning/Roadmap.md`](docs/Planning/Roadmap.md) | Phased build plan + current status |
 
-## 🧩 Part of Smoo AI {#part-of-smoo-ai}
+## 🧩 Part of Smoo AI
 
 smooth-operator is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product: CRM, customer support, campaigns, field service, observability, and developer tools.
 
 - 🚀 **smooth-operator on the platform** — [smoo.ai/th](https://smoo.ai/th)
 - 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
 - 🧩 **Sibling packages** — [smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) (the 5-language engine this wraps), [@smooai/deploy](https://github.com/SmooAI/deploy), [smooth](https://github.com/SmooAI/smooth) (the `th` CLI)
-- ☁️ **Hosted** — [lom.smoo.ai](https://lom.smoo.ai) runs smooth-operator for you, managed and multi-tenant
+- ☁️ **Hosted** — smooth-operator runs the [Smoo AI platform](https://smoo.ai) in production; a standalone managed offering is on the [roadmap](docs/Planning/Roadmap.md)
 
 ## 🤝 Contributing
 
