@@ -33,6 +33,9 @@ public class InternalErrorLoggingTests
         var terminal = events[^1];
         Assert.Equal("error", terminal["type"]!.GetValue<string>());
         Assert.Equal("INTERNAL_ERROR", terminal["error"]!["code"]!.GetValue<string>());
+        // Drop the epoch-millis timestamp before the leak check: it is server noise, and
+        // whenever it happened to contain the digits "401" this assertion flaked in CI.
+        terminal["timestamp"] = 0;
         Assert.DoesNotContain("401", terminal.ToJsonString());
 
         // …but the host log has the real cause, at Error level, with the exception attached.
