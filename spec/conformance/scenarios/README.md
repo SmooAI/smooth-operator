@@ -38,6 +38,20 @@ Every server consumes the same engine (`smooth-operator-core`), which ships a de
 - **`server.confirmTools`** — tool-name patterns gated by **write-confirmation HITL**. When the engine calls a matching tool, the server **parks** the turn and emits `write_confirmation_required` (with `data.data.{ toolId, actionDescription }`) instead of running it; the scenario then sends a `confirm_tool_action` frame (`sessionId` + `approved`), the server acks with `immediate_response`(200, `data.approved`), and the parked turn resumes (runs the tool on approve, rejects on deny). The gated tool's `toolCall` chunk is deferred until *after* the confirmation prompt. Canonical order verified against the Rust reference.
 - **`server.knowledge`** — docs `{ source, content }` seeded into the server's knowledge base before the turn, so a grounded answer surfaces **citations**. The server mirrors the engine's auto-retrieval (`query(message, 3)`) into `eventual_response`'s `data.data.citations[]` — each `{ id, title, url?, snippet, score }`, present only when non-empty. Assert the deterministic fields (`citations.N.id`/`title`/`snippet`) via array-index paths; **not** `score` (a computed float). Each server seeds its own KB the same way (the runner sets the doc id to its source so `id == title == source` is deterministic). Canonical fields verified against the Rust reference.
 
+### Not yet assertable: `eventual_response.usage`
+
+All five servers now attach the optional `usage` object (`{ costUsd, promptTokens, completionTokens }`) to `eventual_response`, but the corpus **cannot assert it yet** — the five mock LLM providers disagree about what a scripted turn reports, so it isn't a cross-language invariant:
+
+| server | `promptTokens` | `completionTokens` |
+|---|---|---|
+| Go · Python · TypeScript | 0 | 0 |
+| Rust | 0 | 5 |
+| C# | 10 | 5 |
+
+`costUsd` **is** 0 everywhere (no server wires a pricing table onto its engine), but it isn't assertable either: the Rust and C# scenario runners strict-compare JSON numbers in opposite directions — Rust emits `0.0` and rejects an integer `0`, C# emits `0` and rejects `0.0` — while Go/Python/TS compare loosely.
+
+Making `usage` a real parity assertion needs two upstream fixes, both outside a server change: align the mock providers' scripted usage in `smooth-operator-core`, and make the Rust/C# runners compare JSON numbers by value. Until then the per-language protocol unit tests cover the contract that matters (the key is omitted when the engine reported nothing, and carries all three fields when it did).
+
 **`steps[].send`** — one inbound protocol frame. `{{name}}` placeholders are substituted from values `capture`d earlier (e.g. `"sessionId": "{{sessionId}}"`).
 
 **`steps[].expect`** — the outbound events the frame must produce, **in order**. Each matcher:

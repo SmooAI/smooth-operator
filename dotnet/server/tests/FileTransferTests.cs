@@ -193,7 +193,7 @@ public class FileTransferTests
     public void EventualResponse_AttachesDirective_WhenPresent()
     {
         var directive = new JsonObject { ["type"] = "send_file" };
-        var ev = ProtocolEvents.EventualResponse("r", 200, "m1", new JsonObject(), false, null, directive);
+        var ev = ProtocolEvents.EventualResponse("r", 200, "m1", new JsonObject(), false, null, directive: directive);
         Assert.Equal("send_file", ev["data"]!["data"]!["directive"]!["type"]!.GetValue<string>());
     }
 

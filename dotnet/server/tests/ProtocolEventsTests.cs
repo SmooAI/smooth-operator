@@ -50,6 +50,24 @@ public class ProtocolEventsTests
     }
 
     [Fact]
+    public void EventualResponse_OmitsUsageWhenEngineReportedNone()
+    {
+        var ev = ProtocolEvents.EventualResponse("r1", 200, "msg-1", ProtocolEvents.GeneralResponse("hi"), needsEscalation: false, citations: null);
+        var inner = ev["data"]!["data"]!.AsObject();
+        Assert.False(inner.ContainsKey("usage"), "usage key must be ABSENT (not null) when the engine reported none");
+    }
+
+    [Fact]
+    public void EventualResponse_AttachesUsageWhenPresent()
+    {
+        var ev = ProtocolEvents.EventualResponse("r1", 200, "msg-1", ProtocolEvents.GeneralResponse("hi"), needsEscalation: false, citations: null, usage: new TurnUsage(0.0021, 120, 34));
+        var usage = ev["data"]!["data"]!["usage"]!;
+        Assert.Equal(0.0021, usage["costUsd"]!.GetValue<double>());
+        Assert.Equal(120, usage["promptTokens"]!.GetValue<long>());
+        Assert.Equal(34, usage["completionTokens"]!.GetValue<long>());
+    }
+
+    [Fact]
     public void EventualResponse_AttachesCitationsWhenPresent()
     {
         var citation = ProtocolEvents.Citation("doc-1", "policies/returns.md", url: null, "snippet", 0.9);

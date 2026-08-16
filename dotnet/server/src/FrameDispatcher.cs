@@ -762,6 +762,7 @@ public sealed class FrameDispatcher
                     ProtocolEvents.GeneralResponse(result.Reply),
                     needsEscalation: false,
                     result.Citations,
+                    result.Usage,
                     result.Directive));
             }
             catch (OperationCanceledException)

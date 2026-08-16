@@ -674,7 +674,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		//    omitted (back-compat). Mirrors the Rust runner draining directive_sink onto
 		//    eventual_response (runner.rs / protocol.rs).
 		directive, hasDirective := turnState.Directive()
-		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations, directive, hasDirective))
+		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations, result.Usage, directive, hasDirective))
 	}()
 }
 

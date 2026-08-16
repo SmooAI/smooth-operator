@@ -35,6 +35,18 @@ type TurnResult struct {
 	// after the post-turn judge. Non-empty only when a workflow was configured; the
 	// caller (dispatcher) persists it. "" for freeform agents. SMOODEV-590.
 	NextStepID string
+	// Usage is the turn's accumulated token-accounting + cost, captured from the
+	// engine's terminal StreamDone. nil when the stream produced no terminal event,
+	// which keeps eventual_response's `usage` absent exactly like the Rust reference.
+	Usage *TurnUsage
+}
+
+// TurnUsage is the per-turn token accounting + cost carried onto eventual_response's
+// `usage` object. Mirrors the Rust reference's protocol::TurnUsage.
+type TurnUsage struct {
+	CostUSD          float64
+	PromptTokens     int
+	CompletionTokens int
 }
 
 // EventSink writes one built protocol event frame to the connection. Handlers/runners
@@ -265,6 +277,7 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		defer r.confirmations.Clear(sessionID)
 	}
 	var reply strings.Builder
+	var usage *TurnUsage
 	// Consume the engine stream, but stay cancellable: a `cancel` frame (or a client
 	// disconnect) cancels ctx and the turn must stop RIGHT THERE — emitting no further
 	// events after the terminal `cancelled`, and never persisting the partial assistant
@@ -314,8 +327,14 @@ consume:
 		case core.StreamToolResult:
 			sink(streamChunk(requestID, ev.Name, toolResultState(ev.Name, ev.Result)))
 		case core.StreamDone:
-			// The terminal AgentRunResponse; the eventual_response is built by the
-			// dispatcher from the accumulated reply, so nothing to emit here.
+			// The terminal AgentRunResponse is not re-emitted as a stream event (the
+			// dispatcher builds eventual_response from the accumulated reply), but its
+			// accumulated cost + token counts become that event's `usage`.
+			usage = &TurnUsage{
+				CostUSD:          ev.Response.CostUSD,
+				PromptTokens:     ev.Response.Usage.PromptTokens,
+				CompletionTokens: ev.Response.Usage.CompletionTokens,
+			}
 		}
 	}
 	// A model-call error aborts the stream WITHOUT a StreamDone; surface it so the
@@ -342,7 +361,7 @@ consume:
 		nextStepID = advanceStep(r.workflow, r.currentStepID, verdict)
 	}
 
-	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations, NextStepID: nextStepID}, nil
+	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations, NextStepID: nextStepID, Usage: usage}, nil
 }
 
 // drainStream discards the tail of an abandoned engine stream so its producer

@@ -11,7 +11,17 @@ namespace SmooAI.SmoothOperator.Server;
 /// <summary>What a completed turn produced (the analog of the Rust <c>TurnResult</c>). <see cref="Directive"/>
 /// is the opaque client-side directive a host tool wrote onto the turn's <see cref="TurnContext"/>
 /// (<c>null</c> ⇒ none; drained onto <c>eventual_response.directive</c>).</summary>
-public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<JsonObject> Citations, JsonNode? Directive = null);
+public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<JsonObject> Citations, JsonNode? Directive = null, TurnUsage? Usage = null);
+
+/// <summary>Per-turn token accounting + cost carried onto <c>eventual_response.usage</c>. Accumulated
+/// across every model call in the turn. The analog of the Rust reference's <c>protocol::TurnUsage</c>.
+/// <para>
+/// ponytail: <see cref="CostUsd"/> is whatever the turn was priced at — currently always 0, because
+/// no server in this repo wires a pricing table onto the engine (Go/Python/TS report 0 for the same
+/// reason; only Rust has a real figure, which it reads from the gateway's cost header). Wire pricing,
+/// or read that header, to make it non-zero. The token counts are real.
+/// </para></summary>
+public sealed record TurnUsage(double CostUsd, long PromptTokens, long CompletionTokens);
 
 /// <summary>
 /// Drives one <c>send_message</c> turn: load prior history, retrieve grounding knowledge, run the
@@ -321,6 +331,9 @@ public sealed class TurnRunner
         //    calls are deduped by callId (streaming can fragment them); results are labeled by
         //    looking the tool name back up from the call.
         var reply = new StringBuilder();
+        long promptTokens = 0;
+        long completionTokens = 0;
+        var sawUsage = false;
         var toolNames = new Dictionary<string, string>();
         var emittedCalls = new HashSet<string>();
 
@@ -402,6 +415,14 @@ public sealed class TurnRunner
                             var name = toolNames.TryGetValue(result.CallId, out var resolved) ? resolved : "tool";
                             sink(ProtocolEvents.StreamChunk(requestId, name, ToolResultState(name, result)));
                             break;
+                        // The engine's streaming path doesn't surface a terminal usage total the way
+                        // the other ports' `done` event does, so accumulate the model's own usage
+                        // chunks here — that IS the turn total once the stream ends.
+                        case UsageContent usage:
+                            promptTokens += usage.Details.InputTokenCount ?? 0;
+                            completionTokens += usage.Details.OutputTokenCount ?? 0;
+                            sawUsage = true;
+                            break;
                     }
                 }
             }
@@ -430,7 +451,12 @@ public sealed class TurnRunner
         // Drain the directive sink (mirrors the Rust runner draining directive_sink after the turn). A host
         // tool that ran this turn may have written a client-side directive; null ⇒ none, so eventual_response
         // omits directive (back-compat). Last-write-wins is inherent — the sink holds the final write.
-        return new TurnResult(replyText, outbound.Id, citations, turnContext.Directive);
+        return new TurnResult(
+            replyText,
+            outbound.Id,
+            citations,
+            turnContext.Directive,
+            sawUsage ? new TurnUsage(0, promptTokens, completionTokens) : null);
     }
 
     /// <summary>
