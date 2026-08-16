@@ -202,10 +202,12 @@ describe('per-user conversation scoping (th-8fe998)', () => {
                 await real.dispatch({ action, requestId: 'r', sessionId: b.sessionId, message: 'x' });
                 await fake.dispatch({ action, requestId: 'r', sessionId: phantom, message: 'x' });
 
-                // Byte-identical once the client-supplied id is normalized away: same code,
-                // same message template, same frame shape. Any divergence is an oracle for
-                // enumerating other users' session ids.
-                const norm = (sink: Frame[], id: string) => JSON.stringify(sink).split(id).join('<ID>');
+                // Byte-identical once the client-supplied id AND the server timestamp are
+                // normalized away: same code, same message template, same frame shape. Any
+                // divergence is an oracle for enumerating other users' session ids.
+                // (Timestamps differ by a few ms between the two dispatches — flaked in CI.)
+                const norm = (sink: Frame[], id: string) =>
+                    JSON.stringify(sink).split(id).join('<ID>').replace(/"timestamp":\d+/g, '"timestamp":<T>');
                 expect(norm(real.sink, b.sessionId)).toBe(norm(fake.sink, phantom));
             }
         });
