@@ -230,6 +230,7 @@ fn tool_arguments_for(events: &[AgentEvent], iteration: u32, tool_name: &str) ->
                 iteration: it,
                 tool_name: name,
                 arguments,
+                ..
             } if *it == iteration && name == tool_name => Some(arguments.clone()),
             _ => None,
         })
