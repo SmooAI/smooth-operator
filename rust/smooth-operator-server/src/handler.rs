@@ -1458,6 +1458,10 @@ async fn handle_send_message(
     let enabled_tools = agent_cfg
         .as_ref()
         .and_then(AgentBehaviorConfig::enabled_tool_ids);
+    // Per-agent passthrough LLM-request metadata (spend attribution etc);
+    // `None`/empty ⇒ no `metadata` on the wire. A host resolver sets it on the
+    // agent's `AgentBehaviorConfig`; core normalizes empty to omitted.
+    let request_metadata = agent_cfg.as_ref().and_then(|c| c.llm_metadata.clone());
 
     // SEP per-agent extension enablement (SMOODEV-2259). A resolved agent (Some
     // cfg) always yields `Some(vec)` — even an EMPTY vec — so the extension host
@@ -1640,6 +1644,8 @@ async fn handle_send_message(
                 // Optional non-image file attachments (empty ⇒ none). Never sent
                 // to the model — carried onto the tool-provider context only.
                 files,
+                // Per-agent LLM-request metadata (spend attribution etc).
+                request_metadata,
             },
             &sink_owned,
         )

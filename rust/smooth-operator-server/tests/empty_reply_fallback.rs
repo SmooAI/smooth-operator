@@ -143,6 +143,7 @@ async fn empty_terminal_content_falls_back_to_streamed_reply() {
             extensions: None,
             images: vec![],
             files: vec![],
+            request_metadata: None,
         },
         &tx,
     )

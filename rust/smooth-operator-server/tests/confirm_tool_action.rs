@@ -161,6 +161,7 @@ fn spawn_turn(
                 extensions: None,
                 images: vec![],
                 files: vec![],
+                request_metadata: None,
             },
             &sink,
         )
