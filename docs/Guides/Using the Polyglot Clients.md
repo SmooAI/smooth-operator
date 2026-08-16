@@ -89,8 +89,9 @@ See [[Agents, Tools, and Workflows]] and [[Protocol Reference]].
 
 ## Notes
 
-- Until packages are published, depend on a sibling checkout (workspace / `file:` /
-  local project ref) — each README has the exact form.
+- TypeScript (npm), Python (PyPI), Rust (crates.io), and Go (module proxy) clients
+  install straight from their registries. The .NET client is in-repo (local project
+  ref) — each README has the exact form.
 - The `/ws` path matters: the reference server routes the WebSocket there.
 
 ## Related

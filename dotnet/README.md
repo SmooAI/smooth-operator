@@ -22,7 +22,10 @@ The **native C#/.NET client** for the [smooth-operator](../docs/PROTOCOL.md) Web
 ## 30-second quickstart
 
 ```bash
-dotnet add package SmooAI.SmoothOperator   # NuGet publish pending — local project ref today
+# The client ships in-repo — reference it as a project:
+dotnet add reference path/to/smooth-operator/dotnet/src/SmooAI.SmoothOperator.csproj
+# (The C# *server* packages — SmooAI.SmoothOperator.Server, .Server.AspNetCore,
+#  .Server.Postgres — are on NuGet.)
 ```
 
 ```csharp

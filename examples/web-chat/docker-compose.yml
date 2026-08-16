@@ -1,0 +1,56 @@
+# smooth-operator · web-chat stack
+#
+#   cp ../.env.example ../.env   # set SMOOAI_GATEWAY_KEY
+#   docker compose up --build    # first run builds the Rust server (~a few min)
+#   open http://localhost:8080
+#
+# Postgres (pgvector) holds durable conversations + the seeded knowledge base;
+# the operator serves the WebSocket protocol; the web container serves the SPA.
+name: smooth-operator-web-chat
+
+services:
+    postgres:
+        image: pgvector/pgvector:pg16
+        environment:
+            POSTGRES_USER: smooth
+            POSTGRES_PASSWORD: smooth
+            POSTGRES_DB: smooth
+        healthcheck:
+            test: ['CMD-SHELL', 'pg_isready -U smooth -d smooth']
+            interval: 3s
+            timeout: 3s
+            retries: 20
+        # No host port: only the operator talks to it.
+
+    operator:
+        build:
+            context: ../..
+            dockerfile: Dockerfile
+        depends_on:
+            postgres:
+                condition: service_healthy
+        # Your BYO gateway lives here. required:false so `up` still works (keyless)
+        # if you haven't made the file yet — the UI connects, replies need the key.
+        env_file:
+            - path: ../.env
+              required: false
+        environment:
+            AUTH_MODE: none # dev only — anonymous WS + open /admin. Never in prod.
+            SMOOTH_AGENT_BIND: 0.0.0.0
+            SMOOTH_AGENT_PORT: '8787'
+            SMOOTH_AGENT_STORAGE: postgres
+            SMOOTH_AGENT_DATABASE_URL: postgresql://smooth:smooth@postgres:5432/smooth?sslmode=disable
+            SMOOTH_AGENT_SEED_KB: '1' # seed retrievable demo docs (return policy, shipping)
+            SMOOTH_AGENT_CONFIRM_TOOLS: knowledge_search # any tool matching parks for human approval
+            RUST_LOG: info,smooth_operator_server=info
+        ports:
+            - '8787:8787'
+
+    web:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        depends_on:
+            - operator
+        ports:
+            - '8080:80'

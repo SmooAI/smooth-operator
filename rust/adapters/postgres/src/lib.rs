@@ -8,11 +8,15 @@
 //!   over a [`deadpool_postgres`] pool, semantics matching the in-memory baseline
 //!   (conversation idempotency, external-id participant resolve, cursor message
 //!   paging, session status/counts).
-//! - **Checkpoints**: smooth-operator's
-//!   [`PostgresCheckpointStore`](smooth_operator_core::PostgresCheckpointStore) (a
-//!   *synchronous* r2d2-pooled store) constructed against the **same database**
-//!   — so the engine's `with_checkpoint_store` plugs straight in and agent state
-//!   lives next to the conversations it belongs to.
+//! - **Checkpoints (resume log)**: the engine's in-memory
+//!   [`MemoryCheckpointStore`](smooth_operator_core::MemoryCheckpointStore). The
+//!   Postgres-backed [`PostgresCheckpointStore`](smooth_operator_core::PostgresCheckpointStore)
+//!   is a *synchronous* r2d2-pooled store, and driving its blocking I/O from the
+//!   engine's async turn loop starves the Tokio runtime and wedges the whole
+//!   server mid-turn (even `GET /health` hangs) — see th-58edbd. Until the engine
+//!   ships a non-blocking Postgres checkpointer, the resume log lives in memory;
+//!   OLTP + knowledge remain fully Postgres-durable, so only crash-resume of an
+//!   in-flight turn degrades.
 //! - **Knowledge**: a pgvector-backed [`PgKnowledgeBase`] (dense HNSW cosine ∪
 //!   sparse `tsvector` BM25 → Reciprocal Rank Fusion). Text→vector goes through
 //!   the [`Embedder`] seam — [`DeterministicEmbedder`] by default (reproducible,
@@ -24,16 +28,10 @@
 //!   recall is pgvector cosine top-K under an HNSW index, scoped to the
 //!   namespace. Shares the adapter's [`Embedder`].
 //!
-//! ## Sharing one database between the async pool and the sync checkpoint store
-//!
-//! The OLTP/knowledge slices need async (`tokio-postgres` + `deadpool`); the
-//! checkpoint slice is a sync trait backed by an r2d2 pool inside
-//! smooth-operator. Both are pointed at the **same `conn_str`**: we build the
-//! async deadpool from it for our own queries, and hand the *same* string to
-//! `PostgresCheckpointStore::connect`, which stands up its own small r2d2 pool
-//! and `checkpoints` table in that database. Two pools, two driver stacks, one
-//! Postgres — the tables coexist (ours from [`schema`], theirs from their own
-//! `CREATE TABLE IF NOT EXISTS`).
+//! The OLTP/knowledge slices use async `tokio-postgres` + `deadpool` against the
+//! `conn_str`. The checkpoint/resume log is in-memory (see above); when the engine
+//! grows a non-blocking Postgres checkpointer it can be pointed at the same
+//! `conn_str` and its `checkpoints` table without touching the OLTP pool.
 
 mod admin;
 mod agent_config;
@@ -59,8 +57,7 @@ use smooth_operator::domain::{
     Conversation, Direction, Message, MessageContent, Participant, ParticipantRef, ParticipantType,
     Platform, Session, SessionStatus,
 };
-use smooth_operator_core::checkpoint::PostgresCheckpointStore;
-use smooth_operator_core::{CheckpointStore, KnowledgeBase};
+use smooth_operator_core::{CheckpointStore, KnowledgeBase, MemoryCheckpointStore};
 
 // The shared embedding seam (trait + deterministic default) now lives in core;
 // re-export it here so existing `postgres::{Embedder, DeterministicEmbedder, …}`
@@ -81,12 +78,14 @@ pub use smooth_operator::embedding::{
 /// Postgres + pgvector storage adapter.
 pub struct PostgresAdapter {
     pool: Pool,
-    /// `Option` so [`Drop`] can `take()` the checkpoint store and dispose of it on
-    /// a dedicated OS thread. The sync `postgres::Client`s inside its r2d2 pool
-    /// run `block_on` in their own `Drop`, which panics on a Tokio worker thread
-    /// ("Cannot start a runtime from within a runtime"). Disposing off-runtime
-    /// keeps the adapter safe to drop from async code.
-    checkpoints: Option<Arc<PostgresCheckpointStore>>,
+    /// In-memory checkpoint/resume log. The Postgres-backed `PostgresCheckpointStore`
+    /// is a SYNC store (r2d2 `postgres::Client`) whose blocking I/O — driven by the
+    /// engine's async turn loop — starves the Tokio runtime and wedges the whole
+    /// server mid-turn (even `GET /health` hangs). See th-58edbd. Until the engine
+    /// ships a non-blocking Postgres checkpointer, OLTP + knowledge stay durable in
+    /// Postgres (pgvector) while the resume log lives in memory; only crash-resume of
+    /// an in-flight turn degrades, which is invisible in normal operation.
+    checkpoints: Arc<MemoryCheckpointStore>,
     knowledge: Arc<PgKnowledgeBase>,
     /// Retained so the [`memory`](PostgresAdapter::memory) accessor can build
     /// namespace-bound [`PgMemory`] handles that embed identically to knowledge.
@@ -97,26 +96,38 @@ pub struct PostgresAdapter {
     handle: tokio::runtime::Handle,
 }
 
-impl Drop for PostgresAdapter {
-    fn drop(&mut self) {
-        if let Some(checkpoints) = self.checkpoints.take() {
-            // Move the (possibly last) strong ref off any Tokio worker thread so
-            // the r2d2 pool's blocking `postgres::Client::drop` runs on a plain
-            // OS thread where `block_on` is legal. Join it so disposal is
-            // deterministic (and so a short-lived process actually closes its
-            // connections).
-            if let Ok(handle) = std::thread::Builder::new()
-                .name("pg-checkpoint-drop".into())
-                .spawn(move || drop(checkpoints))
-            {
-                let _ = handle.join();
-            }
-        }
-    }
+/// Handle to the process-wide runtime dedicated to the adapter's sync-over-async
+/// bridges (see the call site in [`PostgresAdapter::connect_with_embedder`]).
+///
+/// Built once, lazily, and parked on its own OS thread for the process lifetime so
+/// its `Handle` stays valid and its workers are never contended by the server's
+/// main runtime — that contention is exactly what deadlocked a Postgres turn
+/// (th-58edbd). Shared across every adapter instance; deliberately never dropped
+/// (dropping a `Runtime` on a worker thread panics, and a server holds its storage
+/// for the whole process anyway).
+fn bridge_runtime_handle() -> tokio::runtime::Handle {
+    use std::sync::OnceLock;
+    static BRIDGE_RT: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+    BRIDGE_RT
+        .get_or_init(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .thread_name("pg-bridge")
+                .build()
+                .expect("build postgres bridge runtime");
+            let handle = rt.handle().clone();
+            std::thread::Builder::new()
+                .name("pg-bridge-rt".into())
+                .spawn(move || rt.block_on(std::future::pending::<()>()))
+                .expect("spawn postgres bridge runtime thread");
+            handle
+        })
+        .clone()
 }
 
 impl PostgresAdapter {
-    /// Connect to Postgres, build the async pool + sync checkpoint store, and
+    /// Connect to Postgres, build the async pool + in-memory checkpoint store, and
     /// apply the schema. Uses the [`DeterministicEmbedder`] (1024-d) by default.
     ///
     /// `conn_str` is a libpq URL or `key=value` connection string; it is read
@@ -196,19 +207,25 @@ impl PostgresAdapter {
                 .context("applying memories schema")?;
         }
 
-        // --- sync checkpoint store against the SAME database ---
-        // PostgresCheckpointStore::connect runs blocking r2d2 setup; keep it off
-        // the async worker threads.
-        let cs_conn = conn_str.to_string();
-        let checkpoints =
-            tokio::task::spawn_blocking(move || PostgresCheckpointStore::connect(&cs_conn))
-                .await
-                .context("checkpoint store setup task panicked")?
-                .context("constructing PostgresCheckpointStore")?;
-        let checkpoints = Arc::new(checkpoints);
+        // --- in-memory checkpoint/resume log (see the `checkpoints` field) ---
+        // The Postgres checkpointer is sync + blocking and wedges the async turn
+        // loop (th-58edbd); use the engine's in-memory store until that's fixed
+        // upstream. OLTP + knowledge remain Postgres-durable.
+        let checkpoints = Arc::new(MemoryCheckpointStore::new());
 
         // --- pgvector knowledge base (shares the async pool) ---
-        let handle = tokio::runtime::Handle::current();
+        // Sync-over-async bridge runtime. PgKnowledgeBase / PgMemory / the admin
+        // stores (PgSettingsStore, PgConnectorConfigStore, PgIndexingStore) expose
+        // the engine's *synchronous* traits but run their queries on this async pool
+        // via `run_blocking` — spawn the future onto `handle`, block the caller on a
+        // channel. If `handle` is the SERVER's main runtime, a turn that calls a sync
+        // store (every turn resolves the per-org persona via `PgSettingsStore::get`)
+        // blocks its worker on the channel while the spawned future never gets driven
+        // to completion on that same contended runtime — deadlocking the turn and
+        // wedging the whole server, `/health` included (th-58edbd; proven by a stack
+        // sample: worker parked in `run_blocking`→`mpsc recv`). Driving the bridge
+        // futures on a DEDICATED runtime whose workers are always free breaks it.
+        let handle = bridge_runtime_handle();
         let knowledge = Arc::new(PgKnowledgeBase::new(
             pool.clone(),
             embedder.clone(),
@@ -218,7 +235,7 @@ impl PostgresAdapter {
 
         Ok(Self {
             pool,
-            checkpoints: Some(checkpoints),
+            checkpoints,
             knowledge,
             embedder,
             embedding_dim,
@@ -921,11 +938,7 @@ impl StorageAdapter for PostgresAdapter {
     // ---- engine accessors ------------------------------------------------
 
     fn checkpoints(&self) -> Arc<dyn CheckpointStore> {
-        // Always `Some` between construction and drop.
-        self.checkpoints
-            .as_ref()
-            .expect("checkpoint store present")
-            .clone()
+        self.checkpoints.clone()
     }
 
     fn knowledge(&self) -> Arc<dyn KnowledgeBase> {

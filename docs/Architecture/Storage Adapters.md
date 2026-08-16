@@ -6,7 +6,7 @@ smooth-operator never names a database in application or agent code. Everything 
 | --- | --- | --- |
 | Conversations / participants / messages / sessions | relational tables | `aws-sdk-dynamodb` single-table |
 | Connection / session WS state | table or Redis | DynamoDB (TTL) or Redis |
-| Agent checkpoints | `PostgresCheckpointStore` (ships in smooth-operator) | DynamoDB checkpoint store (added here) |
+| Agent checkpoints | in-memory (`MemoryCheckpointStore` — the sync r2d2 `PostgresCheckpointStore` was unwired in the th-58edbd deadlock fix; durable Postgres checkpoints are a follow-up) | DynamoDB checkpoint store (added here) |
 | Knowledge embeddings (dense) | `pgvector` (HNSW) | **Amazon S3 Vectors** |
 | Knowledge keyword (sparse) | `tsvector` BM25 | inverted-index items / managed search |
 
@@ -35,7 +35,7 @@ The `checkpoints` and `knowledge` slices implement smooth-operator-core's `Check
 Mirrors the smooai monorepo's schema (the north star) so dogfooding is a swap, not a rewrite:
 
 - `conversations`, `conversation_participants` (type ∈ {user, ai-agent, human-agent}), `conversation_messages` (direction ∈ {inbound, outbound}), `conversation_sessions`.
-- **Checkpoints**: `PostgresCheckpointStore` from smooth-operator (already merged — r2d2 pool, `checkpoints` table keyed `(agent_id/thread, created_at desc)`).
+- **Checkpoints**: currently `MemoryCheckpointStore` on the Postgres path — the sync r2d2 `PostgresCheckpointStore` was unwired by the th-58edbd deadlock fix (its blocking I/O rode the server runtime). OLTP + knowledge stay Postgres-durable; only crash-resume of an in-flight turn degrades. Re-wiring a durable async checkpoint store is a tracked follow-up.
 - **Knowledge**: a `knowledge_vectors` table with `embedding vector(1024)` (Voyage `voyage-3-large`) + `content_tsv tsvector`, HNSW cosine index. Retrieval = dense (HNSW) ∪ sparse (BM25) → Reciprocal Rank Fusion → optional rerank (the `Reranker` seam — see "Embedding seam (shared) and the rerank stage" above).
 
 ## DynamoDB adapter (AWS) — single-table
