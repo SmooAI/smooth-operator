@@ -377,6 +377,8 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
             workflow: None,
             judge: None,
             greeting_section: None,
+            skill_section: None,
+            tool_hooks: vec![],
             enabled_tools: None,
             auth_gate: None,
             tool_configs: None,
