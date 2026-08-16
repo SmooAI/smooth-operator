@@ -419,8 +419,8 @@ pub fn seed_knowledge(storage: &dyn smooth_operator::adapter::StorageAdapter) {
     // match — knowledge-grounded retrieval silently returned nothing on Postgres.
     // The in-memory backend ignores org, so this is behavior-preserving there. The
     // docs carry no DocAcl ⇒ NULL acl ⇒ org-public, readable by the no-auth reader.
-    let access =
-        smooth_operator::access_control::AccessContext::anonymous().with_organization_id(SEED_ORG_ID);
+    let access = smooth_operator::access_control::AccessContext::anonymous()
+        .with_organization_id(SEED_ORG_ID);
     let kb = storage.knowledge_for_access(&access);
     let _ = kb.ingest(smooth_operator::with_document_set(
         Document::new(

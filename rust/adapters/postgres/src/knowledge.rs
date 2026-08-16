@@ -306,11 +306,12 @@ impl PgKnowledgeBase {
     ///
     /// `KnowledgeBase` is sync, but our work (embedding + deadpool) is async.
     /// `Handle::block_on` can't be called from a runtime worker thread (it panics
-    /// "Cannot start a runtime from within a runtime"), and `block_in_place` only
-    /// relieves the *blocking-budget* concern, not that one. So we `spawn` the
-    /// future onto the runtime (where it can make progress) and block the calling
-    /// thread on a oneshot channel — wrapped in `block_in_place` when we happen to
-    /// be on a multi-thread worker so we don't starve the scheduler.
+    /// "Cannot start a runtime from within a runtime"). So we `spawn` the future
+    /// onto the captured handle — the crate's dedicated bridge runtime (see
+    /// [`crate::bridge_runtime_handle`]), never the server's — and block the
+    /// calling thread on a channel. The dedicated runtime is what makes the
+    /// blocking safe: its workers are never the ones doing the waiting
+    /// (th-58edbd).
     fn run_blocking<F, T>(&self, fut: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>> + Send + 'static,

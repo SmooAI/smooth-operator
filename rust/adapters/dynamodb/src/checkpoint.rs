@@ -59,18 +59,17 @@ pub struct DynamoCheckpointStore {
 }
 
 impl DynamoCheckpointStore {
-    /// Build over an existing DynamoDB client + table, capturing the current
-    /// Tokio runtime handle for the sync→async bridge.
-    ///
-    /// # Panics
-    /// Panics if called outside a Tokio runtime (no current `Handle`). The
-    /// adapter constructs this from inside its async `connect`, so this holds.
+    /// Build over an existing DynamoDB client + table. The sync→async bridge
+    /// runs on the crate's dedicated bridge runtime (never the caller's), so
+    /// this is safe to call from any thread — see
+    /// [`crate::bridge_runtime_handle`] for why capturing the caller's runtime
+    /// deadlocks a turn (th-58edbd).
     #[must_use]
     pub fn new(client: Client, table: impl Into<String>) -> Self {
         Self {
             client,
             table: table.into(),
-            handle: Handle::current(),
+            handle: crate::bridge_runtime_handle(),
         }
     }
 

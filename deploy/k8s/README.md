@@ -277,37 +277,11 @@ kubectl apply -n argocd -f deploy/k8s/argocd/application.yaml
 
 ---
 
-## 6. ⚠️ Required follow-up: bind `0.0.0.0`
+## 6. Bind address
 
-**The server currently binds `127.0.0.1` and is unreachable from inside the
-cluster.** `rust/smooth-operator-server/src/server.rs:78`:
-
-```rust
-let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
-```
-
-A loopback bind only accepts connections from inside the pod's own network
-namespace — the Service / kube-proxy / Ingress all connect over the pod IP, so
-every probe and request is refused. **The chart is otherwise complete; it cannot
-serve traffic until this one-liner ships.**
-
-The minimal fix (to be applied separately — `rust/` is out of scope for this
-chart work) is to bind all interfaces:
-
-```rust
-// rust/smooth-operator-server/src/server.rs  (in `bind`)
-let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-```
-
-Cleaner, config-driven variant — add a `SMOOTH_AGENT_BIND` (or `SMOOTH_AGENT_HOST`)
-env var to `ServerConfig` (default `127.0.0.1` to preserve local-dev behavior,
-set to `0.0.0.0` in this chart's ConfigMap):
-
-```rust
-// config.rs: add `bind: IpAddr` read from SMOOTH_AGENT_BIND (default 127.0.0.1)
-// server.rs: let addr = SocketAddr::from((config.bind, config.port));
-```
-
-If you take the env-var route, add `SMOOTH_AGENT_BIND: "0.0.0.0"` to
-`templates/configmap.yaml`. Tests bind port 0 on loopback and are unaffected
-either way.
+Bind is config-driven via `SMOOTH_AGENT_BIND` (default `127.0.0.1` for local
+dev). This chart's ConfigMap sets `SMOOTH_AGENT_BIND: "0.0.0.0"`
+(`templates/configmap.yaml`) so the Service / probes / Ingress can reach the
+pod, and the server image defaults to `0.0.0.0` as well. Nothing to do here —
+this section previously tracked a hardcoded-loopback follow-up that has since
+shipped.

@@ -17,8 +17,8 @@
 //! | `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id requested from the gateway. |
 //! | `SMOOTH_AGENT_PREAMBLE_MODEL` | *(unset → off)* | When set to a fast model id (e.g. `groq-gpt-oss-20b`), a small model runs in parallel with each streaming turn and emits ONE ephemeral `stream_preamble` sentence ("what I'm about to do") to cover the main model's time-to-first-token. Uses the same gateway/key as `SMOOTH_AGENT_MODEL`. Unset ⇒ no extra call, behavior unchanged. |
 //! | `SMOOTH_AGENT_SEED_KB` | *(unset)* | When `1`, seed a couple of distinctive demo docs on startup. |
-//! | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
-//! | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |
+//! | `SMOOTH_AGENT_MAX_ITERATIONS` | `20` | Agent-loop iteration cap per turn. |
+//! | `SMOOTH_AGENT_MAX_TOKENS` | `8192` | `max_tokens` sent to the gateway. |
 //! | `SMOOTH_AGENT_STORAGE` | `memory` | Storage backend: `memory` \| `postgres` \| `dynamodb`. |
 //! | `SMOOTH_AGENT_BACKPLANE` | `memory` | Connection backplane: `memory` (single-process) \| `redis`/`valkey` \| `nats`. A distributed backend is required for >1 replica and to let non-AI publishers push events via `Backplane::publish`. |
 //! | `SMOOTH_AGENT_BACKPLANE_URL` | *(unset)* | Bus URL for `redis`/`nats` (e.g. `redis://valkey:6379`, `nats://nats:4222`); falls back to `SMOOTH_AGENT_REDIS_URL` / `SMOOTH_AGENT_NATS_URL`. |

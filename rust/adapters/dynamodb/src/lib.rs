@@ -78,6 +78,37 @@ use keys::{attr, GSI1};
 /// Default table name when none is configured.
 pub const DEFAULT_TABLE_NAME: &str = "smooth-operator";
 
+/// Handle to the process-wide runtime dedicated to this adapter's sync-over-async
+/// bridges (settings / connector-config / indexing / checkpoint / knowledge).
+///
+/// Same shape and rationale as the Postgres adapter's bridge runtime (th-58edbd):
+/// capturing the *server's* runtime here deadlocks a turn — persona resolution
+/// calls `DynamoSettingsStore::get` on every turn, which spawns its future onto
+/// the captured runtime and blocks the calling worker on the result; if that
+/// captured runtime IS the server runtime, the worker starves the very future it
+/// waits on. Built once, lazily, parked on its own OS thread for the process
+/// lifetime, and deliberately never dropped.
+pub(crate) fn bridge_runtime_handle() -> Handle {
+    use std::sync::OnceLock;
+    static BRIDGE_RT: OnceLock<Handle> = OnceLock::new();
+    BRIDGE_RT
+        .get_or_init(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .thread_name("ddb-bridge")
+                .build()
+                .expect("build dynamodb bridge runtime");
+            let handle = rt.handle().clone();
+            std::thread::Builder::new()
+                .name("ddb-bridge-rt".into())
+                .spawn(move || rt.block_on(std::future::pending::<()>()))
+                .expect("spawn dynamodb bridge runtime thread");
+            handle
+        })
+        .clone()
+}
+
 /// DynamoDB single-table storage adapter.
 pub struct DynamoDbAdapter {
     client: Client,
@@ -90,20 +121,18 @@ pub struct DynamoDbAdapter {
 }
 
 impl DynamoDbAdapter {
-    /// Build the adapter over an existing client and table name. Captures the
-    /// current Tokio runtime [`Handle`] for the sync checkpoint/knowledge
-    /// bridges, so this must be called from within a Tokio runtime.
+    /// Build the adapter over an existing client and table name. The sync
+    /// checkpoint/knowledge/admin bridges run on a dedicated bridge runtime
+    /// (never the caller's), so this is safe to call from any thread — inside
+    /// or outside a Tokio runtime.
     ///
     /// The knowledge slice defaults to the brute-force DynamoDB backend with a
     /// [`DeterministicEmbedder`] and the org partition `"default"`. Use
     /// [`Self::with_knowledge`] to override.
-    ///
-    /// # Panics
-    /// Panics if called outside a Tokio runtime.
     #[must_use]
     pub fn new(client: Client, table: impl Into<String>) -> Self {
         let table = table.into();
-        let handle = Handle::current();
+        let handle = bridge_runtime_handle();
         let checkpoints = Arc::new(DynamoCheckpointStore::new(client.clone(), table.clone()));
         let knowledge = Arc::new(DynamoKnowledgeBase::new(
             client.clone(),
@@ -130,7 +159,7 @@ impl DynamoDbAdapter {
         organization_id: impl Into<String>,
         backend: KnowledgeBackend,
     ) -> Self {
-        let handle = Handle::current();
+        let handle = bridge_runtime_handle();
         self.knowledge = Arc::new(DynamoKnowledgeBase::new(
             self.client.clone(),
             self.table.clone(),

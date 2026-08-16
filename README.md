@@ -27,6 +27,8 @@
 ---
 
 > **A chat loop is a weekend project. An agent you'd let near production is not.** Smooth Operator remembers the whole conversation, retrieves only what the person asking is allowed to see, streams its reasoning as it works — and **stops to ask you before it writes anything**. One operator binary that runs the same way on **Kubernetes**, **AWS serverless**, or a **single laptop process**, speaking one protocol to native clients in **five languages**. Built in the open, test-first.
+>
+> This is the open-source heart of [Smoo AI](https://smoo.ai) — the same operator engine that runs Smooth Operator in your org, MIT-licensed, yours to run. **MIT-licensed. Bring your own model. You approve every write.**
 
 ---
 
@@ -342,7 +344,7 @@ smooth-operator/
 ├── python/       # smooth-operator (import smooth_operator) — async client
 ├── console/      # Next.js management console for the auth-gated /admin/* API
 ├── examples/     # Runnable reference apps — web-chat (Vite+React) & tui-chat (terminal); each a `docker compose up` stack with Postgres
-├── adapters/     # Storage adapters: postgres (pgvector) and dynamodb (S3 Vectors)
+├── adapters/     # Pointer only — the storage adapter crates live in rust/adapters/ (postgres + dynamodb)
 ├── deploy/
 │   ├── k8s/      # Kubernetes (Helm + ArgoCD) — Postgres + pgvector + Redis/NATS backplane
 │   ├── sst/      # AWS serverless (API GW WebSocket + Lambda + DynamoDB + S3 Vectors)
