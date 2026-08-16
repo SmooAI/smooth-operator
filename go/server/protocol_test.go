@@ -78,14 +78,14 @@ func TestEmittedEventsValidateAgainstSpec(t *testing.T) {
 		{
 			name:      "eventual_response",
 			schemaRef: "events/eventual-response.schema.json",
-			event:     eventualResponse("req-2", 200, "m1", generalResponse("hi there"), false, nil, nil, false),
+			event:     eventualResponse("req-2", 200, "m1", generalResponse("hi there"), false, nil, nil, nil, false),
 		},
 		{
 			name:      "eventual_response_with_citations",
 			schemaRef: "events/eventual-response.schema.json",
 			event: eventualResponse("req-3", 200, "m2", generalResponse("returns are 17 days"), false, []Citation{
 				{ID: "doc-1", Title: "policies/returns.md", URL: "https://example.com/returns.md", Snippet: "17 days", Score: 0.9},
-			}, nil, false),
+			}, nil, nil, false),
 		},
 		{
 			name:      "error",
@@ -144,7 +144,7 @@ func TestEmittedEventsRoundTripIntoClientTypes(t *testing.T) {
 	}
 
 	t.Run("eventual_response", func(t *testing.T) {
-		frame := marshal(t, eventualResponse("req-1", 200, "msg-123", generalResponse("hi"), false, nil, nil, false))
+		frame := marshal(t, eventualResponse("req-1", 200, "msg-123", generalResponse("hi"), false, nil, nil, nil, false))
 		ev, err := protocol.ParseServerEvent(frame)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
@@ -161,6 +161,23 @@ func TestEmittedEventsRoundTripIntoClientTypes(t *testing.T) {
 		}
 		if final.Data.Status != 200 {
 			t.Fatalf("status = %d", final.Data.Status)
+		}
+	})
+
+	t.Run("eventual_response_usage", func(t *testing.T) {
+		// Back-compat: no `usage` key at all when the engine reported none.
+		omitted := eventualResponse("req-1", 200, "m1", generalResponse("hi"), false, nil, nil, nil, false)
+		inner := omitted["data"].(map[string]any)["data"].(map[string]any)
+		if _, ok := inner["usage"]; ok {
+			t.Fatalf("usage must be absent when nil, got %v", inner["usage"])
+		}
+
+		// Present: attached as a sibling object under data.data.
+		withUsage := eventualResponse("req-1", 200, "m1", generalResponse("hi"), false, nil,
+			&TurnUsage{CostUSD: 0.0021, PromptTokens: 120, CompletionTokens: 34}, nil, false)
+		u := withUsage["data"].(map[string]any)["data"].(map[string]any)["usage"].(map[string]any)
+		if u["costUsd"] != 0.0021 || u["promptTokens"] != 120 || u["completionTokens"] != 34 {
+			t.Fatalf("usage = %v", u)
 		}
 	})
 

@@ -105,6 +105,17 @@ describe('protocol conformance', () => {
         expect('citations' in inner).toBe(false);
     });
 
+    it('eventualResponse omits usage when the engine reported none and attaches it when present', () => {
+        const args = ['req-a1b2c3d4-0002', 200, '66666666-6666-6666-6666-666666666666', protocol.generalResponse('ok'), false] as const;
+
+        const omitted = ((roundTrip(protocol.eventualResponse(...args)).data as Record<string, unknown>).data as Record<string, unknown>);
+        expect('usage' in omitted).toBe(false);
+
+        const usage = { costUsd: 0.0021, promptTokens: 120, completionTokens: 34 };
+        const attached = ((roundTrip(protocol.eventualResponse(...args, undefined, usage)).data as Record<string, unknown>).data as Record<string, unknown>);
+        expect(attached.usage).toEqual(usage);
+    });
+
     it('eventualResponse with citations matches the with-citations golden (url omitted when absent)', () => {
         const golden = fixture('eventual_response_with_citations_event');
         const goldenCitations = (((golden.data as Record<string, unknown>).data as Record<string, unknown>).citations as Array<Record<string, unknown>>);

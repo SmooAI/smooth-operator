@@ -523,6 +523,7 @@ class FrameDispatcher:
                     protocol.general_agent_response(result.reply),
                     needs_escalation=False,
                     citations=result.citations or None,
+                    usage=result.usage,
                     directive=result.directive,
                 )
             )

@@ -660,7 +660,7 @@ export class FrameDispatcher {
                 // Drain the directive sink (mirrors the Rust runner's post-turn drain):
                 // a host tool that ran this turn may have written a client-side directive
                 // onto `ctx.directive` (last-write-wins). `undefined` ⇒ omitted.
-                sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations, ctx.directive));
+                sink(protocol.eventualResponse(reqId, 200, result.messageId, protocol.generalResponse(result.reply), false, result.citations, result.usage, ctx.directive));
             } catch (err) {
                 // Cancelled: the terminal `cancelled` event was already emitted by the
                 // cancel handler (or the client is gone) — emit nothing more.

@@ -17,7 +17,7 @@ import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalR
 import type { ConfirmationRegistry } from './confirmation.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
-import type { Citation, Frame } from './protocol.js';
+import type { Citation, Frame, TurnUsage } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
 import { withUserImages, type UserImage } from './toolContext.js';
 import { advanceStep, judgeStep, resolveCurrentStep, type ConversationWorkflow } from './workflow.js';
@@ -33,6 +33,13 @@ export interface TurnResult {
      * was configured; the caller persists it. Undefined for freeform agents.
      */
     nextStepId?: string;
+    /**
+     * The turn's accumulated token accounting + cost, captured from the engine's
+     * terminal `done` event. Undefined when the stream produced no terminal event;
+     * the dispatcher then omits `eventual_response.usage` (back-compat), matching
+     * the Rust reference's `usage: Option<TurnUsage>`.
+     */
+    usage?: TurnUsage;
 }
 
 const AUTO_CONTEXT_LIMIT = 3;
@@ -358,6 +365,7 @@ export class TurnRunner {
         //    call / tool result (the TS parity of the Rust runner translating
         //    ToolCallStart/Complete and the C# FunctionCall/FunctionResult mapping).
         let reply = '';
+        let usage: TurnUsage | undefined;
 
         // Optional fast-model preamble, fired in PARALLEL with the agent loop. Off unless
         // `SMOOTH_AGENT_PREAMBLE_MODEL` is set → no extra call, no extra event. Floating by
@@ -383,6 +391,15 @@ export class TurnRunner {
                 if (event.type === 'text') answerStarted.started = true;
                 this.emit(requestId, event, sink);
                 if (event.type === 'text') reply += event.text;
+                // The terminal `done` is not streamed, but its accumulated cost +
+                // token counts become `eventual_response.usage`.
+                if (event.type === 'done') {
+                    usage = {
+                        costUsd: event.response.costUsd,
+                        promptTokens: event.response.usage.promptTokens,
+                        completionTokens: event.response.usage.completionTokens,
+                    };
+                }
             }
         } finally {
             // Turn over: drop any lingering pending confirmation so a stale entry can't
@@ -418,7 +435,7 @@ export class TurnRunner {
             }
         }
 
-        return { reply, messageId: outbound.id, citations, nextStepId };
+        return { reply, messageId: outbound.id, citations, nextStepId, usage };
     }
 
     /** Map one engine {@link StreamEvent} onto its protocol event(s). */

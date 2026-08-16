@@ -92,12 +92,18 @@ func streamChunk(requestID, node string, state map[string]any) map[string]any {
 // triple-nested data.data carrying messageId, the agent response, needsEscalation,
 // and (only when non-empty) the citations array.
 //
+// usage, when non-nil, attaches the turn's token accounting + cost as a sibling
+// data.data.usage object ({ costUsd, promptTokens, completionTokens }) so a client can
+// accumulate live session cost. Absent when the engine reported no usage, keeping the
+// event back-compatible with clients that predate cost reporting. Mirrors the Rust
+// protocol::eventual_response `usage: Option<TurnUsage>` (protocol.rs).
+//
 // directive is an opaque host-written client-side directive drained from the turn's
 // TurnContext (the send_file convention et al). It is emitted under data.data.directive
 // only when a host tool wrote one this turn — passing (nil, false) omits the field,
 // keeping the wire byte-for-byte unchanged for the common no-directive turn. Mirrors the
 // Rust protocol::eventual_response `directive: Option<Value>` (protocol.rs).
-func eventualResponse(requestID string, status int, messageID string, response map[string]any, needsEscalation bool, citations []Citation, directive any, hasDirective bool) map[string]any {
+func eventualResponse(requestID string, status int, messageID string, response map[string]any, needsEscalation bool, citations []Citation, usage *TurnUsage, directive any, hasDirective bool) map[string]any {
 	inner := map[string]any{
 		"messageId":       messageID,
 		"response":        response,
@@ -109,6 +115,13 @@ func eventualResponse(requestID string, status int, messageID string, response m
 			arr = append(arr, citationObject(c))
 		}
 		inner["citations"] = arr
+	}
+	if usage != nil {
+		inner["usage"] = map[string]any{
+			"costUsd":          usage.CostUSD,
+			"promptTokens":     usage.PromptTokens,
+			"completionTokens": usage.CompletionTokens,
+		}
 	}
 	if hasDirective {
 		inner["directive"] = directive

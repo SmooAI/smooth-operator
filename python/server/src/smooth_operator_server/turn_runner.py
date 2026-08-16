@@ -176,6 +176,11 @@ class TurnResult:
     #: tool wrote it — e.g. ``send_file``). ``None`` ⇒ no directive; the dispatcher
     #: then omits ``eventual_response.directive`` (back-compat).
     directive: dict[str, Any] | None = None
+    #: Token accounting + cost captured from the engine's terminal ``DoneEvent``
+    #: (``{costUsd, promptTokens, completionTokens}``). ``None`` when the stream
+    #: produced no terminal event; the dispatcher then omits
+    #: ``eventual_response.usage`` exactly like the Rust reference.
+    usage: dict[str, Any] | None = None
 
 
 class TurnRunner:
@@ -358,6 +363,7 @@ class TurnRunner:
         #    (finally) once it has been spawned above.
         reply_parts: list[str] = []
         final_text: str | None = None
+        final_usage: dict[str, Any] | None = None
 
         # Optional fast-model preamble (pearl th-ce3888). When
         # `SMOOTH_AGENT_PREAMBLE_MODEL` is set, a small fast model runs CONCURRENTLY
@@ -417,6 +423,13 @@ class TurnRunner:
                     sink(protocol.stream_chunk(request_id, event.name, _tool_result_state(event)))
                 elif isinstance(event, DoneEvent):
                     final_text = event.response.text
+                    # The terminal event is not re-emitted as a stream event, but its
+                    # accumulated cost + token counts become `eventual_response.usage`.
+                    final_usage = {
+                        "costUsd": event.response.cost_usd,
+                        "promptTokens": event.response.usage.prompt_tokens,
+                        "completionTokens": event.response.usage.completion_tokens,
+                    }
         finally:
             # Turn over: the preamble window is closed for good. Cancel and reap the
             # task so a still-in-flight preamble can neither emit late nor linger as
@@ -456,7 +469,13 @@ class TurnRunner:
         #    dispatcher omits `eventual_response.directive` (back-compat).
         directive = context.directive if context is not None else None
 
-        return TurnResult(reply=reply, message_id=outbound.id, citations=citations, directive=directive)
+        return TurnResult(
+            reply=reply,
+            message_id=outbound.id,
+            citations=citations,
+            directive=directive,
+            usage=final_usage,
+        )
 
     async def _run_preamble(
         self,

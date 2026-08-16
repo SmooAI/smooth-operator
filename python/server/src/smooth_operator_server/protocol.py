@@ -94,6 +94,7 @@ def eventual_response(
     response: Any,
     needs_escalation: bool,
     citations: list[dict[str, Any]] | None,
+    usage: dict[str, Any] | None = None,
     directive: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``eventual_response`` — the terminal event of a streaming turn. The payload
@@ -107,7 +108,14 @@ def eventual_response(
     turn's directive sink (e.g. the ``send_file`` convention — agent→user file
     delivery). Attached to ``data.data.directive`` ONLY when non-``None`` — absent
     otherwise, keeping the event back-compatible with clients that predate
-    directives (mirrors the Rust ref's ``protocol.rs`` directive handling)."""
+    directives (mirrors the Rust ref's ``protocol.rs`` directive handling).
+
+    ``usage`` is the turn's token accounting + cost (``costUsd`` / ``promptTokens``
+    / ``completionTokens``), captured from the engine's terminal ``DoneEvent`` so a
+    client can accumulate live session cost. Attached to ``data.data.usage`` ONLY
+    when non-``None`` — absent when the engine reported no usage, keeping the event
+    back-compatible with clients that predate cost reporting (matching the Rust
+    ref's ``usage: Option<TurnUsage>``)."""
     inner: dict[str, Any] = {
         "messageId": message_id,
         "response": response,
@@ -115,6 +123,8 @@ def eventual_response(
     }
     if citations:
         inner["citations"] = citations
+    if usage is not None:
+        inner["usage"] = usage
     if directive is not None:
         inner["directive"] = directive
     return {

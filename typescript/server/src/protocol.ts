@@ -85,6 +85,13 @@ export function streamChunk(requestId: string, node: string, state: Record<strin
     };
 }
 
+/** Per-turn token accounting + cost carried onto `eventual_response.usage`. */
+export interface TurnUsage {
+    costUsd: number;
+    promptTokens: number;
+    completionTokens: number;
+}
+
 /**
  * The terminal turn event. Matches the Rust/C# shape: a triple-nested `data.data`
  * carrying `messageId`, the agent `response`, `needsEscalation`, and — only when
@@ -95,6 +102,11 @@ export function streamChunk(requestId: string, node: string, state: Record<strin
  * Omitted when the turn produced none (`undefined`/`null`) so the wire is
  * byte-identical to before the field existed. Mirrors the Rust runner draining
  * `directive_sink` onto `eventual_response.directive`.
+ *
+ * `usage` is the turn's token accounting + cost, captured from the engine's terminal
+ * `done` event so a client can accumulate live session cost. Omitted when the engine
+ * reported none, keeping the event back-compatible with clients that predate cost
+ * reporting. Mirrors the Rust reference's `usage: Option<TurnUsage>`.
  */
 export function eventualResponse(
     requestId: string,
@@ -103,11 +115,15 @@ export function eventualResponse(
     response: Record<string, unknown>,
     needsEscalation: boolean,
     citations?: Citation[],
+    usage?: TurnUsage,
     directive?: unknown,
 ): Frame {
     const inner: Record<string, unknown> = { messageId, response, needsEscalation };
     if (citations && citations.length > 0) {
         inner.citations = citations.map((c) => citation(c.id, c.title, c.url, c.snippet, c.score));
+    }
+    if (usage !== undefined) {
+        inner.usage = { costUsd: usage.costUsd, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens };
     }
     if (directive !== undefined && directive !== null) {
         inner.directive = directive;

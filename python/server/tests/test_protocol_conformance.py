@@ -72,6 +72,21 @@ def test_eventual_response_with_citations_matches_fixture(fixtures: dict) -> Non
     assert _strip_timestamp(built) == _strip_timestamp(fixture)
 
 
+def test_eventual_response_usage_omitted_and_attached(fixtures: dict) -> None:
+    """``usage`` is absent when the engine reported none (back-compat) and attaches
+    as a sibling of ``data.data`` when it did — matching the Rust reference."""
+    fixture = fixtures["eventual_response_event"]["instance"]
+    inner = fixture["data"]["data"]
+    args = (fixture["requestId"], fixture["status"], inner["messageId"], inner["response"])
+
+    omitted = protocol.eventual_response(*args, needs_escalation=False, citations=None)
+    assert "usage" not in omitted["data"]["data"]
+
+    usage = {"costUsd": 0.0021, "promptTokens": 120, "completionTokens": 34}
+    attached = protocol.eventual_response(*args, needs_escalation=False, citations=None, usage=usage)
+    assert attached["data"]["data"]["usage"] == usage
+
+
 def test_cancelled_builder_matches_fixture(fixtures: dict) -> None:
     """The terminal event of a client-cancelled turn matches the golden shape:
     ``status: 499`` at both levels, the cancelled turn's ``requestId`` echoed, and no

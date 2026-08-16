@@ -73,8 +73,14 @@ public static class ProtocolEvents
     /// (only when non-empty) the <c>citations</c> array, and (only when a host tool emitted one) the
     /// opaque <c>directive</c> — e.g. a <c>send_file</c> object. Absent <c>directive</c> ⇒ omitted, so
     /// the event stays back-compatible with clients that predate directives.
+    /// <para>
+    /// <c>usage</c> is the turn's token accounting + cost, accumulated from the usage the model
+    /// reported over the streaming turn, so a client can accumulate live session cost. Attached only
+    /// when the turn reported usage — absent otherwise, keeping the event back-compatible with
+    /// clients that predate cost reporting. Mirrors the Rust reference's <c>usage: Option&lt;TurnUsage&gt;</c>.
+    /// </para>
     /// </summary>
-    public static JsonObject EventualResponse(string requestId, int status, string messageId, JsonNode response, bool needsEscalation, IReadOnlyList<JsonObject>? citations, JsonNode? directive = null)
+    public static JsonObject EventualResponse(string requestId, int status, string messageId, JsonNode response, bool needsEscalation, IReadOnlyList<JsonObject>? citations, TurnUsage? usage = null, JsonNode? directive = null)
     {
         var inner = new JsonObject
         {
@@ -90,6 +96,15 @@ public static class ProtocolEvents
                 array.Add(citation);
             }
             inner["citations"] = array;
+        }
+        if (usage is not null)
+        {
+            inner["usage"] = new JsonObject
+            {
+                ["costUsd"] = usage.CostUsd,
+                ["promptTokens"] = usage.PromptTokens,
+                ["completionTokens"] = usage.CompletionTokens,
+            };
         }
         if (directive is not null)
         {
