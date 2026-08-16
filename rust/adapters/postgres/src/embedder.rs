@@ -96,9 +96,13 @@ impl Embedder for GatewayEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        // Trim a trailing slash so `{base}/v1/embeddings` is well-formed whether
-        // the configured URL ends in `/` or not.
-        let url = format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'));
+        // `SMOOAI_GATEWAY_URL` already includes the `/v1` suffix (default
+        // `https://llm.smoo.ai/v1`; OpenAI `https://api.openai.com/v1`; etc.) — the
+        // chat client appends `/chat/completions` to it, so the embedder appends
+        // `/embeddings`. Appending `/v1/embeddings` here double-stacked the version
+        // segment (`…/v1/v1/embeddings`) and 404'd every retrieval (th-58edbd).
+        // Trim a trailing slash so it's well-formed whether or not the URL ends in `/`.
+        let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({ "model": self.model, "input": texts });
 
         let resp = self

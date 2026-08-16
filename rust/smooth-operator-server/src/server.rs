@@ -211,6 +211,10 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
     let verifier = smooth_operator::auth::AuthConfig::from_env()
         .map_err(|e| anyhow::anyhow!("auth configuration error: {e}"))?;
 
+    // Captured before `config` is moved into an arm; the persistent arms seed via
+    // this (the in-memory arm seeds inside `build_state`).
+    let seed = config.seed_kb;
+
     let state = match config.storage {
         // The in-memory path is unchanged (synchronous, no external services).
         StorageBackend::Memory => build_state(config),
@@ -252,11 +256,19 @@ pub async fn build_state_from_env_async(config: ServerConfig) -> Result<AppState
             // is absent (a standalone deploy) or a row is malformed.
             let agent_config = Arc::new(adapter.agent_config_resolver());
             let storage: Arc<dyn StorageAdapter> = adapter;
-            AppState::new(storage, config)
+            let state = AppState::new(storage.clone(), config)
                 .with_connector_configs(connectors)
                 .with_settings(settings)
                 .with_indexing(indexing)
-                .with_agent_config(agent_config)
+                .with_agent_config(agent_config);
+            // Seed the demo KB on the same trait path as the in-memory backend.
+            // `SMOOTH_AGENT_SEED_KB` was silently ignored for Postgres before, so
+            // knowledge-grounded retrieval had nothing to find (th-58edbd).
+            if seed {
+                seed_knowledge(storage.as_ref());
+                state.record_document_set(SEED_ORG_ID, SEED_DOCUMENT_SET);
+            }
+            state
         }
 
         // The DynamoDB storage backend is only compiled in on a build with the
@@ -400,8 +412,16 @@ async fn install_backplane_from_env(state: AppState) -> Result<AppState> {
 /// deterministic. The 17-day return window is deliberately unusual so an
 /// ungrounded answer can't accidentally match it. Both docs are tagged into the
 /// `policies` document set so the admin API can report it.
-pub fn seed_knowledge(storage: &InMemoryStorageAdapter) {
-    let kb = smooth_operator::adapter::StorageAdapter::knowledge(storage);
+pub fn seed_knowledge(storage: &dyn smooth_operator::adapter::StorageAdapter) {
+    // Ingest scoped to the reference org. The multi-tenant (Postgres) query path
+    // pre-filters `organization_id = SEED_ORG_ID` (the org the no-auth turn resolves
+    // to), so an unscoped ingest (org = NULL) would seed rows the query can never
+    // match — knowledge-grounded retrieval silently returned nothing on Postgres.
+    // The in-memory backend ignores org, so this is behavior-preserving there. The
+    // docs carry no DocAcl ⇒ NULL acl ⇒ org-public, readable by the no-auth reader.
+    let access =
+        smooth_operator::access_control::AccessContext::anonymous().with_organization_id(SEED_ORG_ID);
+    let kb = storage.knowledge_for_access(&access);
     let _ = kb.ingest(smooth_operator::with_document_set(
         Document::new(
             "SmooAI's return window is exactly 17 days from delivery. Returns after 17 days are not accepted.",

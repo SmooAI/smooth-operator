@@ -5,8 +5,8 @@
 //! CRUD + idempotency, user + ai-agent participants + external-id resolve, message
 //! paging, session create/update — and adds the two production-only slices:
 //!
-//! - **checkpoint save + load** through the `PostgresCheckpointStore` accessor
-//!   (proving the engine plugs into the same DB), and
+//! - **checkpoint save + load** through the `checkpoints()` accessor (now the
+//!   engine's in-memory store — see th-58edbd / the crate docs), and
 //! - **knowledge ingest + hybrid retrieve** (dense pgvector ∪ sparse tsvector →
 //!   RRF) with the `DeterministicEmbedder`, asserting a distinctive seeded doc
 //!   ranks first.
@@ -287,24 +287,21 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].thread_id, "thread-abc");
 
-    // --- checkpoint round-trip through the PostgresCheckpointStore accessor ---
-    // PostgresCheckpointStore is a *synchronous* store backed by the blocking
-    // `postgres` crate (it drives its own runtime internally), so its calls must
-    // run off the async worker threads via spawn_blocking — exactly how the
-    // engine drives it. We assert that the engine-shaped usage round-trips.
+    // --- checkpoint round-trip through the checkpoints() accessor ---
+    // The accessor returns the engine's in-memory MemoryCheckpointStore: the
+    // Postgres checkpointer is a *synchronous* store whose blocking I/O, driven by
+    // the engine's async turn loop, starves the Tokio runtime and wedges the whole
+    // server mid-turn (th-58edbd). Until that's fixed upstream, OLTP + knowledge
+    // stay Postgres-durable while the resume log lives in memory. The CheckpointStore
+    // trait is sync and the in-memory store is non-blocking, so we call it directly
+    // (no spawn_blocking) and assert an engine-shaped save → load_latest round-trips.
     let checkpoints = store.checkpoints();
-    let latest = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<smooth_operator_core::Checkpoint> {
-            let engine_conv = EngineConversation::new(100_000).with_system_prompt("ref runtime");
-            let cp = Checkpoint::new("agent-uuid", &engine_conv, 1)
-                .with_metadata("threadId", "thread-abc");
-            checkpoints.save(&cp)?;
-            Ok(checkpoints
-                .load_latest("agent-uuid")?
-                .expect("checkpoint exists"))
-        },
-    )
-    .await??;
+    let engine_conv = EngineConversation::new(100_000).with_system_prompt("ref runtime");
+    let cp = Checkpoint::new("agent-uuid", &engine_conv, 1).with_metadata("threadId", "thread-abc");
+    checkpoints.save(&cp)?;
+    let latest = checkpoints
+        .load_latest("agent-uuid")?
+        .expect("checkpoint exists");
     assert_eq!(latest.agent_id, "agent-uuid");
     assert_eq!(latest.iteration, 1);
     assert_eq!(
@@ -347,8 +344,8 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
 
     println!("POSTGRES CONFORMANCE: all slices (CRUD + idempotency + paging + sessions + checkpoint + hybrid knowledge) passed against pgvector/pgvector:pg16");
 
-    // `PostgresAdapter::drop` disposes the sync checkpoint pool off-runtime, so
-    // dropping `store` here from async code is safe (no destructor panic).
+    // The checkpoint store is in-memory (no blocking Drop), so dropping the adapter
+    // here from async code is safe.
     drop(store);
     Ok(())
 }
