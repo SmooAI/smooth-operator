@@ -1,0 +1,52 @@
+# smooth-operator · tui-chat stack
+#
+#   cp ../.env.example ../.env       # set SMOOAI_GATEWAY_KEY
+#   docker compose run --build --rm tui   # interactive terminal chat
+#
+# `run` (not `up`) because the TUI needs an interactive TTY. It brings up
+# postgres + operator as dependencies, then attaches you to the chat client.
+name: smooth-operator-tui-chat
+
+services:
+    postgres:
+        image: pgvector/pgvector:pg16
+        environment:
+            POSTGRES_USER: smooth
+            POSTGRES_PASSWORD: smooth
+            POSTGRES_DB: smooth
+        healthcheck:
+            test: ['CMD-SHELL', 'pg_isready -U smooth -d smooth']
+            interval: 3s
+            timeout: 3s
+            retries: 20
+
+    operator:
+        build:
+            context: ../..
+            dockerfile: Dockerfile
+        depends_on:
+            postgres:
+                condition: service_healthy
+        env_file:
+            - path: ../.env
+              required: false
+        environment:
+            AUTH_MODE: none # dev only — anonymous WS + open /admin. Never in prod.
+            SMOOTH_AGENT_BIND: 0.0.0.0
+            SMOOTH_AGENT_PORT: '8787'
+            SMOOTH_AGENT_STORAGE: postgres
+            SMOOTH_AGENT_DATABASE_URL: postgresql://smooth:smooth@postgres:5432/smooth?sslmode=disable
+            SMOOTH_AGENT_SEED_KB: '1'
+            SMOOTH_AGENT_CONFIRM_TOOLS: knowledge_search
+            RUST_LOG: info,smooth_operator_server=info
+
+    tui:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        depends_on:
+            - operator
+        environment:
+            SMOOTH_WS_URL: ws://operator:8787/ws
+        stdin_open: true
+        tty: true

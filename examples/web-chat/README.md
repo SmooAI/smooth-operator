@@ -24,7 +24,27 @@ The interesting code is two files: [`src/operator.ts`](src/operator.ts) (the
 hook) and [`src/App.tsx`](src/App.tsx) (the UI). It's a trimmed port of the
 Smooth daemon PWA's `useOperator`, re-based onto the published SDK.
 
-## Run it
+## Run it with Docker (recommended)
+
+One command brings up the whole stack — Postgres (pgvector) for durable
+conversations + the seeded knowledge base, the operator server, and this UI:
+
+```bash
+cp ../.env.example ../.env    # set SMOOAI_GATEWAY_KEY (see that file)
+docker compose up --build     # first run builds the Rust server (~a few min)
+```
+
+Open **http://localhost:8080**, wait for the header to go **Ready**, and ask
+_“What is your return policy?”_. The compose file turns on all the bells and
+whistles: seeded knowledge (`SMOOTH_AGENT_SEED_KB=1`), durable Postgres storage,
+and **human-in-the-loop approvals** (`SMOOTH_AGENT_CONFIRM_TOOLS=knowledge_search`)
+so the retrieval tool surfaces an Approve/Deny bar before it runs.
+
+> Provider setup is BYO and lives in one file — `examples/.env`. Point
+> `SMOOAI_GATEWAY_URL` at Smoo AI, OpenAI, Groq, or a local Ollama; set
+> `SMOOAI_GATEWAY_KEY` and `SMOOTH_AGENT_MODEL`. Nothing is baked into an image.
+
+## Run it from source (no Docker)
 
 ### 1. Start a smooth-operator server locally
 

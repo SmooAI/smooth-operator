@@ -1,0 +1,19 @@
+{
+    "name": "@smooai/smooth-operator-tui-example",
+    "version": "0.0.1",
+    "private": true,
+    "description": "A dependency-free terminal chat client for a running smooth-operator server — token streaming, inline tool-call/result blocks, human-in-the-loop approvals, and conversation resume, all on the published @smooai/smooth-operator SDK.",
+    "type": "module",
+    "bin": {
+        "smooth-tui": "src/index.mjs"
+    },
+    "scripts": {
+        "start": "node src/index.mjs"
+    },
+    "engines": {
+        "node": ">=22"
+    },
+    "dependencies": {
+        "@smooai/smooth-operator": "workspace:*"
+    }
+}

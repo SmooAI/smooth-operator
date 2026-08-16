@@ -60,10 +60,13 @@ COPY --from=builder /smooth-operator-server /usr/local/bin/smooth-operator-serve
 
 USER 10001:10001
 
-# Default WS port (overridable via SMOOTH_AGENT_PORT). Documented in
-# rust/.../config.rs. NOTE: the server currently binds 127.0.0.1 — for k8s it
-# must bind 0.0.0.0. See deploy/k8s/README.md "0.0.0.0 bind follow-up".
-ENV SMOOTH_AGENT_PORT=8787
+# Bind + port (both overridable). The server reads SMOOTH_AGENT_BIND /
+# SMOOTH_AGENT_PORT (see rust/smooth-operator-server/src/config.rs). The process
+# default bind is 127.0.0.1, which is unreachable from outside a container — so the
+# IMAGE defaults it to 0.0.0.0, the correct container default. Narrow it back with
+# -e SMOOTH_AGENT_BIND=... if you front it with a sidecar/proxy on the pod loopback.
+ENV SMOOTH_AGENT_BIND=0.0.0.0 \
+    SMOOTH_AGENT_PORT=8787
 EXPOSE 8787
 
 ENTRYPOINT ["/usr/local/bin/smooth-operator-server"]
