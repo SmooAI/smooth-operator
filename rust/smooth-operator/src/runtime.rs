@@ -569,6 +569,10 @@ impl KnowledgeChatRuntime {
                 duration_ms,
                 is_error,
                 result,
+                // ponytail: core 1.7.3 added structured `details`; the tool span
+                // doesn't record it yet. Add a field here if a trace consumer
+                // ever needs the structured payload.
+                ..
             } = event
             {
                 let arguments = tool_arguments_for(&outcome.events, *iteration, tool_name);

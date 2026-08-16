@@ -917,6 +917,10 @@ pub async fn run_streaming_turn(
                     result,
                     is_error,
                     duration_ms,
+                    // ponytail: core 1.7.3 added structured `details`; this path
+                    // only builds the gen_ai.tool span. Forward it when a wire
+                    // consumer needs the structured payload.
+                    ..
                 } => {
                     // Capture the tool call for a `gen_ai.tool` span emitted after
                     // the turn (see the collector loop below), pairing the
