@@ -30,6 +30,12 @@
 >
 > This is the open-source heart of [Smoo AI](https://smoo.ai) — the same operator engine that runs Smooth Operator in your org, MIT-licensed, yours to run. **MIT-licensed. Bring your own model. You approve every write.**
 
+<p align="center">
+  <img src=".github/demo-hitl.gif" alt="The operator streams a reply, stops at a knowledge_search tool call for approval, and answers from its knowledge base once approved" width="100%" />
+  <br />
+  <em>Not a mockup — the <a href="./examples/web-chat">web-chat example</a> against a live server. The turn <b>parks</b> at <code>knowledge_search</code> until a human approves, then answers from the knowledge base.</em>
+</p>
+
 ---
 
 ## What is this?
