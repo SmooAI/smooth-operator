@@ -89,6 +89,16 @@ class ConversationSummary:
 #: ``InMemorySessionStore`` default).
 AGENT_NAME = "smooth-agent"
 
+#: The organization every connection belongs to when its principal carries no ``org``
+#: claim — the same ``"public"`` :class:`Principal` defaults to in ``auth.py``.
+#:
+#: It is the default for the ``org_id`` arguments below so a single-tenant caller (and
+#: every existing test) reads and writes the same org without passing anything, while a
+#: multi-tenant deployment gets real isolation by passing the principal's org. Note what
+#: this default is NOT: it is a specific org, never "all orgs". Widening ownership must
+#: never widen tenancy.
+DEFAULT_ORG_ID = "public"
+
 
 class SessionStore(ABC):
     """Persistence for sessions + conversation message logs (async, like the Rust
@@ -104,6 +114,7 @@ class SessionStore(ABC):
         *,
         owner_email: str | None = None,
         enforced: bool = False,
+        org_id: str = DEFAULT_ORG_ID,
     ) -> StoredSession:
         """Mint a session. When ``conversation_id`` names an EXISTING conversation that
         ``owner_email`` may reach, the new session binds to it (resume: reuses the id +
@@ -129,7 +140,9 @@ class SessionStore(ABC):
     async def get_session(self, session_id: str) -> StoredSession | None: ...
 
     @abstractmethod
-    async def list_conversations(self, user_email: str | None, *, enforced: bool = False) -> list[ConversationSummary]:
+    async def list_conversations(
+        self, user_email: str | None, *, enforced: bool = False, org_id: str = DEFAULT_ORG_ID
+    ) -> list[ConversationSummary]:
         """A summary per conversation reachable by ``user_email`` that has at least one
         message (empty conversations — every page-load currently mints one — are
         dropped), in no particular order; the dispatcher sorts most-recent-first and
@@ -213,7 +226,11 @@ class InMemorySessionStore(SessionStore):
         *,
         owner_email: str | None = None,
         enforced: bool = False,
+        org_id: str = DEFAULT_ORG_ID,  # noqa: ARG002 — see below
     ) -> StoredSession:
+        # ``org_id`` is accepted and ignored: this store is single-tenant by
+        # construction, so there is nothing to partition. A durable store
+        # (postgres_store.py) uses it.
         owner = normalize_email(owner_email)
         with self._gate:
             # Resume: bind to an existing conversation (reuse its id + persisted log) when
@@ -259,7 +276,13 @@ class InMemorySessionStore(SessionStore):
             self._updated_at[conversation_id] = datetime.now(timezone.utc)
         return message
 
-    async def list_conversations(self, user_email: str | None, *, enforced: bool = False) -> list[ConversationSummary]:
+    async def list_conversations(
+        self,
+        user_email: str | None,
+        *,
+        enforced: bool = False,
+        org_id: str = DEFAULT_ORG_ID,  # noqa: ARG002 — single-tenant
+    ) -> list[ConversationSummary]:
         scope = normalize_email(user_email)
         with self._gate:
             out: list[ConversationSummary] = []

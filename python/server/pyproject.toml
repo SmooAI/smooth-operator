@@ -18,6 +18,10 @@ dependencies = [
 # SmooAI gateway. Optional: the server is fully testable on MockLlmProvider with
 # no gateway, and protocol-only paths (create/get/ping) need no LLM at all.
 gateway = ["openai>=1.40"]
+# Durable Postgres storage (SMOOTH_AGENT_STORAGE=postgres). Optional: the server is
+# fully usable — and fully tested — on the in-memory stores, and nothing imports
+# `postgres_store` unless that env var selects it.
+postgres = ["asyncpg>=0.29"]
 
 [dependency-groups]
 dev = [
@@ -26,6 +30,10 @@ dev = [
     "ruff>=0.4",
     # The turn round-trip test drives the engine on MockLlmProvider, which ships
     # in smooai-smooth-operator-core — no gateway needed.
+    # The Postgres store tests run against a real database in a throwaway container;
+    # they skip cleanly when Docker is unavailable.
+    "asyncpg>=0.29",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [build-system]

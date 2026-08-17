@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import websockets
 from smooth_operator_core import Knowledge
 
-from .admin import AdminStores, start_admin_http_server
+from .admin import AdminStore, InMemoryAdminStore, start_admin_http_server
 from .agent_config import AgentConfigResolver, NoSessionAuthenticator, SessionAuthenticator, StaticAgentConfigResolver
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
@@ -56,9 +56,9 @@ class ServerState:
     chat_client: Any = None
     knowledge: Knowledge | None = None
     auth: AuthVerifier = field(default_factory=NoAuthVerifier)
-    #: In-memory state the /admin/* management API serves (connectors, settings,
-    #: indexing runs). See admin.py.
-    admin: AdminStores = field(default_factory=AdminStores)
+    #: The store the /admin/* management API serves from (connectors, settings,
+    #: indexing runs) — in-memory by default, Postgres when configured. See admin.py.
+    admin: AdminStore = field(default_factory=InMemoryAdminStore)
     backplane: Backplane = field(default_factory=InMemoryBackplane)
     system_prompt: str | None = None
     model: str | None = None
@@ -342,7 +342,23 @@ async def serve_local(addr: str = f"{DEFAULT_HOST}:{DEFAULT_PORT}", *, seed_kb: 
     host, _, port_str = addr.partition(":")
     port = int(port_str) if port_str else DEFAULT_PORT
 
-    store = InMemorySessionStore()
+    # Storage backend. Unset/memory → the in-memory stores, unchanged; postgres →
+    # durable session + admin stores (one object implements both). A misconfigured
+    # durable backend raises rather than silently falling back to memory: losing
+    # durability quietly is the failure worth shouting about. `postgres_store` is
+    # imported lazily so the memory path never needs asyncpg installed.
+    store: SessionStore
+    admin: AdminStore
+    if (os.environ.get("SMOOTH_AGENT_STORAGE") or "").strip() in ("", "memory"):
+        store, admin = InMemorySessionStore(), InMemoryAdminStore()
+    else:
+        from .postgres_store import resolve_storage
+
+        durable = await resolve_storage()
+        assert durable is not None  # resolve_storage only returns None for memory
+        store, admin = durable, durable
+        print(f"durable storage enabled: SMOOTH_AGENT_STORAGE={os.environ.get('SMOOTH_AGENT_STORAGE')}")
+
     knowledge: Knowledge | None = None
     if seed_kb:
         knowledge = _seed_knowledge()
@@ -356,6 +372,7 @@ async def serve_local(addr: str = f"{DEFAULT_HOST}:{DEFAULT_PORT}", *, seed_kb: 
 
     state = ServerState(
         store=store,
+        admin=admin,
         chat_client=_build_gateway_client(),
         knowledge=knowledge,
         auth=NoAuthVerifier(),

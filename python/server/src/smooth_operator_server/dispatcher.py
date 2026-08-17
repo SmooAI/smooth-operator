@@ -268,6 +268,7 @@ class FrameDispatcher:
             conversation_id,
             owner_email=owner_email,
             enforced=self._auth_enforced,
+            org_id=self._access.principal.org,
         )
         data = {
             "sessionId": session.session_id,
@@ -319,7 +320,9 @@ class FrameDispatcher:
         # conversations it created, which are ownerless by construction). The store
         # applies the filter in its selection, so `limit` below caps an already-scoped
         # list rather than paging over other users' rows. th-8fe998.
-        summaries = await self._store.list_conversations(self._scope_email(), enforced=self._auth_enforced)
+        summaries = await self._store.list_conversations(
+            self._scope_email(), enforced=self._auth_enforced, org_id=self._access.principal.org
+        )
         # Most-recent-first (empties already dropped by the store), then cap.
         summaries.sort(key=lambda c: c.updated_at, reverse=True)
         conversations = [

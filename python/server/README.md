@@ -112,6 +112,7 @@ You decide what the agent can touch; the runner enforces it.
 | WS transport + per-connection loop + single writer | `server.py` | Rust `server.rs`, C# `SmoothOperatorWebSocketExtensions` |
 | Frame dispatch (`ping` / `create` / `get` / `send_message` / `cancel`) | `dispatcher.py` | C# `FrameDispatcher`, Rust `handler.rs` |
 | Session + message store | `session_store.py` | C# `SessionStore`, Rust storage adapter |
+| Durable Postgres storage (sessions + admin stores) | `postgres_store.py` | Rust `adapters/postgres`, C# `PostgresSessionStore` |
 | Streaming turn (engine → protocol events) | `turn_runner.py` | C# `TurnRunner`, Rust `runner.rs` |
 | Per-agent config (instructions / workflow / persona / tools) | `agent_config.py` | monorepo `agents` schema |
 | Conversation-workflow steps + post-turn judge | `workflow.py` | monorepo `general-agent/workflow.ts` |
@@ -151,6 +152,23 @@ uv run --quiet ruff format .
 uv run --quiet ruff check .
 uv run --quiet pytest -q
 ```
+
+The Postgres store tests spin up a throwaway container (testcontainers) and **skip cleanly** when Docker is unreachable, so the suite needs no daemon. On OrbStack, testcontainers' Ryuk reaper can hang before the database container starts — prefix with `TESTCONTAINERS_RYUK_DISABLED=true` if they skip with Docker plainly running.
+
+### Durable storage
+
+In-memory is the default. For persistence across restarts:
+
+```bash
+uv sync --extra postgres
+export SMOOTH_AGENT_STORAGE=postgres
+export SMOOTH_AGENT_DATABASE_URL=postgresql://user:pass@host/db   # or DATABASE_URL
+```
+
+Sessions, conversations, participants, messages and the three `/admin/*` stores
+(connector configs, agent settings, indexing runs) then live in Postgres, on the same
+tables every other server in this repo uses. `asyncpg` is an optional dependency —
+nothing imports it unless `SMOOTH_AGENT_STORAGE=postgres` selects the backend.
 
 ---
 
