@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -783,11 +784,14 @@ type publishRequest struct {
 // ingestion progress, notifications) that need to reach a connected client
 // without going through an agent turn. Admin-gated.
 //
-// This server's backplane is a connID→sink registry, so only `connection`
-// targets can be routed. Rust additionally fans out to session/user/org/agent
-// over a richer backplane; here those return 501 rather than a misleading
-// `{"delivered": 0}` — a caller must never read "accepted, reached nobody" as
-// success for an event that was never routable in the first place.
+// The backplane now carries the reference's full 5-target fan-out, so every kind is
+// deliverable and there is no unroutable case left to misreport — which is why the
+// session/user/org/agent 501s are gone; they were honest only while a connID→sink
+// registry could not route them.
+//
+// Targets are opaque ids matched against the registry; this layer does NOT org-validate
+// session/user/agent ids — the backplane is an id-routing layer, not an authz layer, and
+// callers hold an Admin credential.
 func (s *Server) adminPublish(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, roleAdmin); !ok {
 		return
@@ -802,15 +806,14 @@ func (s *Server) adminPublish(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "INVALID_BODY", "target.id is required")
 		return
 	}
-	switch kind {
-	case "connection":
-		delivered := s.backplane.Publish(r.Context(), id, body.Event)
-		writeJSON(w, http.StatusOK, map[string]any{"delivered": delivered})
-	case "session", "user", "org", "agent":
-		writeAdminError(w, http.StatusNotImplemented, "UNSUPPORTED_TARGET",
-			fmt.Sprintf("this server's backplane routes by connection id only; %q targets are not deliverable here", kind))
-	default:
+	if !slices.Contains(TargetKinds, kind) {
 		writeAdminError(w, http.StatusBadRequest, "INVALID_BODY",
 			fmt.Sprintf("unknown target type %q (want connection|session|user|org|agent)", kind))
+		return
 	}
+	// `delivered` counts THIS process's sockets. With a cross-pod backplane the event also
+	// reaches other pods, whose deliveries this omits — so 0 means "nobody here", never
+	// "delivered to nobody".
+	delivered := s.backplane.Publish(r.Context(), Target{Kind: kind, ID: id}, body.Event)
+	writeJSON(w, http.StatusOK, map[string]any{"delivered": delivered})
 }

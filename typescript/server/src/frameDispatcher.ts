@@ -11,6 +11,8 @@
  * on the live chat path, not just at ingest.
  */
 import type { ChatClientLike, Knowledge, Tool, ToolHook } from '@smooai/smooth-operator-core';
+import type { Target } from './backplane.js';
+import type { StoredSession } from './sessionStore.js';
 import { randomUUID } from 'node:crypto';
 
 import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
@@ -115,7 +117,14 @@ export class FrameDispatcher {
     private readonly store: SessionStore;
     private readonly chatClient: ChatClientLike;
     private readonly knowledge?: AccessKnowledge;
-    private readonly access: AccessContext;
+    /** This connection's access context — the server reads it to associate user/org. */
+    readonly access: AccessContext;
+
+    /**
+     * Backplane association hook, set by the connection loop. Undefined when no backplane
+     * implements `associate`, which simply means session/agent targets are never routable.
+     */
+    associate?: (target: Target) => void;
     private readonly systemPrompt?: string;
     private readonly skillResolver?: SkillResolver;
     private readonly tools: Tool[];
@@ -384,6 +393,11 @@ export class FrameDispatcher {
             conversationId,
             this.access.principal.org,
         );
+        // A freshly created session never passes through scopedSession, so associate here too.
+        if (this.associate) {
+            this.associate({ kind: 'session', id: session.sessionId });
+            if (session.agentId) this.associate({ kind: 'agent', id: session.agentId });
+        }
         sink(
             protocol.immediateResponse(requestId, 200, 'Session created', {
                 sessionId: session.sessionId,
@@ -396,11 +410,31 @@ export class FrameDispatcher {
         );
     }
 
+    /**
+     * Resolve a session this connection may read, and record its backplane targets.
+     *
+     * The single funnel for turning a client-supplied sessionId into a session — the other
+     * servers all have one (Rust/Go `scopedSession`, Python `_visible_session`, .NET
+     * `ScopedSessionAsync`) and TypeScript did not, so the ownership check was re-derived at
+     * each call site. Association lives here for the same reason the check does: one place
+     * covers every handler, so none can work with a session the backplane does not know
+     * about. Callers report a miss with the same SESSION_NOT_FOUND payload they use for an
+     * unknown id — a distinct "forbidden" would be an existence oracle.
+     */
+    private async scopedSession(sessionId: string): Promise<StoredSession | undefined> {
+        const session = await this.store.getSession(sessionId);
+        if (!session || !this.mayRead(session.userEmail, session.orgId)) return undefined;
+        if (this.associate) {
+            this.associate({ kind: 'session', id: session.sessionId });
+            if (session.agentId) this.associate({ kind: 'agent', id: session.agentId });
+        }
+        return session;
+    }
+
     private async handleGetSession(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
-        const session = await this.store.getSession(sessionId);
-        // Not-yours collapses into not-found: same code, same message, same shape.
-        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
+        const session = await this.scopedSession(sessionId);
+        if (!session) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -463,9 +497,8 @@ export class FrameDispatcher {
             sink(protocol.error(requestId, 'VALIDATION_ERROR', "Missing 'sessionId'"));
             return;
         }
-        const session = await this.store.getSession(sessionId);
-        // Not-yours collapses into not-found: same code, same message, same shape.
-        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
+        const session = await this.scopedSession(sessionId);
+        if (!session) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -511,10 +544,10 @@ export class FrameDispatcher {
     private async handleSendMessage(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink, signal?: AbortSignal): Promise<void> {
         const reqId = requestId ?? randomUUID();
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
-        const session = await this.store.getSession(sessionId);
         // Not-yours collapses into not-found — otherwise a caller could post turns into
         // (and read the streamed replies from) another user's conversation.
-        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
+        const session = await this.scopedSession(sessionId);
+        if (!session) {
             sink(protocol.error(reqId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }

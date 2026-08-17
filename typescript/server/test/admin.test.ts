@@ -335,18 +335,40 @@ describe('realtime publish', () => {
         expect(json.delivered).toBe(0);
     });
 
-    it('refuses targets the backplane cannot route, rather than reporting 0', async () => {
-        // {"delivered": 0} would read as "accepted, reached nobody" for an event
-        // that was never routable here. 501 says so out loud.
-        for (const kind of ['session', 'user', 'org', 'agent']) {
-            const { status, json } = await call(authed, 'POST', '/admin/publish', 'admin', {
-                target: { type: kind, id: 'x' },
-                event: {},
-            });
-            expect(status, kind).toBe(501);
-            expect(json.error.code, kind).toBe('UNSUPPORTED_TARGET');
-            expect(json, kind).not.toHaveProperty('delivered');
+    it('delivers to every target kind, not just connection', async () => {
+        // These four used to be a 501 — honest only while a connId→sink registry could not
+        // route them. The backplane now carries the reference's fan-out, so each delivers.
+        const bp = new InMemoryBackplane();
+        const seen: Record<string, unknown>[] = [];
+        await bp.attach('conn-1', (frame) => seen.push(frame as Record<string, unknown>));
+        for (const kind of ['session', 'user', 'org', 'agent'] as const) {
+            bp.associate('conn-1', { kind, id: 'x' });
         }
+        const chatClient = { chat: { completions: { create: async () => ({ choices: [{ message: { content: '' } }] }) } } } as never;
+        const server = await serve({ port: 0, chatClient, store: new InMemorySessionStore(), auth: new RoleVerifier(), backplane: bp });
+        try {
+            for (const kind of ['session', 'user', 'org', 'agent']) {
+                const { status, json } = await call(server, 'POST', '/admin/publish', 'admin', {
+                    target: { type: kind, id: 'x' },
+                    event: { kind },
+                });
+                expect(status, kind).toBe(200);
+                expect(json.delivered, kind).toBe(1);
+            }
+            expect(seen.map((f) => f.kind)).toEqual(['session', 'user', 'org', 'agent']);
+        } finally {
+            await server.close();
+        }
+    });
+
+    it('reports a truthful 0 for a session nothing is associated with', async () => {
+        // The TYPE routes now, so 501 would be the lie — but nothing is listening.
+        const { status, json } = await call(authed, 'POST', '/admin/publish', 'admin', {
+            target: { type: 'session', id: 'ghost' },
+            event: {},
+        });
+        expect(status).toBe(200);
+        expect(json.delivered).toBe(0);
     });
 
     it('validates the body', async () => {

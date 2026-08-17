@@ -33,6 +33,9 @@ type FrameDispatcher struct {
 	// hooks are engine ToolHooks threaded into every turn the runner builds (nil →
 	// none). Set by the server after construction, alongside tools.
 	hooks []core.ToolHook
+	// associate records this connection's backplane targets as they are learned (set by
+	// the connection loop). Nil → session/agent targets are never routable.
+	associate func(target Target)
 	// confirmTools are tool-name substrings gated behind write-confirmation HITL
 	// (empty → HITL off). Threaded into every turn the runner builds.
 	confirmTools []string
@@ -261,7 +264,22 @@ func (d *FrameDispatcher) scopedSession(ctx context.Context, sessionID string) (
 	if !d.access.ConversationScope().Allows(session.OwnerEmail, session.OwnerOrg) {
 		return nil, nil
 	}
+	d.associateSession(session)
 	return session, nil
+}
+
+// associateSession points the session (and its agent) at this connection, so a publish
+// to either target reaches this socket. Called from scopedSession — already the chokepoint
+// every sessionId-bearing action routes through — and from session creation, so no handler
+// can work with a session the backplane does not know about. No-op without a hook.
+func (d *FrameDispatcher) associateSession(session *StoredSession) {
+	if d.associate == nil {
+		return
+	}
+	d.associate(Target{Kind: "session", ID: session.SessionID})
+	if session.AgentID != "" {
+		d.associate(Target{Kind: "agent", ID: session.AgentID})
+	}
 }
 
 func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inboundFrame, sink EventSink) {
@@ -277,6 +295,8 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 		d.internalError(sink, frame.RequestID, "create_conversation_session", err)
 		return
 	}
+	// A freshly created session never passes through scopedSession, so associate here too.
+	d.associateSession(&session)
 	data := map[string]any{
 		"sessionId":          session.SessionID,
 		"conversationId":     session.ConversationID,
