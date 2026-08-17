@@ -291,6 +291,10 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 		// Client-supplied, used only as the OTP delivery contact — never for ownership.
 		ContactEmail: userEmail,
 		OwnerEmail:   owner,
+		// A resumed conversation is in scope.OrgID by construction — conversationOwner
+		// only matches rows whose organization_id equals it — so both branches stamp
+		// the same org.
+		OwnerOrg: scope.OrgID,
 	}
 
 	metadata, err := json.Marshal(sessionMetadata{ContactEmail: userEmail})
@@ -376,25 +380,23 @@ func (s *PostgresStore) conversationOwner(ctx context.Context, conversationID, o
 }
 
 // GetSession returns the session for sessionID, or (nil, nil) if unknown. The raw
-// lookup primitive: ownership is REPORTED (OwnerEmail) but not enforced here, matching
-// the in-memory store — the dispatcher's scopedSession is the gate. OwnerEmail is read
-// from the conversation's user participant rather than duplicated onto the session row,
-// so there is one source of truth and a resumed session reports the ORIGINAL owner.
+// lookup primitive: ownership is REPORTED (OwnerEmail + OwnerOrg) but not enforced
+// here — the dispatcher's scopedSession is the gate, and it applies org before owner.
+// OwnerEmail is read from the conversation's user participant rather than duplicated
+// onto the session row, so there is one source of truth and a resumed session reports
+// the ORIGINAL owner.
 //
-// KNOWN GAP, stated rather than implied: this lookup is NOT org-scoped, because the
-// SessionStore interface hands it no scope to compare against. Every query that DOES
-// receive a scope (ListConversations, ResumeSession) filters by org, but a caller
-// holding a session id from another org still resolves it here, and the dispatcher's
-// gate then only checks OwnerEmail — so a cross-org OWNERLESS conversation would pass.
-// Closing it means putting the org on StoredSession and checking it in
-// scopedSession, which changes the in-memory server's behavior too and so belongs in
-// its own change, not in the storage swap. Reaching the gap requires guessing a v4
-// UUID, and it is the behavior the memory store already has.
+// OwnerOrg MUST be populated for the gate to do its job. It reads the org off the
+// session row and hands it to ConversationScope.Allows, which treats an EMPTY org as
+// "unrecorded" and falls through to an ownership-only check. So a store that returns
+// "" here does not fail loudly — it silently reopens the cross-org hole for every
+// ownerless conversation, on the one backend that actually holds several orgs' data.
 func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*StoredSession, error) {
 	var session StoredSession
 	var metadata []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT s.conversation_id, s.agent_id, s.agent_name, s.user_participant_id, s.agent_participant_id,
+		        s.organization_id,
 		        coalesce(s.metadata, '{}'::jsonb),
 		        coalesce((SELECT p.email FROM conversation_participants p
 		                   WHERE p.conversation_id = s.conversation_id AND p.type = 'user'
@@ -402,7 +404,8 @@ func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Stor
 		   FROM conversation_sessions s
 		  WHERE s.session_id = $1`,
 		sessionID).Scan(&session.ConversationID, &session.AgentID, &session.AgentName,
-		&session.UserParticipantID, &session.AgentParticipantID, &metadata, &session.OwnerEmail)
+		&session.UserParticipantID, &session.AgentParticipantID, &session.OwnerOrg,
+		&metadata, &session.OwnerEmail)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

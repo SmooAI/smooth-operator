@@ -248,6 +248,10 @@ class PostgresStore(SessionStore):
             # On a resume the session inherits the conversation's EXISTING owner rather
             # than re-stamping it, so resuming can never quietly transfer a conversation.
             owner_email=resumed_owner if resume_id else owner,
+            # A resumed conversation is in org_id by construction — _conversation_owner
+            # only matches rows whose organization_id equals it — so both branches stamp
+            # the same org.
+            owner_org=org_id,
         )
 
         now = _now()
@@ -335,15 +339,15 @@ class PostgresStore(SessionStore):
         duplicated onto the session row, so there is one source of truth and a resumed
         session reports the ORIGINAL owner.
 
-        KNOWN GAP, stated rather than implied: this lookup is not org-scoped, because
-        the :class:`SessionStore` interface hands it no org to compare against. Every
-        query that DOES receive one filters by it. Closing this means threading the org
-        onto :class:`StoredSession` and checking it in the dispatcher, which changes
-        the in-memory server's behaviour too and so belongs in its own change. Reaching
-        it requires guessing a v4 UUID, and it is what the memory store does today."""
+        ``owner_org`` MUST be populated for the gate to do its job: the dispatcher
+        treats an unrecorded org as "fall through to ownership", so a store that leaves
+        it ``None`` here does not fail loudly — it silently reopens the cross-org hole
+        for every ownerless conversation, on the one backend that holds several orgs'
+        data."""
         row = await self._pool.fetchrow(
             """SELECT s.conversation_id, s.agent_id, s.agent_name, s.user_participant_id,
-                      s.agent_participant_id, COALESCE(s.metadata, '{}'::jsonb) AS metadata,
+                      s.agent_participant_id, s.organization_id,
+                      COALESCE(s.metadata, '{}'::jsonb) AS metadata,
                       (SELECT p.email FROM conversation_participants p
                         WHERE p.conversation_id = s.conversation_id AND p.type = 'user'
                         ORDER BY p.created_at, p.id LIMIT 1) AS owner_email
@@ -363,6 +367,7 @@ class PostgresStore(SessionStore):
             agent_participant_id=row["agent_participant_id"],
             contact_email=metadata.get("contactEmail"),
             owner_email=normalize_email(row["owner_email"]),
+            owner_org=row["organization_id"] or None,
         )
 
     async def append_message(self, conversation_id: str, direction: MessageDirection, text: str) -> StoredMessage:
