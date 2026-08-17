@@ -66,11 +66,13 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
 | Shared scenario conformance corpus | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Postgres conversation store | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Second storage backend (DynamoDB + S3 Vectors) | ✅ | — | — | — | — |
-| Persistent checkpoint / knowledge / ACL-knowledge stores | ✅ | ✅ | — | — | — |
+| Persistent checkpoint / knowledge / ACL-knowledge stores | ✅ | ✅ | — | — | ◐ [^py-knowledge] |
 | Deep ingestion + ACL surface | ✅ | ✅ | ◐ | ◐ | ◐ |
 | Backplane `attach`/`detach` | ✅ | — | ✅ | ✅ | ✅ |
 | Backplane `publish` (event fan-out) | ✅ | — | ✅ | ✅ | — |
 | **Cross-pod backplane (Redis / NATS)** | ✅ | — | — | — | — |
+
+[^py-knowledge]: Python now has the durable **knowledge + ACL-knowledge** stores (`postgres_knowledge.py`: `PostgresVectorKnowledge` / `PostgresAclKnowledge`, on the shared `knowledge_vectors` table + pgvector). The persistent **checkpoint** store is still pending, so the cell is ◐ rather than ✅.
 
 **The operational consequence:** only the **Rust** server scales past one replica today. Go, TypeScript and Python run an in-memory backplane — correct for a single process, silently wrong the moment you run two pods, because an event published on pod A never reaches a socket held by pod B. C# has no backplane surface at all.
 
