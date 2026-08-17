@@ -540,6 +540,12 @@ func (s *Server) adminUpdateConnector(w http.ResponseWriter, r *http.Request) {
 	// ponytail: read-modify-write without a lock across the two calls. Concurrent PUTs
 	// to the SAME connector are last-write-wins, which is what a Postgres upsert does
 	// anyway; add row-level locking only if a real conflicting-editor case shows up.
+	//
+	// The read is NOT a TOCTOU privilege check, which is what would otherwise make the
+	// missing lock a security bug rather than a lost-update one: a connector's org is
+	// set at create and never changes, so the row cannot become another org's between
+	// the read and the write. If connectors ever become transferable between orgs, that
+	// assumption dies and this needs SELECT ... FOR UPDATE.
 	c, found := s.connectorFor(w, r, r.PathValue("id"), principal.Org)
 	if !found {
 		return

@@ -48,6 +48,10 @@ type StoredSession struct {
 	// decide who may read what. "" means the session has no owner to enforce — auth disabled,
 	// or an anonymous/emailless principal — and stays reachable. th-8fe998, th-909995.
 	OwnerEmail string
+	// OwnerOrg is the organization the conversation belongs to — the OUTER scope the
+	// dispatcher checks before ownership, so a session id alone cannot reach another
+	// org's conversation.
+	OwnerOrg string
 }
 
 // ConversationScope is the visibility filter for conversation reads: WHO is asking, derived
@@ -89,9 +93,22 @@ type ConversationScope struct {
 //
 // Emails compare case-insensitively — OIDC providers vary on casing, and the .NET and
 // Python siblings already fold case. th-8fe998, th-909995.
-func (s ConversationScope) Allows(ownerEmail string) bool {
+func (s ConversationScope) Allows(ownerEmail, ownerOrg string) bool {
 	if s.Unscoped {
 		return true
+	}
+	// Org is the OUTER scope, applied BEFORE ownership: a conversation belonging to
+	// another org is invisible no matter who owns it. Without this, the ownerless
+	// branch below (deliberate, th-909995) let any principal read any org's ownerless
+	// conversation given only its id — authorization resting on an unguessable UUID,
+	// which leaks through logs, referrers and screenshots. th-8fe998 + org scoping.
+	// An UNRECORDED org ("") is not org-scoped: those are rows created before org
+	// capture existed, and denying them would lock people out of conversations they
+	// already own — the same failure mode th-909995 rejected for ownerless rows.
+	// Every conversation created from here on carries one (anonymous principals get
+	// "public"), so this fallback shrinks to nothing rather than standing open.
+	if ownerOrg != "" && !strings.EqualFold(ownerOrg, s.OrgID) {
+		return false
 	}
 	if ownerEmail == "" {
 		return true
@@ -185,6 +202,10 @@ type InMemorySessionStore struct {
 	// Set once at conversation creation and never rewritten, so a resume cannot re-home
 	// someone else's conversation onto the resumer. th-8fe998.
 	owner map[string]string
+	// org maps conversation id → owning organization. Set once at creation next to
+	// owner and never rewritten, for the same reason: a resume must not re-home a
+	// conversation into the resumer's org.
+	org map[string]string
 }
 
 // NewInMemorySessionStore returns an empty in-memory store.
@@ -193,6 +214,7 @@ func NewInMemorySessionStore() *InMemorySessionStore {
 		sessions:  map[string]StoredSession{},
 		messages:  map[string][]StoredMessage{},
 		updatedAt: map[string]time.Time{},
+		org:       map[string]string{},
 		owner:     map[string]string{},
 	}
 }
@@ -224,7 +246,7 @@ func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*use
 		// branch below, so the caller cannot tell them apart and cannot probe for which ids
 		// exist. th-8fe998.
 		_, known := s.messages[convID]
-		resumed = known && scope.Allows(s.owner[convID])
+		resumed = known && scope.Allows(s.owner[convID], s.org[convID])
 	}
 	if !resumed {
 		convID = uuid.NewString() // absent, unknown, or not ours → fresh conversation
@@ -243,15 +265,18 @@ func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*use
 		// inherits the conversation's EXISTING owner rather than re-stamping it, so resuming can
 		// never quietly transfer a conversation. th-8fe998.
 		OwnerEmail: scope.Email,
+		OwnerOrg:   scope.OrgID,
 	}
 	if resumed {
 		session.OwnerEmail = s.owner[convID]
+		session.OwnerOrg = s.org[convID]
 	}
 	s.sessions[session.SessionID] = session
 	if !resumed {
 		s.messages[convID] = nil
 		s.updatedAt[convID] = time.Now()
 		s.owner[convID] = scope.Email
+		s.org[convID] = scope.OrgID
 	}
 	return session, resumed, nil
 }
@@ -297,7 +322,7 @@ func (s *InMemorySessionStore) ListConversations(_ context.Context, scope Conver
 		// Ownership filter runs here, during selection — NOT on the handler's already-capped
 		// page. Filtering after a limit would hand back short/empty pages while other users'
 		// conversations silently consumed the quota. th-8fe998.
-		if !scope.Allows(s.owner[convID]) {
+		if !scope.Allows(s.owner[convID], s.org[convID]) {
 			continue
 		}
 		firstInbound := ""

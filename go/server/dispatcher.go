@@ -258,7 +258,7 @@ func (d *FrameDispatcher) scopedSession(ctx context.Context, sessionID string) (
 	if err != nil || session == nil {
 		return nil, err
 	}
-	if !d.access.ConversationScope().Allows(session.OwnerEmail) {
+	if !d.access.ConversationScope().Allows(session.OwnerEmail, session.OwnerOrg) {
 		return nil, nil
 	}
 	return session, nil

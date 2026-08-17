@@ -179,14 +179,14 @@ func TestOwnerEmailComparisonIsCaseInsensitive(t *testing.T) {
 	owned := seedConversation(t, store, "alice@example.com", "alice secret")
 
 	sameUserDifferentCasing := ConversationScope{Email: "Alice@Example.COM"}
-	if !sameUserDifferentCasing.Allows("alice@example.com") {
+	if !sameUserDifferentCasing.Allows("alice@example.com", "") {
 		t.Fatal("Alice@Example.COM was denied alice@example.com's own conversation")
 	}
-	if !(ConversationScope{Email: "alice@example.com"}).Allows("ALICE@EXAMPLE.COM") {
+	if !(ConversationScope{Email: "alice@example.com"}).Allows("ALICE@EXAMPLE.COM", "") {
 		t.Fatal("case folding must work in both directions")
 	}
 	// Folding case must not fold anything else — a different address is still denied.
-	if sameUserDifferentCasing.Allows("bob@example.com") {
+	if sameUserDifferentCasing.Allows("bob@example.com", "") {
 		t.Fatal("case-insensitive compare matched a DIFFERENT address")
 	}
 
