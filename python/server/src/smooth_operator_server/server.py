@@ -32,7 +32,7 @@ from smooth_operator_core import Knowledge
 from .admin import AdminStore, InMemoryAdminStore, start_admin_http_server
 from .agent_config import AgentConfigResolver, NoSessionAuthenticator, SessionAuthenticator, StaticAgentConfigResolver
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
-from .backplane import Backplane, InMemoryBackplane
+from .backplane import Backplane, InMemoryBackplane, Target
 from .coding_tools import coding_tools_from_env
 from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
@@ -108,7 +108,6 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
     The detach-after-loop runs in ``finally`` so the backplane deregister happens
     whether the loop exits on close, cancel, or error."""
     conn_id = str(uuid.uuid4())
-    await state.backplane.attach(conn_id)
 
     outbound: asyncio.Queue[Optional[dict[str, Any]]] = asyncio.Queue()
 
@@ -130,6 +129,19 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         # Sync enqueue (the dispatcher's sink is sync); the writer task drains it.
         outbound.put_nowait(event)
 
+    # Attach AFTER the sink exists — the backplane needs it to deliver, and a
+    # connection registered without one would report a delivery it cannot make.
+    await state.backplane.attach(conn_id, sink)
+    # The user/org targets are known at connect; session/agent are learned later,
+    # as sessions resolve (the dispatcher's associate hook below).
+    principal = access.principal
+    if not access.is_anonymous:
+        await state.backplane.associate(conn_id, Target("user", principal.sub))
+        await state.backplane.associate(conn_id, Target("org", principal.org))
+
+    async def associate(target: Target) -> None:
+        await state.backplane.associate(conn_id, target)
+
     # One pending-confirmation registry per connection: a `confirm_tool_action`
     # frame and the parked turn it resumes are always on the same connection (the
     # session id keys within it), so the registry need not be server-wide.
@@ -148,6 +160,7 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         session_authenticator=state.session_authenticator,
         judge_model=state.judge_model,
         otp_service=state.otp_service,
+        associate=associate,
     )
 
     cancel_wait = asyncio.ensure_future(state.cancel.wait())
