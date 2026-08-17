@@ -535,6 +535,7 @@ class FrameDispatcher:
             confirmations=self._confirmations,
             agent_config=agent_config,
             judge_model=self._judge_model,
+            org_id=self._access.principal.org,
         )
 
         # Run the turn as a background task, NOT awaited inline. A turn that calls a
