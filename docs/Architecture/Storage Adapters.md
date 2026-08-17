@@ -38,6 +38,22 @@ Mirrors the smooai monorepo's schema (the north star) so dogfooding is a swap, n
 - **Checkpoints**: currently `MemoryCheckpointStore` on the Postgres path — the sync r2d2 `PostgresCheckpointStore` was unwired by the th-58edbd deadlock fix (its blocking I/O rode the server runtime). OLTP + knowledge stay Postgres-durable; only crash-resume of an in-flight turn degrades. Re-wiring a durable async checkpoint store is a tracked follow-up.
 - **Knowledge**: a `knowledge_vectors` table with `embedding vector(1024)` (Voyage `voyage-3-large`) + `content_tsv tsvector`, HNSW cosine index. Retrieval = dense (HNSW) ∪ sparse (BM25) → Reciprocal Rank Fusion → optional rerank (the `Reranker` seam — see "Embedding seam (shared) and the rerank stage" above).
 
+### One schema, all implementations
+
+`rust/adapters/postgres/src/schema.rs` is the **source of truth**, and the Go and C# Postgres stores carry a copy of the same shape. A row written by any server reads back correctly in the others, so a database can be driven by whichever engine is running.
+
+Per-session state that has no dedicated column lives in `conversation_sessions.metadata` (jsonb) under key names that are themselves the cross-server contract:
+
+| key | meaning |
+| --- | --- |
+| `contactEmail` | the session's contact email |
+| `otpVerified` | end-user identity (OTP) verification bit |
+| `currentStepId` | conversation-workflow step pointer |
+
+The conversation's **owner** is deliberately not one of these: it is read from the conversation's `user` participant (`conversation_participants.email`), so there is one source of truth and a resumed session reports the *original* owner rather than whoever resumed it.
+
+> **The C# server used to fork this** (th-8ba730). It invented `conversation_identity_state` and `conversation_workflow_state` side tables, a narrower `conversation_sessions` carrying its own `user_email` column, and had no `conversations` or `conversation_participants` at all. It now reads and writes the shared shape; its store migrates a legacy database in place on init (widen the tables → backfill the side tables and `user_email` into `metadata`/participants → drop what it invented). Two notes for anyone extending it: the store applies **tables → widening → indexes** in that order, because a legacy table survives `CREATE TABLE IF NOT EXISTS` unwidened and an index over a not-yet-added column fails the whole init; and its `ISessionStore` surface stays *conversation*-keyed where Rust/Go key the same metadata by session, so its workflow step and OTP bit still survive a resume. Flipping that is a product decision (it would force re-verification after every resume), not a schema one.
+
 ## DynamoDB adapter (AWS) — single-table
 
 One table, multiple entities, modeled by hand on raw [`aws-sdk-dynamodb`](https://docs.rs/aws-sdk-dynamodb) (the single-table design below is the DynamoDB-Book-style entity layout; a future refactor onto [`modyne`](https://github.com/neoeinstein/modyne) — the "ElectroDB for Rust" — is on the roadmap). Sketch of the access patterns and keys:
