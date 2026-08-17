@@ -339,11 +339,19 @@ public sealed class FrameDispatcher
         {
             ["sessionId"] = session.SessionId,
             ["conversationId"] = session.ConversationId,
-            ["agentId"] = session.AgentId,
             ["agentName"] = session.AgentName,
             ["userParticipantId"] = session.UserParticipantId,
             ["agentParticipantId"] = session.AgentParticipantId,
         };
+
+        // agentId is OMITTED when the session has no agent, matching the Rust handler's
+        // skip_serializing_if. Emitting null would be a lie of a different shape, and there is no
+        // honest string for "no agent". NOTE: the spec still lists agentId as REQUIRED, so an
+        // agentless descriptor is not spec-valid in any language after th-68897a — raised upstream.
+        if (session.AgentId is not null)
+        {
+            data["agentId"] = session.AgentId;
+        }
         sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Session created", data));
     }
 
@@ -428,9 +436,12 @@ public sealed class FrameDispatcher
         {
             ["sessionId"] = session.SessionId,
             ["conversationId"] = session.ConversationId,
-            ["agentId"] = session.AgentId,
             ["agentName"] = session.AgentName,
         };
+        if (session.AgentId is not null)
+        {
+            data["agentId"] = session.AgentId; // omitted when absent — see create_conversation_session.
+        }
         sink(ProtocolEvents.ImmediateResponse(requestId, 200, "OK", data));
     }
 
@@ -675,7 +686,9 @@ public sealed class FrameDispatcher
         //    the session's agentId. A missing/unknown/malformed config resolves to null → the turn
         //    uses the org/default persona, unchanged. The lookup never throws (the store contract).
         AgentConfig? agentConfig = null;
-        if (_agentConfigResolver is not null)
+        // No agent named ⇒ nothing to resolve. This used to be handed a fabricated GUID, which always
+        // resolved to nothing anyway — now the absence is explicit instead of a pointless lookup.
+        if (_agentConfigResolver is not null && session.AgentId is not null)
         {
             agentConfig = await _agentConfigResolver.ResolveAsync(session.AgentId, cancellationToken).ConfigureAwait(false);
         }

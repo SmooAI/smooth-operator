@@ -290,6 +290,33 @@ public sealed class PostgresSharedSchemaTests : IClassFixture<PostgresFixture>
             $"SELECT last_activity_at FROM conversation_sessions WHERE session_id = '{session.SessionId}'"));
     }
 
+    /// <summary>
+    /// A session created with no agent reads back with NO agent, rather than a fabricated GUID
+    /// pointing at one that never existed. Fails if the column returns to NOT NULL or the property to
+    /// non-nullable. th-68897a.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task SessionWithoutAnAgent_ReadsBackNull(string agentId)
+    {
+        Skip.IfNot(_fixture.Available, "Docker unavailable");
+        var store = _fixture.Store!;
+
+        var created = await store.CreateSessionAsync(agentId, "Ada", "ada-agentless@example.com");
+        Assert.Null(created.AgentId);
+
+        var fetched = await store.GetSessionAsync(created.SessionId);
+        Assert.NotNull(fetched);
+        Assert.Null(fetched!.AgentId);
+        // The agent PARTICIPANT is still minted — that row is real, unlike the invented agent id.
+        Assert.False(string.IsNullOrEmpty(fetched.AgentParticipantId));
+
+        // A named agent still round-trips untouched.
+        var named = await store.CreateSessionAsync("agent-real", "Ada", "ada-agentless@example.com");
+        Assert.Equal("agent-real", (await store.GetSessionAsync(named.SessionId))!.AgentId);
+    }
+
     /// <summary>The CHECKs reject a value outside the shared vocabulary rather than storing it.</summary>
     [SkippableFact]
     public async Task PlatformAndStatusChecksRejectUnknownValues()

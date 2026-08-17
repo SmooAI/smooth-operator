@@ -106,7 +106,9 @@ public sealed class ServerInitiatedTurns : IServerInitiatedTurns
         // 2. Resolve per-agent config (instructions/workflow) by the session's agent, exactly like the
         //    client path. Null (no resolver / unknown agent) ⇒ the default persona, unchanged.
         AgentConfig? agentConfig = null;
-        if (_agentConfigResolver is not null)
+        // No agent named ⇒ nothing to resolve. This used to be handed a fabricated GUID, which always
+        // resolved to nothing anyway — now the absence is explicit instead of a pointless lookup.
+        if (_agentConfigResolver is not null && session.AgentId is not null)
         {
             agentConfig = await _agentConfigResolver.ResolveAsync(session.AgentId, cancellationToken).ConfigureAwait(false);
         }

@@ -85,7 +85,9 @@ internal static class PostgresSchema
             session_id           TEXT PRIMARY KEY,
             conversation_id      TEXT NOT NULL,
             organization_id      TEXT NOT NULL DEFAULT '',
-            agent_id             TEXT NOT NULL,
+            -- Nullable: a session with no agent has no agent. This was NOT NULL, which forced the
+            -- store to invent a GUID pointing at an agent that never existed. th-68897a.
+            agent_id             TEXT,
             agent_name           TEXT NOT NULL,
             user_participant_id  TEXT NOT NULL,
             agent_participant_id TEXT NOT NULL,
@@ -218,6 +220,10 @@ internal static class PostgresSchema
                                               ALTER COLUMN updated_at       SET NOT NULL,
                                               ALTER COLUMN last_activity_at SET DEFAULT now(),
                                               ALTER COLUMN last_activity_at SET NOT NULL;
+
+        -- A legacy database has agent_id NOT NULL, so an agentless session would still fail there.
+        -- Dropping a NOT NULL is always safe: every existing row already satisfies the weaker rule.
+        ALTER TABLE conversation_sessions ALTER COLUMN agent_id DROP NOT NULL;
 
         -- ponytail: the CHECKs are deliberately NOT retrofitted here. A legacy row's platform is
         -- 'smooth-operator' (this host's old value, outside the shared vocabulary), so adding the
