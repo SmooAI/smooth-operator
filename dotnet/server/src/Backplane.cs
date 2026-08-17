@@ -35,6 +35,13 @@ public interface IBackplane
     /// </summary>
     int Publish(Target target, JsonObject @event);
 
+    /// <summary>
+    /// Associate a connection with a target, so a publish to that target reaches it. Idempotent, so
+    /// re-resolving the same session cannot double-count a delivery. Learned over the connection's
+    /// life: user/org from auth at connect, session/agent as sessions resolve.
+    /// </summary>
+    void Associate(string connectionId, Target target);
+
     /// <summary>Remove a connection's sink and every association to it. ALWAYS run on teardown.</summary>
     void Detach(string connectionId);
 }
@@ -43,10 +50,9 @@ public interface IBackplane
 /// Single-process <see cref="IBackplane"/>: connection sinks plus a target → connections index. No
 /// cross-pod fan-out — that is the Redis/NATS seam.
 /// <para>
-/// ponytail: <see cref="Publish"/> is already generic over all target kinds. Only
-/// <c>Target("connection", …)</c> has entries today, so the other kinds resolve to zero connections
-/// and return 0 — associating a session/user/org/agent with its connections is the fan-out work, and
-/// it plugs in by seeding <see cref="_byTarget"/> without touching Publish.
+/// All five target kinds resolve locally (the Rust reference's fan-out): <see cref="Attach"/> seeds
+/// the connection target and <see cref="Associate"/> adds session/user/org/agent as the connection
+/// learns them, so <see cref="Publish"/> needed no per-kind branching.
 /// </para>
 /// Safe for concurrent use.
 /// </summary>
@@ -65,7 +71,7 @@ public sealed class InMemoryBackplane : IBackplane
         lock (_gate)
         {
             _sinks[connectionId] = sink;
-            Associate(connectionId, new Target("connection", connectionId));
+            Link(connectionId, new Target("connection", connectionId));
         }
     }
 
@@ -83,7 +89,10 @@ public sealed class InMemoryBackplane : IBackplane
         }
         foreach (var sink in sinks)
         {
-            sink(@event);
+            // Per-sink copy. Fan-out means one event now reaches MANY sinks, and JsonObject is
+            // mutable — the bundled writers only serialize it, but a host's sink is arbitrary code
+            // and one that mutates a shared node would corrupt every other connection's frame.
+            sink((JsonObject)@event.DeepClone());
         }
         return sinks.Count;
     }
@@ -107,8 +116,16 @@ public sealed class InMemoryBackplane : IBackplane
         }
     }
 
+    public void Associate(string connectionId, Target target)
+    {
+        lock (_gate)
+        {
+            Link(connectionId, target);
+        }
+    }
+
     /// <summary>Index both directions. Caller holds <see cref="_gate"/>.</summary>
-    private void Associate(string connectionId, Target target)
+    private void Link(string connectionId, Target target)
     {
         (_byTarget.TryGetValue(target, out var connections) ? connections : _byTarget[target] = []).Add(connectionId);
         (_byConnection.TryGetValue(connectionId, out var targets) ? targets : _byConnection[connectionId] = []).Add(target);

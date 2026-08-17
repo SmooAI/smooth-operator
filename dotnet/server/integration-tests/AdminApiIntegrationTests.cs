@@ -537,26 +537,49 @@ public class AdminApiIntegrationTests
     }
 
     /// <summary>
-    /// The whole point of the 501: session/user/org/agent are NOT routable by a connection-id registry.
-    /// Answering <c>{"delivered": 0}</c> would read as "accepted, reached nobody" for an event that was
-    /// never routable — so the response must carry no <c>delivered</c> field at all.
+    /// These four were a 501 — honest only while a connection-id registry could not route them. The
+    /// backplane now carries the reference's 5-target fan-out, so each delivers for real.
     /// </summary>
     [Theory]
     [InlineData("session")]
     [InlineData("user")]
     [InlineData("org")]
     [InlineData("agent")]
-    public async Task Publish_RefusesTargetsTheBackplaneCannotRoute(string kind)
+    public async Task Publish_DeliversToEveryTargetKind(string kind)
+    {
+        var backplane = new InMemoryBackplane();
+        JsonObject? received = null;
+        backplane.Attach("conn-1", ev => received = ev);
+        backplane.Associate("conn-1", new Target(kind, "x"));
+
+        await using var app = BuildAdminApp(AuthMode.Trusted, backplane: backplane);
+        await app.StartAsync();
+
+        var (status, json) = await Call(app, "POST", "/admin/publish", Admin(),
+            new { target = new { type = kind, id = "x" }, @event = new { kind } });
+
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(1, json!["delivered"]!.GetValue<int>());
+        Assert.Equal(kind, received!["kind"]!.GetValue<string>());
+
+        await app.StopAsync();
+    }
+
+    /// <summary>
+    /// A truthful zero for a non-connection kind too: the type routes, nothing is associated with that
+    /// id. Never a fabricated success — and no longer a 501 for something the registry can resolve.
+    /// </summary>
+    [Fact]
+    public async Task Publish_ReportsZeroForAnUnassociatedSession()
     {
         await using var app = BuildAdminApp(AuthMode.Trusted, backplane: new InMemoryBackplane());
         await app.StartAsync();
 
         var (status, json) = await Call(app, "POST", "/admin/publish", Admin(),
-            new { target = new { type = kind, id = "x" }, @event = new { } });
+            new { target = new { type = "session", id = "ghost" }, @event = new { } });
 
-        Assert.Equal(HttpStatusCode.NotImplemented, status);
-        Assert.Equal("UNSUPPORTED_TARGET", json!["error"]!["code"]!.GetValue<string>());
-        Assert.False(json.AsObject().ContainsKey("delivered"));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(0, json!["delivered"]!.GetValue<int>());
 
         await app.StopAsync();
     }

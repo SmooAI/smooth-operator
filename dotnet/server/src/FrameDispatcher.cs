@@ -23,6 +23,14 @@ public sealed class FrameDispatcher
     private readonly IAccessKnowledge? _knowledge;
     private readonly IReranker? _reranker;
     private readonly AccessContext _access;
+
+    /// <summary>This connection's access context — the WebSocket host reads it to associate the
+    /// backplane's user/org targets from the authenticated principal.</summary>
+    public AccessContext Access => _access;
+
+    /// <summary>Backplane association hook, set by the WebSocket host. Null when no backplane is
+    /// registered, which simply means session/agent targets are never routable.</summary>
+    public Action<Target>? Associate { get; set; }
     private readonly string? _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<IToolHook> _toolHooks;
@@ -324,6 +332,9 @@ public sealed class FrameDispatcher
             string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
 
+        // A freshly created session never passes through ScopedSessionAsync, so associate here too.
+        AssociateSession(session);
+
         var data = new JsonObject
         {
             ["sessionId"] = session.SessionId,
@@ -378,7 +389,30 @@ public sealed class FrameDispatcher
     private async Task<StoredSession?> ScopedSessionAsync(string? sessionId, CancellationToken cancellationToken)
     {
         var session = await _store.GetSessionAsync(sessionId ?? string.Empty, cancellationToken).ConfigureAwait(false);
-        return session is not null && CanRead(session.UserEmail) ? session : null;
+        if (session is null || !CanRead(session.UserEmail))
+        {
+            return null;
+        }
+        AssociateSession(session);
+        return session;
+    }
+
+    /// <summary>
+    /// Point the session (and its agent) at this connection, so a publish to either target reaches
+    /// this socket. Called from the session chokepoint above and from session creation, so no handler
+    /// can work with a session the backplane does not know about. No-op without a hook.
+    /// </summary>
+    private void AssociateSession(StoredSession session)
+    {
+        if (Associate is null)
+        {
+            return;
+        }
+        Associate(new Target("session", session.SessionId));
+        if (!string.IsNullOrEmpty(session.AgentId))
+        {
+            Associate(new Target("agent", session.AgentId));
+        }
     }
 
     private async Task HandleGetSessionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)

@@ -442,4 +442,63 @@ public class WebSocketProtocolIntegrationTests
 
         await app.StopAsync();
     }
+    /// <summary>
+    /// The lifecycle actually ASSOCIATES: a real connection registers its session / user / org /
+    /// agent targets, so a publish aimed at a live client reaches that socket. Without this the
+    /// backplane and the route could both pass every unit test and still reach nobody in production.
+    /// It asserts the events LAND ON THE SOCKET rather than that a counter moved.
+    /// </summary>
+    [Fact]
+    public async Task LiveConnection_IsReachableBySessionUserOrgAndAgent()
+    {
+        var backplane = new InMemoryBackplane();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(new MockChatClient().PushText("hi") as IChatClient);
+        builder.Services.AddSingleton(new TokenAccessResolver(new AuthOptions { Mode = AuthMode.Trusted }));
+        builder.Services.AddSingleton<IBackplane>(backplane);
+        builder.Services.AddSmoothOperatorServer();
+        await using var app = builder.Build();
+        app.MapSmoothOperatorWebSocket("/ws");
+        await app.StartAsync();
+
+        var server = app.GetTestServer();
+        var token = TrustedToken(new { sub = "u-1", org = "org-1", role = "basic", email = "u1@example.com" });
+        using var socket = await server.CreateWebSocketClient()
+            .ConnectAsync(new Uri(server.BaseAddress, $"ws?token={token}"), CancellationToken.None);
+
+        // create_conversation_session is what teaches the connection its session + agent.
+        var agentId = Guid.NewGuid().ToString();
+        await SendAsync(socket, $$"""{"action":"create_conversation_session","requestId":"cs-1","agentId":"{{agentId}}"}""");
+        var created = await ReceiveAsync(socket);
+        var sessionId = created["data"]!["sessionId"]!.GetValue<string>();
+
+        // Every learned target routes, and each publish reports exactly the one socket.
+        foreach (var (kind, id) in new[]
+                 {
+                     ("session", sessionId), ("user", "u-1"), ("org", "org-1"), ("agent", agentId),
+                 })
+        {
+            Assert.Equal(1, backplane.Publish(new Target(kind, id), new JsonObject { ["kind"] = kind }));
+        }
+
+        // …and the events actually arrive on the wire, in order.
+        var landed = new List<string>();
+        for (var i = 0; i < 4; i++)
+        {
+            landed.Add((await ReceiveAsync(socket))["kind"]!.GetValue<string>());
+        }
+        Assert.Equal(["session", "user", "org", "agent"], landed.ToArray());
+
+        // Detach-after-loop: once the connection is gone its session is unroutable again.
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        for (var i = 0; i < 100 && backplane.Count > 0; i++)
+        {
+            await Task.Delay(50);
+        }
+        Assert.Equal(0, backplane.Count);
+        Assert.Equal(0, backplane.Publish(new Target("session", sessionId), new JsonObject()));
+
+        await app.StopAsync();
+    }
 }

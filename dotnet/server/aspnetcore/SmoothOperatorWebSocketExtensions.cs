@@ -139,6 +139,19 @@ public static class SmoothOperatorWebSocketExtensions
         // always — a leaked sink would have `delivered: 1` reported for a socket that is long gone.
         backplane?.Attach(connectionId, ev => channel.Writer.TryWrite(ev));
 
+        if (backplane is not null)
+        {
+            // user/org are known at connect, from the AUTHENTICATED principal — never a frame field.
+            // session/agent are learned later, as sessions resolve (the dispatcher hook below).
+            var access = dispatcher.Access;
+            if (!access.IsAnonymous)
+            {
+                backplane.Associate(connectionId, new Target("user", access.Principal.Sub));
+                backplane.Associate(connectionId, new Target("org", access.Principal.Org));
+            }
+            dispatcher.Associate = target => backplane.Associate(connectionId, target);
+        }
+
         var writer = Task.Run(async () =>
         {
             try
