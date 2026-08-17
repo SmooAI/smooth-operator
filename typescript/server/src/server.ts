@@ -34,6 +34,7 @@ import type { Frame } from './protocol.js';
 import type { ChatClientLike, Tool, ToolHook } from '@smooai/smooth-operator-core';
 import type { AuthVerifier } from './auth.js';
 import { NoAuthVerifier } from './auth.js';
+import { AdminStores, handleAdminRequest } from './admin.js';
 import { InMemorySessionStore, type SessionStore } from './sessionStore.js';
 
 export interface ServerOptions {
@@ -148,10 +149,15 @@ export function buildServer(options: ServerOptions): {
     // SIGTERM/SIGINT (or close()) fire it; every connection's read loop watches it.
     const drain = new AbortController();
 
-    const http = createServer((_req, res) => {
-        // Plain HTTP isn't part of the protocol surface — a tiny health response.
-        res.writeHead(426, { 'content-type': 'text/plain' });
-        res.end('Upgrade Required: connect over WebSocket\n');
+    // The `/admin/*` management API the console drives (see admin.ts). Everything
+    // else on plain HTTP is not part of the protocol surface.
+    const adminStores = new AdminStores();
+    const http = createServer((req, res) => {
+        void handleAdminRequest({ auth, store, stores: adminStores }, req, res).then((handled) => {
+            if (handled) return;
+            res.writeHead(426, { 'content-type': 'text/plain' });
+            res.end('Upgrade Required: connect over WebSocket\n');
+        });
     });
 
     const wss = new WebSocketServer({ server: http, path });
