@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import websockets
 from smooth_operator_core import Knowledge
 
+from . import telemetry
 from .admin import AdminStore, InMemoryAdminStore, start_admin_http_server
 from .agent_config import AgentConfigResolver, NoSessionAuthenticator, SessionAuthenticator, StaticAgentConfigResolver
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
@@ -276,6 +277,11 @@ async def serve(
     The handler resolves each connection's access from its ``?token=`` slot, then
     runs the per-connection loop. With ``install_signal_handlers``, SIGTERM/SIGINT
     trigger a graceful drain."""
+
+    # Install OpenTelemetry (idempotent, env-gated on OTEL_EXPORTER_OTLP_ENDPOINT).
+    # No-op with zero external deps when the endpoint is unset — mirrors the Rust
+    # server's `init_telemetry` at boot.
+    telemetry.init_telemetry()
 
     async def handler(websocket: Any) -> None:
         # The request target (`/ws?token=...`) carries the auth token in its query

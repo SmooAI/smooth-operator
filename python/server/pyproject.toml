@@ -11,9 +11,18 @@ dependencies = [
     "smooai-smooth-operator-core>=1.8.3",
     # asyncio WebSocket transport (server side).
     "websockets>=12",
+    # OpenTelemetry GenAI spans on the turn/tool path (parity with the Rust server's
+    # gen_ai.chat / gen_ai.tool spans). The api+sdk are enough to create spans and to
+    # test them with an in-memory exporter; the OTLP exporter is the optional `otel`
+    # extra below (only needed to actually ship spans to a collector).
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
 ]
 
 [project.optional-dependencies]
+# OTLP span exporter, installed only where the server ships spans to a collector
+# (OTEL_EXPORTER_OTLP_ENDPOINT set). Absent ⇒ init_telemetry logs + runs exporter-less.
+otel = ["opentelemetry-exporter-otlp-proto-grpc>=1.20"]
 # A live (non-mock) turn needs an OpenAI-compatible async client against the
 # SmooAI gateway. Optional: the server is fully testable on MockLlmProvider with
 # no gateway, and protocol-only paths (create/get/ping) need no LLM at all.

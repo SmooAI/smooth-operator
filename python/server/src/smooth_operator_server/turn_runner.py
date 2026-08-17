@@ -33,7 +33,7 @@ from smooth_operator_core import (
     ToolResultEvent,
 )
 
-from . import protocol
+from . import protocol, telemetry
 from .agent_config import AgentConfig, filter_tools
 from .confirmation import ConfirmationRegistry
 from .extensions import build_extension_host
@@ -200,6 +200,7 @@ class TurnRunner:
         agent_config: AgentConfig | None = None,
         judge_model: str | None = None,
         tool_hooks: list[Any] | None = None,
+        org_id: str | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
@@ -222,6 +223,10 @@ class TurnRunner:
         #: tool call. Empty (the default) ⇒ no hooks. Threaded into ``AgentOptions``
         #: only when the installed core supports the seam (see ``_CORE_SUPPORTS_HOOKS``).
         self._tool_hooks = tool_hooks or []
+        #: The owning org, recorded as ``smooai.org_id`` on the turn's ``gen_ai.chat``
+        #: span so the observability studio groups turns by org (mirrors the Rust
+        #: runner's ``org_id`` span field). ``None`` ⇒ the attribute is omitted.
+        self._org_id = org_id
 
     def _is_gated(self, tool_name: str) -> bool:
         """True when ``tool_name`` matches a confirmation-gated pattern (substring,
@@ -399,37 +404,64 @@ class TurnRunner:
         if context is not None and context.images and self._knowledge is None:
             model_message = _build_user_content(user_message, context.images)
 
-        try:
-            # 3. Persist the inbound user message.
-            await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
+        # OpenTelemetry GenAI turn span (mirrors the Rust `run_streaming_turn`
+        # `gen_ai.chat` span). Wraps the whole engine run so the `gen_ai.tool` child
+        # spans nest under it and token usage is recorded onto it. `smooai.org_id`
+        # matches the monorepo TS chat handler so the studio groups by org. A no-op
+        # (zero cost) until `init_telemetry` installs a provider.
+        span_attrs: dict[str, Any] = {
+            telemetry.GEN_AI_SYSTEM: telemetry.SYSTEM_NAME,
+            telemetry.GEN_AI_REQUEST_MODEL: self._model or DEFAULT_MODEL,
+            telemetry.GEN_AI_CONVERSATION_ID: conversation_id,
+            telemetry.GEN_AI_AGENT_NAME: telemetry.AGENT_NAME,
+        }
+        if self._org_id:
+            span_attrs[telemetry.SMOOAI_ORG_ID] = self._org_id
 
-            async for event in agent.run_stream(model_message, thread=thread):
-                if isinstance(event, TextEvent):
-                    if event.text:
-                        # Close the preamble window BEFORE the first answer token
-                        # goes out, so a preamble resolving concurrently is dropped.
-                        answer_started.set()
-                        reply_parts.append(event.text)
-                        sink(protocol.stream_token(request_id, event.text))
-                elif isinstance(event, ToolCallEvent):
-                    # DEFER a confirmation-gated tool's toolCall chunk: it is emitted
-                    # from the gate AFTER `write_confirmation_required`, so the wire
-                    # order matches the reference (Rust) server. Non-gated tools emit
-                    # their chunk inline as before.
-                    if self._is_gated(event.name):
-                        continue
-                    sink(protocol.stream_chunk(request_id, event.name, _tool_call_state(event)))
-                elif isinstance(event, ToolResultEvent):
-                    sink(protocol.stream_chunk(request_id, event.name, _tool_result_state(event)))
-                elif isinstance(event, DoneEvent):
-                    final_text = event.response.text
-                    # The terminal event is not re-emitted as a stream event, but its
-                    # accumulated cost + token counts become `eventual_response.usage`.
-                    final_usage = {
-                        "costUsd": event.response.cost_usd,
-                        "promptTokens": event.response.usage.prompt_tokens,
-                        "completionTokens": event.response.usage.completion_tokens,
-                    }
+        try:
+            with telemetry.tracer().start_as_current_span(telemetry.SPAN_CHAT, attributes=span_attrs) as turn_span:
+                # 3. Persist the inbound user message.
+                await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
+
+                async for event in agent.run_stream(model_message, thread=thread):
+                    if isinstance(event, TextEvent):
+                        if event.text:
+                            # Close the preamble window BEFORE the first answer token
+                            # goes out, so a preamble resolving concurrently is dropped.
+                            answer_started.set()
+                            reply_parts.append(event.text)
+                            sink(protocol.stream_token(request_id, event.text))
+                    elif isinstance(event, ToolCallEvent):
+                        # One `gen_ai.tool` child span per tool call, carrying the tool
+                        # name + redacted arguments (mirrors the Rust runner's per-tool
+                        # child span). Emitted for gated tools too — the span is
+                        # independent of the deferred wire chunk below.
+                        _emit_tool_span(event)
+                        # DEFER a confirmation-gated tool's toolCall chunk: it is emitted
+                        # from the gate AFTER `write_confirmation_required`, so the wire
+                        # order matches the reference (Rust) server. Non-gated tools emit
+                        # their chunk inline as before.
+                        if self._is_gated(event.name):
+                            continue
+                        sink(protocol.stream_chunk(request_id, event.name, _tool_call_state(event)))
+                    elif isinstance(event, ToolResultEvent):
+                        sink(protocol.stream_chunk(request_id, event.name, _tool_result_state(event)))
+                    elif isinstance(event, DoneEvent):
+                        final_text = event.response.text
+                        # The terminal event is not re-emitted as a stream event, but its
+                        # accumulated cost + token counts become `eventual_response.usage`.
+                        final_usage = {
+                            "costUsd": event.response.cost_usd,
+                            "promptTokens": event.response.usage.prompt_tokens,
+                            "completionTokens": event.response.usage.completion_tokens,
+                        }
+                        # Record token usage on the turn span (omitted when the engine
+                        # reported none, per the GenAI conventions).
+                        prompt = event.response.usage.prompt_tokens
+                        completion = event.response.usage.completion_tokens
+                        if prompt or completion:
+                            turn_span.set_attribute(telemetry.GEN_AI_USAGE_INPUT_TOKENS, prompt)
+                            turn_span.set_attribute(telemetry.GEN_AI_USAGE_OUTPUT_TOKENS, completion)
         finally:
             # Turn over: the preamble window is closed for good. Cancel and reap the
             # task so a still-in-flight preamble can neither emit late nor linger as
@@ -621,6 +653,22 @@ def _build_user_content(text: str, images: list[dict[str, Any]]) -> list[dict[st
 def _truncate(value: str, max_chars: int) -> str:
     """Cap ``value`` at ``max_chars`` (matches the TS server's ``truncate``)."""
     return value if len(value) <= max_chars else value[:max_chars]
+
+
+def _emit_tool_span(event: ToolCallEvent) -> None:
+    """Emit a ``gen_ai.tool`` child span for a tool call, carrying the tool name and
+    the redacted JSON arguments (mirrors the Rust runner's per-tool child span). The
+    span opens as a child of the current ``gen_ai.chat`` turn span and closes
+    immediately — a marker, not a duration measured around execution (the engine owns
+    tool execution). No-op cost until a tracer provider is installed."""
+    with telemetry.tracer().start_as_current_span(
+        telemetry.SPAN_TOOL,
+        attributes={
+            telemetry.GEN_AI_TOOL_NAME: event.name,
+            telemetry.GEN_AI_TOOL_ARGUMENTS: telemetry.redact_tool_arguments(event.arguments or ""),
+        },
+    ):
+        pass
 
 
 def _tool_call_state(event: ToolCallEvent) -> dict[str, Any]:
