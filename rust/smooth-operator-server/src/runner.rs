@@ -9,9 +9,12 @@
 //! The service needs both, so this module builds the agent itself, wiring the
 //! same knowledge-grounding as core PLUS:
 //!
-//! 1. **Streaming** via [`Agent::run_with_channel`], translating the engine's
-//!    [`AgentEvent`] stream into protocol events (`stream_token`,
-//!    `stream_chunk`, `eventual_response`).
+//! 1. **Streaming** via the engine's [`AgentExecutor`] seam (which the default
+//!    [`InProcessExecutor`] serves by delegating to [`Agent::run_with_channel`]),
+//!    translating the engine's [`AgentEvent`] stream into protocol events
+//!    (`stream_token`, `stream_chunk`, `eventual_response`). Running the turn
+//!    through the seam rather than the agent directly is what lets a durable
+//!    backend (ADR-030) be selected in one place — see [`turn_executor`].
 //! 2. **Per-session memory** via [`AgentConfig::with_prior_messages`]: before
 //!    each turn the session's persisted message log is loaded from the storage
 //!    adapter and replayed into the conversation, so the model sees turn 1 when
@@ -25,6 +28,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::json;
+use smooth_operator_core::executor::{AgentExecutor, InProcessExecutor};
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::tool::ToolHook;
 use smooth_operator_core::{
@@ -82,6 +86,48 @@ impl ToolHook for SharedToolHook {
     async fn pre_write(&self, path: &str) -> anyhow::Result<()> {
         self.0.pre_write(path).await
     }
+}
+
+/// Env var a deployment sets to run turns on a durable backend (ADR-030)
+/// instead of in-process. Unset — the default — is the in-process executor,
+/// which is a verbatim delegation to `Agent::run_with_channel`, so a deployment
+/// that never sets this behaves exactly as it did before the seam existed.
+const DURABLE_EXECUTOR_ENV: &str = "SMOOTH_AGENT_DURABLE_EXECUTOR";
+
+/// Whether the [`DURABLE_EXECUTOR_ENV`] value asks for durable execution.
+/// Separated from the env read so the parse is testable without mutating
+/// process-global state.
+fn durable_requested(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    )
+}
+
+/// The executor a turn runs on — the one place the durable backend plugs in.
+///
+/// Today this always resolves to [`InProcessExecutor`], because the Temporal
+/// backend lives in `smooai-smooth-operator-temporal`, which is `publish =
+/// false` in the engine repo: this crate consumes the engine from crates.io and
+/// is itself published, so it cannot take a git or path dependency on it. Asking
+/// for durable mode therefore warns and falls back rather than silently
+/// pretending the turn is durable — a turn that a client believes will survive a
+/// disconnect, but won't, is worse than no durable mode at all.
+///
+/// TODO(ADR-030): publish `smooai-smooth-operator-temporal`, then select its
+/// workflow-backed executor here behind an optional `temporal` cargo feature.
+/// That is what makes a parked write-approval survive a browser refresh: the
+/// engine's `AgentTurnWorkflow` already gates approval-required tools on durable
+/// `approve_tool`/`deny_tool` signals, so the pending decision lives in workflow
+/// history instead of the ~5-minute in-process park this runner uses today.
+fn turn_executor() -> Arc<dyn AgentExecutor> {
+    if durable_requested(std::env::var(DURABLE_EXECUTOR_ENV).ok().as_deref()) {
+        tracing::warn!(
+            env = DURABLE_EXECUTOR_ENV,
+            "durable execution requested but no durable backend is compiled into this build; running the turn in-process"
+        );
+    }
+    Arc::new(InProcessExecutor::new())
 }
 
 /// How many auto-injected knowledge results the engine prepends as
@@ -1137,10 +1183,15 @@ pub async fn run_streaming_turn(
         )
     });
 
-    // Drive the agent loop. `run_with_channel` consumes `tx`; when it returns,
-    // the channel closes and the translator task drains and finishes.
-    let conversation = agent
-        .run_with_channel(user_message, tx)
+    // Drive the agent loop through the engine's `AgentExecutor` seam rather than
+    // calling `Agent::run_with_channel` directly. With the default
+    // `InProcessExecutor` this IS that call — a verbatim delegation — so the turn
+    // is byte-for-byte what it was. What the indirection buys is that a durable
+    // backend can be selected here without touching the ~200 lines of event
+    // translation above it. The executor consumes `tx`; when it returns, the
+    // channel closes and the translator task drains and finishes.
+    let conversation = turn_executor()
+        .execute_streaming(&agent, user_message.to_string(), tx)
         .instrument(turn_span.clone())
         .await?;
 
@@ -1569,4 +1620,23 @@ pub fn general_agent_response(reply: &str, suggested_next_actions: &[String]) ->
         "resolutionStatus": "in_progress",
         "suggestedNextActions": suggested_next_actions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::durable_requested;
+
+    /// The durable opt-in is OFF unless the env var explicitly asks for it —
+    /// including for an unset, empty, or unrecognized value. Getting this
+    /// backwards would silently change how every deployed turn runs.
+    #[test]
+    fn durable_is_opt_in_only() {
+        for on in ["1", "true", "TRUE", " on ", "yes"] {
+            assert!(durable_requested(Some(on)), "{on:?} should opt in");
+        }
+        for off in ["", " ", "0", "false", "off", "no", "maybe"] {
+            assert!(!durable_requested(Some(off)), "{off:?} should stay off");
+        }
+        assert!(!durable_requested(None), "unset should stay off");
+    }
 }

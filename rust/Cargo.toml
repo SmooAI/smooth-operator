@@ -30,7 +30,9 @@ repository = "https://github.com/SmooAI/smooth-operator"
 # `LlmClient::with_metadata` (per-agent LLM request metadata passthrough); 1.7.2
 # and below predate it. Same trap as the old 0.16.0/0.16.1 `with_model_ceiling`
 # gap, which is why the `git`/`branch` patch stopgaps keep appearing here.
-smooai-smooth-operator-core = "1.7.3"
+# 1.7.10 is the first with the `executor` module (`AgentExecutor` /
+# `InProcessExecutor`, ADR-030), which `runner::turn_executor` calls.
+smooai-smooth-operator-core = "1.7.10"
 # Intra-workspace dep on the reference lib carries its version so the adapters /
 # ingestion / server that depend on it are publishable (path = local dev,
 # version = the crates.io requirement).
