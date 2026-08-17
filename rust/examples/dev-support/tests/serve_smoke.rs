@@ -367,6 +367,7 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,

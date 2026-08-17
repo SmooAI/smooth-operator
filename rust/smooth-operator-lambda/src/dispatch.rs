@@ -549,6 +549,7 @@ async fn send_message(
             model_max_output: None,
             access,
             llm_provider: None,
+            executor: None,
             // Opt-in rerank stage (feature gap G8): `None` unless the operator
             // enabled it via `SMOOTH_AGENT_RERANK`. Default-off keeps retrieval
             // behavior unchanged.

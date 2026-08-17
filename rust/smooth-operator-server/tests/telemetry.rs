@@ -173,6 +173,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,

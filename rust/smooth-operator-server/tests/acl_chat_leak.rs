@@ -126,6 +126,7 @@ async fn run_turn_as(
             model_max_output: None,
             access,
             llm_provider: Some(Arc::new(mock.clone())),
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,

@@ -127,6 +127,7 @@ async fn run(
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(scripted_mock())),
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,

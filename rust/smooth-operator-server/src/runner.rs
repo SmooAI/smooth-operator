@@ -106,25 +106,34 @@ fn durable_requested(value: Option<&str>) -> bool {
 
 /// The executor a turn runs on — the one place the durable backend plugs in.
 ///
-/// Today this always resolves to [`InProcessExecutor`], because the Temporal
-/// backend lives in `smooai-smooth-operator-temporal`, which is `publish =
-/// false` in the engine repo: this crate consumes the engine from crates.io and
-/// is itself published, so it cannot take a git or path dependency on it. Asking
-/// for durable mode therefore warns and falls back rather than silently
-/// pretending the turn is durable — a turn that a client believes will survive a
+/// `injected` is [`TurnRequest::executor`]: a caller that supplies one gets it,
+/// full stop, and the env var is not consulted. That is the seam a durable
+/// backend arrives through, and it is deliberately a *parameter* rather than
+/// something this function constructs, so the Temporal dependency stays out of
+/// this published crate — see [`TurnRequest::executor`].
+///
+/// With nothing injected this resolves to [`InProcessExecutor`], a verbatim
+/// delegation to `Agent::run_with_channel`. Asking for durable mode via the env
+/// var without supplying an executor warns and falls back rather than silently
+/// pretending the turn is durable — a turn a client believes will survive a
 /// disconnect, but won't, is worse than no durable mode at all.
 ///
-/// TODO(ADR-030): publish `smooai-smooth-operator-temporal`, then select its
-/// workflow-backed executor here behind an optional `temporal` cargo feature.
-/// That is what makes a parked write-approval survive a browser refresh: the
-/// engine's `AgentTurnWorkflow` already gates approval-required tools on durable
-/// `approve_tool`/`deny_tool` signals, so the pending decision lives in workflow
-/// history instead of the ~5-minute in-process park this runner uses today.
-fn turn_executor() -> Arc<dyn AgentExecutor> {
+/// TODO(ADR-030): the engine's `AgentTurnWorkflow` already gates
+/// approval-required tools on durable `approve_tool`/`deny_tool` signals, which
+/// is what would let a parked write-approval outlive a browser refresh instead of
+/// the ~5-minute in-process park this runner uses today. Building the executor
+/// that drives it is blocked on two open design questions, not on plumbing: a
+/// workflow-backed turn has no token-delta path (so it cannot feed the event
+/// translator below), and `AgentTurnInput` carries neither prior messages nor a
+/// per-turn, per-org tool registry.
+fn turn_executor(injected: Option<Arc<dyn AgentExecutor>>) -> Arc<dyn AgentExecutor> {
+    if let Some(executor) = injected {
+        return executor;
+    }
     if durable_requested(std::env::var(DURABLE_EXECUTOR_ENV).ok().as_deref()) {
         tracing::warn!(
             env = DURABLE_EXECUTOR_ENV,
-            "durable execution requested but no durable backend is compiled into this build; running the turn in-process"
+            "durable execution requested but no executor was supplied on the turn; running the turn in-process"
         );
     }
     Arc::new(InProcessExecutor::new())
@@ -477,6 +486,17 @@ pub struct TurnRequest<'a> {
     /// deterministically offline. `None` in production (a live client is built
     /// from `llm`).
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
+    /// Optional durable-execution backend for THIS turn (ADR-030). `None` — the
+    /// default — runs the turn in-process, which is a verbatim delegation to
+    /// `Agent::run_with_channel`, so a caller that never sets this is unchanged.
+    ///
+    /// Per-turn rather than process-global on purpose: durable mode is meant to be
+    /// opted into per conversation, and a process-global handle could not express
+    /// that. It is also what keeps the Temporal dependency OUT of this published
+    /// crate — an unpublished deployment crate can construct the durable executor
+    /// and pass it in here, so nothing Temporal-shaped ever appears in this
+    /// crate's manifest.
+    pub executor: Option<Arc<dyn AgentExecutor>>,
     /// Optional post-retrieval reranker (feature gap G8). When `Some`, the
     /// `knowledge_search` tool overfetches candidates and reorders the top-K with
     /// this reranker before they reach the model. `None` (the default) keeps the
@@ -623,6 +643,7 @@ pub async fn run_streaming_turn(
         model_max_output,
         access,
         llm_provider,
+        executor,
         reranker,
         confirmation,
         interactions,
@@ -1190,7 +1211,7 @@ pub async fn run_streaming_turn(
     // backend can be selected here without touching the ~200 lines of event
     // translation above it. The executor consumes `tx`; when it returns, the
     // channel closes and the translator task drains and finishes.
-    let conversation = turn_executor()
+    let conversation = turn_executor(executor)
         .execute_streaming(&agent, user_message.to_string(), tx)
         .instrument(turn_span.clone())
         .await?;
@@ -1624,7 +1645,36 @@ pub fn general_agent_response(reply: &str, suggested_next_actions: &[String]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::durable_requested;
+    use std::sync::Arc;
+
+    use smooth_operator_core::executor::{AgentExecutor, InProcessExecutor};
+
+    use super::{durable_requested, turn_executor};
+
+    /// An injected executor is handed back verbatim — the SAME handle, not a fresh
+    /// in-process one. This is the whole point of the field: a durable backend
+    /// constructed outside this crate has to survive the trip through here.
+    #[test]
+    fn injected_executor_is_used_verbatim() {
+        let injected: Arc<dyn AgentExecutor> = Arc::new(InProcessExecutor::new());
+        let selected = turn_executor(Some(Arc::clone(&injected)));
+        assert!(
+            Arc::ptr_eq(&injected, &selected),
+            "injected executor must be returned as-is"
+        );
+    }
+
+    /// Nothing injected ⇒ a fresh in-process executor, never the injected slot's
+    /// absence silently becoming an error.
+    #[test]
+    fn no_injection_falls_back_to_in_process() {
+        let a = turn_executor(None);
+        let b = turn_executor(None);
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "each fallback builds its own in-process executor"
+        );
+    }
 
     /// The durable opt-in is OFF unless the env var explicitly asks for it —
     /// including for an unset, empty, or unrecognized value. Getting this
