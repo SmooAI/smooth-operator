@@ -85,7 +85,10 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
             // (organization_id, idempotency_key), and a freshly minted uuid is unique by construction.
             const string conversationSql = """
                 INSERT INTO conversations (id, platform, name, organization_id, idempotency_key, created_at, updated_at)
-                VALUES (@cid, 'smooth-operator', 'conversation', '', @cid, now(), now())
+                -- 'web', not 'smooth-operator': platform is the CHANNEL, and this host serves a
+                -- browser WebSocket chat. The old value was the product name, which is not in the
+                -- shared platform vocabulary and now fails its CHECK. Matches the Go store.
+                VALUES (@cid, 'web', 'conversation', '', @cid, now(), now())
                 ON CONFLICT (id) DO NOTHING
                 """;
             await using (var command = new NpgsqlCommand(conversationSql, connection, transaction))

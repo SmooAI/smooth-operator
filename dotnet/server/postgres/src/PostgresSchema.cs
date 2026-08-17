@@ -35,14 +35,16 @@ internal static class PostgresSchema
     internal const string Tables = """
         CREATE TABLE IF NOT EXISTS conversations (
             id              TEXT PRIMARY KEY,
-            platform        TEXT NOT NULL,
+            platform        TEXT NOT NULL
+                                CHECK (platform IN ('web', 'messenger', 'instagram', 'email', 'discord',
+                                'phone', 'sms', 'slack', 'whatsapp', 'tiktok')),
             name            TEXT NOT NULL,
             organization_id TEXT NOT NULL,
             idempotency_key TEXT NOT NULL,
-            metadata_json   JSONB,
-            analytics_json  JSONB,
-            created_at      TIMESTAMPTZ NOT NULL,
-            updated_at      TIMESTAMPTZ NOT NULL
+            metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+            analytics_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         );
 
         CREATE TABLE IF NOT EXISTS conversation_participants (
@@ -58,9 +60,9 @@ internal static class PostgresSchema
             email               TEXT,
             phone               TEXT,
             crm_contact_id      TEXT,
-            metadata_json       JSONB,
-            created_at          TIMESTAMPTZ NOT NULL,
-            updated_at          TIMESTAMPTZ NOT NULL
+            metadata_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
         );
 
         CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -72,10 +74,10 @@ internal static class PostgresSchema
             content         JSONB NOT NULL,
             from_ref        JSONB,
             to_ref          JSONB,
-            metadata_json   JSONB,
-            analytics_json  JSONB,
+            metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+            analytics_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
             seq             BIGSERIAL,
-            created_at      TIMESTAMPTZ NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at      TIMESTAMPTZ
         );
 
@@ -88,14 +90,15 @@ internal static class PostgresSchema
             user_participant_id  TEXT NOT NULL,
             agent_participant_id TEXT NOT NULL,
             thread_id            TEXT NOT NULL,
-            status               TEXT,
+            -- NULL passes a CHECK, so this constrains the value without making status required.
+            status               TEXT CHECK (status IN ('active', 'idle', 'ended')),
             token_count          BIGINT,
             message_count        BIGINT,
-            metadata             JSONB,
-            created_at           TIMESTAMPTZ,
-            updated_at           TIMESTAMPTZ,
+            metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
             ended_at             TIMESTAMPTZ,
-            last_activity_at     TIMESTAMPTZ
+            last_activity_at     TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         """;
 
@@ -162,7 +165,7 @@ internal static class PostgresSchema
         -- A conversations row for every legacy session (the old shape had no conversations table).
         INSERT INTO conversations (id, platform, name, organization_id, idempotency_key, created_at, updated_at)
         SELECT DISTINCT ON (s.conversation_id)
-               s.conversation_id, 'smooth-operator', 'conversation', '', s.conversation_id,
+               s.conversation_id, 'web', 'conversation', '', s.conversation_id,
                coalesce(s.created_at, now()), coalesce(s.created_at, now())
           FROM conversation_sessions s
          WHERE NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = s.conversation_id)
@@ -182,6 +185,45 @@ internal static class PostgresSchema
         DROP TABLE IF EXISTS conversation_identity_state;
         DROP TABLE IF EXISTS conversation_workflow_state;
         ALTER TABLE conversation_sessions DROP COLUMN IF EXISTS user_email;
+
+        -- A legacy database already HAS these columns, so the NOT NULL DEFAULTs in the DDL above are
+        -- a no-op there (CREATE TABLE IF NOT EXISTS never runs). Backfill the nulls, then apply the
+        -- constraint, so a migrated database ends up with the same guarantees as a fresh one — this
+        -- host is the only server with a migration block, so it is the only one that can close it.
+        UPDATE conversations          SET metadata_json  = '{}'::jsonb WHERE metadata_json  IS NULL;
+        UPDATE conversations          SET analytics_json = '{}'::jsonb WHERE analytics_json IS NULL;
+        UPDATE conversation_participants SET metadata_json = '{}'::jsonb WHERE metadata_json IS NULL;
+        UPDATE conversation_messages  SET metadata_json  = '{}'::jsonb WHERE metadata_json  IS NULL;
+        UPDATE conversation_messages  SET analytics_json = '{}'::jsonb WHERE analytics_json IS NULL;
+        UPDATE conversation_sessions  SET metadata         = '{}'::jsonb WHERE metadata         IS NULL;
+        UPDATE conversation_sessions  SET created_at       = now()      WHERE created_at       IS NULL;
+        UPDATE conversation_sessions  SET updated_at       = now()      WHERE updated_at       IS NULL;
+        UPDATE conversation_sessions  SET last_activity_at = now()      WHERE last_activity_at IS NULL;
+
+        ALTER TABLE conversations             ALTER COLUMN metadata_json    SET DEFAULT '{}'::jsonb,
+                                              ALTER COLUMN metadata_json    SET NOT NULL,
+                                              ALTER COLUMN analytics_json   SET DEFAULT '{}'::jsonb,
+                                              ALTER COLUMN analytics_json   SET NOT NULL;
+        ALTER TABLE conversation_participants ALTER COLUMN metadata_json    SET DEFAULT '{}'::jsonb,
+                                              ALTER COLUMN metadata_json    SET NOT NULL;
+        ALTER TABLE conversation_messages     ALTER COLUMN metadata_json    SET DEFAULT '{}'::jsonb,
+                                              ALTER COLUMN metadata_json    SET NOT NULL,
+                                              ALTER COLUMN analytics_json   SET DEFAULT '{}'::jsonb,
+                                              ALTER COLUMN analytics_json   SET NOT NULL;
+        ALTER TABLE conversation_sessions     ALTER COLUMN metadata         SET DEFAULT '{}'::jsonb,
+                                              ALTER COLUMN metadata         SET NOT NULL,
+                                              ALTER COLUMN created_at       SET DEFAULT now(),
+                                              ALTER COLUMN created_at       SET NOT NULL,
+                                              ALTER COLUMN updated_at       SET DEFAULT now(),
+                                              ALTER COLUMN updated_at       SET NOT NULL,
+                                              ALTER COLUMN last_activity_at SET DEFAULT now(),
+                                              ALTER COLUMN last_activity_at SET NOT NULL;
+
+        -- ponytail: the CHECKs are deliberately NOT retrofitted here. A legacy row's platform is
+        -- 'smooth-operator' (this host's old value, outside the shared vocabulary), so adding the
+        -- constraint would fail the whole init on exactly the databases that need migrating. Fresh
+        -- databases get it from the DDL; rewriting existing rows to fit is a data change, not a
+        -- schema one, and needs its own decision.
         """;
 
     /// <summary>
