@@ -21,10 +21,12 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Callable
 
 from smooth_operator_core import (
+    AgentExecutor,
     AgentOptions,
     DoneEvent,
     HumanApprovalRequest,
     HumanApprovalResponse,
+    InProcessExecutor,
     Knowledge,
     SmoothAgent,
     SmoothAgentThread,
@@ -118,6 +120,50 @@ PREAMBLE_SYSTEM_PROMPT = (
 logger = logging.getLogger(__name__)
 
 
+#: Env var a deployment sets to run turns on a durable backend (ADR-030) instead of
+#: in-process. Unset — the default — is the in-process executor, a verbatim
+#: delegation to ``SmoothAgent.run_stream``, so a deployment that never sets this
+#: behaves exactly as it did before the seam existed. Mirrors the Rust server's
+#: ``DURABLE_EXECUTOR_ENV`` (``runner.rs``).
+DURABLE_EXECUTOR_ENV = "SMOOTH_AGENT_DURABLE_EXECUTOR"
+
+
+def durable_requested(value: str | None) -> bool:
+    """Whether ``value`` opts into durable execution.
+
+    Off unless explicitly asked — an unset, empty, or unrecognized value stays off.
+    Separated from the env read so the parse is testable without mutating
+    process-global state (mirrors the Rust ``durable_requested``)."""
+    return (value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def select_turn_executor(injected: AgentExecutor | None, env_value: str | None = None) -> AgentExecutor:
+    """The executor a turn runs on — the one place a durable backend plugs in.
+
+    A durable backend is dependency-**injected** (``TurnRunner(executor=...)``), so
+    this module needs no hard dependency on the Temporal package: the seam works with
+    the injected executor as an opaque ``AgentExecutor``. Selection is env-gated to
+    match the parity spec — the injected durable backend is used only when
+    ``SMOOTH_AGENT_DURABLE_EXECUTOR`` opts in; otherwise (and whenever nothing is
+    injected) this resolves to the in-process executor, a verbatim delegation to
+    ``SmoothAgent.run_stream``. Asking for durable mode without supplying an executor
+    warns and falls back, rather than silently pretending a turn is durable.
+
+    (This differs deliberately from the Rust ``turn_executor``, where an injected
+    executor wins unconditionally: here the env var is the explicit opt-in, so an
+    injected backend can never silently take over a deployment that didn't ask.)"""
+    if env_value is None:
+        env_value = os.environ.get(DURABLE_EXECUTOR_ENV)
+    if durable_requested(env_value):
+        if injected is not None:
+            return injected
+        logger.warning(
+            "%s requested but no durable executor was supplied on the turn; running the turn in-process",
+            DURABLE_EXECUTOR_ENV,
+        )
+    return InProcessExecutor()
+
+
 def preamble_model() -> str | None:
     """The fast model id for the parallel preamble, or ``None`` when the feature is
     off. Unset / empty / whitespace ⇒ off (no extra LLM call, behavior unchanged) —
@@ -201,9 +247,16 @@ class TurnRunner:
         judge_model: str | None = None,
         tool_hooks: list[Any] | None = None,
         org_id: str | None = None,
+        executor: AgentExecutor | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
+        #: The executor the turn's engine runs on. Selected once here from the
+        #: injected backend + ``SMOOTH_AGENT_DURABLE_EXECUTOR`` (see
+        #: :func:`select_turn_executor`): a durable backend arrives by injection, and
+        #: with nothing injected (the default) this is the in-process executor, a
+        #: verbatim delegation to ``SmoothAgent.run_stream`` — behavior unchanged.
+        self._executor = select_turn_executor(executor)
         self._knowledge = knowledge
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         #: Resolved per-agent config (instructions / workflow / persona). ``None`` →
@@ -423,7 +476,10 @@ class TurnRunner:
                 # 3. Persist the inbound user message.
                 await self._store.append_message(conversation_id, MessageDirection.INBOUND, user_message)
 
-                async for event in agent.run_stream(model_message, thread=thread):
+                # Run the turn through the executor seam (default in-process, a durable
+                # backend when injected + opted in), not `agent.run_stream` directly —
+                # the one place a durable backend plugs in (mirrors the Rust runner).
+                async for event in self._executor.execute_streaming(agent, model_message, thread=thread):
                     if isinstance(event, TextEvent):
                         if event.text:
                             # Close the preamble window BEFORE the first answer token
