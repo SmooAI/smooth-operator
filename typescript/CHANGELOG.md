@@ -1,5 +1,113 @@
 # @smooai/smooth-operator
 
+## 1.46.9
+
+### Patch Changes
+
+- fff7978: refactor(dotnet): make `IBackplane.Publish` target-shaped so the fan-out is additive
+
+  `Publish(string connectionId, event)` became `Publish(Target target, event)`, with
+  `Target(Kind, Id)` as a record. `InMemoryBackplane` now resolves a target to a set of
+  connections via a `Dictionary<Target, HashSet<string>>`, so `Publish` is **already
+  correct for all five target kinds** — the other four simply have no entries yet and
+  return 0. Associating a session/user/org/agent with its connections is the cross-pod
+  fan-out work, and it plugs in by seeding that index without touching `Publish` again.
+  `POST /admin/publish` still 501s the four, which keeps that a route-level statement
+  ("not deliverable here") rather than a backplane limitation.
+
+  `Detach` now tears down every association, not just the sink, via a reverse index — a
+  leaked association resolves to a dead socket and would inflate `delivered` forever.
+
+  No behavior change: `connection` targets deliver exactly as before, all 518 tests pass
+  unchanged.
+
+- d91ee14: feat(dotnet): `GET /admin/model-costs` and `POST /admin/publish`, closing .NET to full admin parity
+
+  The two admin routes that landed for the other engines while the .NET server was
+  catching up on the console surface. `model-costs` went to Go, TypeScript and Python;
+  `publish` went to Go and TypeScript. .NET had neither, which left it the only engine
+  missing `model-costs` and one of two missing `publish`. With these it serves the whole
+  shared admin surface.
+
+  **`GET /admin/model-costs`** is ungated, exactly as in Rust: gateway pricing is not
+  org-sensitive and cost badges must render on a tokenless local connection. It maps the
+  gateway's `/model/info` into `{ "<model>": { inputCostPerToken, outputCostPerToken,
+tier, useCases, maxOutputTokens } }` via a new pure `ModelInfo.MapModelInfo`, fetched
+  at most once per process. Two details are load-bearing and both are tested: an omitted
+  field stays **null rather than defaulted**, because a `0` cost would render a
+  free-model badge on a paid model; and only a **success** is cached, because caching a
+  failure would pin an empty map for the life of the process and leave every badge
+  missing until a restart even after the gateway recovered.
+
+  **`POST /admin/publish`** pushes a realtime event to a target over a new `IBackplane`
+  connection registry — the plug point for non-AI publishers (job status, ingestion
+  progress, notifications) that need to reach a connected client without going through an
+  agent turn. Admin-gated. `connection` targets deliver for real and report a truthful
+  `delivered` count of 0 or 1 taken from the sink registry. `session` / `user` / `org` /
+  `agent` answer a hard **501 `UNSUPPORTED_TARGET` with no `delivered` field at all**: a
+  connection-id registry cannot route them, and `{"delivered": 0}` would let a caller
+  read "accepted, reached nobody" as success for an event that was never routable. When
+  the cross-pod fan-out lands, each target flips from a 501 to a real count.
+
+  `IBackplane` + `InMemoryBackplane` are the first backplane in `dotnet/` — the other
+  engines each had one and .NET did not. Ported from the Go shape and deliberately
+  synchronous: every operation is a dictionary access plus a channel write, and the
+  TS/Python `attach`/`detach` are async only because those ecosystems default to it. The
+  WebSocket host attaches each connection's outbound channel as its sink and detaches on
+  teardown; the detach is the half that matters, since a leaked sink would report
+  `delivered: 1` into a channel whose socket is long gone, and it is covered by a test
+  that drives a real WebSocket and asserts the registry empties.
+
+  Also fixes a latent crash in the existing `ModelInfo.ParseCeilings`, found while
+  writing the mapper's malformed-payload tests: indexing a `JsonNode` that is not an
+  object **throws**, so a gateway payload carrying a scalar `model_info` (or a scalar
+  entry, or a non-string `model_name`) took the parse down instead of reading as "no
+  ceiling". It was contained only by `FetchCeilingAsync`'s catch-all; the pure function is
+  public and threw. Both parsers now coerce at every level.
+
+  One .NET-specific quirk worth recording: a top-level `JsonObject` handed to
+  `Results.Ok` serializes to an **empty body**. It round-trips correctly as a property —
+  which is why a connector's `config` was fine and nothing caught this earlier — so
+  `model-costs` writes `ToJsonString()` directly. Left as `Results.Ok`, the route would
+  have returned a permanently empty `200`, indistinguishable from "the gateway is down".
+
+  Verified by 14 new tests (3 pure mapper cases, 1 sequential route test covering
+  ungated + degrade-to-empty + cache-only-success against a real stub gateway, 8 publish
+  cases including the four unroutable targets, 1 WebSocket attach/detach lifecycle, plus
+  the fail-closed table row) and by exercising all 16 route combos against a booted C#
+  host: no 404s, no 5xx.
+
+- 38e2051: feat(server): make the turn executor injectable per turn (ADR-030)
+
+  `TurnRequest` gains an optional `executor: Option<Arc<dyn AgentExecutor>>`. `None` —
+  every existing caller — runs the turn in-process exactly as before, so this changes
+  no behavior.
+
+  Two reasons it is a per-turn field rather than something the runner constructs or
+  holds process-globally:
+
+  - **It keeps Temporal out of this crate.** This crate publishes to crates.io, and
+    cargo refuses to publish a crate declaring a git or path dependency even behind an
+    off-by-default feature. With the executor injected, an unpublished deployment crate
+    can build the durable executor and pass it in, and nothing Temporal-shaped ever
+    appears in this manifest.
+  - **Durable mode is meant to be opted into per conversation**, which a process-global
+    handle could not express. A process-global would also repeat the exact mismatch
+    that makes the durable backend hard to adopt today — its activity worker holds one
+    global registry while this server builds a per-turn, per-org, ACL-scoped one.
+
+  `turn_executor` now takes the injected value: supplied ⇒ used verbatim, and
+  `SMOOTH_AGENT_DURABLE_EXECUTOR` is not consulted. Nothing supplied ⇒ the in-process
+  executor, with the env var still warning rather than silently pretending a turn is
+  durable.
+
+  This is foundation only. It does **not** make a parked write-approval survive a
+  browser refresh — there is still no client-side `AgentExecutor` in
+  `smooai-smooth-operator-temporal` to inject, and building one is blocked on two open
+  design questions: a workflow-backed turn has no token-delta path (so it cannot feed
+  the runner's event translator), and `AgentTurnInput` carries neither prior messages
+  nor a per-turn tool registry.
+
 ## 1.46.8
 
 ### Patch Changes
