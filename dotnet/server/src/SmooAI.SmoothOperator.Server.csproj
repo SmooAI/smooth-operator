@@ -28,11 +28,9 @@
     <!-- The service is built ON the engine: it drives SmoothAgent per turn and adds the
          protocol/session/storage surface around it. The engine now lives in (and publishes
          from) the smooth-operator-core repo; consume it as the published NuGet package. -->
-    <!-- 1.8.10 is the engine carrying the durable-execution seam (ADR-030): IAgentExecutor /
-         InProcessExecutor, which ExecutorSelection selects between. The seam is on core `main` but
-         its NuGet publish is pending (newest published is 1.8.1); this bump adopts it the moment the
-         core release ships. -->
-    <PackageReference Include="SmooAI.SmoothOperator.Core" Version="1.8.10" />
+    <!-- 1.8.11 is the first published engine carrying the durable-execution seam (ADR-030):
+         IAgentExecutor / InProcessExecutor, which ExecutorSelection selects between. -->
+    <PackageReference Include="SmooAI.SmoothOperator.Core" Version="1.8.11" />
     <!-- ILogger seam for surfacing degraded knowledge-retrieval warnings (pearl th-dadde3). -->
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
   </ItemGroup>
