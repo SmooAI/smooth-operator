@@ -58,6 +58,16 @@ pub struct AppState {
     pub connector_configs: Arc<dyn ConnectorConfigStore>,
     /// Per-org agent settings store, read/written by `/admin/settings`.
     pub settings: Arc<dyn SettingsStore>,
+    /// **Host approver seam** (th-be3f55). Channels from a host-installed hook
+    /// whose `Ask` verdicts should park the turn and route through the chat HITL
+    /// — the same bridge `SMOOTH_AGENT_CONFIRM_TOOLS` uses, but driven by the
+    /// host's own classification instead of tool-name patterns.
+    ///
+    /// Big Smooth's auto-mode gate is the motivating case: the core
+    /// `PermissionHook` could already classify a call as `Ask`, but with no
+    /// approver wired it failed closed, forcing the daemon into `Bypass` where
+    /// nothing is ever asked. `None` (the default) changes nothing.
+    pub host_approver: Option<crate::runner::HostApprover>,
     /// **Host tool-injection seam.** When `Some`, the runner asks this provider
     /// for EXTRA tools and merges them into every turn's `ToolRegistry`
     /// alongside the built-ins. Defaults to `None` (built-ins only); a host
@@ -249,6 +259,7 @@ impl AppState {
         let gateway_key_resolver: Arc<dyn GatewayKeyResolver> =
             Arc::new(EnvGatewayKeyResolver::new(config.gateway_key.clone()));
         Self {
+            host_approver: None,
             storage,
             config: Arc::new(config),
             auth: Arc::new(NoAuthVerifier::default()),

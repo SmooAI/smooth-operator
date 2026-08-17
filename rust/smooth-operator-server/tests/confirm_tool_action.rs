@@ -109,6 +109,7 @@ fn scripted_mock() -> MockLlmClient {
 /// the actual `register_confirmation` / `clear_confirmation` registry.
 fn confirmation_for(state: &AppState) -> ConfirmationConfig {
     ConfirmationConfig {
+        host_approver: None,
         tool_patterns: vec!["knowledge_search".into()],
         session_id: SESSION_ID.to_string(),
         register: {
