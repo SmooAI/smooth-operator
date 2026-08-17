@@ -1,9 +1,35 @@
 //! Embedded schema / migration SQL, applied on [`PostgresAdapter::init`].
 //!
-//! Mirrors the smooai monorepo's relational shape so dogfooding is a swap, not a
-//! rewrite: `conversations`, `conversation_participants`, `conversation_messages`,
-//! `conversation_sessions`, plus `knowledge_vectors` (pgvector `embedding` +
-//! generated `content_tsv` + HNSW cosine index).
+//! Table and column NAMES match the smooai monorepo's relational shape, so this schema
+//! applies against the real database instead of failing on it: `conversations`,
+//! `conversation_participants`, `conversation_messages`, `conversation_sessions`, plus
+//! `knowledge_vectors` (pgvector `embedding` + generated `content_tsv` + HNSW cosine index).
+//!
+//! # What still differs from the monorepo (th-5a5181)
+//!
+//! This used to claim it "mirrors the monorepo". It did not, and the gap was not cosmetic:
+//! `conversation_messages` declared `from_ref`/`to_ref` JSONB where the monorepo has
+//! `from`/`to` participant FKs, and a `seq BIGSERIAL` the monorepo has never had — so
+//! `CREATE INDEX ... (seq)` aborted schema init against the real database. Those are fixed.
+//!
+//! The remaining divergences are real and NOT fixed here, so read this as "applies against
+//! the monorepo database", not "reads and writes it":
+//!
+//! - **Ids are `TEXT` here, `uuid` in the monorepo** (every PK and FK). Reads decode to
+//!   `String`, so a real-database row fails to decode.
+//! - **Enums are `TEXT` + `CHECK`** here; the monorepo has real Postgres enum types
+//!   (`conversation_platform`, `conversation_participant_type`,
+//!   `conversation_message_direction`, `conversation_session_status`). Decoding those needs
+//!   a `::text` cast.
+//! - **`conversation_sessions` differs most**: its PK is `session_id` here and `id` there,
+//!   `thread_id` here and `langgraph_thread_id` there, `agent_name` exists only here, and
+//!   `rate_limit_window_start`/`rate_limit_tokens` only there. `agent_id` is a plain string
+//!   here but `uuid NOT NULL REFERENCES agents(id)` there, so invented agent ids violate the
+//!   FK.
+//! - **No RLS policies** here; the monorepo has them on all four tables.
+//!
+//! `connector_configs`, `agent_settings`, `indexing_runs`, `knowledge_vectors` and
+//! `memories` are this adapter's own — no monorepo counterpart, nothing to mirror.
 //!
 //! The `checkpoints` table is **not** created here — that is owned by
 //! smooth-operator's [`PostgresCheckpointStore`](smooth_operator_core::PostgresCheckpointStore),
@@ -61,17 +87,23 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     conversation_id TEXT,
     direction       TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
     content         JSONB NOT NULL,
-    from_ref        JSONB,
-    to_ref          JSONB,
+    -- Quoted because `from` is a reserved word. These are participant ids, matching the
+    -- monorepo's `from`/`to` FK columns — NOT the denormalized `from_ref`/`to_ref` JSONB
+    -- this adapter used to declare, which no monorepo table has ever had. A ParticipantRef's
+    -- type and name come from joining conversation_participants (see MESSAGE_SELECT).
+    "from"          TEXT,
+    "to"            TEXT,
     metadata_json   JSONB,
     analytics_json  JSONB,
-    -- Monotonic append sequence per conversation; the stable paging cursor.
-    seq             BIGSERIAL,
     created_at      TIMESTAMPTZ NOT NULL,
     updated_at      TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
-    ON conversation_messages (conversation_id, seq);
+-- Paging is (created_at, id), not a `seq` counter: the monorepo table has no seq column, so
+-- declaring one made this schema unappliable against the real database (the CREATE INDEX on
+-- it was the statement that died). (created_at, id) is a stable total order because id is
+-- unique, and it needs no extra column.
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+    ON conversation_messages (conversation_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id           TEXT PRIMARY KEY,
