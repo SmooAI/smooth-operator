@@ -108,9 +108,14 @@ public sealed class SepExtensionHostTests
         return (new FrameDispatcher(store, chat, agentConfigResolver: resolver), new List<JsonObject>());
     }
 
+    // Names an agent on purpose: per-agent config is only resolved for a session that HAS an agent.
+    // This used to work with no agentId because the store minted a GUID and the static resolver
+    // answered for any id — i.e. these tests were relying on the fabrication. th-68897a.
     private static async Task<string> CreateSessionAsync(FrameDispatcher dispatcher, List<JsonObject> events)
     {
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r1"}""", events.Add);
+        await dispatcher.DispatchAsync(
+            """{"action":"create_conversation_session","requestId":"r1","agentId":"11111111-1111-1111-1111-111111111111"}""",
+            events.Add);
         var sessionId = events[0]["data"]!["sessionId"]!.GetValue<string>();
         events.Clear();
         return sessionId;

@@ -22,8 +22,11 @@ public class ServerProtocolTests
 
     // No agentId → the store mints a UUID (the protocol requires a UUID agentId; a client that
     // supplies one must pass a UUID too). This keeps the session descriptor spec-valid.
+    // Names an agent: the spec REQUIRES agentId on the session descriptor, so the spec-validity
+    // assertions below only hold for a session that has one. The agentless shape is covered
+    // separately in CreateSession_WithoutAnAgent_OmitsAgentId. th-68897a.
     private static string CreateSessionFrame(string requestId) =>
-        $$"""{"action":"create_conversation_session","requestId":"{{requestId}}"}""";
+        $$"""{"action":"create_conversation_session","requestId":"{{requestId}}","agentId":"11111111-1111-1111-1111-111111111111"}""";
 
     [Fact]
     public async Task Ping_ReturnsPong()
@@ -53,6 +56,25 @@ public class ServerProtocolTests
         var validator = await ValidatorAsync();
         var result = validator.ValidateAt("actions/create-conversation-session.schema.json#/$defs/Response", data.ToJsonString());
         Assert.True(result.IsValid, result.FormatErrors());
+        Assert.Equal("11111111-1111-1111-1111-111111111111", data["agentId"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// No agent named ⇒ no agentId on the wire, rather than a fabricated GUID pointing at an agent
+    /// that never existed. Omitted (matching the Rust handler's skip_serializing_if) rather than null.
+    /// th-68897a.
+    /// </summary>
+    [Fact]
+    public async Task CreateSession_WithoutAnAgent_OmitsAgentId()
+    {
+        var (dispatcher, _, events) = Build(new MockChatClient());
+        await dispatcher.DispatchAsync(
+            """{"action":"create_conversation_session","requestId":"r1"}""", events.Add);
+
+        var data = Assert.Single(events)["data"]!.AsObject();
+        Assert.False(data.ContainsKey("agentId"));
+        // The agent PARTICIPANT is still minted — that row is real, unlike an invented agent id.
+        Assert.False(string.IsNullOrEmpty(data["agentParticipantId"]!.GetValue<string>()));
     }
 
     [Fact]

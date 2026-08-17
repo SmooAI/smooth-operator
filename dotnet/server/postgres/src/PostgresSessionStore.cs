@@ -70,9 +70,12 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         var session = new StoredSession(
             SessionId: Guid.NewGuid().ToString(),
             ConversationId: resume ? conversationId! : Guid.NewGuid().ToString(),
-            AgentId: string.IsNullOrEmpty(agentId) ? Guid.NewGuid().ToString() : agentId,
+            // Absent stays absent — see StoredSession.AgentId. Whitespace is absent too.
+            AgentId: string.IsNullOrWhiteSpace(agentId) ? null : agentId,
             AgentName: "smooth-agent",
             UserParticipantId: Guid.NewGuid().ToString(),
+            // Unlike AgentId, minting this one is CORRECT: it is a new participant row, not a
+            // reference to something that has to already exist.
             AgentParticipantId: Guid.NewGuid().ToString(),
             UserEmail: email);
 
@@ -132,7 +135,7 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         {
             command.Parameters.AddWithValue("sid", session.SessionId);
             command.Parameters.AddWithValue("cid", session.ConversationId);
-            command.Parameters.AddWithValue("aid", session.AgentId);
+            command.Parameters.AddWithValue("aid", (object?)session.AgentId ?? DBNull.Value);
             command.Parameters.AddWithValue("aname", session.AgentName);
             command.Parameters.AddWithValue("upid", session.UserParticipantId);
             command.Parameters.AddWithValue("apid", session.AgentParticipantId);
@@ -259,7 +262,7 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return new StoredSession(
             sessionId,
             reader.GetString(0),
-            reader.GetString(1),
+            reader.IsDBNull(1) ? null : reader.GetString(1), // agent_id: absent is null, not a GUID
             reader.GetString(2),
             reader.GetString(3),
             reader.GetString(4),

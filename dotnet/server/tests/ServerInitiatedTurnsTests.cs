@@ -120,16 +120,25 @@ public class ServerInitiatedTurnsTests
         Assert.Equal("server said this", messages[1].Text);
     }
 
-    [Fact]
-    public async Task StartTurn_EmptyAgentId_MintsAgent_LikeClientPath()
+    /// <summary>
+    /// An agentless session reports NO agent. This test used to assert the opposite — that the store
+    /// minted a GUID — which is the bug: it pointed the session at an agent that never existed.
+    /// th-68897a.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task StartTurn_WithoutAnAgent_LeavesAgentIdNull(string agentId)
     {
         var store = new InMemorySessionStore();
         var turns = Build(new MockChatClient().PushText("ok"), store);
 
-        var result = await turns.StartTurnAsync(string.Empty, "hello");
+        var result = await turns.StartTurnAsync(agentId, "hello");
 
         var session = await store.GetSessionAsync(result.SessionId);
         Assert.NotNull(session);
-        Assert.False(string.IsNullOrEmpty(session!.AgentId)); // store minted one, matching CreateSession.
+        Assert.Null(session!.AgentId);
+        // Minting the agent PARTICIPANT is still correct — it is a new row, not a dangling reference.
+        Assert.False(string.IsNullOrEmpty(session.AgentParticipantId));
     }
 }

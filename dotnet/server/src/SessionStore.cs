@@ -1,10 +1,18 @@
 namespace SmooAI.SmoothOperator.Server;
 
-/// <summary>A conversation session: the unit the protocol's create/get operate on.</summary>
+/// <summary>
+/// A conversation session: the unit the protocol's create/get operate on.
+/// <para>
+/// <c>AgentId</c> is null when the caller named no agent. Nullable on purpose: it used to be filled
+/// with a fresh GUID, which pointed every agentless session at an agent that never existed —
+/// silently, since that id then flowed into the participant's internal_id and the per-agent config
+/// lookup and resolved to nothing. Absent is now absent. th-68897a.
+/// </para>
+/// </summary>
 public sealed record StoredSession(
     string SessionId,
     string ConversationId,
-    string AgentId,
+    string? AgentId,
     string AgentName,
     string UserParticipantId,
     string AgentParticipantId,
@@ -203,9 +211,12 @@ public sealed class InMemorySessionStore : ISessionStore
             var session = new StoredSession(
                 SessionId: Guid.NewGuid().ToString(),
                 ConversationId: convId,
-                AgentId: string.IsNullOrEmpty(agentId) ? Guid.NewGuid().ToString() : agentId,
+                // Absent stays absent — see StoredSession.AgentId. Whitespace is absent too.
+                AgentId: string.IsNullOrWhiteSpace(agentId) ? null : agentId,
                 AgentName: "smooth-agent",
                 UserParticipantId: Guid.NewGuid().ToString(),
+                // Unlike AgentId, minting this one is CORRECT: it is a new participant row, not a
+                // reference to something that has to already exist.
                 AgentParticipantId: Guid.NewGuid().ToString(),
                 UserEmail: string.IsNullOrEmpty(userEmail) ? null : userEmail);
 
