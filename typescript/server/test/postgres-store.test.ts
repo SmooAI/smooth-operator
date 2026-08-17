@@ -25,6 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InMemoryAdminStore } from '../src/admin.js';
 import { PostgresStore, resolveStorage } from '../src/postgresStore.js';
 import { InMemorySessionStore } from '../src/sessionStore.js';
+import { InMemorySessionStore } from '../src/sessionStore.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -458,6 +459,42 @@ describe('PostgresStore (needs Docker)', () => {
             ).rejects.toThrow(/conversations_platform_check/);
         } finally {
             await pool.end();
+            await store.close();
+        }
+    });
+
+
+    // ── agentless sessions (th-68897a) ──────────────────────────────────────
+    //
+    // A session created with no agentId has NO agent. Both stores used to mint a fresh
+    // UUID here, which pointed every agentless session at an agent that never existed —
+    // invisible until something tried to resolve it. Covers BOTH stores: the fabrication
+    // lived in each, so testing one would leave the other broken.
+    pgIt('a session with no agent has no agent', async () => {
+        const memory = new InMemorySessionStore();
+        for (const blank of ['', '   ']) {
+            const m = await memory.createSession(blank, 'Alice');
+            expect(m.agentId, `in-memory agentId for ${JSON.stringify(blank)}`).toBeUndefined();
+        }
+
+        const store = await newStore();
+        try {
+            const created = await store.createSession('   ', 'Alice', undefined, undefined, org());
+            expect(created.agentId).toBeUndefined();
+
+            // The column itself is NULL, not an empty string standing in for one.
+            const pool = new Pool({ connectionString });
+            try {
+                const row = await pool.query('SELECT agent_id FROM conversation_sessions WHERE session_id = $1', [created.sessionId]);
+                expect(row.rows[0].agent_id).toBeNull();
+            } finally {
+                await pool.end();
+            }
+
+            // …and it survives the round trip rather than coming back as a uuid.
+            const fetched = await store.getSession(created.sessionId);
+            expect(fetched?.agentId).toBeUndefined();
+        } finally {
             await store.close();
         }
     });

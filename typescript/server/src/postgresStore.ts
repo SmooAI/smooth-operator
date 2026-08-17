@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id           TEXT PRIMARY KEY,
     conversation_id      TEXT NOT NULL,
     organization_id      TEXT NOT NULL DEFAULT '',
-    agent_id             TEXT NOT NULL,
+    -- Nullable: a session with no caller-supplied agent has NO agent (th-68897a).
+    agent_id             TEXT,
     agent_name           TEXT NOT NULL,
     user_participant_id  TEXT NOT NULL,
     agent_participant_id TEXT NOT NULL,
@@ -229,7 +230,7 @@ export class PostgresStore implements SessionStore, AdminStore {
         const session: StoredSession = {
             sessionId: randomUUID(),
             conversationId: convId,
-            agentId: agentId && agentId.length > 0 ? agentId : randomUUID(),
+            agentId: agentId?.trim() || undefined,
             agentName: AGENT_NAME,
             userParticipantId: randomUUID(),
             agentParticipantId: randomUUID(),
@@ -318,7 +319,7 @@ export class PostgresStore implements SessionStore, AdminStore {
         return {
             sessionId,
             conversationId: row.conversation_id,
-            agentId: row.agent_id,
+            agentId: row.agent_id ?? undefined, // NULL means no agent, not the string "null"
             agentName: row.agent_name,
             userParticipantId: row.user_participant_id,
             agentParticipantId: row.agent_participant_id,

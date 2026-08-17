@@ -402,7 +402,9 @@ export class FrameDispatcher {
             protocol.immediateResponse(requestId, 200, 'Session created', {
                 sessionId: session.sessionId,
                 conversationId: session.conversationId,
-                agentId: session.agentId,
+                // Omitted rather than null when the session has no agent — absent is the
+                // honest wire shape, and a fabricated id was the bug (th-68897a).
+                ...(session.agentId ? { agentId: session.agentId } : {}),
                 agentName: session.agentName,
                 userParticipantId: session.userParticipantId,
                 agentParticipantId: session.agentParticipantId,
@@ -442,7 +444,7 @@ export class FrameDispatcher {
             protocol.immediateResponse(requestId, 200, 'OK', {
                 sessionId: session.sessionId,
                 conversationId: session.conversationId,
-                agentId: session.agentId,
+                ...(session.agentId ? { agentId: session.agentId } : {}),
                 agentName: session.agentName,
             }),
         );
@@ -607,7 +609,9 @@ export class FrameDispatcher {
         // the default.
         let agentConfig;
         try {
-            agentConfig = (await this.agentConfig?.resolve(session.agentId)) ?? undefined;
+            // An agentless session has nothing to resolve — don't ask about an agent that
+            // does not exist (th-68897a).
+            agentConfig = session.agentId ? ((await this.agentConfig?.resolve(session.agentId)) ?? undefined) : undefined;
         } catch {
             agentConfig = undefined;
         }

@@ -22,8 +22,10 @@ const (
 // StoredSession is a conversation session: the unit the protocol's create/get
 // operate on. The Go analog of the C# StoredSession / Rust session record.
 type StoredSession struct {
-	SessionID          string
-	ConversationID     string
+	SessionID      string
+	ConversationID string
+	// AgentID is the agent this session talks to, as supplied by the caller. "" when
+	// the caller named none — it used to be a fabricated UUID (th-68897a).
 	AgentID            string
 	AgentName          string
 	UserParticipantID  string
@@ -232,9 +234,11 @@ func (s *InMemorySessionStore) CreateSession(ctx context.Context, agentID, userN
 // conversation gets an empty message log seeded — a resume keeps the existing log so
 // subsequent turns append to it.
 func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*userName*/, userEmail string, scope ConversationScope, conversationID string) (StoredSession, bool, error) {
-	if agentID == "" {
-		agentID = uuid.NewString()
-	}
+	// No agentId from the caller means NO agent, not a new one. This used to mint a fresh
+	// UUID, which pointed every agentless session at an agent that has never existed —
+	// invisible until something tried to resolve it (th-68897a). Blank/whitespace reads as
+	// absent; "" is this struct's absent, so nothing downstream needs a pointer.
+	agentID = strings.TrimSpace(agentID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

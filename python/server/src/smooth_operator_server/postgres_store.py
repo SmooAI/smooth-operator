@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id           TEXT PRIMARY KEY,
     conversation_id      TEXT NOT NULL,
     organization_id      TEXT NOT NULL DEFAULT '',
-    agent_id             TEXT NOT NULL,
+    -- Nullable: a session with no caller-supplied agent has NO agent (th-68897a).
+    agent_id             TEXT,
     agent_name           TEXT NOT NULL,
     user_participant_id  TEXT NOT NULL,
     agent_participant_id TEXT NOT NULL,
@@ -243,7 +244,7 @@ class PostgresStore(SessionStore):
         session = StoredSession(
             session_id=str(uuid.uuid4()),
             conversation_id=conv_id,
-            agent_id=agent_id if agent_id else str(uuid.uuid4()),
+            agent_id=(agent_id or "").strip() or None,
             agent_name=AGENT_NAME,
             user_participant_id=str(uuid.uuid4()),
             agent_participant_id=str(uuid.uuid4()),

@@ -831,3 +831,54 @@ func TestPostgresStorePlatformCheckRejectsAnUnknownValue(t *testing.T) {
 		t.Errorf("want a platform CHECK violation, got: %v", err)
 	}
 }
+
+// ── agentless sessions (th-68897a) ──────────────────────────────────────────
+
+// A session created with no agentId has NO agent. Both stores used to mint a fresh
+// UUID here, which pointed every agentless session at an agent that never existed —
+// invisible until something tried to resolve it. Covers BOTH stores: the fabrication
+// lived in each, so testing one would leave the other broken.
+func TestSessionWithNoAgentHasNoAgent(t *testing.T) {
+	ctx := t.Context()
+
+	mem := NewInMemorySessionStore()
+	for _, in := range []string{"", "   "} {
+		created, err := mem.CreateSession(ctx, in, "Alice", "", ConversationScope{})
+		if err != nil {
+			t.Fatalf("in-memory CreateSession(%q): %v", in, err)
+		}
+		if created.AgentID != "" {
+			t.Errorf("in-memory agentId for %q = %q, want empty", in, created.AgentID)
+		}
+	}
+
+	store := newPostgresStore(t)
+	scope := pgScope(t, "alice@example.test")
+	created, err := store.CreateSession(ctx, "   ", "Alice", "alice@example.test", scope)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if created.AgentID != "" {
+		t.Errorf("agentId = %q, want empty", created.AgentID)
+	}
+
+	// The column itself is NULL, not an empty string standing in for one.
+	var agentID *string
+	if err := store.pool.QueryRow(ctx,
+		`SELECT agent_id FROM conversation_sessions WHERE session_id = $1`,
+		created.SessionID).Scan(&agentID); err != nil {
+		t.Fatalf("read agent_id: %v", err)
+	}
+	if agentID != nil {
+		t.Errorf("agent_id = %q, want NULL", *agentID)
+	}
+
+	// …and it survives the round trip rather than coming back as a uuid.
+	fetched, err := store.GetSession(ctx, created.SessionID)
+	if err != nil || fetched == nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if fetched.AgentID != "" {
+		t.Errorf("round-tripped agentId = %q, want empty", fetched.AgentID)
+	}
+}

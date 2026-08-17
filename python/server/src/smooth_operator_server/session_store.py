@@ -28,7 +28,10 @@ class StoredSession:
 
     session_id: str
     conversation_id: str
-    agent_id: str
+    agent_id: str | None
+    """The agent this session talks to, as supplied by the caller. ``None`` when the caller
+    named none — this used to be a fresh UUID, which pointed every agentless session at an
+    agent that has never existed (th-68897a)."""
     agent_name: str
     user_participant_id: str
     agent_participant_id: str
@@ -259,7 +262,7 @@ class InMemorySessionStore(SessionStore):
             session = StoredSession(
                 session_id=str(uuid.uuid4()),
                 conversation_id=conv_id,
-                agent_id=agent_id if agent_id else str(uuid.uuid4()),
+                agent_id=(agent_id or "").strip() or None,
                 agent_name=AGENT_NAME,
                 user_participant_id=str(uuid.uuid4()),
                 agent_participant_id=str(uuid.uuid4()),
