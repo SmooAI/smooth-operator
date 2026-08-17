@@ -21,7 +21,15 @@
 </p>
 
 <p align="center">
-  <a href="#what-is-this"><b>What it is</b></a> &nbsp;·&nbsp; <a href="#quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp; <a href="#deployment-flavors"><b>Deploy flavors</b></a> &nbsp;·&nbsp; <a href="#architecture"><b>Architecture</b></a> &nbsp;·&nbsp; <a href="#-part-of-smoo-ai"><b>Platform</b></a>
+  <img src="https://img.shields.io/badge/streaming-00A6A6?style=flat-square" alt="streaming">
+  <img src="https://img.shields.io/badge/grounded_RAG-00A6A6?style=flat-square" alt="grounded RAG">
+  <img src="https://img.shields.io/badge/human--in--the--loop-00A6A6?style=flat-square" alt="human-in-the-loop">
+  <img src="https://img.shields.io/badge/durable_execution-F49F0A?style=flat-square" alt="durable execution">
+  <img src="https://img.shields.io/badge/gen__ai.*_OpenTelemetry-F49F0A?style=flat-square" alt="gen_ai.* OpenTelemetry">
+</p>
+
+<p align="center">
+  <a href="#what-is-this"><b>What it is</b></a> &nbsp;·&nbsp; <a href="#feature-tour"><b>Feature tour</b></a> &nbsp;·&nbsp; <a href="#quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp; <a href="#deployment-flavors"><b>Deploy flavors</b></a> &nbsp;·&nbsp; <a href="#architecture"><b>Architecture</b></a> &nbsp;·&nbsp; <a href="#-part-of-smoo-ai"><b>Platform</b></a>
 </p>
 
 ---
@@ -56,6 +64,124 @@ The same binary picks its flavor from the environment (`SMOOTH_AGENT_STORAGE` ·
 
 ---
 
+## Feature tour
+
+Seven things it does, each in a few lines. The wire snippets below are the **actual protocol frames** ([`spec/`](spec) is the source of truth) — not pseudocode.
+
+| | Capability | What you get |
+| --- | --- | --- |
+| 🌊 | [**Streaming turns**](#-streaming-turns) | Tokens as the model writes them — plus one authoritative terminal frame |
+| 📚 | [**Grounded RAG + citations**](#-grounded-rag--citations) | Hybrid retrieval, ACL-filtered before the model sees it |
+| ✋ | [**Human-in-the-loop**](#-human-in-the-loop-approvals) | The turn *parks* before any write until a human approves |
+| ⏱️ | [**Durable execution**](#-durable-execution-new) *(new)* | Temporal backend, all five langs — crash-safe resume + durable HITL |
+| 🔭 | [**`gen_ai.*` telemetry**](#-gen_ai-opentelemetry-new) *(new)* | OpenTelemetry spans on every turn + tool, all five servers |
+| 🗣️ | [**5 languages, one protocol**](#-five-languages-one-protocol-tour) | Every client talks to every server — a *tested* guarantee |
+| 🚀 | [**Three deploy flavors**](#-three-flavors-one-binary) | k8s · serverless · local, selected by config from one binary |
+
+### 🌊 Streaming turns
+
+Tokens arrive as the model writes them; you still `await` a single authoritative terminal frame — no reconciling a stream against a separate "final" call.
+
+```jsonc
+→ { "action": "send_message", "sessionId": "…", "message": "How long is your return window?" }
+← { "type": "immediate_response", "status": 202 }          // acked, work started
+← { "type": "stream_token", "data": { "token": "Our" } }   // … "return" "window" "is" "17" "days"
+← { "type": "stream_chunk", "data": { "node": "response_gen" } }
+← { "type": "eventual_response", "status": 200, "data": { "messageId": "…", "costUsd": … } }  // authoritative
+```
+
+### 📚 Grounded RAG + citations
+
+The model autonomously searches the knowledge base and grounds its answer in what it retrieves — hybrid (dense + sparse + rerank), and **ACL-filtered through the storage adapter before a snippet can reach the model or land in a citation**.
+
+```jsonc
+// mid-turn, the engine calls a built-in tool:
+knowledge_search { "query": "return window" }
+  → [{ "docId": "policy-7", "snippet": "…returns accepted within 17 days…", "score": 0.94 }]
+// the reply is grounded in the retrieved 17-day fact — verified live, not memorized.
+```
+
+### ✋ Human-in-the-loop approvals
+
+An agent you'd point at prod stops before it *writes*. A state-mutating tool call **parks the turn** and emits a confirmation frame; the resumed stream flows back into the *same* turn.
+
+```jsonc
+← { "type": "write_confirmation_required",
+    "data": { "requestId": "r-9", "data": { "toolId": "create_ticket", "actionDescription": "Open a support ticket" } } }
+→ { "action": "confirm_tool_action", "sessionId": "…", "requestId": "r-9", "approved": true }  // ← a human decides
+← { "type": "stream_token", … }   // parked turn resumes, same requestId
+```
+
+> Watch it happen in the demo at the top — the turn parks at `knowledge_search` and only answers once a human approves.
+
+### ⏱️ Durable execution *(new)*
+
+Flip one env var and the *same* turn runs as a **Temporal workflow** instead of an in-process task — kill the pod mid-turn and it resumes exactly where it was, and a pending HITL approval survives the restart as a **durable signal**. Ships as an optional, feature-gated per-language package in **all five languages** — no engine pulls a Temporal SDK into your dependency tree by default.
+
+```bash
+export SMOOTH_AGENT_DURABLE_EXECUTOR=temporal   # same binary — now crash-safe, with durable HITL
+```
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
+flowchart LR
+  T["send_message"] --> EX["AgentExecutor<br/>(selected by SMOOTH_AGENT_DURABLE_EXECUTOR)"]
+  EX -->|"in-process (default)"| MEM["ephemeral task<br/>fast path"]
+  EX -->|"temporal"| WF
+  subgraph WF["Temporal workflow — crash-safe"]
+    A1["engine step (activity)"] --> A2["durable HITL signal<br/>approve / deny"] --> A3["durable-wait timer"]
+  end
+  classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+  classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+  class WF warm
+  class MEM teal
+```
+
+> The durable backend is one seam, dependency-injected — the published server keeps **no hard Temporal dep**. Full status (and the one shared ADR-030 streaming/cost follow-up that's identical in every language, Rust included) is in [PARITY-STATUS.md](PARITY-STATUS.md).
+
+### 🔭 `gen_ai.*` OpenTelemetry *(new)*
+
+**All five servers** emit OpenTelemetry spans on the [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) — one `gen_ai.chat` span per turn, a child `gen_ai.tool` span per tool call (**tool arguments redacted**, error status propagated), so a single trace backend correlates turns across every language and the smooai monorepo's existing spans. Gated on one env var; no collector needed to develop.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317   # unset ⇒ local fmt logs, spans still emitted
+```
+
+```
+gen_ai.chat   { gen_ai.request.model, gen_ai.conversation.id, gen_ai.usage.input_tokens, … }
+  └─ gen_ai.tool   { gen_ai.tool.name: "knowledge_search", duration_ms, is_error }
+```
+
+<p align="center">
+  <img src=".github/demo-telemetry.gif" alt="A terminal streams gen_ai.chat and child gen_ai.tool OpenTelemetry spans as the operator runs a turn, tool arguments shown redacted" width="100%" />
+  <br />
+  <em>Not a mockup — a real turn's <code>gen_ai.chat</code> / <code>gen_ai.tool</code> spans, exported over OTLP. Details in <a href="docs/Operations/Observability.md">Observability</a>.</em>
+</p>
+
+### 🗣️ Five languages, one protocol *(tour)*
+
+Every client — **TypeScript · Go · .NET · Python · Rust** — speaks the identical frames, so the language is a stack choice, not a capability choice. It's a *tested* guarantee: all five servers replay the shared [`spec/conformance/scenarios`](spec/conformance/scenarios) corpus and must emit byte-identical protocol output. Full breakdown [below](#five-languages-one-protocol) and in [PARITY-STATUS.md](PARITY-STATUS.md).
+
+```jsonc
+// The same send_message frame, whatever language dials the socket:
+{ "action": "send_message", "sessionId": "…", "message": "…" }
+```
+
+### 🚀 Three flavors, one binary
+
+One codebase, one binary. Storage, backplane and auth are seams selected by config — application code never names a backend. Deep-dive [below](#deployment-flavors).
+
+```bash
+cargo run -p smooai-smooth-operator-server                    # local     — in-memory, auth off
+helm install smooth-operator ./deploy/k8s                     # kubernetes — pgvector + Redis/NATS
+cd deploy/sst && npx sst deploy --stage prod                  # serverless — Lambda + DynamoDB + S3 Vectors
+```
+
+---
+
 ## Quickstart
 
 **Fastest path — Docker.** One command boots the whole stack — Postgres + pgvector, the operator server, and a React chat UI — with token streaming, grounded retrieval with citations, and a human-in-the-loop approval you click yourself. No Rust toolchain required:
@@ -66,6 +192,12 @@ cp .env.example .env               # set SMOOAI_GATEWAY_KEY — any OpenAI-compa
 cd web-chat && docker compose up --build
 # → chat UI on http://localhost:8080
 ```
+
+<p align="center">
+  <img src=".github/screenshot-webchat.png" alt="The web-chat React UI mid-conversation — an assistant reply streaming in, an inline knowledge_search tool chip resolving, and a grounded answer citing the retrieved document" width="100%" />
+  <br />
+  <em>Not a mockup — the <a href="./examples/web-chat">web-chat example</a> mid-turn: streaming tokens, an inline tool chip, and a grounded answer with its citation.</em>
+</p>
 
 > First run builds the server image (a few minutes), then it's cached. Prefer a terminal? [`examples/tui-chat`](examples/tui-chat/README.md) drives the same stack from a TUI. Full walkthrough: [`examples/README.md`](examples/README.md).
 
