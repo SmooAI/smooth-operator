@@ -235,7 +235,7 @@ public class VerifyOtpHandlerTests
 
     private static async Task<string> CreateSessionAsync(FrameDispatcher dispatcher, List<JsonObject> events)
     {
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r-create","agentId":"","userName":"Alice","userEmail":"alice@example.com"}""", events.Add);
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r-create","agentId":"11111111-1111-1111-1111-111111111111","userName":"Alice","userEmail":"alice@example.com"}""", events.Add);
         var sessionId = events[^1]["data"]!["sessionId"]!.GetValue<string>();
         events.Clear();
         return sessionId;

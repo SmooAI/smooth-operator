@@ -29,7 +29,9 @@ public interface IServerInitiatedTurns
     /// persisting the inbound message + the agent's reply into the session store. Returns the new
     /// conversation/session ids so the host can reference (or a client can later resume) it.
     /// </summary>
-    /// <param name="agentId">The agent to run as. Empty ⇒ the store mints one (matches the client path).</param>
+    /// <param name="agentId">The agent to run as. REQUIRED — absent or blank throws
+    /// <see cref="ArgumentException"/>, matching the client path's VALIDATION_ERROR rather than
+    /// inventing an agent that never existed. th-68897a.</param>
     /// <param name="message">The initiating message/context the turn responds to.</param>
     /// <param name="sink">Optional stream event sink (<c>stream_token</c> / <c>stream_chunk</c>). The
     /// message log is persisted regardless; a host that has nowhere to push live events omits it.</param>
@@ -97,6 +99,13 @@ public sealed class ServerInitiatedTurns : IServerInitiatedTurns
         AccessContext? access = null,
         CancellationToken cancellationToken = default)
     {
+        // Same contract as the client path: agentId is required, and a malformed call must persist
+        // NOTHING — so this runs before the store is touched. th-68897a.
+        if (string.IsNullOrWhiteSpace(agentId))
+        {
+            throw new ArgumentException("agentId is required", nameof(agentId));
+        }
+
         requestId ??= Guid.NewGuid().ToString();
 
         // 1. Mint a fresh conversation server-side — the same store call create_conversation_session

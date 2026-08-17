@@ -126,7 +126,7 @@ public class ListConversationsResumeTests
         await store.AppendMessageAsync(original.ConversationId, MessageDirection.Inbound, "prior turn");
 
         // Resume by passing its conversationId — a NEW session bound to the SAME conversation.
-        var frame = $$"""{"action":"create_conversation_session","requestId":"r1","conversationId":"{{original.ConversationId}}"}""";
+        var frame = $$"""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1","conversationId":"{{original.ConversationId}}"}""";
         await dispatcher.DispatchAsync(frame, events.Add);
 
         var data = Assert.Single(events)["data"]!.AsObject();
@@ -145,7 +145,7 @@ public class ListConversationsResumeTests
         var (dispatcher, _, events) = Build();
         var unknown = Guid.NewGuid().ToString();
 
-        var frame = $$"""{"action":"create_conversation_session","requestId":"r1","conversationId":"{{unknown}}"}""";
+        var frame = $$"""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1","conversationId":"{{unknown}}"}""";
         await dispatcher.DispatchAsync(frame, events.Add);
 
         var data = Assert.Single(events)["data"]!.AsObject();
@@ -156,7 +156,7 @@ public class ListConversationsResumeTests
     public async Task CreateSession_WithoutConversationId_MintsFresh()
     {
         var (dispatcher, _, events) = Build();
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r1"}""", events.Add);
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1"}""", events.Add);
         var data = Assert.Single(events)["data"]!.AsObject();
         Assert.False(string.IsNullOrEmpty(data["conversationId"]!.GetValue<string>()));
     }

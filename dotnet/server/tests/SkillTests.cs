@@ -199,7 +199,7 @@ public class SkillTests : IDisposable
 
     private static async Task<string> CreateSessionAsync(FrameDispatcher dispatcher, List<JsonObject> events)
     {
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r1"}""", events.Add);
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1"}""", events.Add);
         var sessionId = events[0]["data"]!["sessionId"]!.GetValue<string>();
         events.Clear();
         return sessionId;

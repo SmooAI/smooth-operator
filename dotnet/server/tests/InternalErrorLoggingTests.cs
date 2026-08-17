@@ -22,7 +22,7 @@ public class InternalErrorLoggingTests
         var dispatcher = new FrameDispatcher(store, new ThrowingChatClient("gateway said 401"), logger: logger);
         var events = new List<JsonObject>();
 
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r1"}""", events.Add);
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1"}""", events.Add);
         var sessionId = events[0]["data"]!["sessionId"]!.GetValue<string>();
         await dispatcher.DispatchAsync(
             $$"""{"action":"send_message","requestId":"r2","sessionId":"{{sessionId}}","message":"hi"}""",
@@ -55,7 +55,7 @@ public class InternalErrorLoggingTests
 
         // A non-string conversationId makes the handler's GetValue<string>() throw inside the
         // dispatcher's outer guard — any handler bug takes this path.
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r1","conversationId":42}""", events.Add);
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1","conversationId":42}""", events.Add);
 
         Assert.Equal("INTERNAL_ERROR", events[^1]["error"]!["code"]!.GetValue<string>());
         var logged = Assert.Single(logger.Entries, e => e.Level == LogLevel.Error);
@@ -69,7 +69,7 @@ public class InternalErrorLoggingTests
         var dispatcher = new FrameDispatcher(new InMemorySessionStore(), new MockChatClient()); // no logger wired
         var events = new List<JsonObject>();
 
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","requestId":"r1","conversationId":42}""", events.Add);
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1","conversationId":42}""", events.Add);
 
         Assert.Equal("INTERNAL_ERROR", events[^1]["error"]!["code"]!.GetValue<string>());
     }

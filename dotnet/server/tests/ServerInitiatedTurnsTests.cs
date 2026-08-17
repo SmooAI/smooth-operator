@@ -121,24 +121,19 @@ public class ServerInitiatedTurnsTests
     }
 
     /// <summary>
-    /// An agentless session reports NO agent. This test used to assert the opposite — that the store
-    /// minted a GUID — which is the bug: it pointed the session at an agent that never existed.
-    /// th-68897a.
+    /// agentId is required here too, and a rejected call must persist NOTHING. This test previously
+    /// asserted the store minted a GUID, which was the bug it is now guarding against. th-68897a.
     /// </summary>
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public async Task StartTurn_WithoutAnAgent_LeavesAgentIdNull(string agentId)
+    public async Task StartTurn_WithoutAnAgent_ThrowsAndPersistsNothing(string agentId)
     {
         var store = new InMemorySessionStore();
         var turns = Build(new MockChatClient().PushText("ok"), store);
 
-        var result = await turns.StartTurnAsync(agentId, "hello");
+        await Assert.ThrowsAsync<ArgumentException>(() => turns.StartTurnAsync(agentId, "hello"));
 
-        var session = await store.GetSessionAsync(result.SessionId);
-        Assert.NotNull(session);
-        Assert.Null(session!.AgentId);
-        // Minting the agent PARTICIPANT is still correct — it is a new row, not a dangling reference.
-        Assert.False(string.IsNullOrEmpty(session.AgentParticipantId));
+        Assert.Empty(await store.ListConversationsAsync(ConversationScope.Unscoped));
     }
 }

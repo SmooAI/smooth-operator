@@ -60,21 +60,25 @@ public class ServerProtocolTests
     }
 
     /// <summary>
-    /// No agent named ⇒ no agentId on the wire, rather than a fabricated GUID pointing at an agent
-    /// that never existed. Omitted (matching the Rust handler's skip_serializing_if) rather than null.
-    /// th-68897a.
+    /// agentId is REQUIRED by the Request schema, so absent-or-blank is a malformed request, not an
+    /// agentless session. It is rejected — and, critically, persists NOTHING: a rejection that still
+    /// writes a row is the same bug wearing an error message. th-68897a.
     /// </summary>
-    [Fact]
-    public async Task CreateSession_WithoutAnAgent_OmitsAgentId()
+    [Theory]
+    [InlineData("""{"action":"create_conversation_session","requestId":"r1"}""")]
+    [InlineData("""{"action":"create_conversation_session","requestId":"r1","agentId":""}""")]
+    [InlineData("""{"action":"create_conversation_session","requestId":"r1","agentId":"   "}""")]
+    public async Task CreateSession_WithoutAnAgent_IsRejectedAndPersistsNothing(string frame)
     {
-        var (dispatcher, _, events) = Build(new MockChatClient());
-        await dispatcher.DispatchAsync(
-            """{"action":"create_conversation_session","requestId":"r1"}""", events.Add);
+        var (dispatcher, store, events) = Build(new MockChatClient());
+        await dispatcher.DispatchAsync(frame, events.Add);
 
-        var data = Assert.Single(events)["data"]!.AsObject();
-        Assert.False(data.ContainsKey("agentId"));
-        // The agent PARTICIPANT is still minted — that row is real, unlike an invented agent id.
-        Assert.False(string.IsNullOrEmpty(data["agentParticipantId"]!.GetValue<string>()));
+        var ev = Assert.Single(events);
+        Assert.Equal("error", ev["type"]!.GetValue<string>());
+        Assert.Equal("VALIDATION_ERROR", ev["error"]!["code"]!.GetValue<string>());
+
+        // Nothing was written — the rejection happens before the store is touched.
+        Assert.Empty(await store.ListConversationsAsync(ConversationScope.Unscoped));
     }
 
     [Fact]
