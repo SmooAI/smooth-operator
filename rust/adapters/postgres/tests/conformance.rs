@@ -27,8 +27,8 @@ use smooth_operator_core::{
 
 use smooth_operator::adapter::{ConversationUpdate, MessageQuery, SessionUpdate, StorageAdapter};
 use smooth_operator::domain::{
-    Conversation, Direction, Message, MessageContent, Participant, ParticipantType, Platform,
-    Session, SessionStatus,
+    Conversation, Direction, Message, MessageContent, Participant, ParticipantRef, ParticipantType,
+    Platform, Session, SessionStatus,
 };
 use smooth_operator_adapter_postgres::PostgresAdapter;
 
@@ -244,6 +244,64 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
     let single = store.get_message("msg-2").await?.expect("exists");
     assert_eq!(single.direction, Direction::Outbound);
     assert_eq!(single.content.text.as_deref(), Some("hello!"));
+
+    // --- from/to are participant FKs, so the ref's type + name come from a join (th-5a5181) ---
+    // The columns hold bare ids; if the join were dropped these would read back with an empty
+    // type and no name, which is exactly what the old denormalized JSONB blob hid.
+    let mut addressed = message("msg-3", "conv-1", Direction::Inbound, "addressed");
+    addressed.from = Some(ParticipantRef {
+        id: "part-user".into(),
+        participant_type: String::new(),
+        name: None,
+    });
+    addressed.to = Some(ParticipantRef {
+        id: "part-agent".into(),
+        participant_type: String::new(),
+        name: None,
+    });
+    store.append_message(addressed).await?;
+    let read_back = store.get_message("msg-3").await?.expect("exists");
+    let from = read_back.from.expect("from ref");
+    let to = read_back.to.expect("to ref");
+    assert_eq!(from.id, "part-user");
+    assert_eq!(from.participant_type, "user", "type comes from the join");
+    assert!(from.name.is_some(), "name comes from the join");
+    assert_eq!(to.id, "part-agent");
+    assert_eq!(to.participant_type, "ai-agent");
+
+    // --- paging ties break on id, since there is no seq column (th-5a5181) ---
+    // Same created_at on every row: the old BIGSERIAL seq made ties impossible, so a
+    // (created_at, id) cursor is the first thing that can drop or repeat a row. Page one at a
+    // time and assert each message comes back exactly once.
+    let tied_at = Utc::now();
+    for id in ["tie-b", "tie-a", "tie-c"] {
+        let mut m = message(id, "conv-tie", Direction::Inbound, id);
+        m.created_at = tied_at;
+        store.append_message(m).await?;
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list_messages_by_conversation(MessageQuery {
+                conversation_id: "conv-tie".into(),
+                limit: 1,
+                cursor,
+                descending: false,
+            })
+            .await?;
+        seen.extend(page.messages.iter().map(|m| m.id.clone()));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+        assert!(seen.len() <= 3, "cursor is not advancing past a tie");
+    }
+    assert_eq!(
+        seen,
+        vec!["tie-a", "tie-b", "tie-c"],
+        "every tied row exactly once, ordered by the id tie-break"
+    );
 
     // --- session create/get/update/list ---
     let session = Session {

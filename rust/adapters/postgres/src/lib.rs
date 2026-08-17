@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::{Config as PoolConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 
@@ -430,20 +430,42 @@ fn row_to_participant(row: &tokio_postgres::Row) -> Result<Participant> {
     })
 }
 
+/// `conversation_messages` plus the two participant rows its `from`/`to` FKs point at.
+///
+/// The columns hold bare participant ids (as the monorepo's do), so a [`ParticipantRef`]'s
+/// `type` and `name` come from the join rather than from a denormalized JSON blob. Both
+/// joins are LEFT so a null ref, or one pointing at a deleted participant, still yields the
+/// message. Every message read goes through this so the four query sites can't drift.
+const MESSAGE_SELECT: &str = "SELECT m.*, \
+     fp.type AS from_type, fp.name AS from_name, \
+     tp.type AS to_type, tp.name AS to_name \
+   FROM conversation_messages m \
+   LEFT JOIN conversation_participants fp ON fp.id = m.\"from\" \
+   LEFT JOIN conversation_participants tp ON tp.id = m.\"to\"";
+
+/// Rebuild a [`ParticipantRef`] from an id plus the joined participant's type/name.
+///
+/// `None` when the id is null. A ref whose participant row is missing keeps the id and
+/// reports an empty type — the id is the load-bearing half, and dropping the whole ref
+/// would silently lose who the message was from.
+fn participant_ref(
+    id: Option<String>,
+    participant_type: Option<String>,
+    name: Option<String>,
+) -> Option<ParticipantRef> {
+    id.map(|id| ParticipantRef {
+        id,
+        participant_type: participant_type.unwrap_or_default(),
+        name,
+    })
+}
+
 fn row_to_message(row: &tokio_postgres::Row) -> Result<Message> {
     let content: serde_json::Value = row.get("content");
     let content: MessageContent =
         serde_json::from_value(content).context("decoding message content")?;
-    let from: Option<serde_json::Value> = row.get("from_ref");
-    let to: Option<serde_json::Value> = row.get("to_ref");
-    let from: Option<ParticipantRef> = from
-        .map(serde_json::from_value)
-        .transpose()
-        .context("decoding from_ref")?;
-    let to: Option<ParticipantRef> = to
-        .map(serde_json::from_value)
-        .transpose()
-        .context("decoding to_ref")?;
+    let from = participant_ref(row.get("from"), row.get("from_type"), row.get("from_name"));
+    let to = participant_ref(row.get("to"), row.get("to_type"), row.get("to_name"));
     Ok(Message {
         id: row.get("id"),
         external_id: row.get("external_id"),
@@ -693,17 +715,15 @@ impl StorageAdapter for PostgresAdapter {
     async fn append_message(&self, message: Message) -> Result<Message> {
         let client = self.pool.get().await?;
         let content = serde_json::to_value(&message.content)?;
-        let from = message
-            .from
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()?;
-        let to = message.to.as_ref().map(serde_json::to_value).transpose()?;
+        // Only the id is stored; the ref's type and name live on the participant row the
+        // FK points at, which is where the monorepo keeps them.
+        let from = message.from.as_ref().map(|p| p.id.clone());
+        let to = message.to.as_ref().map(|p| p.id.clone());
         client
             .execute(
                 "INSERT INTO conversation_messages
                     (id, external_id, organization_id, conversation_id, direction, content,
-                     from_ref, to_ref, metadata_json, analytics_json, created_at, updated_at)
+                     \"from\", \"to\", metadata_json, analytics_json, created_at, updated_at)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
                 &[
                     &message.id,
@@ -727,7 +747,7 @@ impl StorageAdapter for PostgresAdapter {
     async fn get_message(&self, id: &str) -> Result<Option<Message>> {
         let client = self.pool.get().await?;
         let row = client
-            .query_opt("SELECT * FROM conversation_messages WHERE id = $1", &[&id])
+            .query_opt(&format!("{MESSAGE_SELECT} WHERE m.id = $1"), &[&id])
             .await?;
         row.as_ref().map(row_to_message).transpose()
     }
@@ -736,17 +756,18 @@ impl StorageAdapter for PostgresAdapter {
         let client = self.pool.get().await?;
         let limit_i64 = i64::try_from(query.limit).unwrap_or(i64::MAX);
 
-        // Cursor is a message id; page starts strictly after that message's seq
-        // (or before, when descending). Resolve it to a seq first.
-        let cursor_seq: Option<i64> = match &query.cursor {
+        // Cursor is a message id; the page starts strictly after (or before, when
+        // descending) that message's position. Position is the pair (created_at, id) —
+        // there is no `seq` column, and id breaks ties so the order is total.
+        let cursor_pos: Option<(DateTime<Utc>, String)> = match &query.cursor {
             Some(cursor) => {
                 let row = client
                     .query_opt(
-                        "SELECT seq FROM conversation_messages WHERE id = $1",
+                        "SELECT created_at, id FROM conversation_messages WHERE id = $1",
                         &[&cursor],
                     )
                     .await?;
-                row.map(|r| r.get::<_, i64>("seq"))
+                row.map(|r| (r.get("created_at"), r.get("id")))
             }
             None => None,
         };
@@ -754,53 +775,36 @@ impl StorageAdapter for PostgresAdapter {
         // Fetch limit + 1 to detect whether another page remains, mirroring the
         // in-memory "next_cursor is Some iff more rows follow" contract.
         let probe = limit_i64.saturating_add(1);
-        let rows = if query.descending {
-            // Newest first: seq descending; cursor means "seq < cursor_seq".
-            match cursor_seq {
-                Some(seq) => {
-                    client
-                        .query(
-                            "SELECT * FROM conversation_messages
-                             WHERE conversation_id = $1 AND seq < $2
-                             ORDER BY seq DESC LIMIT $3",
-                            &[&query.conversation_id, &seq, &probe],
-                        )
-                        .await?
-                }
-                None => {
-                    client
-                        .query(
-                            "SELECT * FROM conversation_messages
-                             WHERE conversation_id = $1
-                             ORDER BY seq DESC LIMIT $2",
-                            &[&query.conversation_id, &probe],
-                        )
-                        .await?
-                }
-            }
+        // Row-value comparison, so the tie-break is part of the predicate rather than
+        // hand-rolled OR logic that is easy to get subtly wrong.
+        let (order, compare) = if query.descending {
+            ("DESC", "<")
         } else {
-            // Oldest first: seq ascending; cursor means "seq > cursor_seq".
-            match cursor_seq {
-                Some(seq) => {
-                    client
-                        .query(
-                            "SELECT * FROM conversation_messages
-                             WHERE conversation_id = $1 AND seq > $2
-                             ORDER BY seq ASC LIMIT $3",
-                            &[&query.conversation_id, &seq, &probe],
-                        )
-                        .await?
-                }
-                None => {
-                    client
-                        .query(
-                            "SELECT * FROM conversation_messages
-                             WHERE conversation_id = $1
-                             ORDER BY seq ASC LIMIT $2",
-                            &[&query.conversation_id, &probe],
-                        )
-                        .await?
-                }
+            ("ASC", ">")
+        };
+        let rows = match &cursor_pos {
+            Some((created_at, id)) => {
+                client
+                    .query(
+                        &format!(
+                            "{MESSAGE_SELECT} WHERE m.conversation_id = $1
+                               AND (m.created_at, m.id) {compare} ($2, $3)
+                             ORDER BY m.created_at {order}, m.id {order} LIMIT $4"
+                        ),
+                        &[&query.conversation_id, created_at, id, &probe],
+                    )
+                    .await?
+            }
+            None => {
+                client
+                    .query(
+                        &format!(
+                            "{MESSAGE_SELECT} WHERE m.conversation_id = $1
+                             ORDER BY m.created_at {order}, m.id {order} LIMIT $2"
+                        ),
+                        &[&query.conversation_id, &probe],
+                    )
+                    .await?
             }
         };
 
