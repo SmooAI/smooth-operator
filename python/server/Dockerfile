@@ -62,13 +62,15 @@ WORKDIR /workspace
 
 USER 10001:10001
 
-# The server reads SMOOTH_OPERATOR_BIND as a combined host:port (see
-# python/server/src/smooth_operator_server/__main__.py). The PROCESS default is
-# 127.0.0.1:8787, which is unreachable from outside a container — so the IMAGE
-# defaults the host to 0.0.0.0, keeping the port on its 8787 default. Narrow it
-# back with -e SMOOTH_OPERATOR_BIND=127.0.0.1:8787 if you front it with a
-# sidecar/proxy on the pod loopback.
-ENV SMOOTH_OPERATOR_BIND=0.0.0.0:8787
+# Bind + port (both overridable), the canonical names every server implementation
+# reads (see python/server/src/smooth_operator_server/__main__.py). The PROCESS
+# default is 127.0.0.1, which is unreachable from outside a container — so the
+# IMAGE defaults the host to 0.0.0.0. Narrow it back with
+# -e SMOOTH_AGENT_BIND=127.0.0.1 if you front it with a sidecar/proxy on the pod
+# loopback. The legacy combined SMOOTH_OPERATOR_BIND is still honored for existing
+# deployments.
+ENV SMOOTH_AGENT_BIND=0.0.0.0 \
+    SMOOTH_AGENT_PORT=8787
 EXPOSE 8787
 
 ENTRYPOINT ["python", "-m", "smooth_operator_server"]

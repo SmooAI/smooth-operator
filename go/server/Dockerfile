@@ -52,13 +52,14 @@ WORKDIR /workspace
 
 USER 10001:10001
 
-# The server reads SMOOTH_OPERATOR_BIND as a combined host:port (see
-# go/server/cmd/serve/main.go). The PROCESS default is 127.0.0.1:8793, which is
-# unreachable from outside a container — so the IMAGE defaults the host to
-# 0.0.0.0, keeping the port on its 8793 default. Narrow it back with
-# -e SMOOTH_OPERATOR_BIND=127.0.0.1:8793 if you front it with a sidecar/proxy on
-# the pod loopback.
-ENV SMOOTH_OPERATOR_BIND=0.0.0.0:8793
-EXPOSE 8793
+# Bind + port (both overridable), the canonical names every server implementation
+# reads (see go/server/cmd/serve/main.go). The PROCESS default is 127.0.0.1, which
+# is unreachable from outside a container — so the IMAGE defaults the host to
+# 0.0.0.0. Narrow it back with -e SMOOTH_AGENT_BIND=127.0.0.1 if you front it with
+# a sidecar/proxy on the pod loopback. The legacy combined SMOOTH_OPERATOR_BIND is
+# still honored for existing deployments.
+ENV SMOOTH_AGENT_BIND=0.0.0.0 \
+    SMOOTH_AGENT_PORT=8787
+EXPOSE 8787
 
 ENTRYPOINT ["/usr/local/bin/smooth-operator-server"]
