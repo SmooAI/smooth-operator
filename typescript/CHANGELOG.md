@@ -1,5 +1,127 @@
 # @smooai/smooth-operator
 
+## 1.46.3
+
+### Patch Changes
+
+- dcea5e5: fix(rust): clear every clippy 1.96 failure in the workspace, so the gate can be turned on
+
+  Nine hard errors under `-D warnings` on clippy 1.96, all pre-existing and all
+  invisible because the clippy step is `continue-on-error`. Main goes red the moment
+  GitHub's stable runner reaches 1.96.
+
+  - **`unnecessary_sort_by` ×6** — `adapters/in-memory` (3) and `adapters/dynamodb` (3).
+    `sort_by(|a, b| …cmp…)` → `sort_by_key`, with `Reverse` on the two newest-first
+    sorts. Same ordering, no behavior change.
+  - **`too_many_arguments`** — `smooth-operator-server/src/protocol.rs::eventual_response`.
+    Eight flat wire fields, one arg per emitted JSON key; given the same
+    `#[allow]` its sibling builders in `handler.rs` and `server.rs` already carry,
+    rather than a refactor that would touch all ten call sites for a lint heuristic.
+  - **`while_let_loop`** — a `loop` + `let … else { break }` in a test's socket read,
+    now the `while let` clippy asked for.
+  - **`derivable_impls`** — `AuthMode`'s hand-written `Default` is now `#[derive(Default)]`
+    - `#[default]`.
+
+  The last three only surfaced once the adapter errors were fixed: the build failed
+  before those crates were ever reached, so "fix the sort_by sites" and "clippy is
+  clean" were not the same job.
+
+  `cargo clippy --workspace --all-targets -- -D warnings` exits 0 on 1.96; 650 tests
+  pass; `cargo fmt --check` clean.
+
+- 35d7954: fix(ts,python,dotnet): make `eventual_response.usage.costUsd` real instead of always 0
+
+  The TypeScript, Python and .NET servers injected a raw SDK client into the engine —
+  `openai`'s `OpenAI`/`AsyncOpenAI`, and MEAI's OpenAI adapter. Every one of those
+  parses the HTTP response and throws the headers away, and the gateway reports
+  per-request cost ONLY in a response header. So core's cost-header parser (shipped
+  across all five engines in core#121) had nothing to read, and every turn on these
+  three servers reported `costUsd: 0`. Go was already correct because it injects core's
+  own `GatewayClient`; Rust because it builds its own `LlmClient`.
+
+  All three now inject the header-reading client core ships:
+
+  - **TypeScript** — `createGatewayClient({ baseURL, apiKey })`. This also deletes the
+    optional lazy-`import('openai')` dance, its swallow-everything `catch`, and a
+    hand-rolled `createStream` adapter that had no way to carry a cost at all. `openai`
+    now arrives transitively through core.
+  - **Python** — `GatewayLlmProvider(client=…)`, wrapping the `AsyncOpenAI` the server
+    already built so the base-url-optional branch stays the single place that decides
+    the endpoint.
+  - **.NET** — `GatewayChatClient`, which also drops the `Microsoft.Extensions.AI.OpenAI`
+    package reference from the host entirely.
+
+  .NET needed a second fix: its `TurnRunner` hardcoded `new TurnUsage(0, …)`, so the
+  client swap alone would have changed nothing. It now folds the gateway cost the
+  client surfaces on each streaming update's `AdditionalProperties`, summed across the
+  turn's model calls. The `ponytail:` comment that documented the old always-zero
+  behaviour is updated rather than left to mislead.
+
+  Absent-and-zero handling is unchanged and now tested at the server boundary: a header
+  that is PRESENT and reports `0` is not locked in as a real $0 — it falls through
+  exactly as an absent header does.
+
+  Tests are real turns against a real local HTTP+SSE gateway in each language, asserted
+  on what the protocol actually emits rather than inside the engine — TS 5, Python 5,
+  .NET 5. Each language additionally pins the WIRING (that the server hands the engine a
+  header-reading client), because the pipeline tests inject the client directly and
+  would stay green if the server regressed to the raw SDK. Both halves were
+  mutation-tested: reintroducing the bug fails exactly the intended tests.
+
+  Core minimums move to the lowest version per registry that actually ships the clients:
+  npm `^1.8.4`, PyPI `>=1.8.3`, NuGet `1.7.16` (NuGet has no 1.8.x; PyPI's 1.8.4 has no
+  installable files).
+
+- 521caa2: feat(dotnet): serve the full `/admin/*` management API, so the console renders against .NET
+
+  The C# host shipped four admin routes — `/admin/health`, `/admin/me`, a repo-listing
+  `/admin/connectors`, and its own `POST /admin/reindex`. The console needs sixteen, so
+  four of its five pages 404'd and .NET was the one engine the management UI could not
+  drive. This adds the ten missing route families (eleven method+path combos): the
+  conversations list and per-conversation messages, indexing runs, document sets, the
+  full connector CRUD plus `POST /admin/connectors/{id}/index`, and settings GET/PUT.
+
+  Two of the existing routes changed shape to match the contract, because the .NET-only
+  shapes could never have rendered. `/admin/me` now answers `{userId, orgId, role}`
+  instead of `{sub, org, role, groups}`, and `/admin/connectors` now lists persisted,
+  org-scoped connector configs rather than the env-configured GitHub repos — those are
+  still reachable through `POST /admin/reindex`, which is unchanged and remains this
+  host's own extra route. Shapes are built against `console/lib/types.ts`, not the Rust
+  struct field names: those read snake_case in source but serialize camelCase, so
+  copying them yields a server that passes its own tests and renders nothing.
+
+  The auth gate is the one the other four servers use, and it fails closed in both
+  directions. A missing bearer token is 401 even on a no-auth server; a token an
+  auth-enabled server cannot verify is 401 rather than an anonymous grant; below the
+  required role is 403. `AUTH_MODE=none` resolves to an **Admin** principal, matching
+  Rust's `NoAuthVerifier` — without that the console 403-walls against a local server,
+  which is exactly as useless as the 404s this closes. The gate also now resolves
+  through the same `IAuthVerifier` seam the WebSocket host uses, so a host running with
+  `SMOOTH_LOCAL_TOKEN` authenticates admin requests instead of silently falling back to
+  the `TokenAccessResolver`.
+
+  Org scoping lives in the handlers, not the store: a cross-org id 404s identically to
+  an unknown one, so the API is never an existence oracle for another org's rows, and
+  the internal owner key is `[JsonIgnore]`d off every response. `GET /admin/settings`
+  returns defaults on a miss rather than 404.
+
+  Backed by an in-memory `AdminStores` for now, as in the Go and TypeScript servers. A
+  host can register its own instance in DI to pre-seed or share that in-memory state,
+  but that is not a storage swap point: `AdminStores` is sealed with get-only
+  collections, so durable storage will need this class changed. It is the first admin
+  store in `dotnet/` — there was none before, so converging one onto Rust's
+  `ADMIN_SCHEMA` is now a real follow-up rather than something to converge against
+  today. Document sets are honestly empty and a connector index run records zero
+  documents — this server has no per-connector ingestion pipeline yet, and inventing
+  counts would render a lie.
+
+  Verified by 28 xUnit integration tests over real HTTP against a booted host
+  (auth-fail-closed on every gated route, role rank in both directions, the no-auth
+  admin grant and that it does not leak into an auth-enabled server, org isolation, and
+  each response shape), and by booting the Next.js console with `CONSOLE_AUTH=dev`
+  against the C# host: all five pages render, and the connector create → edit → index →
+  delete and settings-save flows round-trip through the UI, with zero `/admin/*` 404s.
+
 ## 1.46.2
 
 ### Patch Changes
