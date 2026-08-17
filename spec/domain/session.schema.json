@@ -4,7 +4,7 @@
   "title": "Session",
   "description": "An AI conversation session. Ties together a conversation, an agent, the user and agent participants, and the smooth-operator workflow thread. Corresponds to a row in the `conversation_sessions` table. The `threadId` field is the smooth-operator thread identifier (stored as `langgraph_thread_id` in the DB for historical reasons; renamed to `threadId` in the protocol).",
   "type": "object",
-  "required": ["sessionId", "conversationId", "organizationId", "agentId", "agentName", "userParticipantId", "agentParticipantId", "threadId"],
+  "required": ["sessionId", "conversationId", "organizationId", "agentName", "userParticipantId", "agentParticipantId", "threadId"],
   "additionalProperties": false,
   "properties": {
     "sessionId": {
@@ -25,7 +25,7 @@
     "agentId": {
       "type": "string",
       "format": "uuid",
-      "description": "The agent handling this session."
+      "description": "The agent handling this session. OPTIONAL: omitted when the caller named no agent. It used to be filled with a fresh UUID, which pointed every agentless session at an agent that had never existed (th-68897a) — absence is now represented by omitting the field, not by a fabricated id."
     },
     "agentName": {
       "type": "string",

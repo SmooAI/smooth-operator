@@ -359,5 +359,16 @@
       },
       "timestamp": 1749340809000
     }
+  },
+  "create_session_response_agentless": {
+    "$schema_ref": "actions/create-conversation-session.schema.json#/$defs/Response",
+    "description": "Create-session response for a session with NO agent: agentId is OMITTED, not fabricated. It used to be filled with a fresh UUID, pointing every agentless session at an agent that had never existed (th-68897a). Fails if agentId returns to `required`.",
+    "instance": {
+      "sessionId": "22222222-2222-2222-2222-222222222222",
+      "conversationId": "33333333-3333-3333-3333-333333333333",
+      "agentName": "Aria",
+      "userParticipantId": "44444444-4444-4444-4444-444444444444",
+      "agentParticipantId": "55555555-5555-5555-5555-555555555555"
+    }
   }
 }

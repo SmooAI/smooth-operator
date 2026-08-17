@@ -76,7 +76,7 @@
       "title": "CreateConversationSessionResponse",
       "description": "Data payload carried in the `immediate_response` event that acknowledges session creation.",
       "type": "object",
-      "required": ["sessionId", "conversationId", "agentId", "agentName", "userParticipantId", "agentParticipantId"],
+      "required": ["sessionId", "conversationId", "agentName", "userParticipantId", "agentParticipantId"],
       "additionalProperties": false,
       "properties": {
         "sessionId": {
