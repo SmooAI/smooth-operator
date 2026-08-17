@@ -121,13 +121,11 @@ fn extract_markdown_suggested_replies(reply: &str) -> Option<(String, Vec<String
         let bulleted = t.trim_start_matches(['-', '*', '•']);
         let item = if bulleted.len() < t.len() {
             bulleted.trim_start()
-        } else if let Some(i) = t
-            .find(['.', ')'])
-            .filter(|&i| i > 0 && t[..i].bytes().all(|b| b.is_ascii_digit()))
-        {
-            t[i + 1..].trim_start()
         } else {
-            return None;
+            let i = t
+                .find(['.', ')'])
+                .filter(|&i| i > 0 && t[..i].bytes().all(|b| b.is_ascii_digit()))?;
+            t[i + 1..].trim_start()
         };
         let item = item.trim().trim_matches(['"', '\'', '`']).trim();
         if item.is_empty() {
