@@ -29,10 +29,13 @@
     },
     "dependencies": {
         "@smooai/smooth-operator-core": "^1.7.1",
+        "pg": "^8.23.0",
         "ws": "^8.18.0"
     },
     "devDependencies": {
+        "@testcontainers/postgresql": "^12.1.0",
         "@types/node": "^25.9.2",
+        "@types/pg": "^8.21.0",
         "@types/ws": "^8.5.13",
         "typescript": "^5.7.3",
         "vitest": "^2.1.8"

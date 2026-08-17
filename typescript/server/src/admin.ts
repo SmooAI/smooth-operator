@@ -11,10 +11,10 @@
  * so copying the field names would produce a server that passes its own tests and
  * renders nothing.
  *
- * ponytail: connector configs, settings and indexing runs live in memory
- * (`AdminStores`) because this server is memory-only today. The durable storage
- * adapter is a separate workstream — swap those three maps; nothing outside this
- * file reads them.
+ * Connector configs, settings and indexing runs sit behind the {@link AdminStore}
+ * seam. {@link InMemoryAdminStore} is the default (this server is memory-only unless
+ * told otherwise); `PostgresStore` (postgresStore.ts) is the durable implementation,
+ * selected with `SMOOTH_AGENT_STORAGE=postgres`.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -46,7 +46,7 @@ function rankName(rank: number): string {
 
 // ── in-memory admin state ───────────────────────────────────────────────────
 
-interface ConnectorConfig {
+export interface ConnectorConfig {
     id: string;
     name: string;
     kind: string;
@@ -58,7 +58,7 @@ interface ConnectorConfig {
     orgId?: string;
 }
 
-interface AgentSettings {
+export interface AgentSettings {
     orgId: string;
     model: string;
     systemPrompt: string;
@@ -66,7 +66,7 @@ interface AgentSettings {
     updatedAt: string;
 }
 
-interface IndexingRun {
+export interface IndexingRun {
     id: string;
     connectorName: string;
     status: string;
@@ -80,13 +80,72 @@ interface IndexingRun {
 }
 
 /**
- * Org-scoped admin state. Every read and write filters by org, so one org can
- * never see or mutate another's rows.
+ * The persistence seam for the three management-console stores. Every method takes
+ * the caller's org and filters by it, so one org can never see or mutate another's
+ * rows. A cross-org id is reported exactly like an unknown one (`undefined` /
+ * `false`), so the handlers render an identical 404 and the id space cannot be probed.
+ *
+ * Two implementations: {@link InMemoryAdminStore} (default) and `PostgresStore`.
  */
-export class AdminStores {
-    readonly connectors = new Map<string, ConnectorConfig>();
-    readonly settings = new Map<string, AgentSettings>();
-    readonly runs: IndexingRun[] = [];
+export interface AdminStore {
+    listConnectors(orgId: string): Promise<ConnectorConfig[]>;
+    /** `undefined` when the org has no such connector — including "it's another org's". */
+    getConnector(orgId: string, id: string): Promise<ConnectorConfig | undefined>;
+    putConnector(connector: ConnectorConfig): Promise<void>;
+    /** Whether the connector existed in that org. */
+    deleteConnector(orgId: string, id: string): Promise<boolean>;
+    /** `undefined` when the org has none; the caller substitutes defaults. */
+    getSettings(orgId: string): Promise<AgentSettings | undefined>;
+    putSettings(settings: AgentSettings): Promise<void>;
+    listRuns(orgId: string): Promise<IndexingRun[]>;
+    recordRun(run: IndexingRun): Promise<void>;
+}
+
+/** In-process {@link AdminStore} — the reference implementation. */
+export class InMemoryAdminStore implements AdminStore {
+    private readonly connectors = new Map<string, ConnectorConfig>();
+    private readonly settings = new Map<string, AgentSettings>();
+    private readonly runs: IndexingRun[] = [];
+
+    async listConnectors(orgId: string): Promise<ConnectorConfig[]> {
+        return [...this.connectors.values()].filter((c) => c.orgId === orgId).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    async getConnector(orgId: string, id: string): Promise<ConnectorConfig | undefined> {
+        // A cross-org id takes the same branch as an unknown one.
+        const row = this.connectors.get(id);
+        return row && row.orgId === orgId ? { ...row } : undefined;
+    }
+
+    async putConnector(connector: ConnectorConfig): Promise<void> {
+        this.connectors.set(connector.id, { ...connector });
+    }
+
+    async deleteConnector(orgId: string, id: string): Promise<boolean> {
+        const row = this.connectors.get(id);
+        if (!row || row.orgId !== orgId) return false;
+        this.connectors.delete(id);
+        return true;
+    }
+
+    async getSettings(orgId: string): Promise<AgentSettings | undefined> {
+        const row = this.settings.get(orgId);
+        return row ? { ...row } : undefined;
+    }
+
+    async putSettings(settings: AgentSettings): Promise<void> {
+        this.settings.set(settings.orgId, { ...settings });
+    }
+
+    async listRuns(orgId: string): Promise<IndexingRun[]> {
+        return this.runs.filter((r) => r.orgId === orgId);
+    }
+
+    async recordRun(run: IndexingRun): Promise<void> {
+        const index = this.runs.findIndex((r) => r.id === run.id);
+        if (index >= 0) this.runs[index] = { ...run };
+        else this.runs.push({ ...run });
+    }
 }
 
 /** Rust's "defaults when unset" settings read. */
@@ -133,7 +192,7 @@ function bearerToken(req: IncomingMessage): string | undefined {
 export interface AdminDeps {
     auth: AuthVerifier;
     store: SessionStore;
-    stores: AdminStores;
+    stores: AdminStore;
 }
 
 /**
@@ -328,7 +387,7 @@ async function route(
     if (method === 'GET' && path === '/admin/indexing/runs') {
         const p = requireRole(deps, req, res, ROLE_CURATOR);
         if (!p) return;
-        sendJson(res, 200, { runs: deps.stores.runs.filter((r) => r.orgId === p.org).map(publicRow) });
+        sendJson(res, 200, { runs: (await deps.stores.listRuns(p.org)).map(publicRow) });
         return;
     }
 
@@ -344,11 +403,7 @@ async function route(
         if (method === 'GET') {
             const p = requireRole(deps, req, res, ROLE_CURATOR);
             if (!p) return;
-            const rows = [...deps.stores.connectors.values()]
-                .filter((c) => c.orgId === p.org)
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map(publicRow);
-            sendJson(res, 200, { connectors: rows });
+            sendJson(res, 200, { connectors: (await deps.stores.listConnectors(p.org)).map(publicRow) });
             return;
         }
         if (method === 'POST') {
@@ -359,7 +414,7 @@ async function route(
             if (!write) return;
             const now = new Date().toISOString();
             const row: ConnectorConfig = { id: randomUUID(), ...write, createdAt: now, updatedAt: now, orgId: p.org };
-            deps.stores.connectors.set(row.id, row);
+            await deps.stores.putConnector(row);
             sendJson(res, 200, { connector: publicRow(row) });
             return;
         }
@@ -369,7 +424,7 @@ async function route(
     if (method === 'POST' && indexMatch) {
         const p = requireRole(deps, req, res, ROLE_CURATOR);
         if (!p) return;
-        const row = ownedConnector(deps, decodeURIComponent(indexMatch[1] ?? ''), p.org, res);
+        const row = await ownedConnector(deps, decodeURIComponent(indexMatch[1] ?? ''), p.org, res);
         if (!row) return;
         // ponytail: no ingestion pipeline on this server yet, so the run is recorded
         // as succeeded with zero documents rather than faked with invented counts.
@@ -386,7 +441,7 @@ async function route(
             error: null,
             orgId: p.org,
         };
-        deps.stores.runs.push(run);
+        await deps.stores.recordRun(run);
         sendJson(res, 200, { run: publicRow(run) });
         return;
     }
@@ -397,7 +452,7 @@ async function route(
         if (method === 'GET') {
             const p = requireRole(deps, req, res, ROLE_CURATOR);
             if (!p) return;
-            const row = ownedConnector(deps, id, p.org, res);
+            const row = await ownedConnector(deps, id, p.org, res);
             if (!row) return;
             sendJson(res, 200, { connector: publicRow(row) });
             return;
@@ -408,17 +463,24 @@ async function route(
             const body = await readJsonBody(req);
             const write = validateConnector(body, res);
             if (!write) return;
-            const row = ownedConnector(deps, id, p.org, res);
+            // ponytail: read-modify-write without a lock across the two calls. Concurrent
+            // PUTs to the SAME connector are last-write-wins, which is what the durable
+            // store's upsert does anyway; add row locking if a real conflict shows up.
+            const row = await ownedConnector(deps, id, p.org, res);
             if (!row) return;
             Object.assign(row, write, { updatedAt: new Date().toISOString() });
+            await deps.stores.putConnector(row);
             sendJson(res, 200, { connector: publicRow(row) });
             return;
         }
         if (method === 'DELETE') {
             const p = requireRole(deps, req, res, ROLE_ADMIN);
             if (!p) return;
-            if (!ownedConnector(deps, id, p.org, res)) return;
-            deps.stores.connectors.delete(id);
+            if (!(await deps.stores.deleteConnector(p.org, id))) {
+                // Unknown and cross-org are the same 404 — no existence oracle.
+                sendError(res, 404, 'NOT_FOUND', 'connector not found');
+                return;
+            }
             res.writeHead(204);
             res.end();
             return;
@@ -429,7 +491,7 @@ async function route(
         if (method === 'GET') {
             const p = requireRole(deps, req, res, ROLE_CURATOR);
             if (!p) return;
-            sendJson(res, 200, { settings: deps.stores.settings.get(p.org) ?? defaultSettings(p.org) });
+            sendJson(res, 200, { settings: (await deps.stores.getSettings(p.org)) ?? defaultSettings(p.org) });
             return;
         }
         if (method === 'PUT') {
@@ -447,7 +509,7 @@ async function route(
                 defaultTools: Array.isArray(body.defaultTools) ? body.defaultTools : [],
                 updatedAt: new Date().toISOString(),
             };
-            deps.stores.settings.set(p.org, settings);
+            await deps.stores.putSettings(settings);
             sendJson(res, 200, { settings });
             return;
         }
@@ -457,9 +519,9 @@ async function route(
 }
 
 /** An org-owned connector, or a 404. A cross-org id is deliberately indistinguishable from an unknown one. */
-function ownedConnector(deps: AdminDeps, id: string, orgId: string, res: ServerResponse): ConnectorConfig | undefined {
-    const row = deps.stores.connectors.get(id);
-    if (!row || row.orgId !== orgId) {
+async function ownedConnector(deps: AdminDeps, id: string, orgId: string, res: ServerResponse): Promise<ConnectorConfig | undefined> {
+    const row = await deps.stores.getConnector(orgId, id);
+    if (!row) {
         sendError(res, 404, 'NOT_FOUND', 'connector not found');
         return undefined;
     }
