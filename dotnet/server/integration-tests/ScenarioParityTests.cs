@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -31,6 +32,29 @@ public class ScenarioParityTests
         {
             yield return new object[] { Path.GetFileName(path), path };
         }
+    }
+
+    /// <summary>
+    /// Offline guard for the by-value JSON comparison (pearl th-4f1263). A corpus matcher writes
+    /// <c>0</c>; a float field on the wire arrives as <c>0.0</c>. Before this,
+    /// <see cref="JsonNode.DeepEquals"/> called those different and no scenario could assert
+    /// <c>eventual_response.usage</c>.
+    /// </summary>
+    [Fact]
+    public void JsonEquals_ComparesNumbersByValue_NotRepresentation()
+    {
+        Assert.True(JsonEquals(JsonNode.Parse("0.0"), JsonNode.Parse("0")));
+        Assert.True(JsonEquals(JsonNode.Parse("0"), JsonNode.Parse("0.0")));
+        Assert.True(JsonEquals(JsonNode.Parse("10"), JsonNode.Parse("10.0")));
+        Assert.True(JsonEquals(
+            JsonNode.Parse("""{"costUsd": 0.0, "promptTokens": 10}"""),
+            JsonNode.Parse("""{"costUsd": 0, "promptTokens": 10}""")));
+        Assert.True(JsonEquals(JsonNode.Parse("[0.0, 1]"), JsonNode.Parse("[0, 1.0]")));
+
+        // Different numbers are still different, and a number is not its string.
+        Assert.False(JsonEquals(JsonNode.Parse("0.0"), JsonNode.Parse("0.5")));
+        Assert.False(JsonEquals(JsonNode.Parse("0"), JsonNode.Parse("\"0\"")));
+        Assert.False(JsonEquals(JsonNode.Parse("""{"a": 1}"""), JsonNode.Parse("""{"a": 1, "b": 2}""")));
     }
 
     [Theory]
@@ -383,6 +407,19 @@ public class ScenarioParityTests
     }
 
     /// <summary>Structural JSON equality — compares scalars and arrays/objects by their canonical text.</summary>
+    /// <summary>
+    /// Compare two JSON values BY VALUE, not by representation: <c>0</c> and <c>0.0</c> are the same
+    /// number.
+    ///
+    /// <see cref="JsonNode.DeepEquals"/> compares a number's representation, so the <c>0.0</c> this
+    /// server emits for a float field does NOT equal the integer <c>0</c> the corpus writes. Rust's
+    /// <c>serde_json::Value</c> equality had the mirror-image bug in the other direction, while Go
+    /// (marshal → <c>float64</c> → <c>DeepEqual</c>), Python (<c>0 == 0.0</c>) and TypeScript (both
+    /// parse to <c>number</c>) already compared loosely. That split is what kept
+    /// <c>eventual_response.usage</c> — whose <c>costUsd</c> is a float the corpus writes as
+    /// <c>0</c> — out of the shared corpus (pearl th-4f1263). Everything that is not a number keeps
+    /// exact equality.
+    /// </summary>
     private static bool JsonEquals(JsonNode? a, JsonNode? b)
     {
         if (a is null || b is null)
@@ -390,8 +427,30 @@ public class ScenarioParityTests
             return a is null && b is null;
         }
 
+        if (a.GetValueKind() == JsonValueKind.Number && b.GetValueKind() == JsonValueKind.Number)
+        {
+            // Via the JSON text, not GetValue<double>(): a node may be backed by a JsonElement
+            // (parsed) or a boxed CLR int (constructed), and GetValue<T> is picky about which.
+            return AsDouble(a) == AsDouble(b);
+        }
+
+        if (a is JsonArray arrayA && b is JsonArray arrayB)
+        {
+            return arrayA.Count == arrayB.Count
+                && arrayA.Zip(arrayB).All(pair => JsonEquals(pair.First, pair.Second));
+        }
+
+        if (a is JsonObject objectA && b is JsonObject objectB)
+        {
+            return objectA.Count == objectB.Count
+                && objectA.All(kv => objectB.TryGetPropertyValue(kv.Key, out var other) && JsonEquals(kv.Value, other));
+        }
+
         return JsonNode.DeepEquals(a, b);
     }
+
+    private static double AsDouble(JsonNode node) =>
+        double.Parse(node.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
 
     private static WebApplication BuildApp(IChatClient chat, IReadOnlyList<AITool> tools, IReadOnlyList<string> confirmTools, IAccessKnowledge? knowledge)
     {

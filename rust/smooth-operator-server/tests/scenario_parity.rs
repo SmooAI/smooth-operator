@@ -373,6 +373,36 @@ async fn next_event(client: &mut common::Client) -> Value {
     }
 }
 
+/// Compare two JSON values BY VALUE, not by representation: `0` and `0.0` are
+/// the same number.
+///
+/// `serde_json::Value`'s own `PartialEq` compares a `Number`'s internal
+/// discriminant, so an integer `0` in the corpus does NOT equal the `0.0` this
+/// server emits for a float field. C#'s `JsonNode.DeepEquals` had the mirror-image
+/// bug in the other direction, while Go (marshal → `float64` → `DeepEqual`),
+/// Python (`0 == 0.0`) and TypeScript (both parse to `number`) already compared
+/// loosely. That split is what kept `eventual_response.usage` — whose `costUsd`
+/// is a float the corpus writes as `0` — out of the shared corpus (pearl
+/// th-4f1263). Everything that is not a number keeps exact equality.
+fn json_eq(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a == b,
+            // Only integers too large for f64 land here; fall back to exact.
+            _ => a == b,
+        },
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| json_eq(x, y))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|w| json_eq(v, w)))
+        }
+        _ => actual == expected,
+    }
+}
+
 /// Match the outbound event stream against an ordered list of matchers (one
 /// `expect` array). Faithful port of the Python reference's `_match_expected`,
 /// including the one-event lookahead a `repeat` matcher uses when its run
@@ -425,8 +455,8 @@ async fn match_expected(
             if let Some(asserts) = m.get("assert").and_then(Value::as_object) {
                 for (path, expected) in asserts {
                     let actual = dot(&event, path);
-                    assert_eq!(
-                        actual, expected,
+                    assert!(
+                        json_eq(actual, expected),
                         "{m_type}: {path} = {actual} != {expected}"
                     );
                 }
@@ -518,4 +548,25 @@ async fn scenario_parity_corpus() {
         run_scenario(path).await;
     }
     eprintln!("[scenario-parity] {} scenario(s) passed", paths.len());
+}
+
+/// Offline guard for the by-value JSON comparison (pearl th-4f1263). A corpus
+/// matcher writes `0`; a float field on the wire arrives as `0.0`. Before this,
+/// `serde_json::Value`'s `PartialEq` called those different and no scenario could
+/// assert `eventual_response.usage`.
+#[test]
+fn json_eq_compares_numbers_by_value_not_representation() {
+    assert!(json_eq(&json!(0.0), &json!(0)));
+    assert!(json_eq(&json!(0), &json!(0.0)));
+    assert!(json_eq(&json!(10), &json!(10.0)));
+    assert!(json_eq(
+        &json!({"costUsd": 0.0, "promptTokens": 10}),
+        &json!({"costUsd": 0, "promptTokens": 10})
+    ));
+    assert!(json_eq(&json!([0.0, 1]), &json!([0, 1.0])));
+
+    // Different numbers are still different, and a number is not its string.
+    assert!(!json_eq(&json!(0.0), &json!(0.5)));
+    assert!(!json_eq(&json!(0), &json!("0")));
+    assert!(!json_eq(&json!({"a": 1}), &json!({"a": 1, "b": 2})));
 }
