@@ -1,5 +1,77 @@
 # @smooai/smooth-operator
 
+## 1.49.1
+
+### Patch Changes
+
+- 09a0223: fix(dotnet): reject `create_conversation_session` without an `agentId` (th-68897a)
+
+  Follow-up to the P1 slice. `agentId` is REQUIRED by the Request schema and the generated
+  client type is non-optional, so absent-or-blank is a **malformed request**, not an
+  agentless session. The old code fabricated a UUID; P1's first pass stopped fabricating
+  but silently stored NULL. Both accept a malformed request and differ only in what they
+  write down — neither validates a required inbound field.
+
+  Both .NET entry points now reject, reusing the existing error path: the WebSocket
+  `create_conversation_session` handler emits `VALIDATION_ERROR "missing 'agentId'"`, and
+  `IServerInitiatedTurns.StartTurnAsync` throws `ArgumentException`. Both reject **before
+  the store is touched**, so a rejected request persists nothing — a rejection that still
+  writes a row is the same bug wearing an error message.
+
+  The nullable column and property from the P1 slice stay: honest for rows predating this
+  check, just no longer reachable from the create path.
+
+  Seventeen test frames across eleven files created sessions without an `agentId` and now
+  supply one. Two were relying on the absence in a way worth naming: `OtpTests` passed an
+  explicitly blank `"agentId":""`, and the extension tool-filter tests leaned on the
+  fabricated GUID resolving against a permissive config resolver.
+
+  534 pass.
+
+- 26d783e: fix(go,ts,python): reject a create_conversation_session with no agentId
+
+  Mirrors core#434 (`bfd3911`). `agentId` is `required` in
+  `create-conversation-session.schema.json` and the generated client type is
+  non-optional, so absent-or-blank is a **malformed request**, not an agentless
+  session. The original code fabricated a UUID; th-68897a's first pass stopped
+  fabricating but silently stored NULL. Both accept a malformed request and differ
+  only in what they write down — neither validates a required inbound field.
+
+  All three now answer `VALIDATION_ERROR` / `Missing 'agentId'` and persist nothing,
+  using each server's existing error-emission path.
+
+  **One entry point per server, not two.** Rust needed both its WS handler and its
+  Lambda dispatcher; Go, TypeScript and Python have no Lambda — the only request
+  boundary is the dispatcher's `create_conversation_session` case. The two-store
+  pattern from th-68897a applied to the _fabrication_, which lived in each store;
+  _validation_ belongs at the request boundary, and the stores have no request id or
+  sink to answer on.
+
+  Everything from th-68897a stays: the column is still nullable, the field still
+  optional, Go still uses `""`-as-absent. That remains honest for rows written before
+  this check — it is just no longer reachable from the create path.
+
+  **14 pre-existing tests were sending malformed creates** and are corrected here,
+  which is the real finding. One of them (`test_send_message_without_gateway_errors_cleanly`)
+  didn't fail — it **hung**, waiting forever for an `immediate_response` that is now an
+  `error`. The rest span conversation scoping, resume, file transfer, graceful drain,
+  skills, tool hooks, turn round-trip and the preamble. None of them ever needed an
+  agentless session; they just never had to supply the field.
+
+  Three tests per language: absent, `""` and `"   "` are each rejected **and** nothing
+  is persisted — a rejection that still writes a row is the same bug wearing an error
+  message — plus one asserting a real agentId still works.
+
+  Green, all exit 0: Go `vet` + `go test`, TypeScript `tsc` + 317 tests, Python ruff +
+  323 tests.
+
+- e45cc21: Rust now validates the shared conformance fixtures.
+
+  Go, TypeScript, Python and .NET all check `spec/conformance/fixtures.json` against the schemas
+  it declares. Rust did not — which made the reference implementation the one implementation that
+  could not catch a spec/code divergence. th-68897a shipped against a stale `required` list and
+  Rust noticed nothing; .NET failed on first contact purely because it validates.
+
 ## 1.49.0
 
 ### Minor Changes
