@@ -674,6 +674,8 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		defer extTurn.Close(ctx)
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
 		runner.hooks = d.hooks
+		// Span attribution: the owning org (grouped by smooai.org_id on the turn span).
+		runner.orgID = d.access.Principal.Org
 		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
 		// Cancelled turn: the `cancelled` event is the turn's ONE terminal event (emitted
 		// by handleCancel), so emit nothing further here — no eventual_response, and no
