@@ -6,55 +6,22 @@ namespace SmooAI.SmoothOperator.Server.Postgres;
 
 /// <summary>
 /// A durable <see cref="ISessionStore"/> backed by Postgres — sessions + conversation message
-/// logs survive a process restart. The C# analog of the Rust <c>adapters/postgres</c> OLTP
-/// surface (the <c>conversation_sessions</c> + <c>conversation_messages</c> tables, applied with
-/// <c>CREATE TABLE IF NOT EXISTS</c>). Passes the same <c>ISessionStore</c> contract tests as the
-/// in-memory store.
+/// logs survive a process restart. Reads and writes the SHARED schema (see
+/// <see cref="PostgresSchema"/>): the same <c>conversations</c> / <c>conversation_participants</c> /
+/// <c>conversation_messages</c> / <c>conversation_sessions</c> tables the Rust, Go, Python and
+/// TypeScript servers use, so one database can be driven by any of them. Passes the same
+/// <c>ISessionStore</c> contract tests as the in-memory store.
 /// </summary>
+/// <remarks>
+/// The interface stays CONVERSATION-keyed (<c>GetWorkflowStepAsync(conversationId)</c> and friends)
+/// while Rust/Go key the same metadata by session. That is a deliberate hold: this host's persisted
+/// workflow step and OTP bit survive a resume today, and flipping to session-keyed would silently
+/// require re-verification after every resume — a product decision, not a schema one. The DATA lives
+/// in the shared place under the shared keys either way; a conversation-keyed write touches every
+/// session row of the conversation and a read takes the most recent.
+/// </remarks>
 public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
 {
-    private const string SchemaSql = """
-        CREATE TABLE IF NOT EXISTS conversation_sessions (
-            session_id           TEXT PRIMARY KEY,
-            conversation_id      TEXT NOT NULL,
-            agent_id             TEXT NOT NULL,
-            agent_name           TEXT NOT NULL,
-            user_participant_id  TEXT NOT NULL,
-            agent_participant_id TEXT NOT NULL,
-            user_email           TEXT,
-            created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        CREATE INDEX IF NOT EXISTS idx_sessions_conversation
-            ON conversation_sessions (conversation_id, created_at);
-        -- Idempotent for a table created before user_email existed.
-        ALTER TABLE conversation_sessions ADD COLUMN IF NOT EXISTS user_email TEXT;
-
-        -- Persisted end-user identity (OTP) verification bit per conversation. Mirrors the workflow
-        -- step table's shape; the C# analog of the Rust session's metadata.otpVerified.
-        CREATE TABLE IF NOT EXISTS conversation_identity_state (
-            conversation_id TEXT PRIMARY KEY,
-            otp_verified    BOOLEAN NOT NULL,
-            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-
-        CREATE TABLE IF NOT EXISTS conversation_messages (
-            id              TEXT PRIMARY KEY,
-            conversation_id TEXT NOT NULL,
-            direction       TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
-            content         JSONB NOT NULL,
-            seq             BIGSERIAL,
-            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
-            ON conversation_messages (conversation_id, seq);
-
-        CREATE TABLE IF NOT EXISTS conversation_workflow_state (
-            conversation_id TEXT PRIMARY KEY,
-            step_id         TEXT NOT NULL,
-            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        """;
-
     private readonly NpgsqlDataSource _dataSource;
 
     public PostgresSessionStore(string connectionString)
@@ -62,7 +29,7 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         _dataSource = NpgsqlDataSource.Create(connectionString);
     }
 
-    /// <summary>Create the store and apply the schema (idempotent).</summary>
+    /// <summary>Create the store and apply the schema + legacy migration (both idempotent).</summary>
     public static async Task<PostgresSessionStore> CreateAsync(string connectionString, CancellationToken cancellationToken = default)
     {
         var store = new PostgresSessionStore(connectionString);
@@ -70,9 +37,21 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return store;
     }
 
+    /// <summary>
+    /// Create tables → widen them → index them, in that order. A database written by the OLD C#
+    /// shape already has narrow tables, so <c>CREATE TABLE IF NOT EXISTS</c> leaves them as they are
+    /// and the widening has to land before anything indexes the new columns.
+    /// </summary>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(SchemaSql);
+        await ExecuteAsync(PostgresSchema.Tables, cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync(PostgresSchema.Migration, cancellationToken).ConfigureAwait(false);
+        await ExecuteAsync(PostgresSchema.Indexes, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ExecuteAsync(string sql, CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(sql);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -87,6 +66,7 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         var resume = !string.IsNullOrEmpty(conversationId)
             && await ConversationExistsAsync(conversationId!, cancellationToken).ConfigureAwait(false);
 
+        var email = string.IsNullOrEmpty(userEmail) ? null : userEmail;
         var session = new StoredSession(
             SessionId: Guid.NewGuid().ToString(),
             ConversationId: resume ? conversationId! : Guid.NewGuid().ToString(),
@@ -94,33 +74,85 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
             AgentName: "smooth-agent",
             UserParticipantId: Guid.NewGuid().ToString(),
             AgentParticipantId: Guid.NewGuid().ToString(),
-            UserEmail: string.IsNullOrEmpty(userEmail) ? null : userEmail);
+            UserEmail: email);
 
-        const string sql = """
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!resume)
+        {
+            // idempotency_key is the conversation id: the shared schema's unique index is
+            // (organization_id, idempotency_key), and a freshly minted uuid is unique by construction.
+            const string conversationSql = """
+                INSERT INTO conversations (id, platform, name, organization_id, idempotency_key, created_at, updated_at)
+                VALUES (@cid, 'smooth-operator', 'conversation', '', @cid, now(), now())
+                ON CONFLICT (id) DO NOTHING
+                """;
+            await using (var command = new NpgsqlCommand(conversationSql, connection, transaction))
+            {
+                command.Parameters.AddWithValue("cid", session.ConversationId);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // The user participant is where the conversation's owner email lives — one source of
+            // truth, so a resumed session reports the ORIGINAL owner (matching the Go store) rather
+            // than whatever the resuming connection happened to present.
+            const string participantsSql = """
+                INSERT INTO conversation_participants
+                    (id, conversation_id, organization_id, type, name, email, created_at, updated_at)
+                VALUES (@upid, @cid, '', 'user', @uname, @email, now(), now()),
+                       (@apid, @cid, '', 'ai-agent', @aname, NULL, now(), now())
+                ON CONFLICT (id) DO NOTHING
+                """;
+            await using (var command = new NpgsqlCommand(participantsSql, connection, transaction))
+            {
+                command.Parameters.AddWithValue("upid", session.UserParticipantId);
+                command.Parameters.AddWithValue("apid", session.AgentParticipantId);
+                command.Parameters.AddWithValue("cid", session.ConversationId);
+                command.Parameters.AddWithValue("uname", (object?)userName ?? "user");
+                command.Parameters.AddWithValue("aname", session.AgentName);
+                command.Parameters.AddWithValue("email", (object?)email ?? DBNull.Value);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        var metadata = JsonSerializer.Serialize(new SessionMetadata { ContactEmail = email });
+        const string sessionSql = """
             INSERT INTO conversation_sessions
-                (session_id, conversation_id, agent_id, agent_name, user_participant_id, agent_participant_id, user_email, created_at)
-            VALUES (@sid, @cid, @aid, @aname, @upid, @apid, @email, now())
+                (session_id, conversation_id, organization_id, agent_id, agent_name,
+                 user_participant_id, agent_participant_id, thread_id, status, metadata,
+                 created_at, updated_at, last_activity_at)
+            VALUES (@sid, @cid, '', @aid, @aname, @upid, @apid, @cid, 'active', @metadata,
+                    now(), now(), now())
             """;
-        await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("sid", session.SessionId);
-        command.Parameters.AddWithValue("cid", session.ConversationId);
-        command.Parameters.AddWithValue("aid", session.AgentId);
-        command.Parameters.AddWithValue("aname", session.AgentName);
-        command.Parameters.AddWithValue("upid", session.UserParticipantId);
-        command.Parameters.AddWithValue("apid", session.AgentParticipantId);
-        command.Parameters.AddWithValue("email", (object?)session.UserEmail ?? DBNull.Value);
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return session;
+        await using (var command = new NpgsqlCommand(sessionSql, connection, transaction))
+        {
+            command.Parameters.AddWithValue("sid", session.SessionId);
+            command.Parameters.AddWithValue("cid", session.ConversationId);
+            command.Parameters.AddWithValue("aid", session.AgentId);
+            command.Parameters.AddWithValue("aname", session.AgentName);
+            command.Parameters.AddWithValue("upid", session.UserParticipantId);
+            command.Parameters.AddWithValue("apid", session.AgentParticipantId);
+            command.Parameters.Add(new NpgsqlParameter("metadata", NpgsqlDbType.Jsonb) { Value = metadata });
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        // A resumed session reports the conversation's original owner, not the resuming caller's email.
+        return resume
+            ? session with { UserEmail = await GetOwnerEmailAsync(session.ConversationId, cancellationToken).ConfigureAwait(false) }
+            : session;
     }
 
     /// <inheritdoc />
     public async Task<bool> ConversationBelongsToUserAsync(string conversationId, string userEmail, CancellationToken cancellationToken = default)
     {
-        // Unknown conversation, another user's, and one with a NULL user_email all return no row —
+        // Unknown conversation, another user's, and one with no recorded owner all return no row —
         // indistinguishable to the caller, so this cannot be used to probe for conversation ids.
         const string sql = """
-            SELECT 1 FROM conversation_sessions
-            WHERE conversation_id = @cid AND lower(user_email) = lower(@email)
+            SELECT 1 FROM conversation_participants
+            WHERE conversation_id = @cid AND type = 'user' AND lower(email) = lower(@email)
             LIMIT 1
             """;
         await using var command = _dataSource.CreateCommand(sql);
@@ -129,13 +161,24 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
     }
 
-    private async Task<bool> ConversationExistsAsync(string conversationId, CancellationToken cancellationToken)
+    private async Task<string?> GetOwnerEmailAsync(string conversationId, CancellationToken cancellationToken)
     {
-        const string sql = "SELECT 1 FROM conversation_sessions WHERE conversation_id = @cid LIMIT 1";
+        const string sql = """
+            SELECT email FROM conversation_participants
+            WHERE conversation_id = @cid AND type = 'user'
+            ORDER BY created_at, id LIMIT 1
+            """;
         await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("cid", conversationId);
-        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return result is not null;
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+    }
+
+    private async Task<bool> ConversationExistsAsync(string conversationId, CancellationToken cancellationToken)
+    {
+        const string sql = "SELECT 1 FROM conversations WHERE id = @cid LIMIT 1";
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("cid", conversationId);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
     }
 
     public async Task<IReadOnlyList<ConversationSummary>> ListConversationsAsync(ConversationScope scope, CancellationToken cancellationToken = default)
@@ -154,9 +197,14 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         //
         // SECURITY (th-966fab): the owner filter is a WHERE inside the aggregate, NOT a post-hoc filter
         // in C# — the dispatcher applies its LIMIT to what comes back, so filtering afterwards would
-        // hand back short/empty pages. A conversation with no owning session row (data written before
-        // scoping existed) matches nobody.
-        var sql = """
+        // hand back short/empty pages. A conversation with no owning user participant matches nobody.
+        const string ownerFilter = """
+            WHERE EXISTS (SELECT 1 FROM conversation_participants p
+                           WHERE p.conversation_id = m.conversation_id
+                             AND p.type = 'user'
+                             AND lower(p.email) = lower(@email))
+            """;
+        var sql = $"""
             SELECT m.conversation_id,
                    COUNT(*)              AS message_count,
                    MAX(m.created_at)     AS updated_at,
@@ -164,24 +212,9 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
                      WHERE i.conversation_id = m.conversation_id AND i.direction = 'inbound'
                      ORDER BY i.seq ASC LIMIT 1) AS first_inbound
             FROM conversation_messages m
+            {(scope.IsUnscoped ? string.Empty : ownerFilter)}
             GROUP BY m.conversation_id
             """;
-        if (!scope.IsUnscoped)
-        {
-            sql = """
-                SELECT m.conversation_id,
-                       COUNT(*)              AS message_count,
-                       MAX(m.created_at)     AS updated_at,
-                       (SELECT i.content->>'text' FROM conversation_messages i
-                         WHERE i.conversation_id = m.conversation_id AND i.direction = 'inbound'
-                         ORDER BY i.seq ASC LIMIT 1) AS first_inbound
-                FROM conversation_messages m
-                WHERE EXISTS (SELECT 1 FROM conversation_sessions s
-                               WHERE s.conversation_id = m.conversation_id
-                                 AND lower(s.user_email) = lower(@email))
-                GROUP BY m.conversation_id
-                """;
-        }
 
         await using var command = _dataSource.CreateCommand(sql);
         if (!scope.IsUnscoped)
@@ -204,9 +237,14 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
 
     public async Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default)
     {
+        // The owner email is read from the conversation's user participant rather than duplicated onto
+        // the session row, so there is one source of truth (matching the Go store).
         const string sql = """
-            SELECT conversation_id, agent_id, agent_name, user_participant_id, agent_participant_id, user_email
-            FROM conversation_sessions WHERE session_id = @sid
+            SELECT s.conversation_id, s.agent_id, s.agent_name, s.user_participant_id, s.agent_participant_id,
+                   (SELECT p.email FROM conversation_participants p
+                     WHERE p.conversation_id = s.conversation_id AND p.type = 'user'
+                     ORDER BY p.created_at, p.id LIMIT 1) AS owner_email
+            FROM conversation_sessions s WHERE s.session_id = @sid
             """;
         await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("sid", sessionId);
@@ -228,11 +266,17 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
     public async Task<StoredMessage> AppendMessageAsync(string conversationId, MessageDirection direction, string text, CancellationToken cancellationToken = default)
     {
         var id = Guid.NewGuid().ToString();
-        var content = JsonSerializer.Serialize(new { text });
+        // {items, text} is the shape the Rust MessageContent serializes to, so a row written here
+        // reads back correctly in every other server.
+        var content = JsonSerializer.Serialize(new
+        {
+            items = new[] { new { type = "text", text } },
+            text,
+        });
 
         const string sql = """
-            INSERT INTO conversation_messages (id, conversation_id, direction, content, created_at)
-            VALUES (@id, @cid, @dir, @content, now())
+            INSERT INTO conversation_messages (id, organization_id, conversation_id, direction, content, created_at)
+            VALUES (@id, (SELECT organization_id FROM conversations WHERE id = @cid), @cid, @dir, @content, now())
             RETURNING created_at
             """;
         await using var command = _dataSource.CreateCommand(sql);
@@ -279,49 +323,80 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return results;
     }
 
-    public async Task<string?> GetWorkflowStepAsync(string conversationId, CancellationToken cancellationToken = default)
-    {
-        const string sql = "SELECT step_id FROM conversation_workflow_state WHERE conversation_id = @cid";
-        await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("cid", conversationId);
-        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return result as string;
-    }
+    public Task<string?> GetWorkflowStepAsync(string conversationId, CancellationToken cancellationToken = default) =>
+        ReadSessionMetadataAsync(conversationId, SessionMetadata.CurrentStepIdKey, cancellationToken);
 
-    public async Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default)
-    {
-        const string sql = """
-            INSERT INTO conversation_workflow_state (conversation_id, step_id, updated_at)
-            VALUES (@cid, @step, now())
-            ON CONFLICT (conversation_id) DO UPDATE SET step_id = EXCLUDED.step_id, updated_at = now()
-            """;
-        await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("cid", conversationId);
-        command.Parameters.AddWithValue("step", stepId);
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
+    public Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default) =>
+        MergeSessionMetadataAsync(conversationId, SessionMetadata.CurrentStepIdKey, stepId, cancellationToken);
 
     public async Task<bool> GetSessionAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default)
     {
-        const string sql = "SELECT otp_verified FROM conversation_identity_state WHERE conversation_id = @cid";
-        await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("cid", conversationId);
-        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return result is bool verified && verified;
+        var value = await ReadSessionMetadataAsync(conversationId, SessionMetadata.OtpVerifiedKey, cancellationToken).ConfigureAwait(false);
+        return value == "true";
     }
 
-    public async Task SetSessionAuthenticatedAsync(string conversationId, bool verified, CancellationToken cancellationToken = default)
+    public Task SetSessionAuthenticatedAsync(string conversationId, bool verified, CancellationToken cancellationToken = default) =>
+        MergeSessionMetadataAsync(conversationId, SessionMetadata.OtpVerifiedKey, verified, cancellationToken);
+
+    /// <summary>
+    /// The most recently created session row of the conversation that carries <paramref name="key"/>,
+    /// as text (<c>-&gt;&gt;</c> renders a JSON boolean as "true"/"false"). Rows that never recorded the
+    /// key are skipped rather than treated as a null answer, so an older write still reads back after a
+    /// resume mints a fresh session row.
+    /// </summary>
+    private async Task<string?> ReadSessionMetadataAsync(string conversationId, string key, CancellationToken cancellationToken)
     {
+        // jsonb_exists(metadata, @key), not `metadata ? @key`: `?` is also a parameter placeholder in
+        // some drivers, so the function form keeps this unambiguous. Don't "simplify" it back.
         const string sql = """
-            INSERT INTO conversation_identity_state (conversation_id, otp_verified, updated_at)
-            VALUES (@cid, @verified, now())
-            ON CONFLICT (conversation_id) DO UPDATE SET otp_verified = EXCLUDED.otp_verified, updated_at = now()
+            SELECT metadata->>@key FROM conversation_sessions
+            WHERE conversation_id = @cid AND jsonb_exists(metadata, @key)
+            ORDER BY created_at DESC, session_id DESC
+            LIMIT 1
             """;
         await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("cid", conversationId);
-        command.Parameters.AddWithValue("verified", verified);
+        command.Parameters.AddWithValue("key", key);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+    }
+
+    /// <summary>
+    /// Merge one key into the metadata of EVERY session row of the conversation. `||` on jsonb is a
+    /// shallow merge, which is all this flat object needs — it leaves the sibling keys
+    /// (<c>contactEmail</c> and the other flag) alone instead of clobbering them. Writing every row
+    /// rather than only the newest is what keeps this conversation-keyed surface consistent no matter
+    /// which session a later read lands on. A no-op for an unknown conversation.
+    /// </summary>
+    private async Task MergeSessionMetadataAsync(string conversationId, string key, object value, CancellationToken cancellationToken)
+    {
+        var patch = JsonSerializer.Serialize(new Dictionary<string, object> { [key] = value });
+        const string sql = """
+            UPDATE conversation_sessions
+               SET metadata = coalesce(metadata, '{}'::jsonb) || @patch::jsonb, updated_at = now()
+             WHERE conversation_id = @cid
+            """;
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("cid", conversationId);
+        command.Parameters.AddWithValue("patch", patch);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync() => _dataSource.DisposeAsync();
+}
+
+/// <summary>
+/// The JSON held in <c>conversation_sessions.metadata</c> — the per-session bits with no dedicated
+/// column in the shared schema. The key names are the contract with the other four servers (the Go
+/// store's <c>sessionMetadata</c> and the Rust reference server's session metadata), so they are
+/// named once here rather than spelled inline at each call site.
+/// </summary>
+internal sealed class SessionMetadata
+{
+    internal const string ContactEmailKey = "contactEmail";
+    internal const string OtpVerifiedKey = "otpVerified";
+    internal const string CurrentStepIdKey = "currentStepId";
+
+    [System.Text.Json.Serialization.JsonPropertyName(ContactEmailKey)]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ContactEmail { get; set; }
 }
