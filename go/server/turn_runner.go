@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -109,6 +110,15 @@ type TurnRunner struct {
 	// min(DefaultMaxTokens, *modelCeiling) so it never exceeds what the model can emit.
 	// nil (the default) leaves the raised default unclamped (EPIC th-1cc9fa).
 	modelCeiling *int
+	// executor is the DEPENDENCY-INJECTED durable-backend slot (ADR-030). nil (the
+	// default) runs the turn on the zero-infra InProcessExecutor — a verbatim
+	// delegation to SmoothAgent.RunStream, so behavior is unchanged. A deployment
+	// that wants durable execution builds a durable AgentExecutor (e.g. the Temporal
+	// backend) elsewhere and sets this field, then opts in via durableExecutorEnv;
+	// keeping it an injected field is what lets the Temporal package stay out of this
+	// server binary. Selected in one place — see turnExecutor. Set by the dispatcher
+	// after construction, alongside hooks/model/orgID.
+	executor core.AgentExecutor
 }
 
 // NewTurnRunner builds a runner over the engine chat client + session store. An empty
@@ -295,7 +305,13 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		go runPreamble(ctx, r.client, model, requestID, userMessage, &answerStarted, sink)
 	}
 
-	stream, err := agent.RunStream(ctx, userMessage, thread)
+	// Drive the turn through the engine's AgentExecutor seam rather than calling
+	// RunStream directly, so a durable backend (ADR-030) can be selected in one
+	// place (turnExecutor). With the default in-process executor this IS that call
+	// — a verbatim delegation — so nothing changes unless a deployment injects a
+	// durable executor AND opts in via SMOOTH_AGENT_DURABLE_EXECUTOR. Mirrors the
+	// Rust runner's turn_executor(executor).execute_streaming(...).
+	stream, err := turnExecutor(r.executor, os.Getenv(durableExecutorEnv)).ExecuteStreaming(ctx, agent, userMessage, thread)
 	if err != nil {
 		return TurnResult{}, err
 	}
