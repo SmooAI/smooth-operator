@@ -89,6 +89,51 @@ async fn recv_conversation_id(rx: &mut UnboundedReceiver<Value>) -> String {
         .to_string()
 }
 
+/// `agentId` is REQUIRED by the Request schema and the generated client type is
+/// non-optional, so absent-or-blank is a malformed request — not an agentless session.
+/// It must be REJECTED, not fabricated (the original bug) and not silently stored as NULL
+/// (th-68897a's first pass). Fails if either of those behaviours comes back.
+#[tokio::test]
+async fn absent_or_blank_agent_id_is_rejected_not_invented() {
+    for frame in [
+        json!({ "action": "create_conversation_session", "requestId": "r1" }),
+        json!({ "action": "create_conversation_session", "requestId": "r1", "agentId": "" }),
+        json!({ "action": "create_conversation_session", "requestId": "r1", "agentId": "   " }),
+    ] {
+        let storage = Arc::new(InMemoryStorageAdapter::new());
+        let state = AppState::new(storage.clone(), base_config());
+        let (tx, mut rx) = unbounded_channel::<Value>();
+        handler::handle_frame(
+            &state,
+            &AccessContext::anonymous(),
+            "conn-test",
+            None,
+            None,
+            &handler::UserScope::Unscoped,
+            &frame.to_string(),
+            &tx,
+        )
+        .await;
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("should emit an event")
+            .expect("sink open");
+        assert_eq!(ev["type"], "error", "expected rejection, got: {ev}");
+        assert_eq!(ev["error"]["code"], "VALIDATION_ERROR", "got: {ev}");
+
+        // ...and nothing was persisted: no conversation means no fabricated agent to point at.
+        assert!(
+            storage
+                .list_conversations_by_org(SEED_ORG_ID)
+                .await
+                .expect("list conversations")
+                .is_empty(),
+            "a rejected create must not persist a conversation"
+        );
+    }
+}
+
 #[tokio::test]
 async fn authed_principal_org_and_payload_agent_carry_through() {
     let storage = Arc::new(InMemoryStorageAdapter::new());

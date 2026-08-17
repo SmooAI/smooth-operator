@@ -122,13 +122,27 @@ async fn create_session(
     parsed: &Value,
     request_id: Option<&str>,
 ) -> Result<()> {
-    // No agentId from the caller means NO agent, not a new one (th-68897a) — same
-    // fabrication the WS handler had.
-    let agent_id: Option<String> = parsed
+    // agentId is REQUIRED by the Request schema and the generated client type is non-optional,
+    // so absent-or-blank is a malformed request, not an agentless session. Reject it: the old
+    // code fabricated a UUID, and th-68897a's first pass silently stored NULL — both skip the
+    // validation that belongs at this boundary. The column stays nullable for rows that predate
+    // this check; it is just no longer reachable from the create path.
+    let Some(agent_id) = parsed
         .get("agentId")
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string);
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        poster
+            .post(&protocol::error(
+                request_id,
+                "VALIDATION_ERROR",
+                "missing 'agentId'",
+            ))
+            .await?;
+        return Ok(());
+    };
 
     let user_name = parsed
         .get("userName")
@@ -205,7 +219,7 @@ async fn create_session(
         organization_id: org_id.clone(),
         participant_type: ParticipantType::AiAgent,
         external_id: None,
-        internal_id: agent_id.clone(),
+        internal_id: Some(agent_id.clone()),
         browser_fingerprint: None,
         browser_info: None,
         name: AGENT_NAME.to_string(),
@@ -221,7 +235,7 @@ async fn create_session(
         session_id: session_id.clone(),
         conversation_id: conversation_id.clone(),
         organization_id: org_id.clone(),
-        agent_id: agent_id.clone(),
+        agent_id: Some(agent_id.clone()),
         agent_name: AGENT_NAME.to_string(),
         user_participant_id: user_participant_id.clone(),
         agent_participant_id: agent_participant_id.clone(),
