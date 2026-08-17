@@ -676,6 +676,7 @@ export class FrameDispatcher {
             model: this.model,
             modelCeiling: this.modelCeiling,
             images: ctx.images,
+            orgId: session.orgId,
         });
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
