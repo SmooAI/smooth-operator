@@ -35,9 +35,13 @@ an unknown one, so the API is never an existence oracle for another org's rows, 
 the internal owner key is `[JsonIgnore]`d off every response. `GET /admin/settings`
 returns defaults on a miss rather than 404.
 
-Backed by an in-memory `AdminStores` for now, as in the Go and TypeScript servers; a
-host can register its own in DI to swap in durable storage without touching the
-handlers. Document sets are honestly empty and a connector index run records zero
+Backed by an in-memory `AdminStores` for now, as in the Go and TypeScript servers. A
+host can register its own instance in DI to pre-seed or share that in-memory state,
+but that is not a storage swap point: `AdminStores` is sealed with get-only
+collections, so durable storage will need this class changed. It is the first admin
+store in `dotnet/` — there was none before, so converging one onto Rust's
+`ADMIN_SCHEMA` is now a real follow-up rather than something to converge against
+today. Document sets are honestly empty and a connector index run records zero
 documents — this server has no per-connector ingestion pipeline yet, and inventing
 counts would render a lie.
 
