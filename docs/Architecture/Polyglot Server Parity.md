@@ -12,6 +12,8 @@ smooth-operator is polyglot at three distinct layers. Keeping them straight is t
 | **Client** | a protocol client that connects to a server and speaks the wire protocol | Rust · C# · Python · TS · Go (+ a React binding + the embeddable widget) |
 | **Server** | the service: WS transport, session store, per-turn engine invocation, backplane, auth | Rust (reference) · C# · Python · TS · Go |
 
+> **Protocol parity is not deployment parity.** This page is about the first: every server speaks the same wire protocol, proven by the corpus in §2. It says nothing about *operational* depth, which is uneven — only the Rust server has a cross-pod backplane (Redis/NATS), so the other four are single-replica today. See [PARITY-STATUS.md](../../PARITY-STATUS.md) for that breakdown before choosing a language to deploy.
+
 A client never names a language, a backend, or whether the engine is embedded or remote — it only ever sees the [[Protocol Reference]]. Each **server** consumes its own language's published engine and re-exposes it over the one schema-driven WebSocket protocol (`create_conversation_session` → `send_message`+`requestId` → `stream_token`/`stream_chunk` → `eventual_response`, plus `confirm_tool_action`).
 
 **Rust is the reference.** Where the protocol leaves a detail underspecified, Rust's behavior is canonical; the other four match it.
