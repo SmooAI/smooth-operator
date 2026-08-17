@@ -318,11 +318,14 @@ public static class SmoothOperatorAdminExtensions
         // publishers (job status, ingestion progress, notifications) that need to reach a connected
         // client without going through an agent turn. Admin-gated.
         //
-        // This server's backplane is a connectionId→sink registry, so only `connection` targets can be
-        // routed. Rust additionally fans out to session/user/org/agent over a richer backplane; here
-        // those are a hard 501 rather than a misleading `{"delivered": 0}` — a caller must never read
-        // "accepted, reached nobody" as success for an event that was never routable in the first
-        // place. When the fan-out lands, each target flips from a 501 to a real count.
+        // The backplane carries the reference's full 5-target fan-out, so every kind is deliverable
+        // and there is no unroutable case left to misreport — which is why the session/user/org/agent
+        // 501s are gone; they were honest only while a connection-id registry could not route them.
+        //
+        // Targets are opaque ids matched against the registry; this layer does NOT org-validate
+        // session/user/agent ids — the backplane is an id-routing layer, not an authz layer, and
+        // callers hold an Admin credential. A host needing hard tenant isolation namespaces those ids
+        // before they reach the backplane.
         endpoints.MapPost($"{prefix}/publish", async (HttpContext ctx) =>
         {
             var (_, deny) = Authorize(ctx, RoleAdmin);
@@ -339,23 +342,17 @@ public static class SmoothOperatorAdminExtensions
                 return AdminError(StatusCodes.Status400BadRequest, "INVALID_BODY", "target.id is required");
             }
 
-            switch (kind)
+            if (!TargetKinds.Contains(kind, StringComparer.Ordinal))
             {
-                case "connection":
-                    var payload = body?["event"] is JsonObject ev ? (JsonObject)ev.DeepClone() : new JsonObject();
-                    return Results.Ok(new { delivered = backplane.Publish(new Target(kind, id), payload) });
-
-                case "session":
-                case "user":
-                case "org":
-                case "agent":
-                    return AdminError(StatusCodes.Status501NotImplemented, "UNSUPPORTED_TARGET",
-                        $"this server's backplane routes by connection id only; \"{kind}\" targets are not deliverable here");
-
-                default:
-                    return AdminError(StatusCodes.Status400BadRequest, "INVALID_BODY",
-                        $"unknown target type \"{kind}\" (want connection|session|user|org|agent)");
+                return AdminError(StatusCodes.Status400BadRequest, "INVALID_BODY",
+                    $"unknown target type \"{kind}\" (want connection|session|user|org|agent)");
             }
+
+            // `delivered` counts THIS process's sockets. With a distributed backplane the event also
+            // reaches other pods, whose deliveries this omits — so 0 means "nobody here", never
+            // "delivered to nobody". Publish copies per sink, so no pre-clone is needed here.
+            var payload = body?["event"] as JsonObject ?? new JsonObject();
+            return Results.Ok(new { delivered = backplane.Publish(new Target(kind, id), payload) });
         });
 
         // ── This host's own extra: re-ingest every configured repo without a restart. ──
@@ -534,6 +531,9 @@ public static class SmoothOperatorAdminExtensions
     }
 
     // ── bodies + responses ──────────────────────────────────────────────────────
+
+    /// <summary>The five target kinds <c>POST /admin/publish</c> accepts.</summary>
+    private static readonly string[] TargetKinds = ["connection", "session", "user", "org", "agent"];
 
     private static IResult AdminError(int status, string code, string message) =>
         Results.Json(new { error = new { code, message } }, statusCode: status);
