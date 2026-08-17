@@ -15,7 +15,7 @@ import json
 import logging
 import uuid
 from datetime import timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from smooth_operator_core import Knowledge
 
@@ -30,6 +30,7 @@ from .agent_config import (
     gate_tools,
 )
 from .auth import AccessContext, normalize_email
+from .backplane import Target
 from .confirmation import ConfirmationRegistry
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
@@ -59,6 +60,7 @@ class FrameDispatcher:
         session_authenticator: SessionAuthenticator | None = None,
         judge_model: str | None = None,
         otp_service: OtpService | None = None,
+        associate: Callable[[Target], Awaitable[None]] | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -84,6 +86,9 @@ class FrameDispatcher:
         #: OTP-offer flow, and `verify_otp` marks the session authenticated. `None` (the
         #: default) keeps the fail-closed behavior — refuse, no OTP offered.
         self._otp_service = otp_service
+        #: Backplane association hook. None in tests/hosts with no backplane wiring,
+        #: which simply means session/agent targets are never routable there.
+        self._associate = associate
         #: Fast model for the post-turn workflow judge (None → runner's default).
         self._judge_model = judge_model
         #: Spawned turn tasks kept alive (the event loop only holds weak refs to
@@ -214,6 +219,27 @@ class FrameDispatcher:
         return not self._access.auth_disabled
 
     async def _visible_session(self, session_id: str) -> Any:
+        """Resolve a visible session and record its backplane targets.
+
+        Association lives here rather than in each handler because this is already the
+        single funnel every sessionId-bearing action goes through — so one hook covers
+        them all, and a handler can never work with a session the backplane does not
+        know about."""
+        session = await self._resolve_visible_session(session_id)
+        if session is not None:
+            await self._associate_session(session)
+        return session
+
+    async def _associate_session(self, session: Any) -> None:
+        """Point the session (and its agent) at this connection, so a publish to either
+        target reaches this socket. No-op without a backplane hook."""
+        if self._associate is None:
+            return
+        await self._associate(Target("session", session.session_id))
+        if session.agent_id:
+            await self._associate(Target("agent", session.agent_id))
+
+    async def _resolve_visible_session(self, session_id: str) -> Any:
         """The session, but only if this connection's principal may see it — otherwise
         ``None``, exactly as for a session id that never existed.
 
@@ -278,6 +304,7 @@ class FrameDispatcher:
             enforced=self._auth_enforced,
             org_id=self._access.principal.org,
         )
+        await self._associate_session(session)
         data = {
             "sessionId": session.session_id,
             "conversationId": session.conversation_id,

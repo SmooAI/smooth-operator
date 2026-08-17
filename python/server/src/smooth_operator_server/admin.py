@@ -43,6 +43,7 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
 from .auth import AccessContext, Principal
+from .backplane import TARGET_KINDS, Target
 
 # Role ranks, mirroring Rust's ``role_rank``.
 ROLE_BASIC = 0
@@ -413,6 +414,45 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
                 "nextCursor": None,
             },
         )
+
+    # ── realtime publish ────────────────────────────────────────────────────
+    # Push an event to a backplane target over the connection fleet — the plug point
+    # for non-AI publishers (job status, ingestion progress, notifications) that need
+    # to reach a connected client without going through an agent turn. Admin-gated.
+    #
+    # Unlike the Go/TS servers (connection-id registries, which 501 the other four),
+    # this backplane ports Rust's full 5-target fan-out, so every target is routable.
+    #
+    # Targets are opaque ids matched against the backplane registry; this layer does
+    # NOT org-validate session/user/agent ids — the backplane is an id-routing layer,
+    # not an authz layer, and callers hold an Admin credential. A host needing hard
+    # tenant isolation namespaces those ids before they reach the backplane.
+    if method == "POST" and path == "/admin/publish":
+        denied = _require_role(state, headers, ROLE_ADMIN)
+        if isinstance(denied, _Denied):
+            return denied.response
+        payload = body()
+        raw_target = payload.get("target")
+        if not isinstance(raw_target, dict):
+            return _error(400, "INVALID_BODY", "target is required")
+        kind = str(raw_target.get("type") or "").strip().lower()
+        target_id = str(raw_target.get("id") or "").strip()
+        if not target_id:
+            return _error(400, "INVALID_BODY", "target.id is required")
+        if kind not in TARGET_KINDS:
+            return _error(
+                400,
+                "INVALID_BODY",
+                f"unknown target type {kind!r} (want connection|session|user|org|agent)",
+            )
+        event = payload.get("event")
+        if not isinstance(event, dict):
+            return _error(400, "INVALID_BODY", "event must be an object")
+        # `delivered` counts THIS process's sockets only. With a distributed backplane
+        # the event also reaches other pods, whose deliveries this omits — so 0 means
+        # "nobody here", never "delivered to nobody".
+        delivered = await state.backplane.publish(Target(kind, target_id), event)
+        return _json(200, {"delivered": delivered})
 
     if method == "GET" and path == "/admin/indexing/runs":
         p = _require_role(state, headers, ROLE_CURATOR)
