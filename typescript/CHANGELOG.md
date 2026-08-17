@@ -1,5 +1,101 @@
 # @smooai/smooth-operator
 
+## 1.49.0
+
+### Minor Changes
+
+- bfd3911: Reject `create_conversation_session` when `agentId` is absent or blank.
+
+  `agentId` is required by the Request schema and the generated client type is non-optional, so
+  an absent or blank one is a malformed request — not an agentless session. The original code
+  fabricated a UUID for it; th-68897a's first pass stopped fabricating but silently stored NULL.
+  Both skip the validation that belongs at that boundary. It is now a `VALIDATION_ERROR`, in
+  both the WebSocket handler and the Lambda dispatcher.
+
+  The column and field stay nullable. That is th-68897a's real win — nothing is ever invented —
+  and it remains honest for rows written before this validation existed. It is simply no longer
+  reachable from the create path.
+
+### Patch Changes
+
+- 1fa1901: fix(dotnet): stop inventing an agent id for agentless sessions (th-68897a)
+
+  Session creation filled a missing `agentId` with a fresh GUID, so every agentless session
+  pointed at an agent that never existed. Nothing failed loudly — the fake id flowed into
+  the participant's `internal_id` and the per-agent config lookup and resolved to nothing.
+
+  `StoredSession.AgentId` and `conversation_sessions.agent_id` are now nullable, blank and
+  whitespace read as absent, and both stores (in-memory and Postgres) stop fabricating.
+  Minting `AgentParticipantId` is untouched — that mints a real participant row, not a
+  dangling reference.
+
+  The nullable type surfaced the exact path the bug hid in: `IAgentConfigResolver.ResolveAsync`
+  was being handed the fabricated GUID at two call sites. Both now skip the lookup when there
+  is no agent, matching the Rust handler.
+
+  **A spec conflict this exposes, raised rather than papered over:** the session descriptor is
+  emitted WITHOUT `agentId` when there is no agent, matching Rust's `skip_serializing_if` — but
+  `spec/actions/create-conversation-session.schema.json` still lists `agentId` as **required**,
+  typed `string`. So an agentless descriptor is not spec-valid in _any_ language after this
+  change; null and omission are both invalid. The .NET spec-validity test now names an agent
+  (the case the spec actually describes) and a separate test pins the agentless shape.
+
+  Two existing tests were asserting the bug and are inverted: one asserted the store minted an
+  agent id, and the extension tool-filter tests were passing no `agentId` and relying on the
+  minted GUID resolving against a static config resolver.
+
+- 1aff9aa: fix(go,ts,python): stop inventing an agent id for agentless sessions
+
+  Mirrors core#429 (`7b93496`). Session creation filled a missing `agentId` with a
+  fresh UUID, so every agentless session pointed at an agent that never existed.
+  Nothing failed loudly — the fabricated id flowed into the backplane agent target
+  and the per-agent config lookup and quietly resolved to nothing.
+
+  `agent_id` is now nullable, the session field optional, and blank/whitespace reads
+  as absent rather than becoming a literal empty-string agent. Absence is propagated
+  instead of papered over: the per-agent config resolver isn't called at all for an
+  agentless session, and `agentId` is omitted from the wire rather than sent as
+  null/empty.
+
+  **Two fabrication sites per server, not one** — the in-memory store and the
+  Postgres store each had it, so the test covers both. Testing one would have left
+  the other broken.
+
+  Two things the Rust change did that deliberately have **no** counterpart here,
+  verified rather than mirrored blind:
+
+  - The agent participant's `internal_id` — none of these three ever sets it. Their
+    participant INSERTs don't name the column, so there was nothing to propagate.
+  - `agentParticipantId` stays a fresh UUID. That mints a legitimate participant row;
+    only `agentId` was the bug.
+
+  `Checkpoint.agent_id` is a different type and is untouched.
+
+  Go keeps `AgentID string` rather than adding a pointer: `""` is already that struct's
+  absent, the store already branched on `agentID == ""`, and blank-is-absent is the
+  specified semantics, so there is no state a pointer would distinguish. The column is
+  NULL in the database either way, coalesced at the one read site.
+
+  One test per language, against real Postgres containers: a session created with a
+  blank agent id reads back absent from **both** stores, the column is NULL rather than
+  an empty string standing in for one, and it survives the round trip instead of
+  returning a uuid.
+
+  Green, all exit 0: Go `vet` + `go test`, TypeScript `tsc` + 313 tests, Python ruff +
+  319 tests.
+
+- 0550e64: Make `agentId` optional in the session schemas.
+
+  th-68897a stopped fabricating an `agentId` when the caller names no agent, but the spec still
+  listed it as required — so after that change there was no spec-valid way to describe an
+  agentless session: `null` fails the type, omission fails `required`. Every server emitting the
+  honest shape was technically out of spec.
+
+  `agentId` is dropped from `required` in `spec/domain/session.schema.json` and
+  `create-conversation-session.schema.json#/$defs/Response`. It keeps its type for when present;
+  absence is represented by omitting the field, which is already what the Rust and .NET servers
+  emit.
+
 ## 1.48.0
 
 ### Minor Changes
