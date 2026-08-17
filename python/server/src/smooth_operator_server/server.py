@@ -278,9 +278,14 @@ async def serve(
     # The /admin/* API listens on its own port: `websockets`' handshake parser
     # accepts GET only and rejects any request body, so the process_request hook
     # cannot serve a POST/PUT API. See admin.py's module docstring.
-    admin_httpd = start_admin_http_server(
-        state, host, (admin_port if admin_port is not None else ws_server.sockets[0].getsockname()[1] + 1)
-    )
+    # Port rule: an explicit `admin_port` wins. Otherwise a real deployment (a
+    # concrete ws port) gets ws+1, which is predictable to configure; an ephemeral
+    # ws port (0, what tests use) gets an ephemeral admin port too. Deriving ws+1
+    # from a BOUND ephemeral port collides — that port is very often already taken
+    # by another server in the same process.
+    if admin_port is None:
+        admin_port = 0 if port == 0 else port + 1
+    admin_httpd = start_admin_http_server(state, host, admin_port)
     server = Server(state, ws_server, admin_httpd)
 
     if install_signal_handlers:
