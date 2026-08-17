@@ -25,14 +25,17 @@ public static class ModelInfo
         {
             return map;
         }
-        foreach (var entry in entries)
+        foreach (var raw in entries)
         {
-            var name = (entry?["model_name"] as JsonValue)?.GetValue<string>();
-            if (string.IsNullOrEmpty(name))
+            // Coerced, not indexed blind: indexing a non-object JsonNode throws, so a payload with a
+            // scalar `model_info` (or a scalar entry) would otherwise take the whole parse down.
+            var entry = raw as JsonObject;
+            var name = Name(entry);
+            if (name is null)
             {
                 continue;
             }
-            var ceiling = TryGetPositiveInt(entry?["model_info"]?["max_output_tokens"]);
+            var ceiling = TryGetPositiveInt((entry?["model_info"] as JsonObject)?["max_output_tokens"]);
             if (ceiling is not null)
             {
                 map[name] = ceiling.Value;
@@ -40,6 +43,63 @@ public static class ModelInfo
         }
         return map;
     }
+
+    /// <summary>
+    /// Map the gateway's <c>/model/info</c> payload into the shape
+    /// <c>GET /admin/model-costs</c> answers — <c>{ "&lt;model&gt;": { inputCostPerToken,
+    /// outputCostPerToken, tier, useCases, maxOutputTokens } }</c> — matching the Rust
+    /// <c>map_model_info</c> and its Go/TS/Python ports. Pure + network-free, so it is unit-testable
+    /// on a sample payload.
+    /// <para>
+    /// Entries without a <c>model_name</c> are skipped, and every field is <b>null when the gateway
+    /// omits it</b> rather than defaulted: a <c>0</c> cost would render a free-model badge on a paid
+    /// model, and a defaulted ceiling would clamp a model that has none.
+    /// </para>
+    /// <para>
+    /// Deliberately separate from <see cref="ParseCeilings"/>, which is a different contract: it drops
+    /// non-positive ceilings because a bogus clamp is worse than none, whereas this reports whatever
+    /// the gateway said (including null) because the console is displaying it, not clamping on it.
+    /// </para>
+    /// </summary>
+    public static JsonObject MapModelInfo(JsonNode? payload)
+    {
+        var out_ = new JsonObject();
+        if (payload?["data"] is not JsonArray entries)
+        {
+            return out_;
+        }
+        foreach (var raw in entries)
+        {
+            // Every level is coerced rather than indexed blind: indexing a JsonNode that is not an
+            // object THROWS, so a gateway payload with e.g. `model_info: 7` would take down the read.
+            var name = Name(raw as JsonObject);
+            if (name is null || out_.ContainsKey(name))
+            {
+                continue;
+            }
+            var info = (raw as JsonObject)?["model_info"] as JsonObject;
+            out_[name] = new JsonObject
+            {
+                ["inputCostPerToken"] = Num(info, "input_cost_per_token"),
+                ["outputCostPerToken"] = Num(info, "output_cost_per_token"),
+                ["tier"] = Str(info, "model_tier") is { } tier ? JsonValue.Create(tier) : null,
+                ["useCases"] = info?["use_cases"] is JsonArray cases ? cases.DeepClone() : new JsonArray(),
+                ["maxOutputTokens"] = Num(info, "max_output_tokens"),
+            };
+        }
+        return out_;
+    }
+
+    /// <summary>The entry's non-empty <c>model_name</c>, or <c>null</c> when absent or not a string.</summary>
+    private static string? Name(JsonObject? entry) => Str(entry, "model_name") is { Length: > 0 } name ? name : null;
+
+    /// <summary>The named field as a JSON string, or <c>null</c> when absent or not a string.</summary>
+    private static string? Str(JsonObject? obj, string key) =>
+        obj?[key] is JsonValue value && value.TryGetValue<string>(out var s) ? s : null;
+
+    /// <summary>The named field as a JSON number, or <c>null</c> when absent or non-numeric.</summary>
+    private static JsonNode? Num(JsonObject? info, string key) =>
+        info?[key] is JsonValue value && value.TryGetValue<double>(out var d) ? JsonValue.Create(d) : null;
 
     /// <summary>
     /// Fetch the output ceiling for <paramref name="model"/> from <c>{gateway}/model/info</c> via

@@ -53,6 +53,84 @@ public class MaxTokensLimitsTests
         Assert.Empty(ModelInfo.ParseCeilings(JsonNode.Parse("{}")));
         Assert.Empty(ModelInfo.ParseCeilings(JsonNode.Parse("{\"data\": \"nope\"}")));
         Assert.Empty(ModelInfo.ParseCeilings(JsonNode.Parse("{\"data\": []}")));
+        // A scalar entry / scalar model_info must read as "no ceiling", not throw — indexing a
+        // non-object JsonNode raises, so these have to be coerced rather than indexed blind.
+        Assert.Empty(ModelInfo.ParseCeilings(JsonNode.Parse("{\"data\": [7]}")));
+        Assert.Empty(ModelInfo.ParseCeilings(JsonNode.Parse("{\"data\":[{\"model_name\":\"x\",\"model_info\":7}]}")));
+        Assert.Empty(ModelInfo.ParseCeilings(JsonNode.Parse("{\"data\":[{\"model_name\":42}]}")));
+    }
+
+    // ── MapModelInfo (pure, network-free) — what GET /admin/model-costs answers ──────────────────
+
+    private const string CostsPayload = """
+    {
+      "data": [
+        {
+          "model_name": "claude-opus-4-8",
+          "model_info": {
+            "input_cost_per_token": 0.000015,
+            "output_cost_per_token": 0.000075,
+            "model_tier": "frontier",
+            "use_cases": ["reasoning", "coding"],
+            "max_output_tokens": 65536
+          }
+        },
+        {
+          "model_name": "claude-haiku-4-5",
+          "model_info": { "input_cost_per_token": 0.0000008, "model_tier": "fast", "use_cases": ["chat"] }
+        },
+        { "model_name": "bare", "model_info": {} },
+        { "model_info": { "model_tier": "nameless" } }
+      ]
+    }
+    """;
+
+    [Fact]
+    public void MapModelInfo_MapsCostsTierAndUseCasesByModelName()
+    {
+        var map = ModelInfo.MapModelInfo(JsonNode.Parse(CostsPayload));
+
+        var opus = map["claude-opus-4-8"]!;
+        Assert.Equal(0.000015, opus["inputCostPerToken"]!.GetValue<double>(), precision: 12);
+        Assert.Equal(0.000075, opus["outputCostPerToken"]!.GetValue<double>(), precision: 12);
+        Assert.Equal("frontier", opus["tier"]!.GetValue<string>());
+        Assert.Equal(new[] { "reasoning", "coding" }, opus["useCases"]!.AsArray().Select(n => n!.GetValue<string>()));
+        Assert.Equal(65536, opus["maxOutputTokens"]!.GetValue<double>());
+    }
+
+    /// <summary>
+    /// The property that matters for the console: an omitted field is null, NOT defaulted. A 0 cost
+    /// would render a free-model badge on a paid model, which is worse than rendering no badge.
+    /// </summary>
+    [Fact]
+    public void MapModelInfo_OmittedFieldsAreNull_NotDefaulted()
+    {
+        var map = ModelInfo.MapModelInfo(JsonNode.Parse(CostsPayload));
+
+        // Present costs but no ceiling → the ceiling is null, not 0.
+        Assert.Null(map["claude-haiku-4-5"]!["outputCostPerToken"]);
+        Assert.Null(map["claude-haiku-4-5"]!["maxOutputTokens"]);
+
+        // An empty model_info → every field null, and useCases an empty array rather than null.
+        var bare = map["bare"]!;
+        Assert.Null(bare["inputCostPerToken"]);
+        Assert.Null(bare["outputCostPerToken"]);
+        Assert.Null(bare["tier"]);
+        Assert.Null(bare["maxOutputTokens"]);
+        Assert.Empty(bare["useCases"]!.AsArray());
+    }
+
+    [Fact]
+    public void MapModelInfo_SkipsNamelessEntries_AndToleratesMalformedPayloads()
+    {
+        Assert.Equal(3, ModelInfo.MapModelInfo(JsonNode.Parse(CostsPayload)).Count); // the nameless entry is skipped
+
+        Assert.Empty(ModelInfo.MapModelInfo(null));
+        Assert.Empty(ModelInfo.MapModelInfo(JsonNode.Parse("{}")));
+        Assert.Empty(ModelInfo.MapModelInfo(JsonNode.Parse("{\"data\": \"nope\"}")));
+        Assert.Empty(ModelInfo.MapModelInfo(JsonNode.Parse("{\"data\": []}")));
+        // A non-object model_info must not throw — it reads as "no fields".
+        Assert.Null(ModelInfo.MapModelInfo(JsonNode.Parse("{\"data\":[{\"model_name\":\"x\",\"model_info\":7}]}"))["x"]!["tier"]);
     }
 
     // ── FetchCeilingAsync (best-effort HTTP) ─────────────────────────────────────────────────────
