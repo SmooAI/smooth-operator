@@ -19,6 +19,10 @@ import (
 // goroutine fed by a channel and a read loop that dispatches inbound frames — so a
 // streaming turn can fire many events while the connection is still reading.
 type Server struct {
+	// admin holds the in-memory state the /admin/* API serves (connector configs,
+	// settings, indexing runs). See admin.go.
+	admin *adminStores
+
 	store     SessionStore
 	client    core.ChatClient
 	auth      AuthVerifier
@@ -190,6 +194,7 @@ func WithOtpService(s OtpService) Option {
 func New(opts ...Option) *Server {
 	drainCtx, drainCancel := context.WithCancel(context.Background())
 	srv := &Server{
+		admin:       newAdminStores(),
 		store:       NewInMemorySessionStore(),
 		auth:        PermissiveVerifier{},
 		backplane:   NewInMemoryBackplane(),
@@ -207,6 +212,7 @@ func New(opts ...Option) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	s.registerAdminRoutes(mux)
 	return mux
 }
 

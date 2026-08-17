@@ -1,0 +1,306 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// The `/admin/*` API the console drives. Two things matter per route: it must
+// fail CLOSED without a sufficient token, and it must answer the wire shape the
+// console's typed client expects (camelCase, `{error:{code,message}}`).
+
+// roleVerifier is an auth-enabled verifier that maps a token straight to a role,
+// so a test can present "admin" / "curator" / "basic" / an unknown token.
+type roleVerifier struct{}
+
+func (roleVerifier) Mode() string { return "test" }
+
+func (roleVerifier) Resolve(token string) AccessContext {
+	switch token {
+	case "admin", "curator", "basic":
+		return AccessContext{
+			Principal:   Principal{Sub: "u-" + token, Org: "org-1", Role: token},
+			AuthEnabled: true,
+		}
+	case "other-org-admin":
+		return AccessContext{
+			Principal:   Principal{Sub: "u-other", Org: "org-2", Role: "admin"},
+			AuthEnabled: true,
+		}
+	default:
+		return AccessContext{Principal: AnonymousPrincipal, IsAnonymous: true, AuthEnabled: true}
+	}
+}
+
+func adminServer(t *testing.T) http.Handler {
+	t.Helper()
+	return New(WithAuth(roleVerifier{})).Handler()
+}
+
+// call issues an admin request with an optional bearer token.
+func call(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *strings.Reader
+	if body == "" {
+		reader = strings.NewReader("")
+	} else {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func decode(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	return out
+}
+
+// Every gated route, with the minimum role it requires. This IS the contract
+// table — if a route is added without a gate, it belongs here or it isn't done.
+var gatedRoutes = []struct {
+	method, path, minRole string
+}{
+	{"GET", "/admin/me", "basic"},
+	{"GET", "/admin/conversations", "basic"},
+	{"GET", "/admin/conversations/c1/messages", "basic"},
+	{"GET", "/admin/indexing/runs", "curator"},
+	{"GET", "/admin/document-sets", "curator"},
+	{"GET", "/admin/connectors", "curator"},
+	{"POST", "/admin/connectors", "admin"},
+	{"POST", "/admin/connectors/x/index", "curator"},
+	{"GET", "/admin/connectors/x", "curator"},
+	{"PUT", "/admin/connectors/x", "admin"},
+	{"DELETE", "/admin/connectors/x", "admin"},
+	{"GET", "/admin/settings", "curator"},
+	{"PUT", "/admin/settings", "admin"},
+}
+
+func TestAdminRoutesFailClosedWithoutAToken(t *testing.T) {
+	h := adminServer(t)
+	for _, rt := range gatedRoutes {
+		rec := call(t, h, rt.method, rt.path, "", `{}`)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without a token = %d, want 401", rt.method, rt.path, rec.Code)
+			continue
+		}
+		body := decode(t, rec)
+		errObj, _ := body["error"].(map[string]any)
+		if errObj == nil || errObj["code"] != "UNAUTHENTICATED" {
+			t.Errorf("%s %s error envelope = %v", rt.method, rt.path, body)
+		}
+	}
+}
+
+func TestAdminRoutesRejectAnInvalidToken(t *testing.T) {
+	h := adminServer(t)
+	rec := call(t, h, "GET", "/admin/me", "garbage", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token = %d, want 401", rec.Code)
+	}
+	if code := decode(t, rec)["error"].(map[string]any)["code"]; code != "INVALID_TOKEN" {
+		t.Errorf("code = %v, want INVALID_TOKEN", code)
+	}
+}
+
+func TestAdminRoutesEnforceRoleRank(t *testing.T) {
+	h := adminServer(t)
+	// A basic principal may read /admin/me but not curator or admin surfaces.
+	if rec := call(t, h, "GET", "/admin/me", "basic", ""); rec.Code != http.StatusOK {
+		t.Errorf("basic on /admin/me = %d, want 200", rec.Code)
+	}
+	if rec := call(t, h, "GET", "/admin/settings", "basic", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("basic on GET /admin/settings = %d, want 403", rec.Code)
+	}
+	// A curator may read settings but not write them.
+	if rec := call(t, h, "GET", "/admin/settings", "curator", ""); rec.Code != http.StatusOK {
+		t.Errorf("curator on GET /admin/settings = %d, want 200", rec.Code)
+	}
+	rec := call(t, h, "PUT", "/admin/settings", "curator", `{"model":"m","systemPrompt":"","defaultTools":[]}`)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("curator on PUT /admin/settings = %d, want 403", rec.Code)
+	}
+	if code := decode(t, rec)["error"].(map[string]any)["code"]; code != "FORBIDDEN" {
+		t.Errorf("code = %v, want FORBIDDEN", code)
+	}
+}
+
+func TestAdminHealthIsUngated(t *testing.T) {
+	// The console probes health before it has a token.
+	rec := call(t, adminServer(t), "GET", "/admin/health", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health = %d, want 200", rec.Code)
+	}
+}
+
+func TestAdminMeShapesThePrincipal(t *testing.T) {
+	body := decode(t, call(t, adminServer(t), "GET", "/admin/me", "curator", ""))
+	if body["userId"] != "u-curator" || body["orgId"] != "org-1" || body["role"] != "curator" {
+		t.Errorf("me = %v", body)
+	}
+}
+
+func TestConnectorCrudRoundTrip(t *testing.T) {
+	h := adminServer(t)
+
+	// create
+	rec := call(t, h, "POST", "/admin/connectors", "admin", `{"name":"docs","kind":"web","config":{"url":"https://x"},"enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+	}
+	created := decode(t, rec)["connector"].(map[string]any)
+	id, _ := created["id"].(string)
+	if id == "" || created["name"] != "docs" || created["enabled"] != true {
+		t.Fatalf("created = %v", created)
+	}
+	if created["createdAt"] == nil || created["updatedAt"] == nil {
+		t.Errorf("timestamps missing: %v", created)
+	}
+
+	// list (curator can read)
+	list := decode(t, call(t, h, "GET", "/admin/connectors", "curator", ""))["connectors"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("list = %v", list)
+	}
+
+	// get
+	got := decode(t, call(t, h, "GET", "/admin/connectors/"+id, "curator", ""))["connector"].(map[string]any)
+	if got["id"] != id {
+		t.Errorf("get = %v", got)
+	}
+
+	// update
+	rec = call(t, h, "PUT", "/admin/connectors/"+id, "admin", `{"name":"docs2","kind":"web","config":{},"enabled":false}`)
+	updated := decode(t, rec)["connector"].(map[string]any)
+	if updated["name"] != "docs2" || updated["enabled"] != false {
+		t.Errorf("updated = %v", updated)
+	}
+
+	// index trigger records a run
+	rec = call(t, h, "POST", "/admin/connectors/"+id+"/index", "curator", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index = %d: %s", rec.Code, rec.Body.String())
+	}
+	runs := decode(t, call(t, h, "GET", "/admin/indexing/runs", "curator", ""))["runs"].([]any)
+	if len(runs) != 1 {
+		t.Errorf("runs = %v", runs)
+	}
+
+	// delete → 204, then 404
+	if rec = call(t, h, "DELETE", "/admin/connectors/"+id, "admin", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("delete = %d, want 204", rec.Code)
+	}
+	if rec = call(t, h, "GET", "/admin/connectors/"+id, "curator", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("get after delete = %d, want 404", rec.Code)
+	}
+}
+
+func TestConnectorsAreOrgIsolated(t *testing.T) {
+	h := adminServer(t)
+	rec := call(t, h, "POST", "/admin/connectors", "admin", `{"name":"mine","kind":"web","config":{},"enabled":true}`)
+	id := decode(t, rec)["connector"].(map[string]any)["id"].(string)
+
+	// Another org's admin must not see it, and must not be able to tell an
+	// existing-but-foreign id from an unknown one.
+	if rec := call(t, h, "GET", "/admin/connectors/"+id, "other-org-admin", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("cross-org get = %d, want 404", rec.Code)
+	}
+	list := decode(t, call(t, h, "GET", "/admin/connectors", "other-org-admin", ""))["connectors"].([]any)
+	if len(list) != 0 {
+		t.Errorf("cross-org list leaked %d connectors", len(list))
+	}
+}
+
+func TestConnectorCreateValidates(t *testing.T) {
+	h := adminServer(t)
+	if rec := call(t, h, "POST", "/admin/connectors", "admin", `{"kind":"web"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("missing name = %d, want 400", rec.Code)
+	}
+	if rec := call(t, h, "POST", "/admin/connectors", "admin", `not json`); rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed body = %d, want 400", rec.Code)
+	}
+}
+
+func TestSettingsDefaultThenRoundTrip(t *testing.T) {
+	h := adminServer(t)
+
+	// Unset settings read as defaults rather than 404.
+	got := decode(t, call(t, h, "GET", "/admin/settings", "curator", ""))["settings"].(map[string]any)
+	if got["orgId"] != "org-1" || got["model"] == "" {
+		t.Fatalf("default settings = %v", got)
+	}
+
+	rec := call(t, h, "PUT", "/admin/settings", "admin", `{"model":"claude-sonnet-4-5","systemPrompt":"be nice","defaultTools":["search"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put = %d: %s", rec.Code, rec.Body.String())
+	}
+	saved := decode(t, rec)["settings"].(map[string]any)
+	if saved["model"] != "claude-sonnet-4-5" || saved["systemPrompt"] != "be nice" {
+		t.Fatalf("saved = %v", saved)
+	}
+	reread := decode(t, call(t, h, "GET", "/admin/settings", "curator", ""))["settings"].(map[string]any)
+	if reread["model"] != "claude-sonnet-4-5" {
+		t.Errorf("settings did not persist: %v", reread)
+	}
+}
+
+func TestConversationsAndMessagesShape(t *testing.T) {
+	h := adminServer(t)
+	body := decode(t, call(t, h, "GET", "/admin/conversations", "curator", ""))
+	if _, ok := body["conversations"].([]any); !ok {
+		t.Errorf("conversations = %v", body)
+	}
+	if _, present := body["nextCursor"]; !present {
+		t.Error("nextCursor must be present (null when there is no next page)")
+	}
+
+	msgs := decode(t, call(t, h, "GET", "/admin/conversations/c1/messages", "curator", ""))
+	if msgs["conversationId"] != "c1" {
+		t.Errorf("messages = %v", msgs)
+	}
+	if _, ok := msgs["messages"].([]any); !ok {
+		t.Errorf("messages list missing: %v", msgs)
+	}
+}
+
+func TestDocumentSetsShape(t *testing.T) {
+	body := decode(t, call(t, adminServer(t), "GET", "/admin/document-sets", "curator", ""))
+	if _, ok := body["documentSets"].([]any); !ok {
+		t.Errorf("documentSets = %v", body)
+	}
+}
+
+func TestNoAuthDevModeGrantsAdmin(t *testing.T) {
+	// AUTH_MODE=none is the local dev flavor, and Rust's NoAuthVerifier returns a
+	// fixed Admin principal there. Without the same grant the console 403-walls
+	// against a local server — as useless as the 404s this API exists to fix.
+	h := New().Handler() // default verifier: PermissiveVerifier, Mode() == "none"
+	for _, path := range []string{"/admin/settings", "/admin/connectors", "/admin/indexing/runs"} {
+		if rec := call(t, h, "GET", path, "dev-token", ""); rec.Code != http.StatusOK {
+			t.Errorf("GET %s on a no-auth server = %d, want 200", path, rec.Code)
+		}
+	}
+	// Still fails closed with NO token at all, even in dev.
+	if rec := call(t, h, "GET", "/admin/settings", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token on a no-auth server = %d, want 401", rec.Code)
+	}
+}
+
+func TestAuthEnabledServerIsUnaffectedByTheDevGrant(t *testing.T) {
+	// The dev grant must not leak into a server that HAS auth configured.
+	h := adminServer(t) // roleVerifier: AuthEnabled, Mode() == "test"
+	if rec := call(t, h, "GET", "/admin/settings", "basic", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("basic on an auth-enabled server = %d, want 403", rec.Code)
+	}
+}
