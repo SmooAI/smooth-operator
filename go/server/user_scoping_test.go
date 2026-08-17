@@ -367,7 +367,7 @@ func TestConversationScopeAllows(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.scope.Allows(tc.owner); got != tc.want {
+			if got := tc.scope.Allows(tc.owner, ""); got != tc.want {
 				t.Fatalf("Allows(%q) = %v, want %v", tc.owner, got, tc.want)
 			}
 		})
@@ -391,7 +391,7 @@ func TestVerifierScopeDerivation(t *testing.T) {
 		if s.Unscoped || s.Email != "" {
 			t.Fatalf("rejected token %q yielded scope %+v, want fail-closed zero value", tok, s)
 		}
-		if s.Allows("a@example.com") {
+		if s.Allows("a@example.com", "") {
 			t.Fatalf("rejected token %q can still see another user's OWNED conversation", tok)
 		}
 	}

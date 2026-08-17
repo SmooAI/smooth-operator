@@ -268,7 +268,9 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 			return StoredSession{}, false, err
 		}
 		// Known AND visible collapse into ONE boolean on purpose — see the doc comment.
-		if found && scope.Allows(existingOwner) {
+		// conversationOwner already filtered by scope.OrgID, so the org half is
+		// satisfied by construction — pass it through rather than re-deriving it.
+		if found && scope.Allows(existingOwner, scope.OrgID) {
 			resumed, owner = true, existingOwner
 		}
 	}
