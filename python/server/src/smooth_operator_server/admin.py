@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 import uuid
@@ -38,6 +39,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 
 from .auth import AccessContext, Principal
 
@@ -164,6 +166,72 @@ def _require_role(state: Any, headers: Any, min_rank: int) -> Principal | _Denie
     )
 
 
+# ── model costs ─────────────────────────────────────────────────────────────
+
+#: The mapped ``/model/info`` payload for the process. Gateway pricing is stable,
+#: so one fetch per process is enough (matching Rust's ``OnceCell``). Only a
+#: SUCCESS is cached — an error leaves it unset so the next request retries,
+#: rather than pinning an empty map for the process lifetime.
+_model_costs_cache: Optional[dict[str, Any]] = None
+
+
+def reset_model_costs_cache() -> None:
+    """Reset the process-wide cache. Test seam."""
+    global _model_costs_cache
+    _model_costs_cache = None
+
+
+def map_model_info(payload: Any) -> dict[str, Any]:
+    """Map the gateway's ``/model/info`` payload into the shape the console reads.
+
+    Pure, so it is unit-testable without a gateway. Entries without a
+    ``model_name`` are skipped, and every field is optional — **None when the
+    gateway omits it** rather than defaulted, since a $0 price would render a
+    free-model badge on a paid model.
+    """
+    out: dict[str, Any] = {}
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("model_name")
+        if not isinstance(name, str) or not name:
+            continue
+        info = entry.get("model_info")
+        info = info if isinstance(info, dict) else {}
+
+        def num(key: str, info: dict[str, Any] = info) -> Any:
+            value = info.get(key)
+            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+        tier = info.get("model_tier")
+        use_cases = info.get("use_cases")
+        out[name] = {
+            "inputCostPerToken": num("input_cost_per_token"),
+            "outputCostPerToken": num("output_cost_per_token"),
+            "tier": tier if isinstance(tier, str) else None,
+            "useCases": use_cases if isinstance(use_cases, list) else [],
+            "maxOutputTokens": num("max_output_tokens"),
+        }
+    return out
+
+
+def _fetch_model_costs() -> dict[str, Any]:
+    """GET the gateway's ``/model/info`` with the server's configured credentials.
+
+    Blocking (stdlib urllib), so callers run it off the event loop.
+    """
+    base = (os.environ.get("SMOOAI_GATEWAY_URL") or "https://llm.smoo.ai/v1").strip().rstrip("/")
+    key = (os.environ.get("SMOOAI_GATEWAY_KEY") or "").strip()
+    req = Request(f"{base}/model/info")
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+    with urlopen(req, timeout=10) as resp:  # noqa: S310 - fixed https gateway base
+        return map_model_info(json.loads(resp.read().decode("utf-8")))
+
+
 # ── the handler ─────────────────────────────────────────────────────────────
 
 _MESSAGES_RE = re.compile(r"^/admin/conversations/([^/]+)/messages$")
@@ -199,6 +267,19 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
     # Ungated, exactly as in Rust: the console probes health before it has a token.
     if method == "GET" and path == "/admin/health":
         return _json(200, {"status": "ok"})
+
+    # Ungated too: gateway pricing is not org-sensitive and the console's cost
+    # badges must render on a tokenless local connection. Any gateway failure
+    # degrades to {} with a 200 — a missing badge beats a broken page.
+    if method == "GET" and path == "/admin/model-costs":
+        global _model_costs_cache
+        if _model_costs_cache is not None:
+            return _json(200, _model_costs_cache)
+        try:
+            _model_costs_cache = await asyncio.to_thread(_fetch_model_costs)
+            return _json(200, _model_costs_cache)
+        except Exception:  # noqa: BLE001 - any gateway/transport failure degrades
+            return _json(200, {})
 
     if method == "GET" and path == "/admin/me":
         p = _require_role(state, headers, ROLE_BASIC)

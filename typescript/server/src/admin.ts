@@ -168,6 +168,60 @@ function requireRole(deps: AdminDeps, req: IncomingMessage, res: ServerResponse,
     return principal;
 }
 
+// ── model costs ─────────────────────────────────────────────────────────────
+
+/**
+ * The mapped `/model/info` payload for the process. Gateway pricing is stable,
+ * so one fetch per process is enough (matching Rust's `OnceCell`). Only a
+ * SUCCESS is cached — an error leaves it unset so the next request retries,
+ * rather than pinning an empty map for the process lifetime.
+ */
+let modelCostsCache: Record<string, unknown> | undefined;
+
+/** Reset the process-wide cache. Test seam. */
+export function resetModelCostsCache(): void {
+    modelCostsCache = undefined;
+}
+
+/**
+ * Map the gateway's `/model/info` payload into the shape the console reads.
+ * Pure, so it is unit-testable without a gateway. Entries without a `model_name`
+ * are skipped, and every field is optional — **null when the gateway omits it**
+ * rather than defaulted, since a $0 price would render a free-model badge on a
+ * paid model.
+ */
+export function mapModelInfo(payload: unknown): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const entries = (payload as { data?: unknown })?.data;
+    if (!Array.isArray(entries)) return out;
+    for (const entry of entries) {
+        const name = (entry as { model_name?: unknown })?.model_name;
+        if (typeof name !== 'string' || name === '') continue;
+        const info = ((entry as { model_info?: unknown }).model_info ?? {}) as Record<string, unknown>;
+        const num = (k: string) => (typeof info[k] === 'number' ? (info[k] as number) : null);
+        out[name] = {
+            inputCostPerToken: num('input_cost_per_token'),
+            outputCostPerToken: num('output_cost_per_token'),
+            tier: typeof info.model_tier === 'string' ? info.model_tier : null,
+            useCases: Array.isArray(info.use_cases) ? info.use_cases : [],
+            maxOutputTokens: num('max_output_tokens'),
+        };
+    }
+    return out;
+}
+
+/** GET the gateway's `/model/info` with the server's configured credentials. */
+async function fetchModelCosts(): Promise<Record<string, unknown>> {
+    const base = (process.env.SMOOAI_GATEWAY_URL?.trim() || 'https://llm.smoo.ai/v1').replace(/\/+$/, '');
+    const key = process.env.SMOOAI_GATEWAY_KEY?.trim();
+    const res = await fetch(`${base}/model/info`, {
+        headers: key ? { authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`model/info: ${res.status}`);
+    return mapModelInfo(await res.json());
+}
+
 // ── the handler ─────────────────────────────────────────────────────────────
 
 /**
@@ -203,6 +257,23 @@ async function route(
     // Ungated, exactly as in Rust: the console probes health before it has a token.
     if (method === 'GET' && path === '/admin/health') {
         sendJson(res, 200, { status: 'ok' });
+        return;
+    }
+
+    // Ungated too: gateway pricing is not org-sensitive and the console's cost
+    // badges must render on a tokenless local connection. Any gateway failure
+    // degrades to {} with a 200 — a missing badge beats a broken page.
+    if (method === 'GET' && path === '/admin/model-costs') {
+        if (modelCostsCache) {
+            sendJson(res, 200, modelCostsCache);
+            return;
+        }
+        try {
+            modelCostsCache = await fetchModelCosts();
+            sendJson(res, 200, modelCostsCache);
+        } catch {
+            sendJson(res, 200, {});
+        }
         return;
     }
 

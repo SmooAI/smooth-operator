@@ -304,3 +304,86 @@ func TestAuthEnabledServerIsUnaffectedByTheDevGrant(t *testing.T) {
 		t.Errorf("basic on an auth-enabled server = %d, want 403", rec.Code)
 	}
 }
+
+// ── model costs ─────────────────────────────────────────────────────────────
+
+func TestMapModelInfoMapsTheGatewayPayload(t *testing.T) {
+	// A representative /v1/model/info payload from the LiteLLM gateway.
+	payload := map[string]any{"data": []any{
+		map[string]any{
+			"model_name": "claude-opus-4-8",
+			"model_info": map[string]any{
+				"input_cost_per_token":  0.000015,
+				"output_cost_per_token": 0.000075,
+				"model_tier":            "frontier",
+				"use_cases":             []any{"reasoning", "coding"},
+				"max_output_tokens":     float64(65536),
+			},
+		},
+		// Missing fields stay NULL rather than defaulting to a wrong number —
+		// a $0 price would render a free-model badge on a paid model.
+		map[string]any{"model_name": "mystery-model", "model_info": map[string]any{}},
+		// No model_name → skipped entirely.
+		map[string]any{"model_info": map[string]any{"input_cost_per_token": 1.0}},
+	}}
+
+	got := mapModelInfo(payload)
+	if len(got) != 2 {
+		t.Fatalf("mapped %d models, want 2: %v", len(got), got)
+	}
+	opus := got["claude-opus-4-8"].(map[string]any)
+	if opus["inputCostPerToken"] != 0.000015 || opus["outputCostPerToken"] != 0.000075 {
+		t.Errorf("costs = %v", opus)
+	}
+	if opus["tier"] != "frontier" || opus["maxOutputTokens"] != float64(65536) {
+		t.Errorf("tier/ceiling = %v", opus)
+	}
+	if cases, _ := opus["useCases"].([]any); len(cases) != 2 {
+		t.Errorf("useCases = %v", opus["useCases"])
+	}
+
+	mystery := got["mystery-model"].(map[string]any)
+	for _, k := range []string{"inputCostPerToken", "outputCostPerToken", "tier", "maxOutputTokens"} {
+		if mystery[k] != nil {
+			t.Errorf("%s should be nil when the gateway omits it, got %v", k, mystery[k])
+		}
+	}
+	if cases, _ := mystery["useCases"].([]any); cases == nil || len(cases) != 0 {
+		t.Errorf("useCases should be an empty array, not null: %v", mystery["useCases"])
+	}
+}
+
+func TestMapModelInfoTolteratesGarbage(t *testing.T) {
+	if got := mapModelInfo(map[string]any{}); len(got) != 0 {
+		t.Errorf("no data key = %v", got)
+	}
+	if got := mapModelInfo(map[string]any{"data": "not-an-array"}); len(got) != 0 {
+		t.Errorf("non-array data = %v", got)
+	}
+}
+
+func TestModelCostsIsUngatedAndDegradesToEmpty(t *testing.T) {
+	// No gateway reachable in a test, so this exercises the degrade path: an
+	// unreachable gateway must yield {} with a 200, never a 500 — a missing cost
+	// badge beats a broken console page.
+	t.Setenv("SMOOAI_GATEWAY_URL", "http://127.0.0.1:1")
+	modelCostsCache.mu.Lock()
+	modelCostsCache.loaded, modelCostsCache.value = false, nil
+	modelCostsCache.mu.Unlock()
+
+	// Ungated: no bearer token at all.
+	rec := call(t, adminServer(t), "GET", "/admin/model-costs", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("model-costs = %d, want 200", rec.Code)
+	}
+	if body := decode(t, rec); len(body) != 0 {
+		t.Errorf("unreachable gateway should degrade to {}, got %v", body)
+	}
+	// A failure must NOT be cached, or one blip pins an empty map for the process.
+	modelCostsCache.mu.Lock()
+	loaded := modelCostsCache.loaded
+	modelCostsCache.mu.Unlock()
+	if loaded {
+		t.Error("a failed fetch must not be cached")
+	}
+}
