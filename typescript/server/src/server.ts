@@ -159,7 +159,7 @@ export function buildServer(options: ServerOptions): {
     // else on plain HTTP is not part of the protocol surface.
     const adminStores: AdminStore = options.adminStore ?? new InMemoryAdminStore();
     const http = createServer((req, res) => {
-        void handleAdminRequest({ auth, store, stores: adminStores }, req, res).then((handled) => {
+        void handleAdminRequest({ auth, store, stores: adminStores, backplane }, req, res).then((handled) => {
             if (handled) return;
             res.writeHead(426, { 'content-type': 'text/plain' });
             res.end('Upgrade Required: connect over WebSocket\n');
