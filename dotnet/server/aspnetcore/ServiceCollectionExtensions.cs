@@ -1,6 +1,7 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using SmooAI.SmoothOperator.Core;
 
 namespace SmooAI.SmoothOperator.Server.AspNetCore;
@@ -19,6 +20,19 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddSmoothOperatorServer(this IServiceCollection services)
     {
         services.TryAddSingleton<ISessionStore, InMemorySessionStore>();
+
+        // The executor a turn runs on (ADR-030) — the one place a durable backend plugs in, mirroring
+        // the Rust server's runner.rs::turn_executor. A host that wants durable turns registers a
+        // durable IAgentExecutor under ExecutorSelection.DurableExecutorServiceKey (it may reference
+        // SmooAI.SmoothOperator.Temporal); this resolves the EFFECTIVE executor via the env-gated
+        // selection, defaulting to the zero-infra InProcessExecutor. The durable registration is
+        // KEYED so it never collides with this effective one. Nothing here references the Temporal
+        // package, so the seam compiles without it.
+        services.TryAddSingleton<IAgentExecutor>(sp =>
+            ExecutorSelection.TurnExecutor(
+                sp.GetKeyedService<IAgentExecutor>(ExecutorSelection.DurableExecutorServiceKey),
+                Environment.GetEnvironmentVariable,
+                sp.GetService<ILoggerFactory>()?.CreateLogger("SmooAI.SmoothOperator.Server.ExecutorSelection")));
 
         // The connection registry POST /admin/publish delivers through. Registered here so the
         // WebSocket host and the admin route share ONE instance — two different defaults would attach
