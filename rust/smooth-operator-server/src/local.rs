@@ -204,6 +204,9 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn skill_resolver(mut self, resolver: Arc<dyn crate::skills::SkillResolver>) -> Self {
         self.skill_resolver = Some(resolver);
+        self
+    }
+
     /// Route a host hook's `Ask` verdicts through the chat HITL (th-be3f55).
     ///
     /// The companion to [`tool_hooks`](Self::tool_hooks): that seam lets a host

@@ -218,7 +218,10 @@ pub struct HostApprover {
 impl HostApprover {
     /// Build an approver from a host hook's channel ends.
     #[must_use]
-    pub fn new(request_rx: UnboundedReceiver<HumanRequest>, response_tx: UnboundedSender<HumanResponse>) -> Self {
+    pub fn new(
+        request_rx: UnboundedReceiver<HumanRequest>,
+        response_tx: UnboundedSender<HumanResponse>,
+    ) -> Self {
         Self {
             request_rx: Arc::new(tokio::sync::Mutex::new(request_rx)),
             response_tx,
@@ -235,7 +238,10 @@ impl HostApprover {
         if let Ok(mut cur) = self.current.lock() {
             *cur = Some(target);
         }
-        if !self.drain_started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .drain_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             self.spawn_drain();
         }
     }
@@ -258,9 +264,18 @@ impl HostApprover {
             while let Some(req) = rx.recv().await {
                 let target = current.lock().ok().and_then(|c| c.clone());
                 match (req, target) {
-                    (HumanRequest::Confirm { tool_name, prompt, .. }, Some(t)) => {
+                    (
+                        HumanRequest::Confirm {
+                            tool_name, prompt, ..
+                        },
+                        Some(t),
+                    ) => {
                         (t.register)(&t.session_id, response_tx.clone());
-                        let _ = t.sink.send(crate::protocol::write_confirmation_required(&t.request_id, &tool_name, &prompt));
+                        let _ = t.sink.send(crate::protocol::write_confirmation_required(
+                            &t.request_id,
+                            &tool_name,
+                            &prompt,
+                        ));
                     }
                     // Nothing is listening — a turn running with no client
                     // attached (a scheduled wake-up). Deny promptly with a
