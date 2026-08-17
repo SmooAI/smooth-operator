@@ -98,6 +98,7 @@ You decide what the agent can touch; the runner enforces it.
 ## What's shipped
 
 - `SessionStore` / `InMemorySessionStore` — sessions + conversation message logs.
+- **Durable Postgres storage** (`PostgresStore`) — sessions, conversations, participants, messages, and the three `/admin/*` stores (connector configs, agent settings, indexing runs) survive a restart. Selected with `SMOOTH_AGENT_STORAGE=postgres` + `SMOOTH_AGENT_DATABASE_URL` (or `DATABASE_URL`); unset keeps the in-memory stores. The tables are the Rust reference adapter's, verbatim, so every server in the repo shares one schema. Every conversation query is scoped by org first and owner second.
 - `FrameDispatcher` — validates inbound frames and routes them (`create_conversation_session` → store, `send_message` → `TurnRunner`, `get_session` → store, `cancel` → abort the in-flight turn, `ping` → pong).
 - **Turn cancellation** (the "Stop button") — one active turn per connection, tracked with its own cancellable context. `cancel` aborts it and emits the terminal `cancelled` event (`status: 499`) in place of the `eventual_response`; the partial assistant reply is discarded (the user message stays persisted). A second `send_message` mid-turn is rejected with `TURN_IN_PROGRESS`; a client disconnect aborts the turn too — unlike the SIGTERM drain, which lets it finish.
 - `TurnRunner` — drives one turn: replay history into a `core.SmoothAgent` thread, consume `RunStream`, emit a `stream_token` per text delta and a `stream_chunk` per tool call / result, persist the reply, return the terminal `eventual_response` (with citations).
@@ -134,6 +135,8 @@ Every native client — [TypeScript](https://www.npmjs.com/package/@smooai/smoot
 cd go/server
 go mod tidy && gofmt -w . && go vet ./... && go test -race ./...
 ```
+
+The Postgres tests spin up a throwaway container (testcontainers) and **skip cleanly** when Docker is unreachable, so the suite needs no daemon. On OrbStack, testcontainers' Ryuk reaper can hang before the database container starts — prefix with `TESTCONTAINERS_RYUK_DISABLED=true` if they skip on a timeout with Docker plainly running.
 
 This package is its own Go module (`github.com/SmooAI/smooth-operator/go/server`) — it depends on the engine module, while the published client module ([`../`](../)) stays dependency-light.
 

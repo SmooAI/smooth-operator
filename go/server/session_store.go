@@ -65,6 +65,13 @@ type ConversationScope struct {
 	// when its OwnerEmail matches (case-insensitively). Empty with Unscoped false ⇒ only
 	// ownerless conversations are visible. See Allows.
 	Email string
+	// OrgID is the authenticated principal's organization — the OUTER scope, applied
+	// before ownership. A durable store partitions conversations by it, so a conversation
+	// in another org is invisible AND unresumable, and reports identically to one that
+	// never existed. The in-memory store is single-tenant and ignores it (every
+	// connection to an auth-disabled server carries the same "public" org anyway), so
+	// nothing changes when it is unset.
+	OrgID string
 }
 
 // Allows reports whether a conversation owned by ownerEmail is visible in this scope.
@@ -119,9 +126,9 @@ type ConversationSummary struct {
 
 // SessionStore is persistence for sessions + conversation message logs — the Go
 // analog of the C# ISessionStore and the Rust StorageAdapter's session/conversation/
-// message surface. Async-shaped (context-taking) so a Postgres/Dynamo adapter can
-// implement the same interface for durability; the bundled InMemorySessionStore is
-// the reference store.
+// message surface. Async-shaped (context-taking) so a durable adapter can implement the
+// same interface; InMemorySessionStore is the reference store and PostgresStore
+// (postgres_store.go, SMOOTH_AGENT_STORAGE=postgres) is the durable one.
 type SessionStore interface {
 	// CreateSession mints a fresh session owned by scope's principal (Email; "" when auth is
 	// disabled). userEmail stays the client-supplied OTP contact and MUST NOT be used for

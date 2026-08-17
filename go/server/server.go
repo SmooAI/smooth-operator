@@ -19,9 +19,9 @@ import (
 // goroutine fed by a channel and a read loop that dispatches inbound frames — so a
 // streaming turn can fire many events while the connection is still reading.
 type Server struct {
-	// admin holds the in-memory state the /admin/* API serves (connector configs,
-	// settings, indexing runs). See admin.go.
-	admin *adminStores
+	// admin is the store the /admin/* API serves from (connector configs, settings,
+	// indexing runs) — in-memory by default, Postgres when configured. See admin.go.
+	admin adminStore
 
 	store     SessionStore
 	client    core.ChatClient
@@ -99,6 +99,11 @@ type Option func(*Server)
 
 // WithSessionStore overrides the session store (default: a fresh in-memory store).
 func WithSessionStore(s SessionStore) Option { return func(srv *Server) { srv.store = s } }
+
+// withAdminStore overrides the /admin/* store (default: a fresh in-memory store).
+// Unexported because the connector/settings/run types are — hosts select a backend
+// through StorageOptionsFromEnv instead.
+func withAdminStore(s adminStore) Option { return func(srv *Server) { srv.admin = s } }
 
 // WithChatClient sets the engine chat client used to run turns. With none, send_message
 // settles as a clean protocol error (the keyless path).
@@ -194,7 +199,7 @@ func WithOtpService(s OtpService) Option {
 func New(opts ...Option) *Server {
 	drainCtx, drainCancel := context.WithCancel(context.Background())
 	srv := &Server{
-		admin:       newAdminStores(),
+		admin:       newInMemoryAdminStore(),
 		store:       NewInMemorySessionStore(),
 		auth:        PermissiveVerifier{},
 		backplane:   NewInMemoryBackplane(),

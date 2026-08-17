@@ -65,9 +65,9 @@ func (a AccessContext) Groups() []string { return a.Principal.Groups }
 // th-8fe998.
 func (a AccessContext) ConversationScope() ConversationScope {
 	if !a.AuthEnabled {
-		return ConversationScope{Unscoped: true}
+		return ConversationScope{Unscoped: true, OrgID: a.Principal.Org}
 	}
-	return ConversationScope{Email: a.Principal.Email}
+	return ConversationScope{Email: a.Principal.Email, OrgID: a.Principal.Org}
 }
 
 // AuthVerifier resolves a connection token (the ?token= query slot) into an
