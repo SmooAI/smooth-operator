@@ -471,6 +471,49 @@ func TestPostgresStorePersistsWorkflowStepAndOtpBit(t *testing.T) {
 	}
 }
 
+// The durable store must report the conversation's ORG on the session, not just the
+// owner. ConversationScope.Allows treats an empty org as "unrecorded" and falls
+// through to an ownership-only check — so a store that drops it reopens the cross-org
+// hole for ownerless conversations while every existing test still passes. Asserted
+// against the real gate, not just the field, so it fails if either side regresses.
+func TestPostgresStoreReportsOwnerOrgSoTheGateCanEnforceIt(t *testing.T) {
+	store := newPostgresStore(t)
+	ctx := t.Context()
+
+	orgA := "org-a-" + uuid.NewString()
+	orgB := "org-b-" + uuid.NewString()
+
+	// An OWNERLESS conversation: ownership alone cannot block a cross-org read, so
+	// only the org check can. An owned one would pass this test for the wrong reason.
+	anonymous := ConversationScope{Unscoped: true, OrgID: orgA}
+	created, err := store.CreateSession(ctx, "", "", "", anonymous)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if created.OwnerOrg != orgA {
+		t.Fatalf("CreateSession OwnerOrg = %q, want %q", created.OwnerOrg, orgA)
+	}
+	if created.OwnerEmail != "" {
+		t.Fatalf("OwnerEmail = %q, want ownerless", created.OwnerEmail)
+	}
+
+	fetched, err := store.GetSession(ctx, created.SessionID)
+	if err != nil || fetched == nil {
+		t.Fatalf("GetSession: %v (session %v)", err, fetched)
+	}
+	if fetched.OwnerOrg != orgA {
+		t.Fatalf("GetSession OwnerOrg = %q, want %q — the gate cannot enforce an org it is never told", fetched.OwnerOrg, orgA)
+	}
+
+	// The gate itself: org B must be refused, org A allowed.
+	if (ConversationScope{Email: "someone@example.test", OrgID: orgB}).Allows(fetched.OwnerEmail, fetched.OwnerOrg) {
+		t.Fatal("BREACH: another org reached an ownerless conversation through a session id")
+	}
+	if !(ConversationScope{Email: "someone@example.test", OrgID: orgA}).Allows(fetched.OwnerEmail, fetched.OwnerOrg) {
+		t.Fatal("same-org ownerless conversation must stay reachable (th-909995)")
+	}
+}
+
 // ── admin stores ────────────────────────────────────────────────────────────
 
 func TestPostgresStoreConnectorsAreOrgScoped(t *testing.T) {

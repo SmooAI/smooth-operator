@@ -267,6 +267,28 @@ describe('PostgresStore (needs Docker)', () => {
         await reopened.close();
     });
 
+    // The durable store must report the conversation's ORG on the session and on
+    // getConversation, not just the owner. `mayRead` treats an absent org as
+    // "unrecorded" and falls through to an ownership-only check — so a store that drops
+    // it reopens the cross-org hole for ownerless conversations while every existing
+    // test still passes. Uses an OWNERLESS conversation: an owned one would pass for
+    // the wrong reason, because ownership alone would block the cross-org read.
+    pgIt('reports orgId so the dispatcher gate can enforce it', async () => {
+        const store = await newStore();
+        const orgA = org('a');
+
+        const anonymous = await store.createSession('', '', undefined, undefined, orgA);
+        expect(anonymous.userEmail).toBeUndefined();
+        expect(anonymous.orgId).toBe(orgA);
+
+        const fetched = await store.getSession(anonymous.sessionId);
+        expect(fetched?.orgId).toBe(orgA);
+
+        const conv = await store.getConversation(anonymous.conversationId, orgA);
+        expect(conv?.orgId).toBe(orgA);
+        await store.close();
+    });
+
     pgIt('scopes connectors by org', async () => {
         const store = await newStore();
         const orgA = org('a');

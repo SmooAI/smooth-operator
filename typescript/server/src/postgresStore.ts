@@ -230,6 +230,9 @@ export class PostgresStore implements SessionStore, AdminStore {
             agentName: AGENT_NAME,
             userParticipantId: randomUUID(),
             agentParticipantId: randomUUID(),
+            // A resumed conversation is in `orgId` by construction — getConversation only
+            // matches rows whose organization_id equals it — so both branches stamp the same org.
+            orgId,
             // On a resume the owner is the conversation's ORIGINAL owner, not this
             // caller's — re-deriving it would let a resume rewrite ownership.
             ...(resumeId ? (resumedOwner ? { userEmail: resumedOwner } : {}) : owner ? { userEmail: owner } : {}),
@@ -289,16 +292,15 @@ export class PostgresStore implements SessionStore, AdminStore {
      * `user` participant rather than duplicated onto the session row, so there is one
      * source of truth and a resumed session reports the ORIGINAL owner.
      *
-     * KNOWN GAP, stated rather than implied: this lookup is not org-scoped, because
-     * the {@link SessionStore} interface hands it no org to compare against. Every
-     * query that DOES receive one filters by it. Closing this means threading the org
-     * onto {@link StoredSession} and checking it in the dispatcher, which changes the
-     * in-memory server's behaviour too and so belongs in its own change. Reaching it
-     * requires guessing a v4 UUID, and it is the behaviour the memory store has today.
+     * `orgId` MUST be populated for the gate to do its job. `mayRead` treats an absent
+     * org as "unrecorded" and falls through to an ownership-only check, so a store that
+     * omits it here does not fail loudly — it silently reopens the cross-org hole for
+     * every ownerless conversation, on the one backend that holds several orgs' data.
      */
     async getSession(sessionId: string): Promise<StoredSession | null> {
         const { rows } = await this.pool.query(
             `SELECT s.conversation_id, s.agent_id, s.agent_name, s.user_participant_id, s.agent_participant_id,
+                    s.organization_id,
                     COALESCE(s.metadata, '{}'::jsonb) AS metadata,
                     (SELECT p.email FROM conversation_participants p
                       WHERE p.conversation_id = s.conversation_id AND p.type = 'user'
@@ -317,6 +319,7 @@ export class PostgresStore implements SessionStore, AdminStore {
             agentName: row.agent_name,
             userParticipantId: row.user_participant_id,
             agentParticipantId: row.agent_participant_id,
+            ...(row.organization_id ? { orgId: row.organization_id as string } : {}),
             ...(row.owner_email ? { userEmail: row.owner_email as string } : {}),
             ...(metadata.contactEmail ? { contactEmail: metadata.contactEmail } : {}),
             ...(metadata.contactPhone ? { contactPhone: metadata.contactPhone } : {}),
@@ -330,9 +333,13 @@ export class PostgresStore implements SessionStore, AdminStore {
      * returns null too — indistinguishable from one that never existed, so the id
      * space cannot be probed across orgs.
      */
-    async getConversation(conversationId: string, orgId: string = DEFAULT_ORG_ID): Promise<{ conversationId: string; userEmail: string | undefined } | null> {
+    async getConversation(
+        conversationId: string,
+        orgId: string = DEFAULT_ORG_ID,
+    ): Promise<{ conversationId: string; userEmail: string | undefined; orgId?: string } | null> {
         const { rows } = await this.pool.query(
-            `SELECT (SELECT p.email FROM conversation_participants p
+            `SELECT c.organization_id,
+                    (SELECT p.email FROM conversation_participants p
                       WHERE p.conversation_id = c.id AND p.type = 'user'
                       ORDER BY p.created_at, p.id LIMIT 1) AS owner_email
                FROM conversations c
@@ -341,7 +348,7 @@ export class PostgresStore implements SessionStore, AdminStore {
         );
         const row = rows[0];
         if (!row) return null;
-        return { conversationId, userEmail: (row.owner_email as string | null) ?? undefined };
+        return { conversationId, userEmail: (row.owner_email as string | null) ?? undefined, orgId: row.organization_id as string };
     }
 
     /**

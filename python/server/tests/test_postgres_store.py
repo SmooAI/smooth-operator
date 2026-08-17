@@ -307,6 +307,22 @@ async def test_persists_workflow_step_and_otp_bit(store, postgres_dsn: str) -> N
         await reopened.close()
 
 
+async def test_reports_owner_org_so_the_gate_can_enforce_it(store) -> None:
+    """The durable store must report the conversation's ORG on the session, not just the
+    owner. The dispatcher treats an unrecorded org as "fall through to ownership", so a
+    store that leaves it None reopens the cross-org hole for ownerless conversations
+    while every existing test still passes. Uses an OWNERLESS conversation — an owned
+    one would pass for the wrong reason, since ownership alone blocks the cross-org read."""
+    org_id = org()
+    anonymous = await store.create_session("", "", None, org_id=org_id)
+    assert anonymous.owner_email is None
+    assert anonymous.owner_org == org_id
+
+    fetched = await store.get_session(anonymous.session_id)
+    assert fetched is not None
+    assert fetched.owner_org == org_id, "the gate cannot enforce an org it is never told"
+
+
 # ── admin stores ────────────────────────────────────────────────────────────
 
 
