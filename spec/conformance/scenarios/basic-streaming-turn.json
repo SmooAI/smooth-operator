@@ -42,7 +42,9 @@
                     "status": 200,
                     "assert": {
                         "data.data.response.responseParts": ["Hello from the engine!"],
-                        "data.data.needsEscalation": false
+                        "data.data.needsEscalation": false,
+                        "data.data.usage.promptTokens": 10,
+                        "data.data.usage.completionTokens": 5
                     }
                 }
             ]

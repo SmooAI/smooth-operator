@@ -30,7 +30,16 @@
 //! turns into `stream_token`s) and the chat queue with the matching response (a
 //! defensive belt-and-braces for any non-streaming code path). The synthesized
 //! stream mirrors Python's `_stream_chunks`: text → content deltas; a tool call →
-//! a `ToolCallStart` + an arguments delta; then `Done`.
+//! a `ToolCallStart` + an arguments delta; then a `Usage` carrying
+//! [`scripted_usage`], then `Done`.
+//!
+//! That `Usage` event is load-bearing, not decoration. The engine's streaming
+//! path estimates completion tokens from the reply's LENGTH (~4 chars/token)
+//! when no `StreamEvent::Usage` ever arrives, so without it this server reported
+//! a usage figure that moved whenever a scenario's text changed — the `0/5` that
+//! kept `eventual_response.usage` out of the corpus. The sibling mocks
+//! synthesize their own final usage chunk; Rust's takes an explicit stream, so
+//! the runner supplies it. Pearl th-4f1263.
 
 mod common;
 
@@ -42,7 +51,7 @@ use serde_json::{json, Value};
 use smooth_operator::adapter::StorageAdapter;
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
-use smooth_operator_core::llm_provider::{tool_call_response, MockLlmClient};
+use smooth_operator_core::llm_provider::{scripted_usage, MockLlmClient};
 use smooth_operator_core::{Document, DocumentType, StreamEvent, Tool, ToolSchema};
 
 use smooth_operator_server::config::{ServerConfig, StorageBackend};
@@ -252,6 +261,7 @@ fn build_mock(script: &[Value]) -> MockLlmClient {
                     .into_iter()
                     .map(|content| StreamEvent::Delta { content })
                     .collect();
+                events.push(StreamEvent::Usage(scripted_usage()));
                 events.push(StreamEvent::Done {
                     finish_reason: "stop".into(),
                 });
@@ -287,12 +297,15 @@ fn build_mock(script: &[Value]) -> MockLlmClient {
                         index: 0,
                         arguments_chunk: arguments_str,
                     },
+                    StreamEvent::Usage(scripted_usage()),
                     StreamEvent::Done {
                         finish_reason: "tool_calls".into(),
                     },
                 ]);
                 // Defensive chat-queue twin (the streaming path is what runs).
-                mock.push_response(tool_call_response(id, name, arguments));
+                // `push_tool_call`, not the raw `tool_call_response` builder, so this
+                // twin carries `scripted_usage()` like the stream above.
+                mock.push_tool_call(id, name, arguments);
             }
             other => panic!("unknown mockLlmScript kind: {other:?}"),
         }

@@ -32,7 +32,11 @@ repository = "https://github.com/SmooAI/smooth-operator"
 # gap, which is why the `git`/`branch` patch stopgaps keep appearing here.
 # 1.7.10 is the first with the `executor` module (`AgentExecutor` /
 # `InProcessExecutor`, ADR-030), which `runner::turn_executor` calls.
-smooai-smooth-operator-core = "1.7.10"
+# 1.8.0 is the first with `llm_provider::scripted_usage()`, which the scenario
+# parity runner seeds into the stream so `eventual_response.usage` is assertable
+# (th-4f1263). NOTE: crates.io numbering DIVERGES from npm's — the same release
+# wave published this crate as 1.8.0 and the npm package as 1.7.16.
+smooai-smooth-operator-core = "1.8.0"
 # Intra-workspace dep on the reference lib carries its version so the adapters /
 # ingestion / server that depend on it are publishable (path = local dev,
 # version = the crates.io requirement).
