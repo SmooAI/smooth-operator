@@ -557,3 +557,39 @@ async def test_platform_check_rejects_an_unknown_value(store, postgres_dsn: str)
             )
     finally:
         await conn.close()
+
+
+async def test_session_with_no_agent_has_no_agent(store, postgres_dsn: str) -> None:
+    """A session created with no agentId has NO agent.
+
+    Both stores used to mint a fresh UUID here, which pointed every agentless session at
+    an agent that never existed — invisible until something tried to resolve it
+    (th-68897a). Covers BOTH stores: the fabrication lived in each, so testing one would
+    leave the other broken.
+    """
+    import asyncpg
+
+    from smooth_operator_server.session_store import InMemorySessionStore
+
+    memory = InMemorySessionStore()
+    for blank in ("", "   "):
+        created = await memory.create_session(blank, "Alice", None)
+        assert created.agent_id is None, f"in-memory agent_id for {blank!r}"
+
+    created = await store.create_session("   ", "Alice", None, owner_email=None, org_id=org())
+    assert created.agent_id is None
+
+    conn = await asyncpg.connect(postgres_dsn)
+    try:
+        # The column itself is NULL, not an empty string standing in for one.
+        row = await conn.fetchrow(
+            "SELECT agent_id FROM conversation_sessions WHERE session_id = $1", created.session_id
+        )
+        assert row["agent_id"] is None
+    finally:
+        await conn.close()
+
+    # …and it survives the round trip rather than coming back as a uuid.
+    fetched = await store.get_session(created.session_id)
+    assert fetched is not None
+    assert fetched.agent_id is None

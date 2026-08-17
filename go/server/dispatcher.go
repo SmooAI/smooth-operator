@@ -300,10 +300,14 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 	data := map[string]any{
 		"sessionId":          session.SessionID,
 		"conversationId":     session.ConversationID,
-		"agentId":            session.AgentID,
 		"agentName":          session.AgentName,
 		"userParticipantId":  session.UserParticipantID,
 		"agentParticipantId": session.AgentParticipantID,
+	}
+	// Omitted rather than "" when the session has no agent — absent is the honest wire
+	// shape, and a fabricated id was the bug (th-68897a).
+	if session.AgentID != "" {
+		data["agentId"] = session.AgentID
 	}
 	sink(immediateResponse(frame.RequestID, 200, "Session created", data))
 }
@@ -321,8 +325,10 @@ func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFra
 	data := map[string]any{
 		"sessionId":      session.SessionID,
 		"conversationId": session.ConversationID,
-		"agentId":        session.AgentID,
 		"agentName":      session.AgentName,
+	}
+	if session.AgentID != "" {
+		data["agentId"] = session.AgentID
 	}
 	sink(immediateResponse(frame.RequestID, 200, "OK", data))
 }
@@ -546,7 +552,9 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	// set — behavior unchanged. Resolution never fails the turn: a resolver error degrades
 	// to the default.
 	var agentConfig *AgentConfig
-	if d.agentConfigs != nil {
+	// An agentless session has nothing to resolve — don't ask the resolver about an
+	// agent that does not exist (th-68897a).
+	if d.agentConfigs != nil && session.AgentID != "" {
 		if cfg, cfgErr := d.agentConfigs.Resolve(ctx, session.AgentID); cfgErr == nil {
 			agentConfig = cfg
 		}

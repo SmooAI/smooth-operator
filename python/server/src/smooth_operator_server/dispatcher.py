@@ -308,11 +308,14 @@ class FrameDispatcher:
         data = {
             "sessionId": session.session_id,
             "conversationId": session.conversation_id,
-            "agentId": session.agent_id,
             "agentName": session.agent_name,
             "userParticipantId": session.user_participant_id,
             "agentParticipantId": session.agent_participant_id,
         }
+        # Omitted rather than null when the session has no agent — absent is the honest
+        # wire shape, and a fabricated id was the bug (th-68897a).
+        if session.agent_id:
+            data["agentId"] = session.agent_id
         sink(protocol.immediate_response(request_id, 200, "Session created", data))
 
     async def _handle_get_session(self, frame: dict, request_id: str | None, sink: Sink) -> None:
@@ -328,11 +331,14 @@ class FrameDispatcher:
         data = {
             "sessionId": session.session_id,
             "conversationId": session.conversation_id,
-            "agentId": session.agent_id,
             "agentName": session.agent_name,
             "userParticipantId": session.user_participant_id,
             "agentParticipantId": session.agent_participant_id,
         }
+        # Omitted rather than null when the session has no agent — absent is the honest
+        # wire shape, and a fabricated id was the bug (th-68897a).
+        if session.agent_id:
+            data["agentId"] = session.agent_id
         sink(protocol.immediate_response(request_id, 200, "Session", data))
 
     async def _handle_list_conversations(self, frame: dict, request_id: str | None, sink: Sink) -> None:
@@ -481,7 +487,9 @@ class FrameDispatcher:
         # 2. Stream the turn through a runner scoped to this connection's access.
         #    Resolve the session's per-agent config (SMOODEV-590); None → the
         #    server-wide default prompt drives the turn (behavior unchanged).
-        agent_config = await self._agent_config_resolver.resolve(session.agent_id)
+        # An agentless session has nothing to resolve — don't ask the resolver about an
+        # agent that does not exist (th-68897a).
+        agent_config = await self._agent_config_resolver.resolve(session.agent_id) if session.agent_id else None
         # Resolve the turn's identity bit once: the session's OTP-verified state (set
         # by a prior successful verify_otp) OR the host SessionAuthenticator seam. This
         # is the Python analog of threading the Rust session's `otpVerified` bit into

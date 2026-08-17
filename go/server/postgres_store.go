@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,7 +105,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id           TEXT PRIMARY KEY,
     conversation_id      TEXT NOT NULL,
     organization_id      TEXT NOT NULL DEFAULT '',
-    agent_id             TEXT NOT NULL,
+    -- Nullable: a session with no caller-supplied agent has NO agent (th-68897a).
+    agent_id             TEXT,
     agent_name           TEXT NOT NULL,
     user_participant_id  TEXT NOT NULL,
     agent_participant_id TEXT NOT NULL,
@@ -259,9 +261,11 @@ func (s *PostgresStore) CreateSession(ctx context.Context, agentID, userName, us
 // unknown / someone else's / another org's) take the identical branch, so a caller
 // cannot use resume as an oracle for which conversation ids exist. th-8fe998.
 func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, userEmail string, scope ConversationScope, conversationID string) (StoredSession, bool, error) {
-	if agentID == "" {
-		agentID = uuid.NewString()
-	}
+	// No agentId from the caller means NO agent, not a new one. This used to mint a fresh
+	// UUID, which pointed every agentless session at an agent that has never existed —
+	// invisible until something tried to resolve it (th-68897a). Blank/whitespace reads as
+	// absent; "" is this struct's absent, so nothing downstream needs a pointer.
+	agentID = strings.TrimSpace(agentID)
 
 	resumed := false
 	owner := scope.Email
@@ -349,7 +353,7 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 		    (session_id, conversation_id, organization_id, agent_id, agent_name, user_participant_id,
 		     agent_participant_id, thread_id, status, metadata, created_at, updated_at, last_activity_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $2, 'active', $8::jsonb, $9, $9, $9)`,
-		session.SessionID, convID, scope.OrgID, agentID, session.AgentName,
+		session.SessionID, convID, scope.OrgID, nullIfBlank(agentID), session.AgentName,
 		session.UserParticipantID, session.AgentParticipantID, string(metadata), now); err != nil {
 		return StoredSession{}, false, fmt.Errorf("postgres: insert session: %w", err)
 	}
@@ -398,7 +402,7 @@ func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Stor
 	var session StoredSession
 	var metadata []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT s.conversation_id, s.agent_id, s.agent_name, s.user_participant_id, s.agent_participant_id,
+		`SELECT s.conversation_id, coalesce(s.agent_id, ''), s.agent_name, s.user_participant_id, s.agent_participant_id,
 		        s.organization_id,
 		        coalesce(s.metadata, '{}'::jsonb),
 		        coalesce((SELECT p.email FROM conversation_participants p

@@ -27,7 +27,12 @@ export const DEFAULT_ORG_ID = 'public';
 export interface StoredSession {
     sessionId: string;
     conversationId: string;
-    agentId: string;
+    /**
+     * The agent this session talks to, as supplied by the caller. `undefined` when the
+     * caller named none — this used to be a fresh UUID, which pointed every agentless
+     * session at an agent that has never existed (th-68897a).
+     */
+    agentId?: string;
     agentName: string;
     userParticipantId: string;
     agentParticipantId: string;
@@ -192,7 +197,7 @@ export class InMemorySessionStore implements SessionStore {
         const session: StoredSession = {
             sessionId: randomUUID(),
             conversationId: convId,
-            agentId: agentId && agentId.length > 0 ? agentId : randomUUID(),
+            agentId: agentId?.trim() || undefined,
             agentName: 'smooth-agent',
             userParticipantId: randomUUID(),
             agentParticipantId: randomUUID(),
