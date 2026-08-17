@@ -526,7 +526,7 @@ impl StorageAdapter for PostgresAdapter {
             .execute(
                 "INSERT INTO conversations
                     (id, platform, name, organization_id, idempotency_key, metadata_json, analytics_json, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 VALUES ($1, $2, $3, $4, $5, coalesce($6, '{}'::jsonb), coalesce($7, '{}'::jsonb), $8, $9)
                  ON CONFLICT (organization_id, idempotency_key) DO NOTHING",
                 &[
                     &conversation.id,
@@ -647,7 +647,7 @@ impl StorageAdapter for PostgresAdapter {
                     (id, conversation_id, organization_id, type, external_id, internal_id,
                      browser_fingerprint, browser_info, name, email, phone, crm_contact_id,
                      metadata_json, created_at, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,coalesce($13, '{}'::jsonb),$14,$15)",
                 &[
                     &participant.id,
                     &participant.conversation_id,
@@ -726,7 +726,7 @@ impl StorageAdapter for PostgresAdapter {
                 "INSERT INTO conversation_messages
                     (id, external_id, organization_id, conversation_id, direction, content,
                      \"from\", \"to\", metadata_json, analytics_json, created_at, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9, '{}'::jsonb),coalesce($10, '{}'::jsonb),$11,$12)",
                 &[
                     &message.id,
                     &message.external_id,
@@ -852,7 +852,8 @@ impl StorageAdapter for PostgresAdapter {
                     (session_id, conversation_id, organization_id, agent_id, agent_name,
                      user_participant_id, agent_participant_id, thread_id, status, token_count,
                      message_count, metadata, created_at, updated_at, ended_at, last_activity_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12, '{}'::jsonb),
+                         coalesce($13, now()),coalesce($14, now()),$15,coalesce($16, now()))",
                 &[
                     &session.session_id,
                     &session.conversation_id,

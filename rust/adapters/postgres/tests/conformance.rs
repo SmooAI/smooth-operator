@@ -136,6 +136,12 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
 
     let fetched = store.get_conversation("conv-1").await?.expect("exists");
     assert_eq!(fetched.organization_id, "org-1");
+    // The json columns are NOT NULL DEFAULT '{}', so "absent" has ONE representation on read
+    // instead of two. A bare DEFAULT is not enough — these inserts pass an explicit NULL for an
+    // absent Option, and DEFAULT only fires on an omitted column — so the inserts coalesce.
+    // This reads back Some({}) from a conversation created with metadata_json: None.
+    assert_eq!(fetched.metadata_json, Some(serde_json::json!({})));
+    assert_eq!(fetched.analytics_json, Some(serde_json::json!({})));
 
     let by_org = store.list_conversations_by_org("org-1").await?;
     assert_eq!(by_org.len(), 1);
