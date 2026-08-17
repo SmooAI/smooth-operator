@@ -19,8 +19,9 @@ public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<Js
 /// <see cref="CostUsd"/> is the gateway's authoritative per-request cost, summed across the turn's
 /// model calls. It reaches here only because the host injects core's <c>GatewayChatClient</c>: the
 /// cost exists ONLY in a response header, and the MEAI OpenAI adapter this replaced dropped headers,
-/// which is why this was hardcoded to 0 for so long. A turn the gateway did not price reports 0 —
-/// no local pricing table is wired here, so 0 still means "unpriced", not "free".
+/// which is why this was hardcoded to 0 for so long. Read straight off the engine's own
+/// CostTracker, so a turn the gateway did not price still falls back to whatever local pricing
+/// the engine has — 0 means "nothing priced it", not "free".
 /// </para></summary>
 public sealed record TurnUsage(double CostUsd, long PromptTokens, long CompletionTokens);
 
@@ -335,11 +336,6 @@ public sealed class TurnRunner
         long promptTokens = 0;
         long completionTokens = 0;
         var sawUsage = false;
-        // null ⇒ the gateway measured nothing this turn (absent header, or every candidate
-        // reported zero). Kept distinct from 0m so an unmeasured turn is never reported as a
-        // real $0. Summed across the turn's model calls, which is what a multi-iteration
-        // tool-calling turn costs.
-        decimal? gatewayCostUsd = null;
         var toolNames = new Dictionary<string, string>();
         var emittedCalls = new HashSet<string>();
 
@@ -392,15 +388,6 @@ public sealed class TurnRunner
             using var _ = turnContext.Enter();
             await foreach (var update in agent.RunStreamingAsync(userMessage, thread, cancellationToken).ConfigureAwait(false))
             {
-                // The gateway's per-request cost rides an update's AdditionalProperties (the
-                // client parses it off the response header, which is the only place it exists).
-                // Read per update, not per content: it is on the update itself, and the client
-                // emits it on a LEADING update that carries no content at all.
-                if (GatewayCostOf(update) is { } measured)
-                {
-                    gatewayCostUsd = (gatewayCostUsd ?? 0m) + measured;
-                }
-
                 var text = update.Text;
                 if (!string.IsNullOrEmpty(text))
                 {
@@ -471,29 +458,25 @@ public sealed class TurnRunner
             outbound.Id,
             citations,
             turnContext.Directive,
-            sawUsage || gatewayCostUsd is not null
-                ? new TurnUsage((double)(gatewayCostUsd ?? 0m), promptTokens, completionTokens)
-                : null);
+            TurnUsageFrom(agent, sawUsage, promptTokens, completionTokens));
     }
 
     /// <summary>
-    /// The gateway cost a chat client attached to one streaming update, or null when it attached
-    /// none. Mirrors the engine's own <c>SmoothAgent.ResponseGatewayCost</c> seam — same
-    /// <c>gatewayCostUsd</c> key, same tolerance for a decimal or double — so a client written
-    /// against either side works with both.
+    /// The turn's usage, preferring the ENGINE's own accounting. <c>SmoothAgent</c> folds the
+    /// gateway cost itself on the streaming path (core#136) and exposes the totals on
+    /// <see cref="SmoothAgent.LastRunResponse"/> once the stream is fully enumerated — which it
+    /// is by the time we get here. Reading it beats re-summing the updates: same number, and it
+    /// picks up the engine's local-pricing fallback for a turn the gateway did not price.
+    /// <para>Falls back to the locally counted tokens when the engine reports nothing (an older
+    /// core, or a stream that produced no terminal totals).</para>
     /// </summary>
-    private static decimal? GatewayCostOf(ChatResponseUpdate update)
+    private static TurnUsage? TurnUsageFrom(SmoothAgent agent, bool sawUsage, long promptTokens, long completionTokens)
     {
-        if (update.AdditionalProperties?.TryGetValue("gatewayCostUsd", out var raw) is not true || raw is null)
+        if (agent.LastRunResponse is { Cost: { } cost })
         {
-            return null;
+            return new TurnUsage((double)cost.TotalCostUsd, cost.TotalPromptTokens, cost.TotalCompletionTokens);
         }
-        return raw switch
-        {
-            decimal d when d > 0m => d,
-            double dbl when dbl > 0 => (decimal)dbl,
-            _ => null,
-        };
+        return sawUsage ? new TurnUsage(0, promptTokens, completionTokens) : null;
     }
 
     /// <summary>
