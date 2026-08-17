@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -747,4 +748,86 @@ func texts(messages []StoredMessage) []string {
 		out[i] = m.Text
 	}
 	return out
+}
+
+// ── schema integrity (th-5a5181 P2) ─────────────────────────────────────────
+
+// The json columns are NOT NULL DEFAULT '{}', so "absent" has ONE representation on
+// read instead of two.
+//
+// These inserts OMIT the json columns rather than passing an explicit NULL, so the
+// DEFAULT fires on its own — no coalesce needed here, unlike the Rust adapter whose
+// inserts name every column. This test is what fails if either half regresses: drop the
+// NOT NULL DEFAULT and these read back NULL; start passing an explicit NULL and the
+// insert dies on the not-null constraint.
+func TestPostgresStoreAbsentJSONReadsBackAsAnEmptyObject(t *testing.T) {
+	store := newPostgresStore(t)
+	ctx := t.Context()
+	scope := pgScope(t, "alice@example.test")
+
+	created, err := store.CreateSession(ctx, "", "Alice", "alice@example.test", scope)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := store.AppendMessage(ctx, created.ConversationID, Inbound, "hello"); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	var metaJSON, analyticsJSON string
+	if err := store.pool.QueryRow(ctx,
+		`SELECT metadata_json::text, analytics_json::text FROM conversations WHERE id = $1`,
+		created.ConversationID).Scan(&metaJSON, &analyticsJSON); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if metaJSON != "{}" || analyticsJSON != "{}" {
+		t.Errorf("conversation json = %q/%q, want {}/{}", metaJSON, analyticsJSON)
+	}
+
+	if err := store.pool.QueryRow(ctx,
+		`SELECT metadata_json::text, analytics_json::text FROM conversation_messages WHERE conversation_id = $1`,
+		created.ConversationID).Scan(&metaJSON, &analyticsJSON); err != nil {
+		t.Fatalf("read message: %v", err)
+	}
+	if metaJSON != "{}" || analyticsJSON != "{}" {
+		t.Errorf("message json = %q/%q, want {}/{}", metaJSON, analyticsJSON)
+	}
+
+	if err := store.pool.QueryRow(ctx,
+		`SELECT metadata_json::text FROM conversation_participants WHERE conversation_id = $1 LIMIT 1`,
+		created.ConversationID).Scan(&metaJSON); err != nil {
+		t.Fatalf("read participant: %v", err)
+	}
+	if metaJSON != "{}" {
+		t.Errorf("participant metadata_json = %q, want {}", metaJSON)
+	}
+
+	// status passes the new CHECK, and the three session timestamps are non-null.
+	var status string
+	var createdAt, updatedAt, lastActivityAt time.Time
+	if err := store.pool.QueryRow(ctx,
+		`SELECT status, created_at, updated_at, last_activity_at FROM conversation_sessions WHERE session_id = $1`,
+		created.SessionID).Scan(&status, &createdAt, &updatedAt, &lastActivityAt); err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if status != "active" {
+		t.Errorf("status = %q, want active", status)
+	}
+	if createdAt.IsZero() || updatedAt.IsZero() || lastActivityAt.IsZero() {
+		t.Error("session timestamps must all be set")
+	}
+}
+
+// The CHECK is what stops a typo'd platform reaching the table at all.
+func TestPostgresStorePlatformCheckRejectsAnUnknownValue(t *testing.T) {
+	store := newPostgresStore(t)
+	_, err := store.pool.Exec(t.Context(),
+		`INSERT INTO conversations (id, platform, name, organization_id, idempotency_key)
+		 VALUES ($1, 'carrier-pigeon', '', $2, $1)`,
+		uuid.NewString(), "org-"+uuid.NewString())
+	if err == nil {
+		t.Fatal("an unknown platform must violate the CHECK")
+	}
+	if !strings.Contains(err.Error(), "conversations_platform_check") {
+		t.Errorf("want a platform CHECK violation, got: %v", err)
+	}
 }

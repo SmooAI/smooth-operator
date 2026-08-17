@@ -40,14 +40,16 @@ import { DEFAULT_ORG_ID, type ConversationSummary, type MessageDirection, type S
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS conversations (
     id              TEXT PRIMARY KEY,
-    platform        TEXT NOT NULL,
+    platform        TEXT NOT NULL
+                        CHECK (platform IN ('web', 'messenger', 'instagram', 'email', 'discord',
+                        'phone', 'sms', 'slack', 'whatsapp', 'tiktok')),
     name            TEXT NOT NULL,
     organization_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
-    metadata_json   JSONB,
-    analytics_json  JSONB,
-    created_at      TIMESTAMPTZ NOT NULL,
-    updated_at      TIMESTAMPTZ NOT NULL
+    metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    analytics_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_org_idem
     ON conversations (organization_id, idempotency_key);
@@ -67,9 +69,9 @@ CREATE TABLE IF NOT EXISTS conversation_participants (
     email               TEXT,
     phone               TEXT,
     crm_contact_id      TEXT,
-    metadata_json       JSONB,
-    created_at          TIMESTAMPTZ NOT NULL,
-    updated_at          TIMESTAMPTZ NOT NULL
+    metadata_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_participants_conversation
     ON conversation_participants (conversation_id, created_at);
@@ -85,10 +87,10 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     content         JSONB NOT NULL,
     from_ref        JSONB,
     to_ref          JSONB,
-    metadata_json   JSONB,
-    analytics_json  JSONB,
+    metadata_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    analytics_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
     seq             BIGSERIAL,
-    created_at      TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
@@ -103,14 +105,15 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     user_participant_id  TEXT NOT NULL,
     agent_participant_id TEXT NOT NULL,
     thread_id            TEXT NOT NULL,
-    status               TEXT,
+    -- NULL passes a CHECK, so this constrains the value without making status required.
+    status               TEXT CHECK (status IN ('active', 'idle', 'ended')),
     token_count          BIGINT,
     message_count        BIGINT,
-    metadata             JSONB,
-    created_at           TIMESTAMPTZ,
-    updated_at           TIMESTAMPTZ,
+    metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at             TIMESTAMPTZ,
-    last_activity_at     TIMESTAMPTZ
+    last_activity_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_conversation
     ON conversation_sessions (conversation_id, created_at);

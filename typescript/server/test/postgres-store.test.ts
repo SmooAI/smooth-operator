@@ -19,6 +19,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
+import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { InMemoryAdminStore } from '../src/admin.js';
@@ -395,6 +396,72 @@ describe('PostgresStore (needs Docker)', () => {
         expect(after[0]?.error).toBe('boom');
         await reopened.close();
     });
+
+    // ── schema integrity (th-5a5181 P2) ─────────────────────────────────────
+    //
+    // The json columns are NOT NULL DEFAULT '{}', so "absent" has ONE representation
+    // on read instead of two.
+    //
+    // These inserts OMIT the json columns rather than passing an explicit NULL, so the
+    // DEFAULT fires on its own — no coalesce needed here, unlike the Rust adapter whose
+    // inserts name every column. This is what fails if either half regresses: drop the
+    // NOT NULL DEFAULT and these read back null; start passing an explicit NULL and the
+    // insert dies on the not-null constraint.
+    pgIt('reads absent json back as an empty object', async () => {
+        const store = await newStore();
+        const orgId = org();
+        const created = await store.createSession('', 'Alice', undefined, undefined, orgId);
+        await store.appendMessage(created.conversationId, 'inbound', 'hello');
+
+        const pool = new Pool({ connectionString });
+        try {
+            const conv = await pool.query('SELECT metadata_json, analytics_json FROM conversations WHERE id = $1', [created.conversationId]);
+            expect(conv.rows[0].metadata_json).toEqual({});
+            expect(conv.rows[0].analytics_json).toEqual({});
+
+            const msg = await pool.query('SELECT metadata_json, analytics_json FROM conversation_messages WHERE conversation_id = $1', [
+                created.conversationId,
+            ]);
+            expect(msg.rows[0].metadata_json).toEqual({});
+            expect(msg.rows[0].analytics_json).toEqual({});
+
+            const part = await pool.query('SELECT metadata_json FROM conversation_participants WHERE conversation_id = $1 LIMIT 1', [
+                created.conversationId,
+            ]);
+            expect(part.rows[0].metadata_json).toEqual({});
+
+            const sess = await pool.query(
+                'SELECT status, created_at, updated_at, last_activity_at FROM conversation_sessions WHERE session_id = $1',
+                [created.sessionId],
+            );
+            expect(sess.rows[0].status).toBe('active'); // passes the new CHECK
+            expect(sess.rows[0].created_at).not.toBeNull();
+            expect(sess.rows[0].updated_at).not.toBeNull();
+            expect(sess.rows[0].last_activity_at).not.toBeNull();
+        } finally {
+            await pool.end();
+            await store.close();
+        }
+    });
+
+    // The CHECK is what stops a typo'd platform reaching the table at all.
+    pgIt('rejects an unknown platform', async () => {
+        const store = await newStore();
+        const pool = new Pool({ connectionString });
+        try {
+            await expect(
+                pool.query(
+                    `INSERT INTO conversations (id, platform, name, organization_id, idempotency_key)
+                     VALUES ($1, 'carrier-pigeon', '', $2, $1)`,
+                    [randomUUID(), org()],
+                ),
+            ).rejects.toThrow(/conversations_platform_check/);
+        } finally {
+            await pool.end();
+            await store.close();
+        }
+    });
+
 });
 
 describe('memory stays the default', () => {
