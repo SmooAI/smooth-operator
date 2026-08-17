@@ -32,10 +32,7 @@ async fn spawn_capturing_mock(body_tx: oneshot::Sender<Value>) -> String {
             // Read until we have the full headers + Content-Length body.
             let mut buf = Vec::new();
             let mut tmp = [0u8; 8192];
-            loop {
-                let Ok(n) = sock.read(&mut tmp).await else {
-                    break;
-                };
+            while let Ok(n) = sock.read(&mut tmp).await {
                 if n == 0 {
                     break;
                 }
