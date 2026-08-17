@@ -51,6 +51,12 @@ export interface StoredSession {
      */
     userEmail?: string;
     /**
+     * The organization the conversation belongs to — the OUTER scope the dispatcher
+     * checks before ownership, so a session id alone cannot reach another org's
+     * conversation.
+     */
+    orgId?: string;
+    /**
      * The caller's email captured at create-session time, used as an OTP delivery
      * contact for the `end_user` auth-gate flow. The reference create path captures
      * only an email; a host store may also carry a phone. `undefined` → no channel to
@@ -118,7 +124,7 @@ export interface SessionStore {
      * REQUIRED rather than optional so an implementation that doesn't track ownership
      * fails to compile instead of silently reporting every conversation as ownerless.
      */
-    getConversation(conversationId: string, orgId?: string): Promise<{ conversationId: string; userEmail: string | undefined } | null>;
+    getConversation(conversationId: string, orgId?: string): Promise<{ conversationId: string; orgId?: string; userEmail: string | undefined } | null>;
     appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage>;
     /** The most recent `limit` messages for a conversation, oldest first. */
     listMessages(conversationId: string, limit: number): Promise<StoredMessage[]>;
@@ -170,9 +176,15 @@ export class InMemorySessionStore implements SessionStore {
      */
     private readonly convOwner = new Map<string, string | undefined>();
 
-    // `orgId` is accepted and ignored: this store is single-tenant by construction, so
-    // there is nothing to partition. A durable store (postgresStore.ts) uses it.
-    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string, _orgId?: string): Promise<StoredSession> {
+    /**
+     * conversation id → owning organization. Recorded at creation next to the owner
+     * and never rewritten, for the same reason: a resume must not re-home a
+     * conversation into the resumer's org. The OUTER scope the dispatcher checks
+     * before ownership.
+     */
+    private readonly convOrg = new Map<string, string | undefined>();
+
+    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string, orgId?: string): Promise<StoredSession> {
         // Resume: bind to an existing conversation (reuse its id + persisted log) when
         // the caller passes a known conversationId. Unknown/absent → mint a fresh one.
         const resume = conversationId && this.messages.has(conversationId);
@@ -188,6 +200,8 @@ export class InMemorySessionStore implements SessionStore {
             // caller's email — the dispatcher has already verified they match, and
             // re-deriving it from the request would let a resume rewrite ownership.
             ...(resume ? this.ownerField(convId) : userEmail ? { userEmail } : {}),
+            // Same rule for the org: on a resume it is the conversation's ORIGINAL org.
+            ...(resume ? this.orgField(convId) : orgId ? { orgId } : {}),
             // Stash the caller's email as an OTP delivery contact for the end_user
             // auth-gate flow (mirrors the Rust reference capturing contactEmail).
             ...(userEmail ? { contactEmail: userEmail } : {}),
@@ -198,6 +212,7 @@ export class InMemorySessionStore implements SessionStore {
             this.messages.set(convId, []);
             this.convUpdatedAt.set(convId, Date.now());
             this.convOwner.set(convId, userEmail);
+            this.convOrg.set(convId, orgId);
         }
         return session;
     }
@@ -208,12 +223,22 @@ export class InMemorySessionStore implements SessionStore {
         return owner ? { userEmail: owner } : {};
     }
 
+    /** The stored org of `convId` as a spreadable field (absent when unrecorded). */
+    private orgField(convId: string): { orgId?: string } {
+        const org = this.convOrg.get(convId);
+        return org ? { orgId: org } : {};
+    }
+
     async getSession(sessionId: string): Promise<StoredSession | null> {
         return this.sessions.get(sessionId) ?? null;
     }
 
-    async getConversation(conversationId: string, _orgId?: string): Promise<{ conversationId: string; userEmail: string | undefined } | null> {
-        return this.messages.has(conversationId) ? { conversationId, userEmail: this.convOwner.get(conversationId) } : null;
+    async getConversation(conversationId: string, _orgId?: string): Promise<{ conversationId: string; userEmail: string | undefined; orgId?: string } | null> {
+        // The org is RETURNED rather than filtered on here: the dispatcher owns the
+        // access decision (mayRead), so filtering in two places would let them drift.
+        return this.messages.has(conversationId)
+            ? { conversationId, userEmail: this.convOwner.get(conversationId), orgId: this.convOrg.get(conversationId) }
+            : null;
     }
 
     async appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage> {

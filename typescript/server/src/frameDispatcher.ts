@@ -338,9 +338,19 @@ export class FrameDispatcher {
      * existence oracle: an attacker could enumerate other users' conversation ids by
      * diffing the two responses. Not-yours and not-there must be indistinguishable.
      */
-    private mayRead(ownerEmail: string | undefined): boolean {
+    private mayRead(ownerEmail: string | undefined, ownerOrg?: string): boolean {
         const scope = this.scopeEmail();
         if (scope === undefined) return true; // auth not configured — unscoped
+        // Org is the OUTER scope, applied BEFORE ownership: a conversation belonging to
+        // another org is invisible no matter who owns it. Without this the ownerless
+        // branch below (deliberate — see the doc comment) let any principal read any
+        // org's ownerless conversation given only its id, i.e. authorization resting on
+        // an unguessable UUID.
+        //
+        // An UNRECORDED org is not org-scoped: those rows predate org capture, and
+        // denying them would lock people out of conversations they already own — the
+        // same failure mode the ownerless rule exists to avoid.
+        if (ownerOrg && ownerOrg.toLowerCase() !== (this.access.principal.org ?? '').toLowerCase()) return false;
         if (!ownerEmail) return true; // no owner to enforce
         return ownerEmail.toLowerCase() === scope.toLowerCase();
     }
@@ -358,7 +368,7 @@ export class FrameDispatcher {
         let conversationId = requested;
         if (requested !== undefined && this.scopeEmail() !== undefined) {
             const conv = await this.store.getConversation(requested, this.access.principal.org);
-            if (!conv || !this.mayRead(conv.userEmail)) conversationId = undefined;
+            if (!conv || !this.mayRead(conv.userEmail, conv.orgId)) conversationId = undefined;
         }
 
         // The session's owner is the PRINCIPAL's email, not the frame's `userEmail` —
@@ -390,7 +400,7 @@ export class FrameDispatcher {
         const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
         const session = await this.store.getSession(sessionId);
         // Not-yours collapses into not-found: same code, same message, same shape.
-        if (!session || !this.mayRead(session.userEmail)) {
+        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -455,7 +465,7 @@ export class FrameDispatcher {
         }
         const session = await this.store.getSession(sessionId);
         // Not-yours collapses into not-found: same code, same message, same shape.
-        if (!session || !this.mayRead(session.userEmail)) {
+        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -504,7 +514,7 @@ export class FrameDispatcher {
         const session = await this.store.getSession(sessionId);
         // Not-yours collapses into not-found — otherwise a caller could post turns into
         // (and read the streamed replies from) another user's conversation.
-        if (!session || !this.mayRead(session.userEmail)) {
+        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
             sink(protocol.error(reqId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }
@@ -783,7 +793,7 @@ export class FrameDispatcher {
         // belong to this caller — otherwise OTP codes could be burned against, and
         // verification claimed on, someone else's session.
         const session = await this.store.getSession(sessionId);
-        if (!session || !this.mayRead(session.userEmail)) {
+        if (!session || !this.mayRead(session.userEmail, session.orgId)) {
             sink(protocol.error(requestId, 'SESSION_NOT_FOUND', `session '${sessionId}' not found`));
             return;
         }

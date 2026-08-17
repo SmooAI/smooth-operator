@@ -240,9 +240,17 @@ class FrameDispatcher:
             return None
         if not self._auth_enforced:
             return session  # auth disabled → single tenant, no ownership to check
+        # Org is the OUTER scope, checked BEFORE ownership: another org's conversation
+        # is unreachable no matter who owns it. Without this the ownerless branch below
+        # (deliberate, th-909995) let any principal read any org's ownerless
+        # conversation given only its id — authorization resting on an unguessable
+        # UUID. An unrecorded org (rows predating org capture) is not org-scoped, so
+        # those stay reachable by their owner rather than being locked away.
+        if session.owner_org is not None and session.owner_org != self._access.principal.org:
+            return None
         owner = normalize_email(session.owner_email)
         if owner is None:
-            return session  # ownerless → open, as before scoping (th-909995)
+            return session  # ownerless → open within the org (th-909995)
         # Owned → exact match only. An emailless principal (scope None) matches no
         # owner, so it still cannot reach anyone else's owned session.
         return session if owner == self._scope_email() else None

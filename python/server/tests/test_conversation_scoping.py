@@ -60,7 +60,10 @@ async def _dispatch(dispatcher: FrameDispatcher, frame: dict) -> list[dict]:
 async def _seed(store: InMemorySessionStore, owner: str, text: str) -> tuple[str, str]:
     """A conversation owned by ``owner`` with one inbound message. Returns
     ``(session_id, conversation_id)``."""
-    session = await store.create_session("agent", None, None, owner_email=owner)
+    # Seed into the same org the _authed principal carries: org is the OUTER scope,
+    # so a conversation created in DEFAULT_ORG_ID ("public") is correctly invisible to
+    # an "acme" principal. These tests are about OWNERSHIP, so keep the org constant.
+    session = await store.create_session("agent", None, None, owner_email=owner, org_id="acme")
     await store.append_message(session.conversation_id, MessageDirection.INBOUND, text)
     return session.session_id, session.conversation_id
 
