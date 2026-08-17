@@ -120,7 +120,7 @@ impl StorageAdapter for InMemoryStorageAdapter {
             .filter(|c| c.organization_id == organization_id)
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|c| std::cmp::Reverse(c.created_at));
         Ok(out)
     }
 
@@ -184,7 +184,7 @@ impl StorageAdapter for InMemoryStorageAdapter {
             .filter(|p| p.conversation_id == conversation_id)
             .cloned()
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|c| c.created_at);
         Ok(out)
     }
 
@@ -334,7 +334,7 @@ impl StorageAdapter for InMemoryStorageAdapter {
             .filter(|s| s.conversation_id == conversation_id)
             .cloned()
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|c| c.created_at);
         Ok(out)
     }
 

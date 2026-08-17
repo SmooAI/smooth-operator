@@ -145,6 +145,9 @@ pub struct TurnUsage {
 /// when the turn produced no directive, keeping the event back-compatible with
 /// clients that predate directives.
 #[must_use]
+// Flat wire fields, one arg per emitted JSON key — same shape (and same allow) as
+// the builders in handler.rs and server.rs.
+#[allow(clippy::too_many_arguments)]
 pub fn eventual_response(
     request_id: &str,
     status: i64,

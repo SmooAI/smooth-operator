@@ -464,7 +464,7 @@ impl StorageAdapter for DynamoDbAdapter {
         let mut convs: Vec<Conversation> =
             out.items().iter().map(body_to).collect::<Result<_>>()?;
         // Newest first (matches the baseline contract).
-        convs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        convs.sort_by_key(|c| std::cmp::Reverse(c.created_at));
         Ok(convs)
     }
 
@@ -618,7 +618,7 @@ impl StorageAdapter for DynamoDbAdapter {
             .await
             .map_err(|e| anyhow!("dynamodb list_participants: {}", aws_err(e)))?;
         let mut parts: Vec<Participant> = out.items().iter().map(body_to).collect::<Result<_>>()?;
-        parts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        parts.sort_by_key(|p| p.created_at);
         Ok(parts)
     }
 
@@ -897,7 +897,7 @@ impl StorageAdapter for DynamoDbAdapter {
             .await
             .map_err(|e| anyhow!("dynamodb list_sessions: {}", aws_err(e)))?;
         let mut sessions: Vec<Session> = out.items().iter().map(body_to).collect::<Result<_>>()?;
-        sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        sessions.sort_by_key(|s| s.created_at);
         Ok(sessions)
     }
 

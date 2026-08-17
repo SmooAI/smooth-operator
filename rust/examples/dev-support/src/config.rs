@@ -61,19 +61,14 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are the dev-team knowledge & suppor
     cannot find an answer in the repository, say so plainly rather than guessing.";
 
 /// How the connector + the `github_search` tool authenticate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMode {
     /// A personal-access token read from `$GITHUB_TOKEN`.
+    #[default]
     Token,
     /// No credentials — public repos at the anonymous rate limit.
     None,
-}
-
-impl Default for AuthMode {
-    fn default() -> Self {
-        Self::Token
-    }
 }
 
 /// Which content tiers to ingest.
