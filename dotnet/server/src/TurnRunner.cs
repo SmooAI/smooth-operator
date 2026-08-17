@@ -16,10 +16,11 @@ public sealed record TurnResult(string Reply, string MessageId, IReadOnlyList<Js
 /// <summary>Per-turn token accounting + cost carried onto <c>eventual_response.usage</c>. Accumulated
 /// across every model call in the turn. The analog of the Rust reference's <c>protocol::TurnUsage</c>.
 /// <para>
-/// ponytail: <see cref="CostUsd"/> is whatever the turn was priced at — currently always 0, because
-/// no server in this repo wires a pricing table onto the engine (Go/Python/TS report 0 for the same
-/// reason; only Rust has a real figure, which it reads from the gateway's cost header). Wire pricing,
-/// or read that header, to make it non-zero. The token counts are real.
+/// <see cref="CostUsd"/> is the gateway's authoritative per-request cost, summed across the turn's
+/// model calls. It reaches here only because the host injects core's <c>GatewayChatClient</c>: the
+/// cost exists ONLY in a response header, and the MEAI OpenAI adapter this replaced dropped headers,
+/// which is why this was hardcoded to 0 for so long. A turn the gateway did not price reports 0 —
+/// no local pricing table is wired here, so 0 still means "unpriced", not "free".
 /// </para></summary>
 public sealed record TurnUsage(double CostUsd, long PromptTokens, long CompletionTokens);
 
@@ -334,6 +335,11 @@ public sealed class TurnRunner
         long promptTokens = 0;
         long completionTokens = 0;
         var sawUsage = false;
+        // null ⇒ the gateway measured nothing this turn (absent header, or every candidate
+        // reported zero). Kept distinct from 0m so an unmeasured turn is never reported as a
+        // real $0. Summed across the turn's model calls, which is what a multi-iteration
+        // tool-calling turn costs.
+        decimal? gatewayCostUsd = null;
         var toolNames = new Dictionary<string, string>();
         var emittedCalls = new HashSet<string>();
 
@@ -386,6 +392,15 @@ public sealed class TurnRunner
             using var _ = turnContext.Enter();
             await foreach (var update in agent.RunStreamingAsync(userMessage, thread, cancellationToken).ConfigureAwait(false))
             {
+                // The gateway's per-request cost rides an update's AdditionalProperties (the
+                // client parses it off the response header, which is the only place it exists).
+                // Read per update, not per content: it is on the update itself, and the client
+                // emits it on a LEADING update that carries no content at all.
+                if (GatewayCostOf(update) is { } measured)
+                {
+                    gatewayCostUsd = (gatewayCostUsd ?? 0m) + measured;
+                }
+
                 var text = update.Text;
                 if (!string.IsNullOrEmpty(text))
                 {
@@ -456,7 +471,29 @@ public sealed class TurnRunner
             outbound.Id,
             citations,
             turnContext.Directive,
-            sawUsage ? new TurnUsage(0, promptTokens, completionTokens) : null);
+            sawUsage || gatewayCostUsd is not null
+                ? new TurnUsage((double)(gatewayCostUsd ?? 0m), promptTokens, completionTokens)
+                : null);
+    }
+
+    /// <summary>
+    /// The gateway cost a chat client attached to one streaming update, or null when it attached
+    /// none. Mirrors the engine's own <c>SmoothAgent.ResponseGatewayCost</c> seam — same
+    /// <c>gatewayCostUsd</c> key, same tolerance for a decimal or double — so a client written
+    /// against either side works with both.
+    /// </summary>
+    private static decimal? GatewayCostOf(ChatResponseUpdate update)
+    {
+        if (update.AdditionalProperties?.TryGetValue("gatewayCostUsd", out var raw) is not true || raw is null)
+        {
+            return null;
+        }
+        return raw switch
+        {
+            decimal d when d > 0m => d,
+            double dbl when dbl > 0 => (decimal)dbl,
+            _ => null,
+        };
     }
 
     /// <summary>

@@ -28,7 +28,7 @@
         "start": "node dist/main.js"
     },
     "dependencies": {
-        "@smooai/smooth-operator-core": "^1.7.1",
+        "@smooai/smooth-operator-core": "^1.8.4",
         "pg": "^8.23.0",
         "ws": "^8.18.0"
     },

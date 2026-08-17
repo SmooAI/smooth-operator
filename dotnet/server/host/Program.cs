@@ -1,8 +1,6 @@
-using System.ClientModel;
 using System.Net.Http.Headers;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.FileProviders;
-using OpenAI;
 using SmooAI.SmoothOperator.Server;
 using SmooAI.SmoothOperator.Server.AspNetCore;
 using SmooAI.SmoothOperator.Server.Postgres;
@@ -40,12 +38,13 @@ var gatewayKey = Get("SMOOAI_GATEWAY_KEY", Get("SMOOTH_GATEWAY_KEY"));
 // The model, unlike the gateway pair, IS this server's own config surface, so it takes the
 // canonical SMOOTH_AGENT_MODEL the Rust host reads. SMOOAI_MODEL / SMOOTH_MODEL stay as aliases.
 var model = Get("SMOOTH_AGENT_MODEL", Get("SMOOAI_MODEL", Get("SMOOTH_MODEL", "claude-haiku-4-5")));
+// Core's own client, not the MEAI OpenAI adapter. The gateway reports per-request cost ONLY
+// in a response header, and the adapter's parsed ChatResponse drops HTTP headers entirely —
+// so core's cost-header parser had nothing to read and every turn's costUsd came back 0.
+// GatewayChatClient keeps the response and surfaces the cost on AdditionalProperties, which
+// is what SmoothAgent folds into the run. Same reason the Go host injects core.NewGatewayClient.
 builder.Services.AddSingleton<IChatClient>(_ =>
-    new OpenAIClient(
-            new ApiKeyCredential(string.IsNullOrEmpty(gatewayKey) ? "unset" : gatewayKey),
-            new OpenAIClientOptions { Endpoint = new Uri(gatewayUrl) })
-        .GetChatClient(model)
-        .AsIChatClient());
+    new SmooAI.SmoothOperator.Core.GatewayChatClient(gatewayUrl, string.IsNullOrEmpty(gatewayKey) ? "unset" : gatewayKey, model));
 
 // ── Storage: durable Postgres when configured, else in-memory (the default) ──
 // Canonical SMOOTH_AGENT_DATABASE_URL (what the Rust adapters and the Helm chart's Secret
