@@ -20,10 +20,10 @@ structurally cannot serve it. Instead the admin API runs on a small stdlib
 override with ``admin_port``). The console points at it via its own admin base
 URL, which is already configured separately from the WS URL.
 
-ponytail: connector configs, settings and indexing runs live in memory
-(:class:`AdminStores`) because this server is memory-only today. The durable
-storage adapter is a separate workstream — swap those three containers; nothing
-outside this module reads them.
+Connector configs, settings and indexing runs sit behind the :class:`AdminStore`
+seam. :class:`InMemoryAdminStore` is the default (this server is memory-only unless
+told otherwise); ``PostgresStore`` (postgres_store.py) is the durable
+implementation, selected with ``SMOOTH_AGENT_STORAGE=postgres``.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import os
 import re
 import threading
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,14 +69,90 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class AdminStore(ABC):
+    """The persistence seam for the three management-console stores.
+
+    Every method takes the caller's org and filters by it, so one org can never see or
+    mutate another's rows. A cross-org id is reported exactly like an unknown one
+    (``None`` / ``False``), so the handlers render an identical 404 and the id space
+    cannot be probed.
+
+    Two implementations: :class:`InMemoryAdminStore` (default) and ``PostgresStore``.
+    """
+
+    @abstractmethod
+    async def list_connectors(self, org_id: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def get_connector(self, org_id: str, connector_id: str) -> dict[str, Any] | None:
+        """``None`` when the org has no such connector — including "it's another org's"."""
+        ...
+
+    @abstractmethod
+    async def put_connector(self, connector: dict[str, Any]) -> None: ...
+
+    @abstractmethod
+    async def delete_connector(self, org_id: str, connector_id: str) -> bool:
+        """Whether the connector existed in that org."""
+        ...
+
+    @abstractmethod
+    async def get_settings(self, org_id: str) -> dict[str, Any] | None:
+        """``None`` when the org has none; the caller substitutes defaults."""
+        ...
+
+    @abstractmethod
+    async def put_settings(self, settings: dict[str, Any]) -> None: ...
+
+    @abstractmethod
+    async def list_runs(self, org_id: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def record_run(self, run: dict[str, Any]) -> None: ...
+
+
 @dataclass
-class AdminStores:
-    """Org-scoped admin state. Every read and write filters by org, so one org can
-    never see or mutate another's rows."""
+class InMemoryAdminStore(AdminStore):
+    """In-process :class:`AdminStore` — the reference implementation."""
 
     connectors: dict[str, dict[str, Any]] = field(default_factory=dict)
     settings: dict[str, dict[str, Any]] = field(default_factory=dict)
     runs: list[dict[str, Any]] = field(default_factory=list)
+
+    async def list_connectors(self, org_id: str) -> list[dict[str, Any]]:
+        return sorted((c for c in self.connectors.values() if c["_orgId"] == org_id), key=lambda c: c["name"])
+
+    async def get_connector(self, org_id: str, connector_id: str) -> dict[str, Any] | None:
+        # A cross-org id takes the same branch as an unknown one.
+        row = self.connectors.get(connector_id)
+        return dict(row) if row is not None and row["_orgId"] == org_id else None
+
+    async def put_connector(self, connector: dict[str, Any]) -> None:
+        self.connectors[connector["id"]] = dict(connector)
+
+    async def delete_connector(self, org_id: str, connector_id: str) -> bool:
+        row = self.connectors.get(connector_id)
+        if row is None or row["_orgId"] != org_id:
+            return False
+        del self.connectors[connector_id]
+        return True
+
+    async def get_settings(self, org_id: str) -> dict[str, Any] | None:
+        row = self.settings.get(org_id)
+        return dict(row) if row is not None else None
+
+    async def put_settings(self, settings: dict[str, Any]) -> None:
+        self.settings[settings["orgId"]] = dict(settings)
+
+    async def list_runs(self, org_id: str) -> list[dict[str, Any]]:
+        return [r for r in self.runs if r["_orgId"] == org_id]
+
+    async def record_run(self, run: dict[str, Any]) -> None:
+        for index, existing in enumerate(self.runs):
+            if existing["id"] == run["id"]:
+                self.runs[index] = dict(run)
+                return
+        self.runs.append(dict(run))
 
 
 def _default_settings(org_id: str) -> dict[str, Any]:
@@ -341,7 +418,7 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
         p = _require_role(state, headers, ROLE_CURATOR)
         if isinstance(p, _Denied):
             return p.response
-        return _json(200, {"runs": [_public(r) for r in state.admin.runs if r["_orgId"] == p.org]})
+        return _json(200, {"runs": [_public(r) for r in await state.admin.list_runs(p.org)]})
 
     if method == "GET" and path == "/admin/document-sets":
         denied = _require_role(state, headers, ROLE_CURATOR)
@@ -356,10 +433,7 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
             p = _require_role(state, headers, ROLE_CURATOR)
             if isinstance(p, _Denied):
                 return p.response
-            rows = sorted(
-                (c for c in state.admin.connectors.values() if c["_orgId"] == p.org),
-                key=lambda c: c["name"],
-            )
+            rows = await state.admin.list_connectors(p.org)
             return _json(200, {"connectors": [_public(c) for c in rows]})
         if method == "POST":
             p = _require_role(state, headers, ROLE_ADMIN)
@@ -370,14 +444,14 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
                 return write
             now = _now()
             row = {"id": str(uuid.uuid4()), **write, "createdAt": now, "updatedAt": now, "_orgId": p.org}
-            state.admin.connectors[row["id"]] = row
+            await state.admin.put_connector(row)
             return _json(200, {"connector": _public(row)})
 
     if method == "POST" and (m := _INDEX_RE.match(path)):
         p = _require_role(state, headers, ROLE_CURATOR)
         if isinstance(p, _Denied):
             return p.response
-        row = _owned_connector(state, m.group(1), p.org)
+        row = await state.admin.get_connector(p.org, m.group(1))
         if row is None:
             return _error(404, "NOT_FOUND", "connector not found")
         # ponytail: no ingestion pipeline on this server yet, so the run is recorded
@@ -395,7 +469,7 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
             "error": None,
             "_orgId": p.org,
         }
-        state.admin.runs.append(run)
+        await state.admin.record_run(run)
         return _json(200, {"run": _public(run)})
 
     if m := _CONNECTOR_RE.match(path):
@@ -404,7 +478,7 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
             p = _require_role(state, headers, ROLE_CURATOR)
             if isinstance(p, _Denied):
                 return p.response
-            row = _owned_connector(state, connector_id, p.org)
+            row = await state.admin.get_connector(p.org, connector_id)
             return _json(200, {"connector": _public(row)}) if row else _error(404, "NOT_FOUND", "connector not found")
         if method == "PUT":
             p = _require_role(state, headers, ROLE_ADMIN)
@@ -413,18 +487,23 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
             write = _validate_connector(body())
             if isinstance(write, tuple):
                 return write
-            row = _owned_connector(state, connector_id, p.org)
+            # ponytail: read-modify-write without a lock across the two calls.
+            # Concurrent PUTs to the SAME connector are last-write-wins, which is what
+            # the durable store's upsert does anyway; add row locking if a real
+            # conflicting-editor case shows up.
+            row = await state.admin.get_connector(p.org, connector_id)
             if row is None:
                 return _error(404, "NOT_FOUND", "connector not found")
             row.update(write, updatedAt=_now())
+            await state.admin.put_connector(row)
             return _json(200, {"connector": _public(row)})
         if method == "DELETE":
             p = _require_role(state, headers, ROLE_ADMIN)
             if isinstance(p, _Denied):
                 return p.response
-            if _owned_connector(state, connector_id, p.org) is None:
+            # Unknown and cross-org are the same 404 — no existence oracle.
+            if not await state.admin.delete_connector(p.org, connector_id):
                 return _error(404, "NOT_FOUND", "connector not found")
-            del state.admin.connectors[connector_id]
             return 204, None
 
     if path == "/admin/settings":
@@ -432,7 +511,7 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
             p = _require_role(state, headers, ROLE_CURATOR)
             if isinstance(p, _Denied):
                 return p.response
-            return _json(200, {"settings": state.admin.settings.get(p.org) or _default_settings(p.org)})
+            return _json(200, {"settings": await state.admin.get_settings(p.org) or _default_settings(p.org)})
         if method == "PUT":
             p = _require_role(state, headers, ROLE_ADMIN)
             if isinstance(p, _Denied):
@@ -448,17 +527,10 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
                 "defaultTools": data.get("defaultTools") if isinstance(data.get("defaultTools"), list) else [],
                 "updatedAt": _now(),
             }
-            state.admin.settings[p.org] = settings
+            await state.admin.put_settings(settings)
             return _json(200, {"settings": settings})
 
     return _error(404, "NOT_FOUND", f"no admin route for {method} {path}")
-
-
-def _owned_connector(state: Any, connector_id: str, org_id: str) -> Optional[dict[str, Any]]:
-    """An org-owned connector, or ``None``. A cross-org id is deliberately
-    indistinguishable from an unknown one — both 404."""
-    row = state.admin.connectors.get(connector_id)
-    return row if row is not None and row["_orgId"] == org_id else None
 
 
 def _validate_connector(data: dict[str, Any]) -> dict[str, Any] | AdminResponse:
