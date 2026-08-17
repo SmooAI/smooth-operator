@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -312,6 +313,8 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
+
+	mux.HandleFunc("GET /admin/model-costs", s.adminModelCosts)
 
 	mux.HandleFunc("GET /admin/me", s.adminMe)
 	mux.HandleFunc("GET /admin/conversations", s.adminListConversations)
@@ -633,4 +636,124 @@ func (s *Server) adminPutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// ── model costs ─────────────────────────────────────────────────────────────
+
+// modelCostsCache holds the mapped /model/info payload for the process. The
+// gateway's pricing is stable, so one fetch per process is enough — matching the
+// Rust server's OnceCell. Only a SUCCESS is cached; an error leaves it unset so
+// the next request retries.
+var modelCostsCache struct {
+	mu     sync.Mutex
+	value  map[string]any
+	loaded bool
+}
+
+// adminModelCosts serves GET /admin/model-costs.
+//
+// UNGATED, exactly as in Rust: gateway pricing is not org-sensitive and the
+// console's cost badges must render on a tokenless local connection. Any gateway
+// or transport failure degrades to an empty object rather than a 500 — a missing
+// badge is better than a broken page.
+func (s *Server) adminModelCosts(w http.ResponseWriter, r *http.Request) {
+	modelCostsCache.mu.Lock()
+	if modelCostsCache.loaded {
+		cached := modelCostsCache.value
+		modelCostsCache.mu.Unlock()
+		writeJSON(w, http.StatusOK, cached)
+		return
+	}
+	modelCostsCache.mu.Unlock()
+
+	costs, err := fetchModelCosts(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	modelCostsCache.mu.Lock()
+	modelCostsCache.value, modelCostsCache.loaded = costs, true
+	modelCostsCache.mu.Unlock()
+	writeJSON(w, http.StatusOK, costs)
+}
+
+// fetchModelCosts GETs the gateway's /model/info with the server's configured
+// gateway credentials — the same ones the turns use — and maps it.
+func fetchModelCosts(ctx context.Context) (map[string]any, error) {
+	base := strings.TrimRight(orDefaultEnv("SMOOAI_GATEWAY_URL", "https://llm.smoo.ai/v1"), "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/model/info", nil)
+	if err != nil {
+		return nil, err
+	}
+	if key := strings.TrimSpace(os.Getenv("SMOOAI_GATEWAY_KEY")); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("model/info: %d", resp.StatusCode)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return mapModelInfo(payload), nil
+}
+
+func orDefaultEnv(name, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// mapModelInfo turns the gateway's /model/info payload into the
+// `{ "<model>": {inputCostPerToken, outputCostPerToken, tier, useCases,
+// maxOutputTokens} }` shape the console reads. Pure, so it is unit-testable on a
+// sample payload without a gateway. Mirrors the Rust `map_model_info`: entries
+// without a `model_name` are skipped, and every field is optional (null when the
+// gateway omits it) rather than defaulted to a wrong number.
+func mapModelInfo(payload map[string]any) map[string]any {
+	out := map[string]any{}
+	entries, _ := payload["data"].([]any)
+	for _, raw := range entries {
+		entry, _ := raw.(map[string]any)
+		name, _ := entry["model_name"].(string)
+		if name == "" {
+			continue
+		}
+		info, _ := entry["model_info"].(map[string]any)
+		out[name] = map[string]any{
+			"inputCostPerToken":  numOrNil(info, "input_cost_per_token"),
+			"outputCostPerToken": numOrNil(info, "output_cost_per_token"),
+			"tier":               strOrNil(info, "model_tier"),
+			"useCases":           arrOrEmpty(info, "use_cases"),
+			"maxOutputTokens":    numOrNil(info, "max_output_tokens"),
+		}
+	}
+	return out
+}
+
+func numOrNil(info map[string]any, key string) any {
+	if v, ok := info[key].(float64); ok {
+		return v
+	}
+	return nil
+}
+
+func strOrNil(info map[string]any, key string) any {
+	if v, ok := info[key].(string); ok {
+		return v
+	}
+	return nil
+}
+
+func arrOrEmpty(info map[string]any, key string) []any {
+	if v, ok := info[key].([]any); ok {
+		return v
+	}
+	return []any{}
 }

@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from smooth_operator_server.admin import map_model_info, reset_model_costs_cache
 from smooth_operator_server.auth import AccessContext, AuthVerifier, Principal
 from smooth_operator_server.server import ServerState, serve
 from smooth_operator_server.session_store import InMemorySessionStore
@@ -257,3 +258,66 @@ async def test_settings_defaults_then_round_trip(authed) -> None:
 
 async def test_settings_write_requires_a_model(authed) -> None:
     assert (await call(authed, "PUT", "/admin/settings", "admin", {"systemPrompt": "x"}))[0] == 400
+
+
+# ---- model costs ----
+
+# A representative /v1/model/info payload from the LiteLLM gateway.
+MODEL_INFO_PAYLOAD = {
+    "data": [
+        {
+            "model_name": "claude-opus-4-8",
+            "model_info": {
+                "input_cost_per_token": 0.000015,
+                "output_cost_per_token": 0.000075,
+                "model_tier": "frontier",
+                "use_cases": ["reasoning", "coding"],
+                "max_output_tokens": 65536,
+            },
+        },
+        {"model_name": "mystery-model", "model_info": {}},
+        {"model_info": {"input_cost_per_token": 1}},  # no model_name -> skipped
+    ]
+}
+
+
+def test_map_model_info_maps_the_gateway_payload() -> None:
+    got = map_model_info(MODEL_INFO_PAYLOAD)
+    assert list(got) == ["claude-opus-4-8", "mystery-model"]
+    assert got["claude-opus-4-8"] == {
+        "inputCostPerToken": 0.000015,
+        "outputCostPerToken": 0.000075,
+        "tier": "frontier",
+        "useCases": ["reasoning", "coding"],
+        "maxOutputTokens": 65536,
+    }
+
+
+def test_map_model_info_leaves_omitted_fields_none() -> None:
+    # A $0 default would render a free-model badge on a paid model.
+    assert map_model_info(MODEL_INFO_PAYLOAD)["mystery-model"] == {
+        "inputCostPerToken": None,
+        "outputCostPerToken": None,
+        "tier": None,
+        "useCases": [],
+        "maxOutputTokens": None,
+    }
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": "not-an-array"}, None, "junk"])
+def test_map_model_info_tolerates_garbage(payload) -> None:
+    assert map_model_info(payload) == {}
+
+
+async def test_model_costs_is_ungated_and_degrades_to_empty(authed, monkeypatch) -> None:
+    reset_model_costs_cache()
+    monkeypatch.setenv("SMOOAI_GATEWAY_URL", "http://127.0.0.1:1")
+    try:
+        # No bearer token at all — ungated.
+        status, payload = await call(authed, "GET", "/admin/model-costs")
+        assert status == 200
+        assert payload == {}
+        # A failure must NOT be cached, or one blip pins {} for the process.
+        assert (await call(authed, "GET", "/admin/model-costs"))[0] == 200
+    finally:
+        reset_model_costs_cache()

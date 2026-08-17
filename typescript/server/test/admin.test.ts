@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ANONYMOUS_PRINCIPAL, type AccessContext, type AuthVerifier } from '../src/auth.js';
 import { InMemorySessionStore } from '../src/sessionStore.js';
 import { serve, type RunningServer } from '../src/server.js';
+import { mapModelInfo, resetModelCostsCache } from '../src/admin.js';
 
 /** An auth-enabled verifier that maps a token straight to a role. */
 class RoleVerifier implements AuthVerifier {
@@ -232,5 +233,72 @@ describe('settings', () => {
 
     it('rejects a write with no model', async () => {
         expect((await call(authed, 'PUT', '/admin/settings', 'admin', { systemPrompt: 'x' })).status).toBe(400);
+    });
+});
+
+describe('model costs', () => {
+    // A representative /v1/model/info payload from the LiteLLM gateway.
+    const payload = {
+        data: [
+            {
+                model_name: 'claude-opus-4-8',
+                model_info: {
+                    input_cost_per_token: 0.000015,
+                    output_cost_per_token: 0.000075,
+                    model_tier: 'frontier',
+                    use_cases: ['reasoning', 'coding'],
+                    max_output_tokens: 65536,
+                },
+            },
+            { model_name: 'mystery-model', model_info: {} },
+            { model_info: { input_cost_per_token: 1 } }, // no model_name → skipped
+        ],
+    };
+
+    it('maps the gateway payload to the console shape', () => {
+        const got = mapModelInfo(payload);
+        expect(Object.keys(got)).toEqual(['claude-opus-4-8', 'mystery-model']);
+        expect(got['claude-opus-4-8']).toEqual({
+            inputCostPerToken: 0.000015,
+            outputCostPerToken: 0.000075,
+            tier: 'frontier',
+            useCases: ['reasoning', 'coding'],
+            maxOutputTokens: 65536,
+        });
+    });
+
+    it('leaves omitted fields null rather than defaulting them', () => {
+        // A $0 default would render a free-model badge on a paid model.
+        expect(mapModelInfo(payload)['mystery-model']).toEqual({
+            inputCostPerToken: null,
+            outputCostPerToken: null,
+            tier: null,
+            useCases: [],
+            maxOutputTokens: null,
+        });
+    });
+
+    it('tolerates garbage payloads', () => {
+        expect(mapModelInfo({})).toEqual({});
+        expect(mapModelInfo({ data: 'not-an-array' })).toEqual({});
+        expect(mapModelInfo(undefined)).toEqual({});
+    });
+
+    it('is ungated and degrades to {} when the gateway is unreachable', async () => {
+        resetModelCostsCache();
+        const prev = process.env.SMOOAI_GATEWAY_URL;
+        process.env.SMOOAI_GATEWAY_URL = 'http://127.0.0.1:1';
+        try {
+            // No bearer token at all — ungated.
+            const { status, json } = await call(authed, 'GET', '/admin/model-costs');
+            expect(status).toBe(200);
+            expect(json).toEqual({});
+            // A failure must NOT be cached, or one blip pins {} for the process.
+            const again = await call(authed, 'GET', '/admin/model-costs');
+            expect(again.status).toBe(200);
+        } finally {
+            process.env.SMOOAI_GATEWAY_URL = prev;
+            resetModelCostsCache();
+        }
     });
 });
