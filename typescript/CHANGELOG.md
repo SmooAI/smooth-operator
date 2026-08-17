@@ -1,5 +1,114 @@
 # @smooai/smooth-operator
 
+## 1.48.0
+
+### Minor Changes
+
+- 7b93496: Stop fabricating an `agent_id` when the caller names no agent.
+
+  Session creation filled a missing `agentId` with a fresh UUID, so every agentless session
+  pointed at an agent that had never existed. `Session.agent_id` is now `Option<String>` and the
+  `conversation_sessions.agent_id` column is nullable: absent is the honest answer, and a
+  fabricated reference is not.
+
+  Both entry points had the same bug — the WebSocket handler and the Lambda dispatcher — and
+  both are fixed. A blank or whitespace-only `agentId` now also reads as absent rather than
+  becoming a literal empty agent.
+
+  BREAKING for direct Rust consumers of `smooth_operator::domain::Session`: `agent_id` is now
+  `Option<String>`.
+
+### Patch Changes
+
+- 459b4b4: Push the Postgres adapter's data integrity into the schema.
+
+  The json columns (`metadata_json`, `analytics_json`, `metadata`) are now `NOT NULL DEFAULT
+'{}'`, so "absent" has one representation on read instead of two. `platform` and session
+  `status` gain CHECK constraints alongside the ones `direction` and participant `type` already
+  had, and the timestamps that were fully nullable on `conversation_sessions` are now
+  `NOT NULL DEFAULT now()`.
+
+  A bare DEFAULT was not enough: the inserts pass an explicit NULL for an absent optional, and
+  a DEFAULT only fires on an omitted column, so the inserts coalesce in SQL.
+
+  Rust only — the Go, TypeScript, Python and .NET stores keep their own copies of this DDL and
+  are being brought across separately against this as the reference.
+
+- b5dd15d: feat(dotnet): let the Postgres schema enforce what the store was only hoping (th-5a5181 P2)
+
+  The .NET slice of the adapter-integrity wave, mirroring the Rust reference (#425):
+  `metadata_json` / `analytics_json` / `metadata` become `JSONB NOT NULL DEFAULT '{}'`
+  so "absent" has one representation on read instead of two; `platform` and session
+  `status` gain CHECK constraints alongside the ones `direction` and participant `type`
+  already had (status stays optional — a NULL passes a CHECK); and
+  `conversation_sessions.created_at` / `updated_at` / `last_activity_at` become
+  `NOT NULL DEFAULT now()` like every other table's.
+
+  Two places this slice differs from the Rust one, both deliberate:
+
+  **No `coalesce` in the INSERTs.** Rust needed it because its inserts pass an explicit
+  NULL for an absent `Option`, and a bare `DEFAULT` only fires on an OMITTED column. This
+  store omits those columns entirely, so the DEFAULT already fires — a coalesce here would
+  be dead SQL. The only json column it writes explicitly is
+  `conversation_sessions.metadata`, which is always a serialized object.
+
+  **`platform` was `'smooth-operator'`, which the new CHECK rejects.** That is the product
+  name, not a channel, and it is not in the shared platform vocabulary — applying the CHECK
+  without fixing it would have failed every conversation insert. Now `'web'`, matching the
+  Go store, which is what a browser WebSocket chat is.
+
+  The migration block also closes the constraints on a LEGACY database: `CREATE TABLE IF
+NOT EXISTS` is a no-op there, so the DDL's NOT NULLs would never have applied. It
+  backfills the nulls then `SET NOT NULL` / `SET DEFAULT`, so a migrated database ends up
+  with the same guarantees as a fresh one. This is the only server with a migration block,
+  so it is the only one that can. The CHECKs are deliberately NOT retrofitted — a legacy
+  row's platform is `'smooth-operator'`, so adding that constraint would fail init on
+  exactly the databases that need migrating.
+
+  Tests: a session created with no metadata reads back `{}` rather than null across
+  conversations, messages and participants; a migrated legacy database reports its columns
+  as NOT NULL; and the CHECKs reject `'smooth-operator'` and an unknown session status.
+  70 green against real pgvector containers.
+
+- 0bf93f7: feat(go,ts,python): mirror the P2 schema integrity constraints into the three servers
+
+  Mirrors core#425 (Rust adapter, `459b4b4`) into `go/server/postgres_store.go`,
+  `typescript/server/src/postgresStore.ts` and
+  `python/.../postgres_store.py` — identical DDL in all three:
+
+  - `metadata_json` / `analytics_json` / `metadata` → `JSONB NOT NULL DEFAULT '{}'::jsonb`
+    on conversations, participants, messages and sessions, so "absent" has ONE
+    representation on read instead of two.
+  - `platform` gains a `CHECK` over the ten known values; `status` gains a `CHECK`
+    over `active` / `idle` / `ended`. Status stays optional — NULL passes a CHECK, so
+    the value is constrained without the column becoming required.
+  - `conversation_sessions.created_at` / `updated_at` / `last_activity_at` →
+    `NOT NULL DEFAULT now()`.
+
+  **No `coalesce()` was needed in any of the three, unlike Rust.** The Rust adapter
+  names every column in its INSERTs and passes an explicit NULL for an absent
+  `Option`, and `DEFAULT` only fires on an _omitted_ column — hence its four
+  coalesces. These three servers **omit** the json columns from every
+  conversation-domain INSERT, so the DEFAULT fires on its own. The one JSONB they do
+  pass explicitly (`conversation_sessions.metadata`) is always a serialized object,
+  never NULL, in all three. Verified against real Postgres containers rather than
+  assumed.
+
+  Also skipped, per the Rust PR: the `(organization_id, browser_fingerprint)` index.
+  No server here queries that column.
+
+  Two tests per language, run against real containers: absent json reads back as `{}`
+  (the one that fails if either the `NOT NULL DEFAULT` or the omit-from-INSERT
+  regresses), and an unknown platform is rejected by the CHECK.
+
+  Green: Go `vet` + full `go test` (14 postgres tests), TypeScript `tsc` + 312 tests,
+  Python ruff + 318 tests. All exit 0.
+
+  Note carried over from the Rust PR: the DDL is `CREATE TABLE IF NOT EXISTS`, so
+  these constraints apply to newly-created databases. An existing table is unchanged
+  until someone writes a migration — same as Rust, and worth a follow-up rather than
+  a silent assumption.
+
 ## 1.47.1
 
 ### Patch Changes
