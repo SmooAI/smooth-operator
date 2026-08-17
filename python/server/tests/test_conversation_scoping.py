@@ -132,7 +132,9 @@ async def test_client_supplied_email_cannot_claim_another_users_scope() -> None:
 
     # Alice creates a session while claiming to be Bob in the frame.
     alice = FrameDispatcher(store, None, access=_authed(ALICE))
-    created = await _dispatch(alice, {"action": "create_conversation_session", "userEmail": BOB, "userName": "Bob"})
+    created = await _dispatch(
+        alice, {"action": "create_conversation_session", "agentId": "agent", "userEmail": BOB, "userName": "Bob"}
+    )
     session_id = created[0]["data"]["sessionId"]
     stored = await store.get_session(session_id)
     assert stored is not None
@@ -152,7 +154,9 @@ async def test_resuming_another_users_conversation_mints_a_fresh_one() -> None:
     _, bob_conv = await _seed(store, BOB, "bob secret")
 
     alice = FrameDispatcher(store, None, access=_authed(ALICE))
-    events = await _dispatch(alice, {"action": "create_conversation_session", "conversationId": bob_conv})
+    events = await _dispatch(
+        alice, {"action": "create_conversation_session", "agentId": "agent", "conversationId": bob_conv}
+    )
     got = events[0]["data"]["conversationId"]
     assert got != bob_conv  # not bound to Bob's conversation
 
@@ -167,7 +171,7 @@ async def test_owner_can_still_resume_their_own_conversation() -> None:
     _, alice_conv = await _seed(store, ALICE, "mine")
     events = await _dispatch(
         FrameDispatcher(store, None, access=_authed(ALICE)),
-        {"action": "create_conversation_session", "conversationId": alice_conv},
+        {"action": "create_conversation_session", "agentId": "agent", "conversationId": alice_conv},
     )
     assert events[0]["data"]["conversationId"] == alice_conv
     assert [m.text for m in await store.list_messages(alice_conv, 100)] == ["mine"]
@@ -297,7 +301,9 @@ async def test_emailless_principal_can_use_its_own_session(access: AccessContext
     store = InMemorySessionStore()
     dispatcher = FrameDispatcher(store, None, access=access)
 
-    created = await _dispatch(dispatcher, {"action": "create_conversation_session", "requestId": "r1"})
+    created = await _dispatch(
+        dispatcher, {"action": "create_conversation_session", "agentId": "agent", "requestId": "r1"}
+    )
     session_id = created[0]["data"]["sessionId"]
     conversation_id = created[0]["data"]["conversationId"]
 
@@ -318,7 +324,9 @@ async def test_emailless_principal_can_use_its_own_session(access: AccessContext
     assert _conv_ids(listed) == [conversation_id]
 
     # Resume by conversationId binds back to the same conversation.
-    resumed = await _dispatch(dispatcher, {"action": "create_conversation_session", "conversationId": conversation_id})
+    resumed = await _dispatch(
+        dispatcher, {"action": "create_conversation_session", "agentId": "agent", "conversationId": conversation_id}
+    )
     assert resumed[0]["data"]["conversationId"] == conversation_id
 
 
@@ -340,7 +348,9 @@ async def test_emailless_principal_still_cannot_reach_an_owned_session(access: A
     assert alice_conv not in _conv_ids(listed)
 
     # Nor by resuming her conversation id — that mints a fresh, empty one.
-    resumed = await _dispatch(dispatcher, {"action": "create_conversation_session", "conversationId": alice_conv})
+    resumed = await _dispatch(
+        dispatcher, {"action": "create_conversation_session", "agentId": "agent", "conversationId": alice_conv}
+    )
     assert resumed[0]["data"]["conversationId"] != alice_conv
     assert [m.text for m in await store.list_messages(alice_conv, 100)] == ["alice secret"]
 
@@ -393,9 +403,11 @@ async def test_auth_disabled_stays_unscoped() -> None:
 
     # Resume works regardless of owner, and the client-supplied email is still the
     # OTP contact (no principal exists to override it).
-    resumed = await _dispatch(local, {"action": "create_conversation_session", "conversationId": a_conv})
+    resumed = await _dispatch(
+        local, {"action": "create_conversation_session", "agentId": "agent", "conversationId": a_conv}
+    )
     assert resumed[0]["data"]["conversationId"] == a_conv
-    created = await _dispatch(local, {"action": "create_conversation_session", "userEmail": ALICE})
+    created = await _dispatch(local, {"action": "create_conversation_session", "agentId": "agent", "userEmail": ALICE})
     stored = await store.get_session(created[0]["data"]["sessionId"])
     assert stored is not None and stored.contact_email == ALICE
 

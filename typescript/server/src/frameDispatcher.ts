@@ -371,6 +371,17 @@ export class FrameDispatcher {
         // the same id it passed. Mirrors the Rust reference's resume branch.
         const requested = typeof frame.conversationId === 'string' && frame.conversationId.length > 0 ? frame.conversationId : undefined;
 
+        // agentId is REQUIRED by the Request schema and the generated client type is
+        // non-optional, so absent-or-blank is a MALFORMED REQUEST, not an agentless session.
+        // The old code fabricated a UUID and th-68897a's first pass silently stored NULL —
+        // both skip the validation that belongs at this boundary. The column stays nullable
+        // for rows written before this check; it is just no longer reachable from here.
+        const agentId = typeof frame.agentId === 'string' ? frame.agentId.trim() : '';
+        if (!agentId) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "Missing 'agentId'"));
+            return;
+        }
+
         // Someone else's conversation is treated as an id we don't know: we drop it and
         // mint a fresh conversation, which is byte-for-byte what an unknown id already
         // does. Erroring here instead would tell the attacker their guessed id was real.
@@ -387,7 +398,7 @@ export class FrameDispatcher {
         const ownerEmail = this.access.authEnabled ? this.access.principal.email : typeof frame.userEmail === 'string' ? frame.userEmail : undefined;
 
         const session = await this.store.createSession(
-            typeof frame.agentId === 'string' ? frame.agentId : '',
+            agentId,
             typeof frame.userName === 'string' ? frame.userName : undefined,
             ownerEmail,
             conversationId,

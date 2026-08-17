@@ -138,7 +138,7 @@ async def test_send_message_without_gateway_errors_cleanly() -> None:
     server, _ = await _start(chat_client=None)
     try:
         async with websockets.connect(server.ws_url()) as ws:
-            await ws.send(json.dumps({"action": "create_conversation_session", "requestId": "r-c"}))
+            await ws.send(json.dumps({"action": "create_conversation_session", "requestId": "r-c", "agentId": "agent"}))
             created = await _recv_until(ws, "immediate_response")
             session_id = created["data"]["sessionId"]
             await ws.send(

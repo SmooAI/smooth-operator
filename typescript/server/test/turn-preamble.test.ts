@@ -307,7 +307,7 @@ describe('fast-model preamble', () => {
             try {
                 server = await serve({ chatClient: client });
                 const ws = await TestClient.connect(server.url);
-                ws.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+                ws.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
                 const sessionId = ((await ws.receive()).data as Record<string, unknown>).sessionId as string;
 
                 ws.sendAction({ action: 'send_message', requestId: 'sm', sessionId, message: 'How long can I return?' });

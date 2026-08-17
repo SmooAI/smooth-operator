@@ -118,7 +118,7 @@ describe('send_message.skill (over the wire)', () => {
     async function start(skillRoot: string | undefined, chat: MockLlmProvider) {
         server = await serve({ chatClient: chat, skillResolver: skillRoot ? new DirSkillResolver([skillRoot]) : undefined });
         const client = await TestClient.connect(server.url);
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
         return { client, sessionId };
     }

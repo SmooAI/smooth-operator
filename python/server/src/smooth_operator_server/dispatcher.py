@@ -286,6 +286,16 @@ class FrameDispatcher:
         # to it (reuses id + history); absent/unknown → a fresh conversation. The response
         # echoes conversationId either way, so a resuming client sees the id it passed.
         # Mirrors the Rust/Go/TS reference. th-d5b446.
+        # agentId is REQUIRED by the Request schema and the generated client type is
+        # non-optional, so absent-or-blank is a MALFORMED REQUEST, not an agentless session.
+        # The old code fabricated a UUID and th-68897a's first pass silently stored NULL —
+        # both skip the validation that belongs at this boundary. The column stays nullable
+        # for rows written before this check; it is just no longer reachable from here.
+        agent_id = str(frame.get("agentId") or "").strip()
+        if not agent_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "Missing 'agentId'"))
+            return
+
         raw_conv_id = frame.get("conversationId")
         conversation_id = raw_conv_id if isinstance(raw_conv_id, str) and raw_conv_id else None
         # Ownership comes from the AUTHENTICATED PRINCIPAL, never from the frame. The
@@ -296,7 +306,7 @@ class FrameDispatcher:
         owner_email = self._scope_email()
         user_email = owner_email if self._auth_enforced else frame.get("userEmail")
         session = await self._store.create_session(
-            frame.get("agentId") or "",
+            agent_id,
             frame.get("userName"),
             user_email,
             conversation_id,
