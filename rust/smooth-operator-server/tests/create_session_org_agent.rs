@@ -133,7 +133,7 @@ async fn authed_principal_org_and_payload_agent_carry_through() {
         .await
         .expect("list sessions");
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].agent_id, "agent-Y");
+    assert_eq!(sessions[0].agent_id.as_deref(), Some("agent-Y"));
 }
 
 #[tokio::test]

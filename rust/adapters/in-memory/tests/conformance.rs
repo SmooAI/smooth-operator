@@ -213,7 +213,7 @@ async fn full_lifecycle_through_the_adapter() {
         session_id: "sess-1".into(),
         conversation_id: "conv-1".into(),
         organization_id: "org-1".into(),
-        agent_id: "agent-uuid".into(),
+        agent_id: Some("agent-uuid".into()),
         agent_name: "Smantha".into(),
         user_participant_id: "part-user".into(),
         agent_participant_id: "part-agent".into(),
@@ -227,6 +227,7 @@ async fn full_lifecycle_through_the_adapter() {
         ended_at: None,
         last_activity_at: Some(Utc::now()),
     };
+    let session_template = session.clone();
     store.create_session(session).await.expect("create session");
 
     let bumped = store
@@ -276,6 +277,22 @@ async fn full_lifecycle_through_the_adapter() {
         smooth_operator_core::DocumentType::Documentation,
     ))
     .expect("ingest");
+
+    // A session created with NO agent stays agentless. This used to be filled with a fresh
+    // UUID, so every agentless session pointed at an agent that had never existed
+    // (th-68897a). Fails if agent_id goes back to a non-optional column or field.
+    let agentless = Session {
+        session_id: "sess-agentless".into(),
+        agent_id: None,
+        ..session_template
+    };
+    store.create_session(agentless).await.expect("session");
+    let read_back = store
+        .get_session("sess-agentless")
+        .await
+        .expect("session")
+        .expect("exists");
+    assert_eq!(read_back.agent_id, None, "absent agent must stay absent");
     let results = kb.query("smooth-agent service", 5).expect("query");
     assert!(!results.is_empty());
 }

@@ -337,21 +337,32 @@ async fn handle_create_session(
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
 ) {
-    let agent_id = parsed
+    // No agentId from the caller means NO agent, not a new one. This used to mint a
+    // fresh UUID, which pointed every agentless session at an agent that has never
+    // existed — invisible until something tried to resolve it (th-68897a).
+    let agent_id: Option<String> = parsed
         .get("agentId")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
 
     // Embeddable-widget auth: enforce the agent's origin allowlist + authContext
     // before creating any session. No-op for agents without a policy (unless
     // WIDGET_AUTH_STRICT). On denial, an error is emitted and we stop here. A
     // resolved policy may also carry the agent's org (multi-tenant host).
-    let widget_org =
-        match enforce_widget_auth(state, origin, &agent_id, parsed, request_id, sink).await {
-            WidgetAuthOutcome::Denied => return,
-            WidgetAuthOutcome::Allowed { org_id } => org_id,
-        };
+    let widget_org = match enforce_widget_auth(
+        state,
+        origin,
+        agent_id.as_deref().unwrap_or(""),
+        parsed,
+        request_id,
+        sink,
+    )
+    .await
+    {
+        WidgetAuthOutcome::Denied => return,
+        WidgetAuthOutcome::Allowed { org_id } => org_id,
+    };
 
     let user_name = parsed
         .get("userName")
@@ -440,7 +451,7 @@ async fn handle_create_session(
         .backplane
         .associate(
             conn_id,
-            smooth_operator::backplane::Target::Agent(agent_id.clone()),
+            smooth_operator::backplane::Target::Agent(agent_id.clone().unwrap_or_default()),
         )
         .await;
 
@@ -482,7 +493,7 @@ async fn handle_create_session(
         organization_id: org_id.clone(),
         participant_type: ParticipantType::AiAgent,
         external_id: None,
-        internal_id: Some(agent_id.clone()),
+        internal_id: agent_id.clone(),
         browser_fingerprint: None,
         browser_info: None,
         name: AGENT_NAME.to_string(),
@@ -1427,8 +1438,10 @@ async fn handle_send_message(
     // resolved by the connection's `agent_id` so two agents in the same org can
     // behave differently. Absent / malformed ⇒ `None`, so the org-default persona
     // (SEAM 2) is used, unchanged. Isolated per agent by construction.
-    let agent_cfg: Option<AgentBehaviorConfig> =
-        state.agent_config.resolve(&session.agent_id).await;
+    let agent_cfg: Option<AgentBehaviorConfig> = match session.agent_id.as_deref() {
+        Some(id) => state.agent_config.resolve(id).await,
+        None => None,
+    };
 
     // SEAM 3 — model precedence, applied low → high so the winner clobbers last:
     //   1. server default (`SMOOTH_AGENT_MODEL`, already in `llm`),

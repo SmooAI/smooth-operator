@@ -72,7 +72,7 @@ fn test_session() -> Session {
         session_id: SESSION_ID.to_string(),
         conversation_id: CONVERSATION_ID.to_string(),
         organization_id: "org".to_string(),
-        agent_id: "agent".to_string(),
+        agent_id: Some("agent".to_string()),
         agent_name: "Agent".to_string(),
         user_participant_id: "u".to_string(),
         agent_participant_id: "a".to_string(),

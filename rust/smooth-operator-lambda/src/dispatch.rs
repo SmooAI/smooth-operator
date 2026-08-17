@@ -122,11 +122,13 @@ async fn create_session(
     parsed: &Value,
     request_id: Option<&str>,
 ) -> Result<()> {
-    let agent_id = parsed
+    // No agentId from the caller means NO agent, not a new one (th-68897a) — same
+    // fabrication the WS handler had.
+    let agent_id: Option<String> = parsed
         .get("agentId")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
 
     let user_name = parsed
         .get("userName")
@@ -203,7 +205,7 @@ async fn create_session(
         organization_id: org_id.clone(),
         participant_type: ParticipantType::AiAgent,
         external_id: None,
-        internal_id: Some(agent_id.clone()),
+        internal_id: agent_id.clone(),
         browser_fingerprint: None,
         browser_info: None,
         name: AGENT_NAME.to_string(),
