@@ -75,6 +75,15 @@ func main() {
 	ctx := context.Background()
 	addr := resolveAddr(os.Getenv)
 
+	// OTel: install the OTLP span exporter when OTEL_EXPORTER_OTLP_ENDPOINT is set (env-
+	// gated, matching the Rust host); unset → cheap no-op tracer. A bad endpoint logs and
+	// continues rather than taking down the host.
+	shutdownTelemetry, err := server.InitTelemetry(ctx)
+	if err != nil {
+		log.Printf("telemetry: OTLP exporter init failed, continuing without export: %v", err)
+	}
+	defer func() { _ = shutdownTelemetry(context.Background()) }()
+
 	var opts []server.LocalOption
 
 	// Storage backend. Unset/memory → nothing to install (the in-memory stores stay);

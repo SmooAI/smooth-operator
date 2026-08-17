@@ -6,8 +6,13 @@ import (
 	"errors"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	core "github.com/SmooAI/smooth-operator-core/go/core"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // errNoEngine is returned by a turn when no chat client (LLM gateway) is configured.
@@ -92,6 +97,13 @@ type TurnRunner struct {
 	currentStepID string
 	// judgeModel is the cheap model id the workflow judge uses ("" → DefaultJudgeModel).
 	judgeModel string
+	// model is recorded as gen_ai.request.model on the turn's OTel span ("" → the engine
+	// default; see spanModel). Span-only — it does NOT change what the engine requests.
+	// Set by the dispatcher after construction, alongside hooks/orgID.
+	model string
+	// orgID is recorded as smooai.org_id on the turn span so the observability studio
+	// groups turns by org ("" → attribute omitted). Set by the dispatcher after construction.
+	orgID string
 	// modelCeiling is the active model's hard output ceiling (its max_output_tokens),
 	// sourced from the gateway's /model/info. The turn's max_tokens is clamped to
 	// min(DefaultMaxTokens, *modelCeiling) so it never exceeds what the model can emit.
@@ -155,6 +167,23 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	if r.client == nil {
 		return TurnResult{}, errNoEngine
 	}
+
+	// OpenTelemetry GenAI turn span (mirrors the Rust runner's `gen_ai.chat` span and
+	// `KnowledgeChatRuntime::run_turn`). Wraps the whole turn; the tool child spans and
+	// token usage are recorded onto it below. `smooai.org_id` matches the monorepo TS chat
+	// handler's attribute so the studio groups by org. When telemetry is not initialized
+	// (no OTLP endpoint), this is the no-op tracer and every call here is cheap.
+	tr := otel.Tracer(SystemName)
+	ctx, turnSpan := tr.Start(ctx, SpanChat, oteltrace.WithAttributes(
+		attribute.String(GenAISystem, SystemName),
+		attribute.String(GenAIRequestModel, r.spanModel()),
+		attribute.String(GenAIConversationID, conversationID),
+		attribute.String(GenAIAgentName, AgentName),
+	))
+	if r.orgID != "" {
+		turnSpan.SetAttributes(attribute.String(SmooaiOrgID, r.orgID))
+	}
+	defer turnSpan.End()
 
 	// 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources
 	//    / TS citation build: query the same retriever the engine grounds on with the user
@@ -278,6 +307,14 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	}
 	var reply strings.Builder
 	var usage *TurnUsage
+	// Buffer each tool call's raw args + start time from its StreamToolCall so the
+	// `gen_ai.tool` child span emitted after the turn can carry them (redacted) with a
+	// measured duration. Keyed by tool name — the reference runner runs a turn's tool
+	// calls sequentially, so this pairs a call to its result. Mirrors the Rust
+	// ToolSpanRecord collector.
+	pendingToolArgs := map[string]string{}
+	pendingToolStart := map[string]time.Time{}
+	var toolRecords []toolSpanRecord
 	// Consume the engine stream, but stay cancellable: a `cancel` frame (or a client
 	// disconnect) cancels ctx and the turn must stop RIGHT THERE — emitting no further
 	// events after the terminal `cancelled`, and never persisting the partial assistant
@@ -317,6 +354,10 @@ consume:
 				sink(streamToken(requestID, ev.Text))
 			}
 		case core.StreamToolCall:
+			// Buffer the args + start time for the gen_ai.tool span (captured even for a
+			// gated tool, whose chunk is deferred below but whose span still emits).
+			pendingToolArgs[ev.Name] = ev.Arguments
+			pendingToolStart[ev.Name] = time.Now()
 			// DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
 			// gate AFTER write_confirmation_required, so the wire order matches the
 			// reference (Rust) server. Non-gated tools emit their chunk inline as before.
@@ -325,6 +366,17 @@ consume:
 			}
 			sink(streamChunk(requestID, ev.Name, toolCallState(ev.Name, ev.Arguments)))
 		case core.StreamToolResult:
+			isErr := isToolError(ev.Result)
+			rec := toolSpanRecord{name: ev.Name, arguments: pendingToolArgs[ev.Name], isError: isErr}
+			if start, ok := pendingToolStart[ev.Name]; ok {
+				rec.durationMs = time.Since(start).Milliseconds()
+			}
+			if isErr {
+				rec.errText = ev.Result
+			}
+			delete(pendingToolArgs, ev.Name)
+			delete(pendingToolStart, ev.Name)
+			toolRecords = append(toolRecords, rec)
 			sink(streamChunk(requestID, ev.Name, toolResultState(ev.Name, ev.Result)))
 		case core.StreamDone:
 			// The terminal AgentRunResponse is not re-emitted as a stream event (the
@@ -341,6 +393,29 @@ consume:
 	// turn settles as a protocol error rather than an empty success.
 	if err := stream.Err(); err != nil {
 		return TurnResult{}, err
+	}
+
+	// Record token usage on the turn span (omitted when the engine reported none, per the
+	// GenAI conventions) and emit one `gen_ai.tool` child span per tool call — carrying
+	// the redacted arguments, measured latency, and an ERROR status on failure. Mirrors the
+	// Rust runner's post-turn span emission.
+	if usage != nil && (usage.PromptTokens > 0 || usage.CompletionTokens > 0) {
+		turnSpan.SetAttributes(
+			attribute.Int(GenAIUsageInputTokens, usage.PromptTokens),
+			attribute.Int(GenAIUsageOutputTokens, usage.CompletionTokens),
+		)
+	}
+	for _, rec := range toolRecords {
+		_, toolSpan := tr.Start(ctx, SpanTool, oteltrace.WithAttributes(
+			attribute.String(GenAIToolName, rec.name),
+			attribute.String(GenAIToolArguments, redactToolArguments(rec.arguments)),
+			attribute.Int64("duration_ms", rec.durationMs),
+			attribute.Bool("is_error", rec.isError),
+		))
+		if rec.isError {
+			toolSpan.SetStatus(codes.Error, rec.errText)
+		}
+		toolSpan.End()
 	}
 
 	// 5. Persist the outbound reply.
@@ -401,11 +476,38 @@ func toolCallState(name, arguments string) map[string]any {
 	}
 }
 
+// toolSpanRecord is one tool call captured during the turn, used to emit a `gen_ai.tool`
+// child span after the turn. The Go analog of the Rust runner's ToolSpanRecord.
+type toolSpanRecord struct {
+	name       string
+	arguments  string
+	durationMs int64
+	isError    bool
+	errText    string
+}
+
+// spanModel is the model recorded as gen_ai.request.model on the turn span — the runner's
+// explicit model, or the engine default when unset (the Go server leaves it unset today;
+// see defaultTurnModel).
+func (r *TurnRunner) spanModel() string {
+	if r.model != "" {
+		return r.model
+	}
+	return defaultTurnModel
+}
+
+// isToolError reports whether a tool result string carries the engine's failure
+// convention (it folds tool failures into the result text). Shared by the stream_chunk
+// builder and the gen_ai.tool span so both agree on the error flag.
+func isToolError(result string) bool {
+	return strings.HasPrefix(result, "Error:") || strings.HasPrefix(result, "Denied by human:")
+}
+
 // toolResultState builds the stream_chunk state for a tool result, matching the
 // Rust/C# rawResponse.toolResult shape. The engine folds tool failures into the
 // result string, so detect that convention for the isError flag.
 func toolResultState(name, result string) map[string]any {
-	isError := strings.HasPrefix(result, "Error:") || strings.HasPrefix(result, "Denied by human:")
+	isError := isToolError(result)
 	return map[string]any{
 		"rawResponse": map[string]any{
 			"toolResult": map[string]any{"name": name, "isError": isError, "result": result},
