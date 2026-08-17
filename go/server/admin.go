@@ -7,12 +7,14 @@ package server
 // and the same role gate (Bearer token → verify → rank check; 401 missing/invalid,
 // 403 insufficient). Rank: basic=0, curator=1, admin=2.
 //
-// ponytail: connector configs, settings and indexing runs are held in memory
-// (adminStores below) because this server is memory-only today. The durable
-// storage adapter is a separate workstream — swap adminStores' three maps for it;
-// nothing outside this file reads them.
+// Connector configs, settings and indexing runs sit behind the adminStore seam
+// below. inMemoryAdminStore is the default (this server is memory-only unless
+// told otherwise); PostgresStore is the durable implementation, selected with
+// SMOOTH_AGENT_STORAGE=postgres. Nothing outside this file and postgres_store.go
+// touches either.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -103,21 +105,128 @@ type indexingRun struct {
 	orgID            string
 }
 
-// adminStores is the org-scoped admin state. Every read and write filters by org,
-// so one org can never see or mutate another's rows — the same isolation the Rust
-// handlers get from their storage adapter.
-type adminStores struct {
+// adminStore is the persistence seam for the three management-console stores. Every
+// method takes the caller's org and filters by it, so one org can never see or mutate
+// another's rows — the same isolation the Rust handlers get from their storage
+// adapter. A cross-org id is reported exactly like an unknown one (nil / false), so
+// the handlers render an identical 404 and the id space cannot be probed.
+//
+// Two implementations: inMemoryAdminStore (default) and PostgresStore (durable).
+type adminStore interface {
+	ListConnectors(ctx context.Context, orgID string) ([]*connectorConfig, error)
+	// GetConnector returns nil (no error) when the org has no such connector.
+	GetConnector(ctx context.Context, orgID, id string) (*connectorConfig, error)
+	PutConnector(ctx context.Context, connector *connectorConfig) error
+	// DeleteConnector reports whether the connector existed in that org.
+	DeleteConnector(ctx context.Context, orgID, id string) (bool, error)
+	// GetSettings returns nil (no error) when the org has none; the caller substitutes defaults.
+	GetSettings(ctx context.Context, orgID string) (*agentSettings, error)
+	PutSettings(ctx context.Context, settings *agentSettings) error
+	ListRuns(ctx context.Context, orgID string) ([]*indexingRun, error)
+	RecordRun(ctx context.Context, run *indexingRun) error
+}
+
+// inMemoryAdminStore is the in-process adminStore — the reference implementation.
+// Safe for concurrent use.
+type inMemoryAdminStore struct {
 	mu         sync.Mutex
 	connectors map[string]*connectorConfig
 	settings   map[string]*agentSettings
 	runs       []*indexingRun
 }
 
-func newAdminStores() *adminStores {
-	return &adminStores{
+func newInMemoryAdminStore() *inMemoryAdminStore {
+	return &inMemoryAdminStore{
 		connectors: map[string]*connectorConfig{},
 		settings:   map[string]*agentSettings{},
 	}
+}
+
+func (s *inMemoryAdminStore) ListConnectors(_ context.Context, orgID string) ([]*connectorConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []*connectorConfig{}
+	for _, c := range s.connectors {
+		if c.orgID == orgID {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (s *inMemoryAdminStore) GetConnector(_ context.Context, orgID, id string) (*connectorConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A cross-org id takes the same branch as an unknown one.
+	if c, found := s.connectors[id]; found && c.orgID == orgID {
+		clone := *c
+		return &clone, nil
+	}
+	return nil, nil
+}
+
+func (s *inMemoryAdminStore) PutConnector(_ context.Context, connector *connectorConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clone := *connector
+	s.connectors[connector.ID] = &clone
+	return nil
+}
+
+func (s *inMemoryAdminStore) DeleteConnector(_ context.Context, orgID, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, found := s.connectors[id]; !found || c.orgID != orgID {
+		return false, nil
+	}
+	delete(s.connectors, id)
+	return true, nil
+}
+
+func (s *inMemoryAdminStore) GetSettings(_ context.Context, orgID string) (*agentSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if settings, found := s.settings[orgID]; found {
+		clone := *settings
+		return &clone, nil
+	}
+	return nil, nil
+}
+
+func (s *inMemoryAdminStore) PutSettings(_ context.Context, settings *agentSettings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clone := *settings
+	s.settings[settings.OrgID] = &clone
+	return nil
+}
+
+func (s *inMemoryAdminStore) ListRuns(_ context.Context, orgID string) ([]*indexingRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []*indexingRun{}
+	for _, run := range s.runs {
+		if run.orgID == orgID {
+			out = append(out, run)
+		}
+	}
+	return out, nil
+}
+
+func (s *inMemoryAdminStore) RecordRun(_ context.Context, run *indexingRun) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.runs {
+		if existing.ID == run.ID {
+			clone := *run
+			s.runs[i] = &clone
+			return nil
+		}
+	}
+	clone := *run
+	s.runs = append(s.runs, &clone)
+	return nil
 }
 
 // defaultSettings mirrors Rust's "defaults when unset" read.
@@ -317,13 +426,10 @@ func (s *Server) adminIndexingRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	runs := make([]*indexingRun, 0)
-	for _, run := range s.admin.runs {
-		if run.orgID == principal.Org {
-			runs = append(runs, run)
-		}
+	runs, err := s.admin.ListRuns(r.Context(), principal.Org)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not list indexing runs")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
@@ -343,23 +449,24 @@ func (s *Server) adminListConnectors(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	out := make([]*connectorConfig, 0)
-	for _, c := range s.admin.connectors {
-		if c.orgID == principal.Org {
-			out = append(out, c)
-		}
+	out, err := s.admin.ListConnectors(r.Context(), principal.Org)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not list connectors")
+		return
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	writeJSON(w, http.StatusOK, map[string]any{"connectors": out})
 }
 
-// connectorFor returns an org-owned connector, or writes a 404. A cross-org id is
-// deliberately indistinguishable from an unknown one.
-func (s *Server) connectorFor(w http.ResponseWriter, id, orgID string) (*connectorConfig, bool) {
-	c, found := s.admin.connectors[id]
-	if !found || c.orgID != orgID {
+// connectorFor returns an org-owned connector, or writes the rejection and returns
+// ok=false. A cross-org id is deliberately indistinguishable from an unknown one:
+// both are a plain 404, so the connector id space cannot be probed across orgs.
+func (s *Server) connectorFor(w http.ResponseWriter, r *http.Request, id, orgID string) (*connectorConfig, bool) {
+	c, err := s.admin.GetConnector(r.Context(), orgID, id)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not read connector")
+		return nil, false
+	}
+	if c == nil {
 		writeAdminError(w, http.StatusNotFound, "NOT_FOUND", "connector not found")
 		return nil, false
 	}
@@ -371,9 +478,7 @@ func (s *Server) adminGetConnector(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	c, found := s.connectorFor(w, r.PathValue("id"), principal.Org)
+	c, found := s.connectorFor(w, r, r.PathValue("id"), principal.Org)
 	if !found {
 		return
 	}
@@ -411,9 +516,10 @@ func (s *Server) adminCreateConnector(w http.ResponseWriter, r *http.Request) {
 		ID: uuid.NewString(), Name: body.Name, Kind: body.Kind, Config: body.Config,
 		Enabled: body.Enabled, CreatedAt: now, UpdatedAt: now, orgID: principal.Org,
 	}
-	s.admin.mu.Lock()
-	s.admin.connectors[c.ID] = c
-	s.admin.mu.Unlock()
+	if err := s.admin.PutConnector(r.Context(), c); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not create connector")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"connector": c})
 }
 
@@ -426,14 +532,19 @@ func (s *Server) adminUpdateConnector(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	c, found := s.connectorFor(w, r.PathValue("id"), principal.Org)
+	// ponytail: read-modify-write without a lock across the two calls. Concurrent PUTs
+	// to the SAME connector are last-write-wins, which is what a Postgres upsert does
+	// anyway; add row-level locking only if a real conflicting-editor case shows up.
+	c, found := s.connectorFor(w, r, r.PathValue("id"), principal.Org)
 	if !found {
 		return
 	}
 	c.Name, c.Kind, c.Config, c.Enabled = body.Name, body.Kind, body.Config, body.Enabled
 	c.UpdatedAt = time.Now().UTC()
+	if err := s.admin.PutConnector(r.Context(), c); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not update connector")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"connector": c})
 }
 
@@ -442,12 +553,16 @@ func (s *Server) adminDeleteConnector(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	if _, found := s.connectorFor(w, r.PathValue("id"), principal.Org); !found {
+	deleted, err := s.admin.DeleteConnector(r.Context(), principal.Org, r.PathValue("id"))
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not delete connector")
 		return
 	}
-	delete(s.admin.connectors, r.PathValue("id"))
+	if !deleted {
+		// Unknown and cross-org are the same 404 — no existence oracle.
+		writeAdminError(w, http.StatusNotFound, "NOT_FOUND", "connector not found")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -456,9 +571,7 @@ func (s *Server) adminIndexConnector(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	c, found := s.connectorFor(w, r.PathValue("id"), principal.Org)
+	c, found := s.connectorFor(w, r, r.PathValue("id"), principal.Org)
 	if !found {
 		return
 	}
@@ -471,7 +584,10 @@ func (s *Server) adminIndexConnector(w http.ResponseWriter, r *http.Request) {
 		ID: uuid.NewString(), ConnectorName: c.Name, Status: "succeeded",
 		StartedAt: now, FinishedAt: &finished, orgID: principal.Org,
 	}
-	s.admin.runs = append(s.admin.runs, run)
+	if err := s.admin.RecordRun(r.Context(), run); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not record indexing run")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": run})
 }
 
@@ -480,10 +596,12 @@ func (s *Server) adminGetSettings(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.admin.mu.Lock()
-	defer s.admin.mu.Unlock()
-	settings, found := s.admin.settings[principal.Org]
-	if !found {
+	settings, err := s.admin.GetSettings(r.Context(), principal.Org)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not read settings")
+		return
+	}
+	if settings == nil {
 		settings = defaultSettings(principal.Org)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
@@ -510,8 +628,9 @@ func (s *Server) adminPutSettings(w http.ResponseWriter, r *http.Request) {
 		OrgID: principal.Org, Model: body.Model, SystemPrompt: body.SystemPrompt,
 		DefaultTools: body.DefaultTools, UpdatedAt: time.Now().UTC(),
 	}
-	s.admin.mu.Lock()
-	s.admin.settings[principal.Org] = settings
-	s.admin.mu.Unlock()
+	if err := s.admin.PutSettings(r.Context(), settings); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL", "could not save settings")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
 }

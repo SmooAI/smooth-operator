@@ -4,17 +4,21 @@
 //
 // Env contract (shared with the sibling hosts):
 //
-//	SMOOTH_AGENT_BIND      host to listen on (default 127.0.0.1)
-//	SMOOTH_AGENT_PORT      port to listen on (default 8787)
-//	SMOOAI_GATEWAY_URL     OpenAI-compatible gateway base URL
-//	SMOOAI_GATEWAY_KEY     gateway API key (absent → keyless; turns error cleanly)
-//	SMOOTH_PERSONA         system prompt for the agent (optional)
-//	SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)
-//	SMOOTH_NO_TOOLS        set to "1" to serve a chat-only agent (no coding tools)
+//	SMOOTH_AGENT_BIND          host to listen on (default 127.0.0.1)
+//	SMOOTH_AGENT_PORT          port to listen on (default 8787)
+//	SMOOTH_AGENT_STORAGE       memory (default) | postgres — durable sessions + admin stores
+//	SMOOTH_AGENT_DATABASE_URL  Postgres DSN for SMOOTH_AGENT_STORAGE=postgres
+//	SMOOAI_GATEWAY_URL         OpenAI-compatible gateway base URL
+//	SMOOAI_GATEWAY_KEY         gateway API key (absent → keyless; turns error cleanly)
+//	SMOOTH_PERSONA             system prompt for the agent (optional)
+//	SMOOTH_WORKSPACE           root the coding tools are confined to (default: cwd)
+//	SMOOTH_NO_TOOLS            set to "1" to serve a chat-only agent (no coding tools)
 //
-// Alias, still honored so existing deployments keep working:
+// Aliases, still honored so existing deployments keep working:
 //
-//	SMOOTH_OPERATOR_BIND   combined host:port (this host's pre-parity name)
+//	SMOOTH_OPERATOR_BIND       combined host:port (this host's pre-parity name)
+//	DATABASE_URL               read ONLY once SMOOTH_AGENT_STORAGE=postgres has
+//	                           explicitly selected the backend, as in the Rust host
 package main
 
 import (
@@ -68,9 +72,25 @@ func splitAddr(value, host, port string) (string, string) {
 }
 
 func main() {
+	ctx := context.Background()
 	addr := resolveAddr(os.Getenv)
 
 	var opts []server.LocalOption
+
+	// Storage backend. Unset/memory → nothing to install (the in-memory stores stay);
+	// postgres → durable session + admin stores. A misconfigured durable backend is
+	// fatal rather than a silent fall back to memory.
+	storage, err := server.StorageOptionsFromEnv(ctx)
+	if err != nil {
+		log.Fatalf("storage: %v", err)
+	}
+	for _, opt := range storage {
+		opts = append(opts, server.WithLocalServerOption(opt))
+	}
+	if len(storage) > 0 {
+		log.Printf("durable storage enabled: SMOOTH_AGENT_STORAGE=%s", os.Getenv("SMOOTH_AGENT_STORAGE"))
+	}
+
 	if key := os.Getenv("SMOOAI_GATEWAY_KEY"); key != "" {
 		opts = append(opts, server.WithLocalChatClient(core.NewGatewayClient(os.Getenv("SMOOAI_GATEWAY_URL"), key)))
 	}
@@ -96,7 +116,7 @@ func main() {
 	}
 
 	log.Printf("smooth-operator-server (Go, local flavor) listening on ws://%s/ws", addr)
-	if err := server.ServeLocal(context.Background(), addr, opts...); err != nil {
+	if err := server.ServeLocal(ctx, addr, opts...); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }
