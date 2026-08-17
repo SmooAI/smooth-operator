@@ -48,9 +48,9 @@ All five servers now attach the optional `usage` object (`{ costUsd, promptToken
 | Rust | 0 | 5 |
 | C# | 10 | 5 |
 
-`costUsd` **is** 0 everywhere (no server wires a pricing table onto its engine), but it isn't assertable either: the Rust and C# scenario runners strict-compare JSON numbers in opposite directions — Rust emits `0.0` and rejects an integer `0`, C# emits `0` and rejects `0.0` — while Go/Python/TS compare loosely.
+**All five runners now compare JSON numbers BY VALUE** (pearl th-4f1263) — `0` and `0.0` are the same number, so a matcher can name a float field without caring how a given server spells it. Previously Rust and C# strict-compared in *opposite* directions (Rust emitted `0.0` and rejected an integer `0`; C# emitted `0` and rejected `0.0`) while Go/Python/TS already compared loosely, which alone would have made any `usage` assertion unwritable.
 
-Making `usage` a real parity assertion needs two upstream fixes, both outside a server change: align the mock providers' scripted usage in `smooth-operator-core`, and make the Rust/C# runners compare JSON numbers by value. Until then the per-language protocol unit tests cover the contract that matters (the key is omitted when the engine reported nothing, and carries all three fields when it did).
+What remains is the mock disagreement above: align the five mock providers' scripted usage in `smooth-operator-core`, release it, and bump each server's core dependency. Until then the per-language protocol unit tests cover the contract that matters (the key is omitted when the engine reported nothing, and carries all three fields when it did).
 
 **`steps[].send`** — one inbound protocol frame. `{{name}}` placeholders are substituted from values `capture`d earlier (e.g. `"sessionId": "{{sessionId}}"`).
 
