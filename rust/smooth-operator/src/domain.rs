@@ -212,7 +212,12 @@ pub struct Session {
     /// core domain type — storage backends can write the session's org
     /// directly instead of re-deriving it from the conversation.
     pub organization_id: String,
-    pub agent_id: String,
+    /// The agent this session talks to, as supplied by the caller. `None` when the
+    /// caller named no agent — this used to be filled with a fresh UUID, which made
+    /// every agentless session point at an agent that has never existed (th-68897a).
+    /// Absent is the honest answer; a fabricated reference is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub agent_name: String,
     pub user_participant_id: String,
     pub agent_participant_id: String,
@@ -430,7 +435,7 @@ mod tests {
             session_id: "s1".into(),
             conversation_id: "c1".into(),
             organization_id: "org1".into(),
-            agent_id: "a1".into(),
+            agent_id: Some("a1".into()),
             agent_name: "Smantha".into(),
             user_participant_id: "pu".into(),
             agent_participant_id: "pa".into(),

@@ -350,7 +350,7 @@ async fn confirm_tool_action_handler_routes_the_verdict_to_the_parked_turn() {
         session_id: SESSION_ID.into(),
         conversation_id: CONVERSATION_ID.into(),
         organization_id: String::new(),
-        agent_id: "agent-hitl".into(),
+        agent_id: Some("agent-hitl".into()),
         agent_name: "smooth-agent".into(),
         user_participant_id: "part-user".into(),
         agent_participant_id: "part-agent".into(),
