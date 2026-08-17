@@ -310,13 +310,22 @@ def _build_gateway_client() -> Any:
         return None
     try:
         from openai import AsyncOpenAI
+        from smooth_operator_core import GatewayLlmProvider
     except ImportError as exc:  # pragma: no cover - env without the gateway extra
         raise RuntimeError(
             "SMOOAI_GATEWAY_KEY is set but the 'openai' client is not installed; "
             "install with the [gateway] extra to enable live turns."
         ) from exc
     base_url = os.environ.get("SMOOAI_GATEWAY_URL")
-    return AsyncOpenAI(api_key=key, base_url=base_url) if base_url else AsyncOpenAI(api_key=key)
+    sdk = AsyncOpenAI(api_key=key, base_url=base_url) if base_url else AsyncOpenAI(api_key=key)
+    # Wrapped in core's own provider rather than injected raw. The gateway reports
+    # per-request cost ONLY in a response header, and the SDK's parsed response drops
+    # headers — so core's cost-header parser had nothing to read and every turn's
+    # cost_usd came back 0. GatewayLlmProvider uses ``with_raw_response`` to keep them
+    # and exposes ``.headers`` on the seam the engine already reads. Same reason the Go
+    # host injects core.NewGatewayClient. Passing ``client=`` keeps the base_url-optional
+    # branch above as the single place that decides the endpoint.
+    return GatewayLlmProvider(client=sdk)
 
 
 async def serve_local(addr: str = f"{DEFAULT_HOST}:{DEFAULT_PORT}", *, seed_kb: bool = False) -> None:

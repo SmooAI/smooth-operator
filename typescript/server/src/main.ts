@@ -22,6 +22,9 @@
  *   SMOOTH_AGENT_DATABASE_URL  Postgres DSN for SMOOTH_AGENT_STORAGE=postgres (falls
  *                          back to DATABASE_URL, but only once postgres is asked for)
  */
+import { pathToFileURL } from 'node:url';
+
+import { createGatewayClient } from '@smooai/smooth-operator-core';
 import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
 
 import { codingTools } from './codingTools.js';
@@ -62,45 +65,28 @@ function keylessClient(): ChatClientLike {
     } as ChatClientLike;
 }
 
-async function buildChatClient(): Promise<ChatClientLike> {
+// Exported for the wiring test: injecting a header-DROPPING client is exactly the
+// bug this file fixes, and only a test that calls this can catch a regression.
+export async function buildChatClient(): Promise<ChatClientLike> {
     const url = process.env.SMOOAI_GATEWAY_URL;
     const key = process.env.SMOOAI_GATEWAY_KEY;
     if (!url || !key) {
         return keylessClient();
     }
-    // A gateway key is present: wire the real OpenAI-compatible client. `openai` is
-    // an optional, lazily-imported dependency so the keyless local flavor needs no
-    // extra install. (Importing it only on this path keeps the MVP dependency-light.)
-    try {
-        // Indirected through a variable so the bundler/typechecker treats `openai`
-        // as an OPTIONAL runtime dependency (it isn't in this package's deps — the
-        // keyless local flavor needs no LLM SDK). Production installs it alongside.
-        const openaiModule = 'openai';
-        const mod = (await import(openaiModule)) as { default: new (opts: { apiKey: string; baseURL: string }) => ChatClientLike };
-        // Pin the resolved model into the env so the turn runner and the ceiling lookup
-        // agree on which model is in play (the request model and its /model/info ceiling
-        // must be the same model). Pinned under the CANONICAL name, which `resolveModel`
-        // reads first — pinning the alias would be overridden by a set canonical name.
-        process.env.SMOOTH_AGENT_MODEL = resolveModel();
-        const openai = new mod.default({ apiKey: key, baseURL: url });
-        // The engine's `runStream` needs `chat.completions.createStream`; the raw SDK
-        // only exposes `create`. Adapt it: streaming is `create({ ...body, stream: true })`,
-        // whose async-iterable of chunks already matches the engine's `ChatChunk` shape.
-        // Without this the server boots but every turn throws "requires a streaming-capable
-        // client" (the server always uses runStream). ponytail: thin wrapper, no new dep.
-        const completions = openai.chat.completions;
-        completions.createStream = async function* (body: Record<string, unknown>) {
-            // openai's `create({stream:true})` resolves to a Stream; the engine wants a
-            // synchronous AsyncIterable, so await it here and re-yield its chunks.
-            const stream = (await completions.create({ ...body, stream: true })) as unknown as AsyncIterable<import('@smooai/smooth-operator-core').ChatChunk>;
-            yield* stream;
-        };
-        return openai;
-    } catch {
-        // The `openai` package isn't installed — fall back to the keyless client so
-        // the server still boots (turns error cleanly).
-        return keylessClient();
-    }
+    // Pin the resolved model into the env so the turn runner and the ceiling lookup
+    // agree on which model is in play (the request model and its /model/info ceiling
+    // must be the same model). Pinned under the CANONICAL name, which `resolveModel`
+    // reads first — pinning the alias would be overridden by a set canonical name.
+    process.env.SMOOTH_AGENT_MODEL = resolveModel();
+    // Core's own client, not the raw `openai` SDK. The gateway reports per-request cost
+    // ONLY in a response header and the SDK's parsed response drops headers, so core's
+    // cost-header parser had nothing to read and every turn's costUsd came back 0.
+    // createGatewayClient keeps the response (`.withResponse()`) and surfaces the cost —
+    // and it brings a real `createStream`, so the hand-rolled adapter this replaced,
+    // which had no way to carry a cost at all, is gone. Same reason the Go host injects
+    // core.NewGatewayClient. `openai` arrives transitively through core, so the optional
+    // lazy-import dance (and its swallow-everything catch) is gone with it.
+    return createGatewayClient({ baseURL: url, apiKey: key });
 }
 
 /**
@@ -136,8 +122,13 @@ async function main(): Promise<void> {
     // serveLocal already wires SIGTERM/SIGINT → graceful drain + close.
 }
 
-main().catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error('smooth-operator-server failed to start:', err);
-    process.exit(1);
-});
+// Boot only when run as the binary, not when imported. Without this guard, merely
+// importing anything from this module starts a server on the default port — which
+// the wiring test below does, and which would make it a port-collision flake.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    main().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('smooth-operator-server failed to start:', err);
+        process.exit(1);
+    });
+}

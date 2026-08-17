@@ -415,19 +415,19 @@ wheels = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "1.3.2"
+version = "1.8.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openai" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/79/86/3bf1413138e03f8a93cc1b2f89329577550e4067b2102f0818191d331eb2/smooai_smooth_operator_core-1.3.2.tar.gz", hash = "sha256:6320ced2aef127ffb336454ada83014dfeedb20f0b3b5f85a4d65ddfb787534b", size = 102352, upload-time = "2026-07-08T21:36:30.205Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/ca/9442e70c37499c1300472760d3aed515e26b80f22891c8d44fe913e750f0/smooai_smooth_operator_core-1.8.3.tar.gz", hash = "sha256:4d47e045e1fdb6c01b573212b2cc7ce59defc71bd1b3eabda806d42313fb1604", size = 167600, upload-time = "2026-08-17T05:26:37.016Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/f7/936ace91ecc9e0cd3414409ab3388399682db609a1a79a88b68fbdcb60ef/smooai_smooth_operator_core-1.3.2-py3-none-any.whl", hash = "sha256:649987523d0a1470ea06f6727bd17784f54cb9cb7836dc53f6dd52963758ad39", size = 56719, upload-time = "2026-07-08T21:36:29.213Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/df/6189687431f521e099da82cc828ad3a2cd94d1406e7cd8f88a56c4a26e24/smooai_smooth_operator_core-1.8.3-py3-none-any.whl", hash = "sha256:397d91626631ca0843e1ce5a1893a2cafa0ca4af239637f5407c9277a13559bf", size = 105330, upload-time = "2026-08-17T05:26:36.038Z" },
 ]
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.45.0"
+version = "1.46.1"
 source = { editable = "." }
 dependencies = [
     { name = "smooai-smooth-operator-core" },
@@ -449,7 +449,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openai", marker = "extra == 'gateway'", specifier = ">=1.40" },
-    { name = "smooai-smooth-operator-core", specifier = ">=1.3.2" },
+    { name = "smooai-smooth-operator-core", specifier = ">=1.8.3" },
     { name = "websockets", specifier = ">=12" },
 ]
 provides-extras = ["gateway"]
