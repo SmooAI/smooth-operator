@@ -1,5 +1,38 @@
 # @smooai/smooth-operator
 
+## 1.50.3
+
+### Patch Changes
+
+- 0f1ead2: feat(go): env-gated durable-executor selection seam on the Go server turn path (th-137b91, Q parity)
+
+  The Go server drove every turn by calling `SmoothAgent.RunStream` directly, so there was no single
+  place a durable backend (ADR-030) could plug in — parity gap with the Rust server's `turn_executor`.
+  `TurnRunner.Run` now drives the turn through the engine's `AgentExecutor` seam:
+  `turnExecutor(r.executor, os.Getenv("SMOOTH_AGENT_DURABLE_EXECUTOR")).ExecuteStreaming(...)`.
+
+  The durable backend is DEPENDENCY-INJECTED via the new `TurnRunner.executor` field (nil by default),
+  so the server binary keeps no compile-time dependency on any Temporal package. Selection mirrors the
+  Rust `durable_requested` opt-in exactly (`1`/`true`/`on`/`yes`, case- and whitespace-insensitive):
+  the injected executor is used only when the env opts in AND one was supplied; otherwise the
+  zero-infra `InProcessExecutor`, a verbatim delegation to `RunStream`, so a default deployment behaves
+  exactly as before. Requesting durable mode with nothing injected warns and falls back rather than
+  silently pretending the turn is durable. Unit tests cover the full selection matrix with a fake
+  injected executor.
+
+- d8a6d43: feat(python-server): env-gated durable-executor selection seam (th-137b91, Q parity)
+
+  The Python server ran every turn by calling `SmoothAgent.run_stream` directly, so there was no single
+  place a durable backend (ADR-030) could be selected — unlike the Rust server's `turn_executor`
+  (`runner.rs`). `TurnRunner` now routes each turn through the engine's `AgentExecutor` seam, chosen
+  once in `select_turn_executor`: a durable backend is dependency-injected as an opaque `AgentExecutor`
+  (so the server keeps no hard dependency on the Temporal package), and it is used only when
+  `SMOOTH_AGENT_DURABLE_EXECUTOR` opts in (`1/true/on/yes`). With nothing injected — the default — the
+  turn runs on `InProcessExecutor`, a verbatim delegation to `run_stream`, so behavior is unchanged.
+  Asking for durable mode with nothing injected warns and falls back rather than silently pretending a
+  turn is durable. `durable_requested` is split out for a testable parse. Tests cover the parse table,
+  the selection logic, and two real turns driven through a fake injected executor.
+
 ## 1.50.2
 
 ### Patch Changes
