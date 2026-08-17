@@ -2038,7 +2038,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3109,7 +3109,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.41",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3146,7 +3146,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -4220,9 +4220,9 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "1.7.14"
+version = "1.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3158eb55db089d9553477b801e4507fe0fedd3e149f62af46e1da7d39a6d81c9"
+checksum = "16fb059238e430fe008ebef2af566e47aecc4f705a336cb60b90a1e0fe11a60e"
 dependencies = [
  "anyhow",
  "async-trait",
