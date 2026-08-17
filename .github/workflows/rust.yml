@@ -49,7 +49,6 @@ jobs:
             - name: Clippy
               working-directory: rust
               run: cargo clippy --workspace --all-targets -- -D warnings
-              continue-on-error: true # bring to zero, then drop this line
 
             - name: Test
               working-directory: rust
