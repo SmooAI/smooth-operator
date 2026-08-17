@@ -328,6 +328,18 @@ async function runConnection(socket: WebSocket, dispatcher: FrameDispatcher, bac
 
     await backplane.attach(connId, sink);
 
+    if (backplane.associate) {
+        const associate = backplane.associate.bind(backplane);
+        // user/org are known at connect, from the AUTHENTICATED principal — never a frame
+        // field. session/agent are learned later, as sessions resolve (the hook below).
+        const { principal, isAnonymous } = dispatcher.access;
+        if (!isAnonymous) {
+            associate(connId, { kind: 'user', id: principal.sub });
+            associate(connId, { kind: 'org', id: principal.org });
+        }
+        dispatcher.associate = (target) => associate(connId, target);
+    }
+
     // Inbound frames arrive on the socket's 'message' event; buffer them and hand
     // them to the read loop one at a time (the loop awaits each dispatch). The reader
     // wakes on its own level-triggered Signal — and the shared `drainSignal` also

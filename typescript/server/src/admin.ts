@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { AuthVerifier, Principal } from './auth.js';
-import type { Backplane } from './backplane.js';
+import { TARGET_KINDS, type Backplane, type Target } from './backplane.js';
 import type { SessionStore } from './sessionStore.js';
 
 /** Role ranks, mirroring Rust's `role_rank`. */
@@ -493,11 +493,13 @@ async function route(
     // for non-AI publishers (job status, ingestion progress, notifications) that
     // must reach a connected client without an agent turn. Admin-gated.
     //
-    // This server's backplane is a connId→sink registry, so only `connection`
-    // targets are routable. Rust additionally fans out to session/user/org/agent
-    // over a richer backplane; here those answer 501 rather than a misleading
-    // `{"delivered": 0}` — a caller must never read "accepted, reached nobody" as
-    // success for an event that was never routable.
+    // The bundled backplane carries the reference's full 5-target fan-out, so every kind
+    // is deliverable and there is no unroutable case left to misreport. A third-party
+    // backplane predating `publish` still answers 501 — that one genuinely cannot route.
+    //
+    // Targets are opaque ids matched against the registry; this layer does NOT
+    // org-validate session/user/agent ids — the backplane is an id-routing layer, not an
+    // authz layer, and callers hold an Admin credential.
     if (method === 'POST' && path === '/admin/publish') {
         if (!requireRole(deps, req, res, ROLE_ADMIN)) return;
         const body = (await readJsonBody(req)) as { target?: { type?: unknown; id?: unknown }; event?: unknown };
@@ -507,24 +509,19 @@ async function route(
             sendError(res, 400, 'INVALID_BODY', 'target.id is required');
             return;
         }
-        if (kind === 'connection') {
-            if (!deps.backplane.publish) {
-                sendError(res, 501, 'UNSUPPORTED_TARGET', 'the configured backplane cannot publish');
-                return;
-            }
-            sendJson(res, 200, { delivered: deps.backplane.publish(id, body.event as never) });
+        if (!TARGET_KINDS.includes(kind as Target['kind'])) {
+            sendError(res, 400, 'INVALID_BODY', `unknown target type "${kind}" (want connection|session|user|org|agent)`);
             return;
         }
-        if (['session', 'user', 'org', 'agent'].includes(kind)) {
-            sendError(
-                res,
-                501,
-                'UNSUPPORTED_TARGET',
-                `this server's backplane routes by connection id only; "${kind}" targets are not deliverable here`,
-            );
+        if (!deps.backplane.publish) {
+            sendError(res, 501, 'UNSUPPORTED_TARGET', 'the configured backplane cannot publish');
             return;
         }
-        sendError(res, 400, 'INVALID_BODY', `unknown target type "${kind}" (want connection|session|user|org|agent)`);
+        // `delivered` counts THIS process's sockets. With a cross-pod backplane the event
+        // also reaches other pods, whose deliveries this omits — so 0 means "nobody here",
+        // never "delivered to nobody".
+        const target = { kind: kind as Target['kind'], id };
+        sendJson(res, 200, { delivered: deps.backplane.publish(target, body.event as never) });
         return;
     }
 

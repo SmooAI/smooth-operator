@@ -429,25 +429,47 @@ func TestPublishReportsZeroForAnUnattachedConnection(t *testing.T) {
 	}
 }
 
-func TestPublishRefusesTargetsTheBackplaneCannotRoute(t *testing.T) {
-	// The whole point: session/user/org/agent are NOT routable by a connID→sink
-	// backplane. Answering {"delivered": 0} would read as "accepted, reached
-	// nobody" for an event that was never routable — a 501 says so out loud.
-	h := adminServer(t)
+func TestPublishDeliversToEveryTargetKind(t *testing.T) {
+	// These four were a 501 — honest only while a connID→sink backplane could not route
+	// them. The fan-out landed, so each one delivers for real now.
+	bp := NewInMemoryBackplane()
+	got := make(chan map[string]any, 4)
+	bp.Attach(context.Background(), "conn-1", func(e map[string]any) { got <- e })
+	for _, kind := range []string{"session", "user", "org", "agent"} {
+		bp.Associate(context.Background(), "conn-1", Target{Kind: kind, ID: "x"})
+	}
+	h := New(WithAuth(roleVerifier{}), WithBackplane(bp)).Handler()
+
 	for _, kind := range []string{"session", "user", "org", "agent"} {
 		rec := call(t, h, "POST", "/admin/publish", "admin",
-			`{"target":{"type":"`+kind+`","id":"x"},"event":{}}`)
-		if rec.Code != http.StatusNotImplemented {
-			t.Errorf("%s target = %d, want 501", kind, rec.Code)
-			continue
+			`{"target":{"type":"`+kind+`","id":"x"},"event":{"kind":"`+kind+`"}}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s target = %d: %s", kind, rec.Code, rec.Body.String())
 		}
-		body := decode(t, rec)
-		if code := body["error"].(map[string]any)["code"]; code != "UNSUPPORTED_TARGET" {
-			t.Errorf("%s code = %v", kind, code)
+		if d := decode(t, rec)["delivered"]; d != float64(1) {
+			t.Errorf("%s delivered = %v, want 1", kind, d)
 		}
-		if _, leaked := body["delivered"]; leaked {
-			t.Errorf("%s must not report a delivered count at all: %v", kind, body)
+		select {
+		case e := <-got:
+			if e["kind"] != kind {
+				t.Errorf("%s event = %v", kind, e)
+			}
+		default:
+			t.Errorf("%s event never reached the attached sink", kind)
 		}
+	}
+}
+
+func TestPublishReportsZeroForAnUnassociatedSession(t *testing.T) {
+	// The TYPE routes now, so a 501 would be the lie — but nothing is associated with it.
+	h := adminServer(t)
+	rec := call(t, h, "POST", "/admin/publish", "admin",
+		`{"target":{"type":"session","id":"ghost"},"event":{}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	if d := decode(t, rec)["delivered"]; d != float64(0) {
+		t.Errorf("delivered = %v, want 0", d)
 	}
 }
 

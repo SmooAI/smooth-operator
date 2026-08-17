@@ -324,6 +324,13 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	s.backplane.Attach(s.drainCtx, connID, send)
 	defer s.backplane.Detach(context.Background(), connID)
 
+	// user/org are known at connect, from the AUTHENTICATED principal — never a frame
+	// field. session/agent are learned later, as sessions resolve (dispatcher.associate).
+	if p := access.Principal; !access.IsAnonymous {
+		s.backplane.Associate(s.drainCtx, connID, Target{Kind: "user", ID: p.Sub})
+		s.backplane.Associate(s.drainCtx, connID, Target{Kind: "org", ID: p.Org})
+	}
+
 	// One pending-confirmation registry per connection: a confirm_tool_action frame and
 	// the parked turn it resumes are always on the same connection (the session id keys
 	// within it), so the registry need not be server-wide.
@@ -333,6 +340,11 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// construction (before the dispatcher serves any frame) to avoid churning the
 	// long constructor signature. Nil → no hooks.
 	dispatcher.hooks = s.hooks
+	// Same connection-scoped seam as hooks: set after construction rather than growing
+	// the constructor. Nil → session/agent targets simply never become routable.
+	dispatcher.associate = func(target Target) {
+		s.backplane.Associate(s.drainCtx, connID, target)
+	}
 
 	// teardown unparks any confirmation-blocked turn, drains in-flight turns, closes the
 	// writer sink once (under sendMu, so an in-flight send can't race the close), waits
