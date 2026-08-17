@@ -16,4 +16,13 @@
     <ProjectReference Include="..\postgres\src\SmooAI.SmoothOperator.Server.Postgres.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- OpenTelemetry tracing: exports the TurnRunner's gen_ai.* spans over OTLP, wired ONLY when
+         OTEL_EXPORTER_OTLP_ENDPOINT is set (see Program.cs) — the env gate mirrors the Rust host's
+         init_telemetry. Without the endpoint no exporter is installed and the ActivitySource stays
+         dormant, so a collector-less run has zero telemetry overhead. -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+  </ItemGroup>
+
 </Project>

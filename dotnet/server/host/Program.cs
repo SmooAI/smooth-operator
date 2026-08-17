@@ -1,6 +1,9 @@
 using System.Net.Http.Headers;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.FileProviders;
+using OpenTelemetry;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using SmooAI.SmoothOperator.Server;
 using SmooAI.SmoothOperator.Server.AspNetCore;
 using SmooAI.SmoothOperator.Server.Postgres;
@@ -160,6 +163,20 @@ if (Get("SMOOTH_NO_TOOLS") != "1")
 {
     var workspace = Get("SMOOTH_WORKSPACE", Directory.GetCurrentDirectory());
     builder.Services.AddSingleton<IReadOnlyList<AITool>>(CodingTools.Create(workspace));
+}
+
+// ── Telemetry: export the TurnRunner's gen_ai.chat / gen_ai.tool spans over OTLP, but ONLY when
+//    OTEL_EXPORTER_OTLP_ENDPOINT is set — the same env gate the Rust host's init_telemetry uses.
+//    Unset (the default) ⇒ no exporter is installed and the ActivitySource stays dormant, so a
+//    collector-less run (local dev, the parity bench, CI) has zero telemetry overhead. The endpoint
+//    (and OTEL_EXPORTER_OTLP_* protocol/headers) are read by the exporter from the environment. ──
+if (!string.IsNullOrWhiteSpace(Get("OTEL_EXPORTER_OTLP_ENDPOINT")))
+{
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(r => r.AddService(Telemetry.SystemName))
+        .WithTracing(t => t
+            .AddSource(Telemetry.ActivitySourceName)
+            .AddOtlpExporter());
 }
 
 builder.Services.AddSmoothOperatorServer();
