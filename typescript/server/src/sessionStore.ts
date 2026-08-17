@@ -11,6 +11,18 @@
  */
 import { randomUUID } from 'node:crypto';
 
+/**
+ * The organization every connection belongs to when its principal carries no `org`
+ * claim — the same `'public'` {@link Principal.org} defaults to in `auth.ts`.
+ *
+ * It is the default for the `orgId` arguments below so a single-tenant caller (and
+ * every existing test) reads and writes the same org without passing anything, while
+ * a multi-tenant deployment gets real isolation by passing the principal's org. Note
+ * what this default is NOT: it is a specific org, never "all orgs". Widening
+ * ownership must never widen tenancy.
+ */
+export const DEFAULT_ORG_ID = 'public';
+
 /** A conversation session: the unit the protocol's create/get operate on. */
 export interface StoredSession {
     sessionId: string;
@@ -96,7 +108,7 @@ export interface SessionStore {
      * so subsequent turns append and history replays). An absent or unknown id mints
      * a fresh conversation (unchanged behavior).
      */
-    createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string): Promise<StoredSession>;
+    createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string, orgId?: string): Promise<StoredSession>;
     getSession(sessionId: string): Promise<StoredSession | null>;
     /**
      * A conversation by id, or null if unknown — the resume-binding existence check.
@@ -106,7 +118,7 @@ export interface SessionStore {
      * REQUIRED rather than optional so an implementation that doesn't track ownership
      * fails to compile instead of silently reporting every conversation as ownerless.
      */
-    getConversation(conversationId: string): Promise<{ conversationId: string; userEmail: string | undefined } | null>;
+    getConversation(conversationId: string, orgId?: string): Promise<{ conversationId: string; userEmail: string | undefined } | null>;
     appendMessage(conversationId: string, direction: MessageDirection, text: string): Promise<StoredMessage>;
     /** The most recent `limit` messages for a conversation, oldest first. */
     listMessages(conversationId: string, limit: number): Promise<StoredMessage[]>;
@@ -128,7 +140,7 @@ export interface SessionStore {
      * applying a limit. Limiting first and filtering after silently returns short or
      * empty pages, which reads as "no conversations" rather than as a bug.
      */
-    listConversations(userEmail: string | undefined): Promise<ConversationSummary[]>;
+    listConversations(userEmail: string | undefined, orgId?: string): Promise<ConversationSummary[]>;
     /**
      * SMOODEV-590 — persist the conversation's current workflow step id (set by the
      * post-turn judge). A no-op for an unknown session. Optional so existing stores
@@ -158,7 +170,9 @@ export class InMemorySessionStore implements SessionStore {
      */
     private readonly convOwner = new Map<string, string | undefined>();
 
-    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string): Promise<StoredSession> {
+    // `orgId` is accepted and ignored: this store is single-tenant by construction, so
+    // there is nothing to partition. A durable store (postgresStore.ts) uses it.
+    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string, _orgId?: string): Promise<StoredSession> {
         // Resume: bind to an existing conversation (reuse its id + persisted log) when
         // the caller passes a known conversationId. Unknown/absent → mint a fresh one.
         const resume = conversationId && this.messages.has(conversationId);
@@ -198,7 +212,7 @@ export class InMemorySessionStore implements SessionStore {
         return this.sessions.get(sessionId) ?? null;
     }
 
-    async getConversation(conversationId: string): Promise<{ conversationId: string; userEmail: string | undefined } | null> {
+    async getConversation(conversationId: string, _orgId?: string): Promise<{ conversationId: string; userEmail: string | undefined } | null> {
         return this.messages.has(conversationId) ? { conversationId, userEmail: this.convOwner.get(conversationId) } : null;
     }
 
@@ -220,7 +234,7 @@ export class InMemorySessionStore implements SessionStore {
         return limit >= list.length ? [...list] : list.slice(list.length - limit);
     }
 
-    async listConversations(userEmail: string | undefined): Promise<ConversationSummary[]> {
+    async listConversations(userEmail: string | undefined, _orgId?: string): Promise<ConversationSummary[]> {
         const out: ConversationSummary[] = [];
         for (const [conversationId, list] of this.messages) {
             // Scoped: skip conversations this user doesn't own. Filtering here — inside the

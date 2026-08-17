@@ -357,7 +357,7 @@ export class FrameDispatcher {
         // does. Erroring here instead would tell the attacker their guessed id was real.
         let conversationId = requested;
         if (requested !== undefined && this.scopeEmail() !== undefined) {
-            const conv = await this.store.getConversation(requested);
+            const conv = await this.store.getConversation(requested, this.access.principal.org);
             if (!conv || !this.mayRead(conv.userEmail)) conversationId = undefined;
         }
 
@@ -372,6 +372,7 @@ export class FrameDispatcher {
             typeof frame.userName === 'string' ? frame.userName : undefined,
             ownerEmail,
             conversationId,
+            this.access.principal.org,
         );
         sink(
             protocol.immediateResponse(requestId, 200, 'Session created', {
@@ -419,7 +420,7 @@ export class FrameDispatcher {
 
         // Scoped to the connection's principal. Applied in the store selection, ahead of
         // the limit below — filtering after a limit silently yields short/empty pages.
-        const summaries = await this.store.listConversations(this.scopeEmail());
+        const summaries = await this.store.listConversations(this.scopeEmail(), this.access.principal.org);
         const conversations = summaries
             .filter((c) => c.messageCount > 0)
             .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))

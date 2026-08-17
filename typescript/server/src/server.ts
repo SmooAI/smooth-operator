@@ -34,13 +34,19 @@ import type { Frame } from './protocol.js';
 import type { ChatClientLike, Tool, ToolHook } from '@smooai/smooth-operator-core';
 import type { AuthVerifier } from './auth.js';
 import { NoAuthVerifier } from './auth.js';
-import { AdminStores, handleAdminRequest } from './admin.js';
+import { InMemoryAdminStore, type AdminStore, handleAdminRequest } from './admin.js';
 import { InMemorySessionStore, type SessionStore } from './sessionStore.js';
 
 export interface ServerOptions {
     /** The OpenAI-compatible engine client (gateway in prod, a mock in tests). */
     chatClient: ChatClientLike;
     store?: SessionStore;
+    /**
+     * The `/admin/*` store (default: a fresh in-memory one). A durable backend
+     * (`PostgresStore`) implements both this and {@link ServerOptions.store}, so the
+     * same instance is normally passed to both.
+     */
+    adminStore?: AdminStore;
     knowledge?: AccessKnowledge;
     auth?: AuthVerifier;
     backplane?: Backplane;
@@ -151,7 +157,7 @@ export function buildServer(options: ServerOptions): {
 
     // The `/admin/*` management API the console drives (see admin.ts). Everything
     // else on plain HTTP is not part of the protocol surface.
-    const adminStores = new AdminStores();
+    const adminStores: AdminStore = options.adminStore ?? new InMemoryAdminStore();
     const http = createServer((req, res) => {
         void handleAdminRequest({ auth, store, stores: adminStores }, req, res).then((handled) => {
             if (handled) return;
@@ -257,10 +263,17 @@ export async function serveLocal(options: {
      * turn's tool registry. Forwarded straight to {@link ServerOptions.toolHooks}.
      */
     toolHooks?: ToolHook[];
+    /**
+     * Durable storage (a `PostgresStore`, which is both a {@link SessionStore} and an
+     * {@link AdminStore}). Omitted — the default — keeps the local flavor fully
+     * in-memory, exactly as before.
+     */
+    storage?: SessionStore & AdminStore;
 }): Promise<RunningServer> {
     return serve({
         chatClient: options.chatClient,
-        store: new InMemorySessionStore(),
+        store: options.storage ?? new InMemorySessionStore(),
+        adminStore: options.storage,
         auth: new NoAuthVerifier(),
         backplane: new InMemoryBackplane(),
         knowledge: options.knowledge,

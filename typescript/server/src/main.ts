@@ -18,11 +18,15 @@
  *   SMOOAI_GATEWAY_KEY     gateway API key
  *   SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)
  *   SMOOTH_NO_TOOLS        set to "1" to serve a chat-only agent (no coding tools)
+ *   SMOOTH_AGENT_STORAGE   memory (default) | postgres — durable sessions + admin stores
+ *   SMOOTH_AGENT_DATABASE_URL  Postgres DSN for SMOOTH_AGENT_STORAGE=postgres (falls
+ *                          back to DATABASE_URL, but only once postgres is asked for)
  */
 import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
 
 import { codingTools } from './codingTools.js';
 import { resolveBind, resolveModel } from './env.js';
+import { resolveStorage } from './postgresStore.js';
 import { createGatewayModelCeilingResolver, type ModelCeilingResolver } from './modelCeiling.js';
 import { serveLocal } from './server.js';
 
@@ -117,8 +121,16 @@ function buildTools(): Tool[] | undefined {
 async function main(): Promise<void> {
     const { host, port } = resolveBind();
     const chatClient = await buildChatClient();
+    // Unset/memory → undefined, and the local flavor stays fully in-memory. A
+    // misconfigured durable backend throws out of main() rather than silently falling
+    // back to memory: losing durability quietly is the failure worth shouting about.
+    const storage = await resolveStorage();
+    if (storage) {
+        // eslint-disable-next-line no-console
+        console.log(`durable storage enabled: SMOOTH_AGENT_STORAGE=${process.env.SMOOTH_AGENT_STORAGE}`);
+    }
 
-    const server = await serveLocal({ chatClient, host, port, model: resolveModel(), modelCeiling: buildModelCeiling(), tools: buildTools() });
+    const server = await serveLocal({ chatClient, host, port, model: resolveModel(), modelCeiling: buildModelCeiling(), tools: buildTools(), storage });
     // eslint-disable-next-line no-console
     console.log(`smooth-operator-server (TypeScript, local flavor) listening on ${server.url}`);
     // serveLocal already wires SIGTERM/SIGINT → graceful drain + close.

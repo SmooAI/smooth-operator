@@ -80,7 +80,7 @@ WS connection ──▶ FrameDispatcher ──▶ create/get session ──▶ S
 
 - **WS transport** (`ws`): per-connection read loop + a single outbound writer — one socket, one writer, never a concurrent `ws.send`.
 - **FrameDispatcher** — validates inbound frames and routes them; unknown/invalid frames error *without* dropping the connection.
-- **SessionStore** — in-memory sessions + conversation logs behind an async interface; a durable adapter drops in.
+- **SessionStore** — in-memory sessions + conversation logs behind an async interface, with a durable **Postgres** implementation (`PostgresStore`) selected by `SMOOTH_AGENT_STORAGE=postgres` + `SMOOTH_AGENT_DATABASE_URL`.
 - **TurnRunner** — runs the engine streaming and maps `StreamEvent`s onto protocol events, with auto-context citations.
 - **Graceful SIGTERM drain** — an in-flight turn finishes before the socket closes; a backplane `detach` always runs after the loop.
 
@@ -143,7 +143,9 @@ pnpm --filter @smooai/smooth-operator-server typecheck
 pnpm --filter @smooai/smooth-operator-server test
 ```
 
-27 tests: protocol conformance (round-trips the `spec/conformance/fixtures.json` golden messages), boot, turn round-trip over a real WebSocket (tokens, tool chunks, citations, multi-turn history), graceful drain, the auth verifier seam, and the tool-gating / OTP flow.
+Protocol conformance (round-trips the `spec/conformance/fixtures.json` golden messages), boot, turn round-trip over a real WebSocket (tokens, tool chunks, citations, multi-turn history), graceful drain, the auth verifier seam, the tool-gating / OTP flow, and the durable Postgres store.
+
+The Postgres tests spin up a throwaway container (testcontainers) and **skip cleanly** when Docker is unreachable, so the suite needs no daemon. On OrbStack, testcontainers' Ryuk reaper can hang before the database container starts — prefix with `TESTCONTAINERS_RYUK_DISABLED=true` if they skip with Docker plainly running.
 
 ## What's done vs. stubbed
 
@@ -152,7 +154,7 @@ pnpm --filter @smooai/smooth-operator-server test
 | WS transport, single writer, read loop | **Done** |
 | FrameDispatcher (ping / create / get / send_message) | **Done** |
 | Turn cancellation (`cancel` → `cancelled` 499, one turn per connection) | **Done** |
-| In-memory SessionStore + history replay | **Done** |
+| In-memory SessionStore + history replay | **Done** (still the default) |
 | TurnRunner streaming (text + tool chunks + citations) | **Done** |
 | Host tool injection (`tools`) + per-agent config + authLevel gate + OTP | **Done** |
 | SEP extension hosting (allowlist-gated) | **Done** |
@@ -161,7 +163,7 @@ pnpm --filter @smooai/smooth-operator-server test
 | `serveLocal()` embeddable entrypoint + binary | **Done** |
 | Reranker stage on the citation path | **Stubbed** — the engine supports a reranker; not yet a server knob |
 | Cross-pod backplane (Redis/NATS) | **Stubbed** — in-memory `attach`/`detach`; the seam is wired |
-| Durable (Postgres/Dynamo) SessionStore | **Stubbed** — implement the `SessionStore` interface |
+| Durable Postgres SessionStore + admin stores | **Done** — `SMOOTH_AGENT_STORAGE=postgres` (DynamoDB is still open) |
 
 ---
 
