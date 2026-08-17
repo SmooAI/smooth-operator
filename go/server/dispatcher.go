@@ -283,6 +283,16 @@ func (d *FrameDispatcher) associateSession(session *StoredSession) {
 }
 
 func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inboundFrame, sink EventSink) {
+	// agentId is REQUIRED by the Request schema and the generated client type is
+	// non-optional, so absent-or-blank is a MALFORMED REQUEST, not an agentless session.
+	// The old code fabricated a UUID and th-68897a's first pass silently stored NULL —
+	// both skip the validation that belongs at this boundary. The column stays nullable
+	// for rows written before this check; it is just no longer reachable from here.
+	if strings.TrimSpace(frame.AgentID) == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "Missing 'agentId'"))
+		return
+	}
+
 	// Resume when the caller passes a known conversationId (bind the new session to it so
 	// subsequent turns append to its log and the runner replays its history); absent/unknown
 	// → a fresh conversation (byte-for-byte unchanged). th-d5b446.

@@ -63,7 +63,7 @@ describe('toolHooks server seam', () => {
         server = await serve({ chatClient: chat, tools: [leakyTool()], toolHooks: [hook] });
         const client = await TestClient.connect(server.url);
 
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 
         client.sendAction({ action: 'send_message', requestId: 'sm', sessionId, message: 'look up account a1' });
@@ -104,7 +104,7 @@ describe('toolHooks server seam', () => {
         server = await serve({ chatClient: chat, tools: [tool], toolHooks: [blockHook] });
         const client = await TestClient.connect(server.url);
 
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 
         client.sendAction({ action: 'send_message', requestId: 'sm', sessionId, message: 'do the dangerous thing' });

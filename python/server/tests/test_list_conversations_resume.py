@@ -150,7 +150,12 @@ async def test_dispatch_resume_echoes_conversation_id_and_keeps_history() -> Non
 
     events = await _dispatch(
         dispatcher,
-        {"action": "create_conversation_session", "requestId": "r1", "conversationId": first.conversation_id},
+        {
+            "action": "create_conversation_session",
+            "requestId": "r1",
+            "agentId": "agent",
+            "conversationId": first.conversation_id,
+        },
     )
     data = events[0]["data"]
     assert data["conversationId"] == first.conversation_id  # resumed: same id echoed back
@@ -165,7 +170,9 @@ async def test_dispatch_create_without_conversation_id_mints_fresh() -> None:
     store = InMemorySessionStore()
     dispatcher = FrameDispatcher(store, None)
 
-    events = await _dispatch(dispatcher, {"action": "create_conversation_session", "requestId": "r1"})
+    events = await _dispatch(
+        dispatcher, {"action": "create_conversation_session", "requestId": "r1", "agentId": "agent"}
+    )
     convo_id = events[0]["data"]["conversationId"]
     assert isinstance(convo_id, str) and convo_id
     # Fresh empty conversation → not listed.

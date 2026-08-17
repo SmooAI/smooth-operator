@@ -31,7 +31,7 @@ function lastUserContent(messages: Array<Record<string, unknown>>): unknown {
 }
 
 async function createSession(client: TestClient): Promise<string> {
-    client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+    client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
     return ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 }
 

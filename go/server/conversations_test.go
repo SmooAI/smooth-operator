@@ -215,3 +215,37 @@ func TestCreateSessionResumeEchoesConversationId(t *testing.T) {
 		t.Errorf("resumed session echoed conversationId %v, want %q", data["conversationId"], orig.ConversationID)
 	}
 }
+
+// agentId is REQUIRED by the Request schema, so absent-or-blank is a malformed request —
+// not an agentless session. Asserts BOTH halves: the request is rejected, and NOTHING is
+// persisted. A rejection that still writes a row is the same bug wearing an error message.
+func TestCreateSessionRejectsBlankAgentID(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame map[string]any
+	}{
+		{"absent", map[string]any{"action": "create_conversation_session", "requestId": "r1"}},
+		{"empty", map[string]any{"action": "create_conversation_session", "requestId": "r1", "agentId": ""}},
+		{"whitespace", map[string]any{"action": "create_conversation_session", "requestId": "r1", "agentId": "   "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			d := authEnabledDispatcher(store, AnonymousAccess)
+
+			sink, events := capture()
+			dispatchJSON(t, d, tc.frame, sink)
+
+			if len(*events) != 1 || errCode((*events)[0]) != "VALIDATION_ERROR" {
+				t.Fatalf("want a VALIDATION_ERROR, got %+v", *events)
+			}
+			// …and no conversation was persisted.
+			convs, err := store.ListConversations(context.Background(), ConversationScope{})
+			if err != nil {
+				t.Fatalf("ListConversations: %v", err)
+			}
+			if len(convs) != 0 {
+				t.Errorf("a rejected create persisted %d conversation(s)", len(convs))
+			}
+		})
+	}
+}

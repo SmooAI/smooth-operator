@@ -63,7 +63,7 @@ describe('turn round-trip over a real WebSocket', () => {
         server = await serve({ chatClient: chat });
         const client = await TestClient.connect(server.url);
 
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 
         client.sendAction({ action: 'send_message', requestId: 'sm', sessionId, message: 'how long to return?' });
@@ -96,7 +96,7 @@ describe('turn round-trip over a real WebSocket', () => {
         server = await serve({ chatClient: new MockLlmProvider().pushText('Returns are accepted within 30 days.'), knowledge });
         const client = await TestClient.connect(server.url);
 
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 
         client.sendAction({ action: 'send_message', requestId: 'sm', sessionId, message: 'what is the refund policy?' });
@@ -121,7 +121,7 @@ describe('turn round-trip over a real WebSocket', () => {
         server = await serve({ chatClient: chat });
         const client = await TestClient.connect(server.url);
 
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 
         client.sendAction({ action: 'send_message', requestId: 'sm-1', sessionId, message: 'first question' });

@@ -85,7 +85,7 @@ describe('graceful drain', () => {
         };
 
         const client = await TestClient.connect(`ws://127.0.0.1:${port}/ws`);
-        client.sendAction({ action: 'create_conversation_session', requestId: 'cs' });
+        client.sendAction({ action: 'create_conversation_session', requestId: 'cs', agentId: 'agent' });
         const sessionId = ((await client.receive()).data as Record<string, unknown>).sessionId as string;
 
         // The connection is attached to the backplane while the read loop runs.

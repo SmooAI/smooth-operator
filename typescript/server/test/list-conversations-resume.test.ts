@@ -19,7 +19,7 @@ import { TestClient } from './wsClient.js';
 
 /** Create a session over the wire; returns its ids. Optionally resume `conversationId`. */
 async function createSession(client: TestClient, opts: { requestId: string; conversationId?: string; agentId?: string }): Promise<{ sessionId: string; conversationId: string }> {
-    client.sendAction({ action: 'create_conversation_session', ...opts });
+    client.sendAction({ action: 'create_conversation_session', agentId: 'agent', ...opts });
     const created = await client.receive();
     expect(created.type).toBe('immediate_response');
     const data = created.data as Record<string, unknown>;
