@@ -20,6 +20,11 @@ public static class ServiceCollectionExtensions
     {
         services.TryAddSingleton<ISessionStore, InMemorySessionStore>();
 
+        // The connection registry POST /admin/publish delivers through. Registered here so the
+        // WebSocket host and the admin route share ONE instance — two different defaults would attach
+        // sinks to a registry the publish route never reads, and every publish would report 0.
+        services.TryAddSingleton<IBackplane, InMemoryBackplane>();
+
         // Host-callable seam to start a turn server-side (e.g. a webhook → "investigate this alert")
         // instead of from a client send_message frame. Resolves the SAME shared collaborators
         // BuildDispatcher hands the client path (persona via SMOOTH_PERSONA, the LLM workflow judge

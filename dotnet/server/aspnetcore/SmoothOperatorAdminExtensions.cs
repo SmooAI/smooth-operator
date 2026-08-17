@@ -41,8 +41,26 @@ public static class SmoothOperatorAdminExtensions
         // storage swap point (see AdminStores); durable storage means changing that class.
         var stores = endpoints.ServiceProvider.GetService<AdminStores>() ?? new AdminStores();
 
+        // The connection registry POST /admin/publish delivers through. AddSmoothOperatorServer
+        // registers the shared in-memory default; the fallback here only covers an admin-only host with
+        // no WebSocket endpoint, where there are no sinks to reach anyway.
+        var backplane = endpoints.ServiceProvider.GetService<IBackplane>() ?? new InMemoryBackplane();
+
         // Ungated, exactly as in Rust: the console probes health before it has a token.
         endpoints.MapGet($"{prefix}/health", () => Results.Ok(new { status = "ok" }));
+
+        // Also UNGATED, exactly as in Rust: gateway pricing is not org-sensitive, and the console's
+        // cost badges must render on a tokenless local connection.
+        //
+        // Written with ToJsonString rather than Results.Ok: a top-level JsonObject handed to the
+        // minimal-API JSON writer serializes to an EMPTY body (it round-trips fine as a property, e.g.
+        // a connector's `config`, which is why nothing else here hits it). The map is already a JSON
+        // document, so re-serializing it was pointless work anyway.
+        endpoints.MapGet($"{prefix}/model-costs", async (HttpContext ctx) =>
+        {
+            var costs = await ModelCostsAsync(FetchModelCostsAsync, ctx.RequestAborted);
+            return Results.Content(costs.ToJsonString(), "application/json");
+        });
 
         endpoints.MapGet($"{prefix}/me", (HttpContext ctx) =>
         {
@@ -295,6 +313,51 @@ public static class SmoothOperatorAdminExtensions
             return Results.Ok(new { settings });
         });
 
+        // ── Realtime publish ────────────────────────────────────────────────────────
+        // Push an event to a backplane target over the connection fleet — the plug point for non-AI
+        // publishers (job status, ingestion progress, notifications) that need to reach a connected
+        // client without going through an agent turn. Admin-gated.
+        //
+        // This server's backplane is a connectionId→sink registry, so only `connection` targets can be
+        // routed. Rust additionally fans out to session/user/org/agent over a richer backplane; here
+        // those are a hard 501 rather than a misleading `{"delivered": 0}` — a caller must never read
+        // "accepted, reached nobody" as success for an event that was never routable in the first
+        // place. When the fan-out lands, each target flips from a 501 to a real count.
+        endpoints.MapPost($"{prefix}/publish", async (HttpContext ctx) =>
+        {
+            var (_, deny) = Authorize(ctx, RoleAdmin);
+            if (deny is not null) return deny;
+
+            var (body, bodyError) = await ReadJsonBodyAsync(ctx);
+            if (bodyError is not null) return bodyError;
+
+            var target = body?["target"] as JsonObject;
+            var kind = (Str(target, "type") ?? string.Empty).Trim().ToLowerInvariant();
+            var id = (Str(target, "id") ?? string.Empty).Trim();
+            if (id.Length == 0)
+            {
+                return AdminError(StatusCodes.Status400BadRequest, "INVALID_BODY", "target.id is required");
+            }
+
+            switch (kind)
+            {
+                case "connection":
+                    var payload = body?["event"] is JsonObject ev ? (JsonObject)ev.DeepClone() : new JsonObject();
+                    return Results.Ok(new { delivered = backplane.Publish(id, payload) });
+
+                case "session":
+                case "user":
+                case "org":
+                case "agent":
+                    return AdminError(StatusCodes.Status501NotImplemented, "UNSUPPORTED_TARGET",
+                        $"this server's backplane routes by connection id only; \"{kind}\" targets are not deliverable here");
+
+                default:
+                    return AdminError(StatusCodes.Status400BadRequest, "INVALID_BODY",
+                        $"unknown target type \"{kind}\" (want connection|session|user|org|agent)");
+            }
+        });
+
         // ── This host's own extra: re-ingest every configured repo without a restart. ──
         endpoints.MapPost($"{prefix}/reindex", async (HttpContext ctx) =>
         {
@@ -395,6 +458,80 @@ public static class SmoothOperatorAdminExtensions
         RoleCurator => "curator",
         _ => "basic",
     };
+
+    // ── model costs ─────────────────────────────────────────────────────────────
+
+    private static readonly object ModelCostsGate = new();
+
+    /// <summary>
+    /// The mapped <c>/model/info</c> payload for the process. Gateway pricing is stable, so one fetch
+    /// per process is enough (matching Rust's <c>OnceCell</c>). Only a SUCCESS is ever stored here —
+    /// caching a failure would pin an empty map for the whole process, so every cost badge would stay
+    /// missing until a restart even after the gateway recovered.
+    /// </summary>
+    private static JsonObject? _modelCostsCache;
+
+    /// <summary>Ten seconds, matching the Go and TS ports. Reused so a per-request client isn't minted.</summary>
+    private static readonly HttpClient ModelCostsHttp = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+    /// <summary>
+    /// The cached model-cost map, fetching once per process via <paramref name="fetch"/>. Any failure
+    /// degrades to an empty object with status 200 — never a 500, since a missing badge beats a broken
+    /// page — and is deliberately NOT cached, so the next request retries.
+    /// </summary>
+    private static async Task<JsonObject> ModelCostsAsync(Func<CancellationToken, Task<JsonObject>> fetch, CancellationToken cancellationToken)
+    {
+        lock (ModelCostsGate)
+        {
+            if (_modelCostsCache is not null)
+            {
+                return _modelCostsCache;
+            }
+        }
+
+        JsonObject mapped;
+        try
+        {
+            mapped = await fetch(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            return new JsonObject();
+        }
+
+        lock (ModelCostsGate)
+        {
+            // A lost race is harmless — both callers mapped the same stable pricing.
+            return _modelCostsCache ??= mapped;
+        }
+    }
+
+    /// <summary>
+    /// GET the gateway's <c>/model/info</c> with the server's configured gateway credentials — the
+    /// same ones the turns use — and map it. Reads the cross-engine <c>SMOOAI_*</c> names Go and TS
+    /// read, with this host's <c>SMOOTH_*</c> aliases honored too so a deployment that set only those
+    /// gets badges rather than a silently empty map.
+    /// </summary>
+    private static async Task<JsonObject> FetchModelCostsAsync(CancellationToken cancellationToken)
+    {
+        var baseUrl = ServerEnv.First(
+            Environment.GetEnvironmentVariable("SMOOAI_GATEWAY_URL"),
+            Environment.GetEnvironmentVariable("SMOOTH_GATEWAY_URL"),
+            "https://llm.smoo.ai/v1").TrimEnd('/');
+        var key = ServerEnv.First(
+            Environment.GetEnvironmentVariable("SMOOAI_GATEWAY_KEY"),
+            Environment.GetEnvironmentVariable("SMOOTH_GATEWAY_KEY"));
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/model/info");
+        if (key.Length > 0)
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+        }
+        using var response = await ModelCostsHttp.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        return ModelInfo.MapModelInfo(JsonNode.Parse(body));
+    }
 
     // ── bodies + responses ──────────────────────────────────────────────────────
 

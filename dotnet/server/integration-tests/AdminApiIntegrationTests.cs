@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using SmooAI.SmoothOperator.Server.AspNetCore;
@@ -40,10 +41,15 @@ public class AdminApiIntegrationTests
         { "POST", "/admin/connectors/x/index" },
         { "GET", "/admin/settings" },
         { "PUT", "/admin/settings" },
+        { "POST", "/admin/publish" },
         { "POST", "/admin/reindex" },
     };
 
-    private static WebApplication BuildAdminApp(AuthMode mode, RepoIngestionService? ingestion = null, ISessionStore? store = null)
+    private static WebApplication BuildAdminApp(
+        AuthMode mode,
+        RepoIngestionService? ingestion = null,
+        ISessionStore? store = null,
+        IBackplane? backplane = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -55,6 +61,10 @@ public class AdminApiIntegrationTests
         if (store is not null)
         {
             builder.Services.AddSingleton(store);
+        }
+        if (backplane is not null)
+        {
+            builder.Services.AddSingleton(backplane);
         }
 
         var app = builder.Build();
@@ -385,6 +395,203 @@ public class AdminApiIntegrationTests
         var (status, json) = await Call(app, "PUT", "/admin/settings", Admin(), new { systemPrompt = "x" });
         Assert.Equal(HttpStatusCode.BadRequest, status);
         Assert.Equal("INVALID_BODY", json!["error"]!["code"]!.GetValue<string>());
+        await app.StopAsync();
+    }
+
+    // ── model costs ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// One sequential test on purpose: the model-cost cache is process-wide, so the ungated read, the
+    /// degrade-to-empty and the cache-only-success properties can only be asserted in a known order.
+    /// The order is what proves the interesting part — a FAILED fetch must not be cached, or every
+    /// cost badge stays missing until a restart even after the gateway recovers.
+    /// </summary>
+    [Fact]
+    public async Task ModelCosts_IsUngated_DegradesToEmpty_AndCachesOnlySuccess()
+    {
+        const string urlVar = "SMOOAI_GATEWAY_URL";
+        const string keyVar = "SMOOAI_GATEWAY_KEY";
+        var originalUrl = Environment.GetEnvironmentVariable(urlVar);
+        var originalKey = Environment.GetEnvironmentVariable(keyVar);
+
+        try
+        {
+            // (a) An unreachable gateway degrades to `{}` at status 200, with NO token — the route is
+            //     ungated because pricing is not org-sensitive and badges must render tokenless.
+            Environment.SetEnvironmentVariable(urlVar, "http://127.0.0.1:1/v1");
+            Environment.SetEnvironmentVariable(keyVar, null);
+
+            await using var app = BuildAdminApp(AuthMode.Trusted);
+            await app.StartAsync();
+
+            var degraded = await app.GetTestServer().CreateClient().GetAsync("/admin/model-costs");
+            Assert.Equal(HttpStatusCode.OK, degraded.StatusCode);
+            Assert.Equal("{}", await degraded.Content.ReadAsStringAsync());
+
+            // (b) Point at a live stub. If the failure above had been cached we would still see `{}`.
+            await using var gateway = await StartStubGatewayAsync();
+            Environment.SetEnvironmentVariable(urlVar, $"{gateway.BaseUrl}/v1");
+
+            var mapped = await Call(app, "GET", "/admin/model-costs");
+            Assert.Equal(HttpStatusCode.OK, mapped.Status);
+            var opus = mapped.Json!["claude-opus-4-8"]!;
+            Assert.Equal("frontier", opus["tier"]!.GetValue<string>());
+            Assert.Equal(0.000075, opus["outputCostPerToken"]!.GetValue<double>(), precision: 12);
+            // Omitted fields stay null rather than defaulting to a wrong number.
+            Assert.Null(mapped.Json["cheap-model"]!["maxOutputTokens"]);
+
+            // (c) Stop the stub and point somewhere dead again: a SUCCESS is cached for the process,
+            //     so the same payload still comes back without another fetch.
+            await gateway.App.StopAsync();
+            Environment.SetEnvironmentVariable(urlVar, "http://127.0.0.1:1/v1");
+
+            var cached = await Call(app, "GET", "/admin/model-costs");
+            Assert.Equal(HttpStatusCode.OK, cached.Status);
+            Assert.Equal("frontier", cached.Json!["claude-opus-4-8"]!["tier"]!.GetValue<string>());
+
+            await app.StopAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(urlVar, originalUrl);
+            Environment.SetEnvironmentVariable(keyVar, originalKey);
+        }
+    }
+
+    /// <summary>A real Kestrel stub standing in for the LiteLLM gateway's <c>/v1/model/info</c>.</summary>
+    private sealed record StubGateway(WebApplication App, string BaseUrl) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync() => await App.DisposeAsync();
+    }
+
+    private static async Task<StubGateway> StartStubGatewayAsync()
+    {
+        var builder = WebApplication.CreateBuilder();
+        // A real port, not TestServer: the admin route fetches over a real HttpClient.
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        app.MapGet("/v1/model/info", () => Results.Text(
+            """
+            {
+              "data": [
+                {
+                  "model_name": "claude-opus-4-8",
+                  "model_info": {
+                    "input_cost_per_token": 0.000015,
+                    "output_cost_per_token": 0.000075,
+                    "model_tier": "frontier",
+                    "use_cases": ["reasoning"],
+                    "max_output_tokens": 65536
+                  }
+                },
+                { "model_name": "cheap-model", "model_info": { "input_cost_per_token": 0.0000008 } }
+              ]
+            }
+            """,
+            "application/json"));
+        await app.StartAsync();
+        var baseUrl = app.Urls.First();
+        return new StubGateway(app, baseUrl);
+    }
+
+    // ── realtime publish ────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Publish_DeliversToAnAttachedConnection()
+    {
+        var backplane = new InMemoryBackplane();
+        JsonObject? received = null;
+        backplane.Attach("conn-1", ev => received = ev);
+
+        await using var app = BuildAdminApp(AuthMode.Trusted, backplane: backplane);
+        await app.StartAsync();
+
+        var (status, json) = await Call(app, "POST", "/admin/publish", Admin(),
+            new { target = new { type = "connection", id = "conn-1" }, @event = new { kind = "job.done" } });
+
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(1, json!["delivered"]!.GetValue<int>());
+        Assert.NotNull(received);
+        Assert.Equal("job.done", received!["kind"]!.GetValue<string>());
+
+        await app.StopAsync();
+    }
+
+    /// <summary>
+    /// A truthful zero: the target TYPE is routable here, the connection just is not attached. That is
+    /// a real <c>delivered: 0</c>, unlike the unroutable target types below.
+    /// </summary>
+    [Fact]
+    public async Task Publish_ReportsZeroForAnUnattachedConnection()
+    {
+        await using var app = BuildAdminApp(AuthMode.Trusted, backplane: new InMemoryBackplane());
+        await app.StartAsync();
+
+        var (status, json) = await Call(app, "POST", "/admin/publish", Admin(),
+            new { target = new { type = "connection", id = "nobody" }, @event = new { } });
+
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(0, json!["delivered"]!.GetValue<int>());
+
+        await app.StopAsync();
+    }
+
+    /// <summary>
+    /// The whole point of the 501: session/user/org/agent are NOT routable by a connection-id registry.
+    /// Answering <c>{"delivered": 0}</c> would read as "accepted, reached nobody" for an event that was
+    /// never routable — so the response must carry no <c>delivered</c> field at all.
+    /// </summary>
+    [Theory]
+    [InlineData("session")]
+    [InlineData("user")]
+    [InlineData("org")]
+    [InlineData("agent")]
+    public async Task Publish_RefusesTargetsTheBackplaneCannotRoute(string kind)
+    {
+        await using var app = BuildAdminApp(AuthMode.Trusted, backplane: new InMemoryBackplane());
+        await app.StartAsync();
+
+        var (status, json) = await Call(app, "POST", "/admin/publish", Admin(),
+            new { target = new { type = kind, id = "x" }, @event = new { } });
+
+        Assert.Equal(HttpStatusCode.NotImplemented, status);
+        Assert.Equal("UNSUPPORTED_TARGET", json!["error"]!["code"]!.GetValue<string>());
+        Assert.False(json.AsObject().ContainsKey("delivered"));
+
+        await app.StopAsync();
+    }
+
+    [Fact]
+    public async Task Publish_ValidatesTheBody()
+    {
+        await using var app = BuildAdminApp(AuthMode.Trusted, backplane: new InMemoryBackplane());
+        await app.StartAsync();
+
+        // Missing target.id.
+        Assert.Equal(HttpStatusCode.BadRequest, (await Call(app, "POST", "/admin/publish", Admin(),
+            new { target = new { type = "connection" }, @event = new { } })).Status);
+
+        // Unknown target type.
+        Assert.Equal(HttpStatusCode.BadRequest, (await Call(app, "POST", "/admin/publish", Admin(),
+            new { target = new { type = "wat", id = "x" }, @event = new { } })).Status);
+
+        // No target at all.
+        Assert.Equal(HttpStatusCode.BadRequest, (await Call(app, "POST", "/admin/publish", Admin(),
+            new { @event = new { } })).Status);
+
+        await app.StopAsync();
+    }
+
+    [Fact]
+    public async Task Publish_IsAdminGated()
+    {
+        await using var app = BuildAdminApp(AuthMode.Trusted, backplane: new InMemoryBackplane());
+        await app.StartAsync();
+
+        var body = new { target = new { type = "connection", id = "x" }, @event = new { } };
+        Assert.Equal(HttpStatusCode.Forbidden, (await Call(app, "POST", "/admin/publish", Curator(), body)).Status);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Call(app, "POST", "/admin/publish", token: null, body: body)).Status);
+
         await app.StopAsync();
     }
 

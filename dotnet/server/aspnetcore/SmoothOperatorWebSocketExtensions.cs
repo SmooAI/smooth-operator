@@ -48,7 +48,10 @@ public static class SmoothOperatorWebSocketExtensions
             }
 
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            await PumpAsync(socket, dispatcherFor(context), context.RequestAborted).ConfigureAwait(false);
+            // The backplane registration for this connection. The id is opaque and minted here, as in
+            // the Go server — a publisher learns it out of band; nothing on the wire surfaces it.
+            var backplane = context.RequestServices.GetService<IBackplane>();
+            await PumpAsync(socket, dispatcherFor(context), backplane, Guid.NewGuid().ToString(), context.RequestAborted).ConfigureAwait(false);
         });
 
         return app;
@@ -119,11 +122,22 @@ public static class SmoothOperatorWebSocketExtensions
             skillResolver: services.GetService<ISkillResolver>() ?? DirSkillResolver.FromEnv());
     }
 
-    private static async Task PumpAsync(WebSocket socket, FrameDispatcher dispatcher, CancellationToken cancellationToken)
+    private static async Task PumpAsync(
+        WebSocket socket,
+        FrameDispatcher dispatcher,
+        IBackplane? backplane,
+        string connectionId,
+        CancellationToken cancellationToken)
     {
         // Outbound events go through a channel to a SINGLE writer task — WebSocket.SendAsync isn't
         // safe to call concurrently. Mirrors the Rust server's sink_tx + writer split.
         var channel = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions { SingleReader = true });
+
+        // Register this connection's outbound sink so events published from anywhere (a job, an
+        // ingestion pass, POST /admin/publish) reach it. The channel is the sink, so a published event
+        // takes exactly the same single-writer path as a turn's events. Detached in the finally below,
+        // always — a leaked sink would have `delivered: 1` reported for a socket that is long gone.
+        backplane?.Attach(connectionId, ev => channel.Writer.TryWrite(ev));
 
         var writer = Task.Run(async () =>
         {
@@ -171,6 +185,10 @@ public static class SmoothOperatorWebSocketExtensions
         }
         finally
         {
+            // Deregister first: nothing published from here on can reach this socket, and reporting a
+            // delivery into a channel that is about to be completed would be a lie.
+            backplane?.Detach(connectionId);
+
             // Client hung up mid-turn: abort the in-flight turn (its partial assistant message is
             // discarded — nothing persisted, no event emitted; there is no client to send one to).
             if (clientGone)

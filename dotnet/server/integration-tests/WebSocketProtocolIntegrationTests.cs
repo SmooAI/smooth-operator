@@ -401,4 +401,45 @@ public class WebSocketProtocolIntegrationTests
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
         await app.StopAsync();
     }
+
+    /// <summary>
+    /// A connection attaches its outbound sink to the backplane and DETACHES on teardown. The detach
+    /// is the load-bearing half: a leaked sink would have <c>POST /admin/publish</c> report
+    /// <c>delivered: 1</c> into a channel whose socket is long gone.
+    /// </summary>
+    [Fact]
+    public async Task Connection_AttachesItsSink_AndDetachesOnTeardown()
+    {
+        var backplane = new InMemoryBackplane();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(new MockChatClient() as IChatClient);
+        // Registered BEFORE AddSmoothOperatorServer so this instance wins its TryAddSingleton default.
+        builder.Services.AddSingleton<IBackplane>(backplane);
+        builder.Services.AddSmoothOperatorServer();
+        await using var app = builder.Build();
+        app.MapSmoothOperatorWebSocket("/ws");
+        await app.StartAsync();
+
+        Assert.Equal(0, backplane.Count);
+
+        using (var socket = await ConnectAsync(app.GetTestServer()))
+        {
+            // Round-trip a ping so the connection is demonstrably up and its sink registered.
+            await SendAsync(socket, """{"action":"ping","requestId":"p1"}""");
+            Assert.Equal("pong", (await ReceiveAsync(socket))["type"]!.GetValue<string>());
+            Assert.Equal(1, backplane.Count);
+
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        }
+
+        // Teardown is asynchronous relative to the client's close, so poll rather than assume.
+        for (var i = 0; i < 100 && backplane.Count > 0; i++)
+        {
+            await Task.Delay(50);
+        }
+        Assert.Equal(0, backplane.Count);
+
+        await app.StopAsync();
+    }
 }
