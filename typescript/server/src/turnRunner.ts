@@ -12,9 +12,10 @@
  * `runStream` mapped event-by-event onto protocol events.
  */
 import { approve, deny, SmoothAgent } from '@smooai/smooth-operator-core';
-import type { AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool, ToolHook } from '@smooai/smooth-operator-core';
+import type { AgentExecutor, AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool, ToolHook } from '@smooai/smooth-operator-core';
 
 import type { ConfirmationRegistry } from './confirmation.js';
+import { turnExecutor } from './executorSelection.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Citation, Frame, TurnUsage } from './protocol.js';
@@ -218,6 +219,19 @@ export interface TurnRunnerOptions {
      * attribute is omitted.
      */
     orgId?: string;
+    /**
+     * Optional durable-execution backend for THIS turn (ADR-030). Undefined — the
+     * default — runs the turn in-process (a verbatim delegation to
+     * `SmoothAgent.runStream`), so a deployment that never injects one behaves
+     * exactly as before the seam existed.
+     *
+     * Per-turn (an option) rather than process-global on purpose, and injected as
+     * a PARAMETER so this server keeps no dependency on the Temporal package: a
+     * deployment constructs a `TemporalAgentExecutor` outside this package and
+     * passes it here (or sets {@link DURABLE_EXECUTOR_ENV} to be warned when it
+     * asks for durable mode without supplying one). See {@link turnExecutor}.
+     */
+    executor?: AgentExecutor;
 }
 
 export class TurnRunner {
@@ -237,6 +251,13 @@ export class TurnRunner {
     private readonly modelCeiling?: ModelCeilingResolver;
     private readonly images: UserImage[];
     private readonly orgId?: string;
+    /**
+     * The executor this turn runs on, resolved once at construction: the injected
+     * durable backend if supplied, else the in-process default (mirrors the Rust
+     * runner's `turn_executor`). Running the turn through the seam rather than the
+     * agent directly is what lets a durable backend be selected in one place.
+     */
+    private readonly executor: AgentExecutor;
 
     constructor(options: TurnRunnerOptions) {
         this.chatClient = options.chatClient;
@@ -255,6 +276,7 @@ export class TurnRunner {
         this.modelCeiling = options.modelCeiling;
         this.images = options.images ?? [];
         this.orgId = options.orgId;
+        this.executor = turnExecutor(options.executor);
     }
 
     /** True when `name` matches a confirmation-gated pattern (substring, like the Rust hook). */
@@ -391,7 +413,11 @@ export class TurnRunner {
         // no tracer provider is registered (the collector-less default).
         const turnSpan = startTurnSpan(this.model, conversationId, this.orgId);
         try {
-            for await (const event of agent.runStream(userMessage, history)) {
+            // Run the turn through the executor seam rather than the agent
+            // directly — the in-process default is a verbatim delegation to
+            // `agent.runStream`, and this is the one place a durable backend
+            // (ADR-030) plugs in. Mirrors the Rust runner's `turn_executor`.
+            for await (const event of this.executor.executeStreaming(agent, userMessage, history)) {
                 // Cancelled: bail BEFORE emitting this event, so nothing follows the
                 // terminal `cancelled` the dispatcher already sent.
                 if (cancelSignal?.aborted) throw new TurnCancelledError();
