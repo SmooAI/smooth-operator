@@ -343,7 +343,7 @@ public static class SmoothOperatorAdminExtensions
             {
                 case "connection":
                     var payload = body?["event"] is JsonObject ev ? (JsonObject)ev.DeepClone() : new JsonObject();
-                    return Results.Ok(new { delivered = backplane.Publish(id, payload) });
+                    return Results.Ok(new { delivered = backplane.Publish(new Target(kind, id), payload) });
 
                 case "session":
                 case "user":
