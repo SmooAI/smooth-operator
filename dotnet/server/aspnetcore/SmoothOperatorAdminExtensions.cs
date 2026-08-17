@@ -36,8 +36,9 @@ public static class SmoothOperatorAdminExtensions
     public static IEndpointRouteBuilder MapSmoothOperatorAdmin(this IEndpointRouteBuilder endpoints, string prefix = "/admin")
     {
         // ponytail: the admin state is per-mapping and in-memory, exactly as in the Go/TS/Python
-        // servers. A host that wants durability registers its own AdminStores; the durable Postgres
-        // backend is a separate workstream and nothing outside this file reads these maps.
+        // servers. Resolved once here and captured by the handler closures, so it persists across
+        // requests. A registered instance lets a host pre-seed or share that state — it is NOT a
+        // storage swap point (see AdminStores); durable storage means changing that class.
         var stores = endpoints.ServiceProvider.GetService<AdminStores>() ?? new AdminStores();
 
         // Ungated, exactly as in Rust: the console probes health before it has a token.
@@ -468,6 +469,15 @@ public static class SmoothOperatorAdminExtensions
 /// <summary>
 /// Org-scoped admin state. Every read and write filters by org, so one org can never see or mutate
 /// another's rows. Register one in DI to override the per-mapping default (e.g. to seed fixtures).
+/// <para>
+/// ponytail: in-memory, and sealed with get-only collections — a registered instance can be
+/// pre-seeded or shared, but it cannot be handed Postgres-backed collections. Durable storage means
+/// changing THIS class, not registering a different one; the ceiling is deliberate, since one
+/// implementation exists and an interface for a second nobody has scheduled would be speculative.
+/// If durable admin storage lands (converged onto Rust's <c>ADMIN_SCHEMA</c>), keep the org filter
+/// in the HANDLERS: moving it into the store is how a cross-org id stops 404-ing identically to an
+/// unknown one, which is what makes this API not an existence oracle.
+/// </para>
 /// </summary>
 public sealed class AdminStores
 {
