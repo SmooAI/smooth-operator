@@ -269,10 +269,12 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
     assert_eq!(to.id, "part-agent");
     assert_eq!(to.participant_type, "ai-agent");
 
-    // --- paging ties break on id, since there is no seq column (th-5a5181) ---
-    // Same created_at on every row: the old BIGSERIAL seq made ties impossible, so a
-    // (created_at, id) cursor is the first thing that can drop or repeat a row. Page one at a
-    // time and assert each message comes back exactly once.
+    // --- paging never drops or repeats a row when created_at ties (th-5a5181) ---
+    // Same created_at on every row, and ids deliberately NOT in append order. `seq` is what
+    // makes this safe: a database-assigned counter cannot tie, so the page order is APPEND
+    // order regardless of timestamp or id. This is the check that fails if paging is ever
+    // moved onto a timestamp — which it briefly was (#421), before the standalone-store goal
+    // made `seq` the right key again. Page one at a time; each message must appear once.
     let tied_at = Utc::now();
     for id in ["tie-b", "tie-a", "tie-c"] {
         let mut m = message(id, "conv-tie", Direction::Inbound, id);
@@ -299,8 +301,8 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
     }
     assert_eq!(
         seen,
-        vec!["tie-a", "tie-b", "tie-c"],
-        "every tied row exactly once, ordered by the id tie-break"
+        vec!["tie-b", "tie-a", "tie-c"],
+        "every tied row exactly once, in append order"
     );
 
     // --- session create/get/update/list ---

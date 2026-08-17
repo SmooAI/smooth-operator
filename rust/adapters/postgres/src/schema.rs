@@ -1,35 +1,34 @@
 //! Embedded schema / migration SQL, applied on [`PostgresAdapter::init`].
 //!
-//! Table and column NAMES match the smooai monorepo's relational shape, so this schema
-//! applies against the real database instead of failing on it: `conversations`,
+//! This is the OSS operator's own STANDALONE store: `conversations`,
 //! `conversation_participants`, `conversation_messages`, `conversation_sessions`, plus
-//! `knowledge_vectors` (pgvector `embedding` + generated `content_tsv` + HNSW cosine index).
-//!
-//! # What still differs from the monorepo (th-5a5181)
-//!
-//! This used to claim it "mirrors the monorepo". It did not, and the gap was not cosmetic:
-//! `conversation_messages` declared `from_ref`/`to_ref` JSONB where the monorepo has
-//! `from`/`to` participant FKs, and a `seq BIGSERIAL` the monorepo has never had — so
-//! `CREATE INDEX ... (seq)` aborted schema init against the real database. Those are fixed.
-//!
-//! The remaining divergences are real and NOT fixed here, so read this as "applies against
-//! the monorepo database", not "reads and writes it":
-//!
-//! - **Ids are `TEXT` here, `uuid` in the monorepo** (every PK and FK). Reads decode to
-//!   `String`, so a real-database row fails to decode.
-//! - **Enums are `TEXT` + `CHECK`** here; the monorepo has real Postgres enum types
-//!   (`conversation_platform`, `conversation_participant_type`,
-//!   `conversation_message_direction`, `conversation_session_status`). Decoding those needs
-//!   a `::text` cast.
-//! - **`conversation_sessions` differs most**: its PK is `session_id` here and `id` there,
-//!   `thread_id` here and `langgraph_thread_id` there, `agent_name` exists only here, and
-//!   `rate_limit_window_start`/`rate_limit_tokens` only there. `agent_id` is a plain string
-//!   here but `uuid NOT NULL REFERENCES agents(id)` there, so invented agent ids violate the
-//!   FK.
-//! - **No RLS policies** here; the monorepo has them on all four tables.
-//!
 //! `connector_configs`, `agent_settings`, `indexing_runs`, `knowledge_vectors` and
-//! `memories` are this adapter's own — no monorepo counterpart, nothing to mirror.
+//! `memories` — the last five having no counterpart anywhere else.
+//!
+//! # It does not mirror the smooai monorepo, and is not meant to (th-5a5181)
+//!
+//! It used to say it did. It never has: `conversation_messages` declared `from_ref`/`to_ref`
+//! JSONB where the monorepo has `from`/`to` participant FKs, and the ids, enums and session
+//! columns differ throughout.
+//!
+//! The reason that is FINE, rather than a backlog: **the deployed operator never uses this
+//! adapter.** `ai.smoo.ai/ws` (chat-ws) persists through the monorepo's private
+//! `SmooaiStorageAdapter` — a separate sqlx implementation of the same `StorageAdapter` trait
+//! over the real org- and CRM-linked tables (Model B, ADR-041, SMOODEV-1888). This crate is
+//! compiled into that binary but is dead there; it is the store for people self-hosting the
+//! OSS operator. So the two schemas are allowed to differ, and "make this apply against the
+//! real database" was closed as a non-goal.
+//!
+//! What that leaves, deliberately:
+//!
+//! - **Ids are `TEXT`**, not `uuid`. A store that accepts any id shape is more portable for a
+//!   self-hoster, and no FK integrity is lost that this adapter was enforcing anyway.
+//! - **Enums are `TEXT` + `CHECK`**, not Postgres enum types — the constraint without the
+//!   migration cost of adding a value.
+//! - **`seq BIGSERIAL` exists here and nowhere else.** It is the paging key for all five
+//!   server implementations, and a database-assigned counter cannot tie the way
+//!   `(created_at, id)` can. Keep it.
+//! - **No RLS policies.** Single-tenant self-hosting; org scoping is enforced in the queries.
 //!
 //! The `checkpoints` table is **not** created here — that is owned by
 //! smooth-operator's [`PostgresCheckpointStore`](smooth_operator_core::PostgresCheckpointStore),
@@ -95,15 +94,16 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     "to"            TEXT,
     metadata_json   JSONB,
     analytics_json  JSONB,
+    -- Monotonic append sequence per conversation; the stable paging cursor. The monorepo
+    -- table has no such column, which is deliberate and fine: this is a STANDALONE store,
+    -- not a mirror (see the module docs). A counter assigned by the database is a stronger
+    -- paging key than (created_at, id) — it cannot tie, and it survives clock skew.
+    seq             BIGSERIAL,
     created_at      TIMESTAMPTZ NOT NULL,
     updated_at      TIMESTAMPTZ
 );
--- Paging is (created_at, id), not a `seq` counter: the monorepo table has no seq column, so
--- declaring one made this schema unappliable against the real database (the CREATE INDEX on
--- it was the statement that died). (created_at, id) is a stable total order because id is
--- unique, and it needs no extra column.
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
-    ON conversation_messages (conversation_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
+    ON conversation_messages (conversation_id, seq);
 
 CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id           TEXT PRIMARY KEY,

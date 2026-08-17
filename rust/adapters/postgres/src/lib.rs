@@ -1,8 +1,10 @@
 //! Postgres + pgvector [`StorageAdapter`] — the dogfood backend.
 //!
-//! This is the production Postgres implementation of the one storage seam (see
-//! `docs/STORAGE.md`). It mirrors the smooai monorepo's schema so dogfooding is
-//! a swap, not a rewrite:
+//! This is the OSS operator's own standalone Postgres implementation of the one
+//! storage seam (see `docs/STORAGE.md`). It does NOT mirror the smooai monorepo's
+//! schema and is not meant to — the deployed operator persists through a separate
+//! private adapter over the real tables (ADR-041); see [`schema`] for why that is
+//! deliberate rather than a backlog item (th-5a5181).
 //!
 //! - **OLTP** (conversations / participants / messages / sessions): async CRUD
 //!   over a [`deadpool_postgres`] pool, semantics matching the in-memory baseline
@@ -45,7 +47,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use deadpool_postgres::{Config as PoolConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 
@@ -756,18 +758,19 @@ impl StorageAdapter for PostgresAdapter {
         let client = self.pool.get().await?;
         let limit_i64 = i64::try_from(query.limit).unwrap_or(i64::MAX);
 
-        // Cursor is a message id; the page starts strictly after (or before, when
-        // descending) that message's position. Position is the pair (created_at, id) —
-        // there is no `seq` column, and id breaks ties so the order is total.
-        let cursor_pos: Option<(DateTime<Utc>, String)> = match &query.cursor {
+        // Cursor is a message id; the page starts strictly after that message's `seq` (or
+        // before, when descending). A database-assigned counter cannot tie, which is why it
+        // is a stronger paging key than any (timestamp, id) pair — and it is what the other
+        // four server implementations page on too. Resolve the id to a seq first.
+        let cursor_seq: Option<i64> = match &query.cursor {
             Some(cursor) => {
                 let row = client
                     .query_opt(
-                        "SELECT created_at, id FROM conversation_messages WHERE id = $1",
+                        "SELECT seq FROM conversation_messages WHERE id = $1",
                         &[&cursor],
                     )
                     .await?;
-                row.map(|r| (r.get("created_at"), r.get("id")))
+                row.map(|r| r.get::<_, i64>("seq"))
             }
             None => None,
         };
@@ -775,23 +778,20 @@ impl StorageAdapter for PostgresAdapter {
         // Fetch limit + 1 to detect whether another page remains, mirroring the
         // in-memory "next_cursor is Some iff more rows follow" contract.
         let probe = limit_i64.saturating_add(1);
-        // Row-value comparison, so the tie-break is part of the predicate rather than
-        // hand-rolled OR logic that is easy to get subtly wrong.
         let (order, compare) = if query.descending {
             ("DESC", "<")
         } else {
             ("ASC", ">")
         };
-        let rows = match &cursor_pos {
-            Some((created_at, id)) => {
+        let rows = match cursor_seq {
+            Some(seq) => {
                 client
                     .query(
                         &format!(
-                            "{MESSAGE_SELECT} WHERE m.conversation_id = $1
-                               AND (m.created_at, m.id) {compare} ($2, $3)
-                             ORDER BY m.created_at {order}, m.id {order} LIMIT $4"
+                            "{MESSAGE_SELECT} WHERE m.conversation_id = $1 AND m.seq {compare} $2
+                             ORDER BY m.seq {order} LIMIT $3"
                         ),
-                        &[&query.conversation_id, created_at, id, &probe],
+                        &[&query.conversation_id, &seq, &probe],
                     )
                     .await?
             }
@@ -800,7 +800,7 @@ impl StorageAdapter for PostgresAdapter {
                     .query(
                         &format!(
                             "{MESSAGE_SELECT} WHERE m.conversation_id = $1
-                             ORDER BY m.created_at {order}, m.id {order} LIMIT $2"
+                             ORDER BY m.seq {order} LIMIT $2"
                         ),
                         &[&query.conversation_id, &probe],
                     )
