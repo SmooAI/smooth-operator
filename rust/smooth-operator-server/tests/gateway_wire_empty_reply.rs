@@ -75,6 +75,7 @@ async fn run_against(chunks: Vec<String>) -> (String, Vec<String>, Vec<String>, 
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: None, // REAL client → hits the mock over HTTP
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,

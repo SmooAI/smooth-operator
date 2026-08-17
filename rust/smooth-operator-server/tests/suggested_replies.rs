@@ -55,6 +55,7 @@ async fn run_turn(deltas: &[&str]) -> (TurnResult, Vec<String>, String) {
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: Some(mock.clone()),
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,

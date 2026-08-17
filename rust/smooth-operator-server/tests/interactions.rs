@@ -180,6 +180,7 @@ fn spawn_turn(
                 model_max_output: None,
                 access: AccessContext::anonymous(),
                 llm_provider: Some(Arc::new(mock)),
+                executor: None,
                 reranker: None,
                 confirmation: None,
                 interactions: Some(interactions),

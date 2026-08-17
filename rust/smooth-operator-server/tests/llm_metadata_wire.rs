@@ -89,6 +89,7 @@ async fn capture_request_body(request_metadata: Option<serde_json::Map<String, V
             model_max_output: None,
             access: AccessContext::anonymous(),
             llm_provider: None, // REAL client → hits the mock over HTTP
+            executor: None,
             reranker: None,
             confirmation: None,
             interactions: None,
