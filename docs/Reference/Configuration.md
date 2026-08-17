@@ -6,6 +6,11 @@ and Lambda, in one place. The server is configured entirely by env vars
 secrets come from `@smooai/config` rather than raw env vars (the key **names** are
 the same).
 
+> **These names are the contract for all five server implementations** — Rust, Go,
+> Python, TypeScript and .NET all read `SMOOTH_AGENT_*`, so switching engines never
+> means relearning the config surface. See [Cross-implementation aliases](#cross-implementation-aliases)
+> for the pre-parity names each host still accepts.
+
 > **Secrets policy.** The gateway key, JWT secrets, and connector tokens are read
 > from the environment (or `@smooai/config`) and **never logged**. A connector
 > config stores a secret *name* (`auth_ref`), never the token — see [[Admin API]].
@@ -21,6 +26,45 @@ the same).
 | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Default agent-loop iteration cap per turn. **Fallback only** — a per-agent `agents.max_iterations` (clamped to `1..=64`) overrides it. See below. |
 | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |
 | `RUST_LOG` | `info,smooth_operator=info` | Log verbosity (independent of OTLP export). |
+
+### Cross-implementation aliases
+
+The five server implementations grew their config surfaces independently, so the
+same setting had up to three spellings — the Go and Python hosts read a combined
+`SMOOTH_OPERATOR_BIND`, TypeScript split it into `_HOST` + `_PORT`, and .NET had
+its own `SMOOTH_*` family with no bind var at all (it took ASP.NET's `:5000`). The
+`SMOOTH_AGENT_*` names above are now canonical in **every** implementation.
+
+Each host still accepts the name it read before, so no existing deployment breaks.
+**The canonical name wins when both are set.**
+
+| Setting | Canonical | Alias still honored | Hosts affected |
+| --- | --- | --- | --- |
+| Bind host | `SMOOTH_AGENT_BIND` | `SMOOTH_OPERATOR_BIND` (`host:port`), `SMOOTH_OPERATOR_HOST`, `ASPNETCORE_URLS` | Go, Python, TS, .NET |
+| Bind port | `SMOOTH_AGENT_PORT` | port half of `SMOOTH_OPERATOR_BIND`, `SMOOTH_OPERATOR_PORT` | Go, Python, TS, .NET |
+| Model | `SMOOTH_AGENT_MODEL` | `SMOOAI_MODEL`, `SMOOTH_MODEL` | TS, .NET |
+| Seed KB | `SMOOTH_AGENT_SEED_KB` | `SMOOTH_OPERATOR_SEED_KB` | Python |
+| Max tokens | `SMOOTH_AGENT_MAX_TOKENS` | `SMOOTH_MAX_TOKENS` | .NET |
+| Max iterations | `SMOOTH_AGENT_MAX_ITERATIONS` | `SMOOTH_MAX_ITERATIONS` | .NET |
+| Database URL | `SMOOTH_AGENT_DATABASE_URL` | `SMOOTH_DATABASE_URL`, `DATABASE_URL` | .NET (Rust already read both) |
+| Auth mode | `SMOOTH_AGENT_AUTH_MODE` | `AUTH_MODE`, `SMOOTH_AUTH_MODE` | Rust, .NET |
+
+Two deliberate exceptions, which are **not** renamed:
+
+- **`SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY`** keep the `SMOOAI_*` spelling. That
+  pair is the wider SmooAI gateway contract shared with launchers and benches, not
+  this server's own config surface, and it is already identical in all five hosts.
+  It is also the one place this has bitten: the .NET host once read only
+  `SMOOTH_GATEWAY_KEY` while every launcher exported `SMOOAI_GATEWAY_KEY`, so it ran
+  keyless and every turn came back as `INTERNAL_ERROR` (th-df7007). `SMOOTH_GATEWAY_*`
+  remains an alias there.
+- **`AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` / `AUTH_JWT_*_SECRET`** (and .NET's
+  `SMOOTH_JWT_HS256_SECRET`) are untouched. Only the auth *mode* was unified; the key
+  material family is a separate, larger surface and renaming it would be a
+  credentials change, not a naming one.
+
+The Go host's default port also moved from `8793` to `8787`, so all five processes —
+and all five container images — serve the same port unless told otherwise.
 
 ### Per-agent `model` / `max_iterations` overrides
 

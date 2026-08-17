@@ -15,22 +15,23 @@ as context, run non-root as uid 10001, and default their bind to `0.0.0.0` —
 the process defaults stay on loopback, which is correct outside a container and
 unreachable inside one.
 
-| Server     | Dockerfile                      | Port | Bind env                                    |
-| ---------- | ------------------------------- | ---- | ------------------------------------------- |
-| Rust       | `Dockerfile`                    | 8787 | `SMOOTH_AGENT_BIND` + `SMOOTH_AGENT_PORT`   |
-| .NET       | `dotnet/server/host/Dockerfile` | 8080 | `ASPNETCORE_URLS`                           |
-| Go         | `go/server/Dockerfile`          | 8793 | `SMOOTH_OPERATOR_BIND` (`host:port`)        |
-| Python     | `python/server/Dockerfile`      | 8787 | `SMOOTH_OPERATOR_BIND` (`host:port`)        |
-| TypeScript | `typescript/server/Dockerfile`  | 8787 | `SMOOTH_OPERATOR_HOST` + `SMOOTH_OPERATOR_PORT` |
+| Server     | Dockerfile                      | Port | Bind env                                  | Alias still honored                       |
+| ---------- | ------------------------------- | ---- | ----------------------------------------- | ----------------------------------------- |
+| Rust       | `Dockerfile`                    | 8787 | `SMOOTH_AGENT_BIND` + `SMOOTH_AGENT_PORT` | —                                         |
+| .NET       | `dotnet/server/host/Dockerfile` | 8787 | `SMOOTH_AGENT_BIND` + `SMOOTH_AGENT_PORT` | `ASPNETCORE_URLS`                         |
+| Go         | `go/server/Dockerfile`          | 8787 | `SMOOTH_AGENT_BIND` + `SMOOTH_AGENT_PORT` | `SMOOTH_OPERATOR_BIND` (`host:port`)      |
+| Python     | `python/server/Dockerfile`      | 8787 | `SMOOTH_AGENT_BIND` + `SMOOTH_AGENT_PORT` | `SMOOTH_OPERATOR_BIND` (`host:port`)      |
+| TypeScript | `typescript/server/Dockerfile`  | 8787 | `SMOOTH_AGENT_BIND` + `SMOOTH_AGENT_PORT` | `SMOOTH_OPERATOR_HOST` + `_PORT`          |
 
-The bind env differs per implementation because each server's own config surface
-does — the images don't invent a shared name, they set whichever one that server
-already reads. Go keeps its distinct `8793` default rather than being normalized
-to `8787`, so a container matches the process it packages.
+Every implementation reads the same `SMOOTH_AGENT_*` names and defaults to `8787`,
+so the same `docker run` works against any of them and switching engines is a
+one-word change. Each server's PRE-PARITY name is kept as an alias — the canonical
+name wins when both are set — so no existing deployment breaks. The full alias
+table is in [Configuration](../docs/Reference/Configuration.md).
 
 ```bash
 docker build -f go/server/Dockerfile -t smooth-operator-server-go .
-docker run --rm -p 8793:8793 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-go
+docker run --rm -p 8787:8787 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-go
 ```
 
 The Go/Python/TypeScript images confine the agent's coding tools to `/workspace`

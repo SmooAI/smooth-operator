@@ -1170,10 +1170,13 @@ impl AuthConfig {
     /// Returns [`AuthError::Misconfigured`] for an unknown `AUTH_MODE`, or for
     /// `jwt`/`smoo` without a usable key.
     pub fn from_env() -> Result<Box<dyn AuthVerifier>, AuthError> {
-        let raw_mode = std::env::var("AUTH_MODE")
-            .ok()
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty());
+        // Canonical `SMOOTH_AGENT_AUTH_MODE` (the prefix every sibling host reads)
+        // wins; the bare `AUTH_MODE` this host has always read stays as an alias so
+        // existing deployments keep working. See [`resolve_auth_mode`].
+        let raw_mode = resolve_auth_mode(
+            env_nonempty("SMOOTH_AGENT_AUTH_MODE"),
+            env_nonempty("AUTH_MODE"),
+        );
         let mode_explicit = raw_mode.is_some();
         let mode = raw_mode.unwrap_or_else(|| "jwt".to_string());
 
@@ -1280,6 +1283,17 @@ fn jwks_source(issuer: Option<&str>) -> Option<String> {
     issuer.map(|iss| format!("{}/.well-known/jwks.json", iss.trim_end_matches('/')))
 }
 
+/// Pick the auth mode from the canonical name, falling back to the alias.
+///
+/// Part of the cross-host env-parity contract: every server implementation reads
+/// the canonical `SMOOTH_AGENT_*` names, and each host's pre-parity name keeps
+/// working as an alias so no existing deployment breaks. This host's alias is the
+/// bare `AUTH_MODE`. Split out as a pure function because the env is process-global
+/// and `cargo test` runs in parallel — a test that sets it would race its siblings.
+fn resolve_auth_mode(canonical: Option<String>, alias: Option<String>) -> Option<String> {
+    canonical.or(alias).map(|s| s.trim().to_ascii_lowercase())
+}
+
 /// Read an env var, returning `None` when absent or empty/whitespace.
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key)
@@ -1295,6 +1309,32 @@ mod tests {
     use serde_json::json;
 
     const SECRET: &[u8] = b"test-shared-secret-not-a-real-key";
+
+    /// The env-parity contract: the canonical `SMOOTH_AGENT_AUTH_MODE` and this
+    /// host's pre-parity `AUTH_MODE` both resolve, and canonical wins when both
+    /// are set — so unifying the prefix cannot break an existing deployment.
+    #[test]
+    fn auth_mode_resolves_canonical_and_alias_with_canonical_winning() {
+        assert_eq!(resolve_auth_mode(None, None), None);
+        assert_eq!(
+            resolve_auth_mode(Some("jwt".into()), None),
+            Some("jwt".to_string())
+        );
+        assert_eq!(
+            resolve_auth_mode(None, Some("none".into())),
+            Some("none".to_string())
+        );
+        assert_eq!(
+            resolve_auth_mode(Some("jwt".into()), Some("none".into())),
+            Some("jwt".to_string()),
+            "canonical SMOOTH_AGENT_AUTH_MODE must win over the AUTH_MODE alias"
+        );
+        // Case/whitespace normalization is preserved from the pre-parity read.
+        assert_eq!(
+            resolve_auth_mode(Some("  SMOO  ".into()), None),
+            Some("smoo".to_string())
+        );
+    }
 
     /// Sign an HS256 token with the given claims object.
     fn sign(claims: serde_json::Value) -> String {

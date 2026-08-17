@@ -8,20 +8,25 @@ deployable artifact: `dotnet run`, or build the container and ship it.
 
 ```bash
 SMOOAI_GATEWAY_KEY=… \
-SMOOTH_AUTH_MODE=jwt SMOOTH_JWT_HS256_SECRET=… \
+SMOOTH_AGENT_AUTH_MODE=jwt SMOOTH_JWT_HS256_SECRET=… \
 SMOOTH_GITHUB_REPOS="acme/handbook,acme/runbooks@main" SMOOTH_GITHUB_TOKEN=ghp_… \
 dotnet run --project dotnet/server/host
-# → /health and /ws on http://localhost:5xxx
+# → /health and /ws on http://127.0.0.1:8787
 ```
 
 Or container:
 
 ```bash
 docker build -f dotnet/server/host/Dockerfile -t smooth-operator-server .
-docker run -p 8080:8080 -e SMOOAI_GATEWAY_KEY=… -e SMOOTH_AUTH_MODE=jwt -e SMOOTH_JWT_HS256_SECRET=… \
-  -e SMOOTH_DATABASE_URL=postgres://user:pass@db:5432/smooth \
+docker run -p 8787:8787 -e SMOOAI_GATEWAY_KEY=… -e SMOOTH_AGENT_AUTH_MODE=jwt -e SMOOTH_JWT_HS256_SECRET=… \
+  -e SMOOTH_AGENT_DATABASE_URL=postgres://user:pass@db:5432/smooth \
   -e SMOOTH_GITHUB_REPOS=acme/handbook -e SMOOTH_GITHUB_TOKEN=ghp_… smooth-operator-server
 ```
+
+> **Bind.** This host had no bind var of its own and took ASP.NET's `:5000` default —
+> neither of the ports its four siblings serve. It now reads the canonical
+> `SMOOTH_AGENT_BIND` / `SMOOTH_AGENT_PORT` and defaults to `127.0.0.1:8787` like the
+> rest. An explicit `ASPNETCORE_URLS` still wins when no `SMOOTH_AGENT_*` bind is set.
 
 ## Configuration (environment)
 
@@ -29,16 +34,18 @@ docker run -p 8080:8080 -e SMOOAI_GATEWAY_KEY=… -e SMOOTH_AUTH_MODE=jwt -e SMO
 | --- | --- | --- |
 | `SMOOAI_GATEWAY_URL` | `https://llm.smoo.ai/v1` | Any OpenAI-compatible endpoint (smooth gateway, Azure OpenAI, Ollama). `SMOOTH_GATEWAY_URL` is accepted as a fallback. |
 | `SMOOAI_GATEWAY_KEY` | — | The model API key. **Required** for chat. `SMOOTH_GATEWAY_KEY` is accepted as a fallback. |
-| `SMOOAI_MODEL` | `claude-haiku-4-5` | Model id at the gateway. `SMOOTH_MODEL` is accepted as a fallback. |
+| `SMOOTH_AGENT_BIND` | `127.0.0.1` | Bind host. Set `0.0.0.0` in k8s/containers (translated to ASP.NET's `+`). |
+| `SMOOTH_AGENT_PORT` | `8787` | TCP port. `ASPNETCORE_URLS` is accepted as a fallback. |
+| `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id at the gateway. `SMOOAI_MODEL` and `SMOOTH_MODEL` are accepted as fallbacks. |
 | `SMOOTH_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for the durable knowledge store (semantic retrieval when a gateway key is set, else a deterministic fallback). |
 | `SMOOTH_AGENT_RERANK` | `off` | Post-retrieval reorder stage: `gateway` (cross-encoder if keyed, else lexical), `lexical` (offline), or `off`. |
 | `SMOOTH_RERANK_MODEL` | `rerank-english-v3.0` | Rerank model id when `SMOOTH_AGENT_RERANK=gateway`. |
-| `SMOOTH_DATABASE_URL` | *(in-memory)* | `postgres://…` or an Npgsql connection string. Durable sessions when set. |
-| `SMOOTH_AUTH_MODE` | `none` | `jwt` (verify), `trusted` (proxied identity), or `none`. |
-| `SMOOTH_JWT_HS256_SECRET` | — | Shared secret when `SMOOTH_AUTH_MODE=jwt`. |
+| `SMOOTH_AGENT_DATABASE_URL` | *(in-memory)* | `postgres://…` or an Npgsql connection string. Durable sessions when set. `SMOOTH_DATABASE_URL` and `DATABASE_URL` are accepted as fallbacks. |
+| `SMOOTH_AGENT_AUTH_MODE` | `none` | `jwt` (verify), `trusted` (proxied identity), or `none`. `SMOOTH_AUTH_MODE` and `AUTH_MODE` are accepted as fallbacks. |
+| `SMOOTH_JWT_HS256_SECRET` | — | Shared secret when `SMOOTH_AGENT_AUTH_MODE=jwt`. |
 | `SMOOTH_GITHUB_REPOS` | — | Comma list of `owner/repo[@ref]` to ingest at startup. |
 | `SMOOTH_GITHUB_TOKEN` | — | GitHub token for private repos / higher rate limits. |
-| `SMOOTH_AGENT_PREAMBLE_MODEL` | *(unset → off)* | When set to a fast model id (e.g. `groq-gpt-oss-20b`), a small model runs IN PARALLEL with each streaming turn and emits ONE ephemeral `stream_preamble` sentence ("what I'm about to do") to cover the main model's time-to-first-token. Same gateway/key as `SMOOTH_MODEL`, capped at 64 output tokens. Best-effort: it is dropped once the real answer starts, never persisted, never in `eventual_response`, and any failure is swallowed. Unset ⇒ no extra call, behavior unchanged. |
+| `SMOOTH_AGENT_PREAMBLE_MODEL` | *(unset → off)* | When set to a fast model id (e.g. `groq-gpt-oss-20b`), a small model runs IN PARALLEL with each streaming turn and emits ONE ephemeral `stream_preamble` sentence ("what I'm about to do") to cover the main model's time-to-first-token. Same gateway/key as `SMOOTH_AGENT_MODEL`, capped at 64 output tokens. Best-effort: it is dropped once the real answer starts, never persisted, never in `eventual_response`, and any failure is swallowed. Unset ⇒ no extra call, behavior unchanged. |
 | `SMOOTH_WORKSPACE` | *(process cwd)* | Root the coding tools (`read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`) are confined to. Every path the model supplies is resolved inside it; an escape (`../`, an absolute path outside) is refused. |
 | `SMOOTH_NO_TOOLS` | *(unset → tools on)* | Set to `1` to serve a **chat-only** agent (no coding tools). |
 | `SMOOTH_AGENT_CONFIRM_TOOLS` | *(unset → off)* | Comma list of tool-name substrings gated behind **write-confirmation HITL**: a turn that calls a matching tool parks and emits `write_confirmation_required`; the client resumes it with `confirm_tool_action` (`{sessionId, requestId, approved}`). Unset = no tool requires confirmation (unchanged). |

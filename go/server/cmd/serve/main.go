@@ -4,28 +4,71 @@
 //
 // Env contract (shared with the sibling hosts):
 //
-//	SMOOTH_OPERATOR_BIND   host:port to listen on (default 127.0.0.1:8793)
+//	SMOOTH_AGENT_BIND      host to listen on (default 127.0.0.1)
+//	SMOOTH_AGENT_PORT      port to listen on (default 8787)
 //	SMOOAI_GATEWAY_URL     OpenAI-compatible gateway base URL
 //	SMOOAI_GATEWAY_KEY     gateway API key (absent → keyless; turns error cleanly)
 //	SMOOTH_PERSONA         system prompt for the agent (optional)
 //	SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)
 //	SMOOTH_NO_TOOLS        set to "1" to serve a chat-only agent (no coding tools)
+//
+// Alias, still honored so existing deployments keep working:
+//
+//	SMOOTH_OPERATOR_BIND   combined host:port (this host's pre-parity name)
 package main
 
 import (
 	"context"
 	"log"
+	"net"
 	"os"
+	"strings"
 
 	core "github.com/SmooAI/smooth-operator-core/go/core"
 	server "github.com/SmooAI/smooth-operator/go/server"
 )
 
-func main() {
-	addr := os.Getenv("SMOOTH_OPERATOR_BIND")
-	if addr == "" {
-		addr = "127.0.0.1:8793"
+// Process defaults, shared with the Rust/Python/TS/.NET hosts. The port was 8793
+// before the env-parity pass; every sibling host defaults to 8787, so a client
+// pointed at the "smooth-operator port" now reaches whichever engine is running.
+const (
+	defaultHost = "127.0.0.1"
+	defaultPort = "8787"
+)
+
+// resolveAddr builds the listen address from the environment, canonical-first.
+//
+// SMOOTH_AGENT_BIND is a bare host (matching the Rust host), but a combined
+// "host:port" is accepted too, in which case its port applies. The legacy
+// combined SMOOTH_OPERATOR_BIND is read first so anything canonical set
+// alongside it overrides it.
+func resolveAddr(get func(string) string) string {
+	host, port := defaultHost, defaultPort
+
+	if legacy := strings.TrimSpace(get("SMOOTH_OPERATOR_BIND")); legacy != "" {
+		host, port = splitAddr(legacy, host, port)
 	}
+	if bind := strings.TrimSpace(get("SMOOTH_AGENT_BIND")); bind != "" {
+		host, port = splitAddr(bind, host, port)
+	}
+	if p := strings.TrimSpace(get("SMOOTH_AGENT_PORT")); p != "" {
+		port = p
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// splitAddr reads value as either "host:port" or a bare host, keeping the passed
+// fallbacks for whichever half it does not carry. net.SplitHostPort handles the
+// bracketed IPv6 form, so "[::1]:8787" splits and a bare "::1" does not.
+func splitAddr(value, host, port string) (string, string) {
+	if h, p, err := net.SplitHostPort(value); err == nil {
+		return h, p
+	}
+	return value, port
+}
+
+func main() {
+	addr := resolveAddr(os.Getenv)
 
 	var opts []server.LocalOption
 	if key := os.Getenv("SMOOAI_GATEWAY_KEY"); key != "" {

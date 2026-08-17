@@ -19,6 +19,15 @@ var config = builder.Configuration; // already layered with environment variable
 string Get(string key, string? fallback = null) =>
     config[key] is { Length: > 0 } value ? value : fallback ?? string.Empty;
 
+// ── Bind: the canonical SMOOTH_AGENT_BIND / SMOOTH_AGENT_PORT every sibling host reads.
+// This host had no bind env at all and took ASP.NET's :5000 default, which is neither of
+// the ports its four siblings serve. An explicit ASPNETCORE_URLS still wins when no
+// SMOOTH_AGENT_* bind is set, so the container image's own URL is untouched. ──
+if (ServerEnv.ResolveUrls(key => config[key]) is { } urls)
+{
+    builder.WebHost.UseUrls(urls);
+}
+
 // ── Model: an OpenAI-compatible gateway (the smooth gateway, Azure OpenAI, Ollama, …) ──
 // The gateway/model triple is the CROSS-ENGINE contract: rust, go, ts and python all read the
 // SMOOAI_* spelling (rust/smooth-operator-server/src/local.rs, go/server/cmd/serve/main.go,
@@ -28,7 +37,9 @@ string Get(string key, string? fallback = null) =>
 // deployments that set it.
 var gatewayUrl = Get("SMOOAI_GATEWAY_URL", Get("SMOOTH_GATEWAY_URL", "https://llm.smoo.ai/v1"));
 var gatewayKey = Get("SMOOAI_GATEWAY_KEY", Get("SMOOTH_GATEWAY_KEY"));
-var model = Get("SMOOAI_MODEL", Get("SMOOTH_MODEL", "claude-haiku-4-5"));
+// The model, unlike the gateway pair, IS this server's own config surface, so it takes the
+// canonical SMOOTH_AGENT_MODEL the Rust host reads. SMOOAI_MODEL / SMOOTH_MODEL stay as aliases.
+var model = Get("SMOOTH_AGENT_MODEL", Get("SMOOAI_MODEL", Get("SMOOTH_MODEL", "claude-haiku-4-5")));
 builder.Services.AddSingleton<IChatClient>(_ =>
     new OpenAIClient(
             new ApiKeyCredential(string.IsNullOrEmpty(gatewayKey) ? "unset" : gatewayKey),
@@ -37,7 +48,10 @@ builder.Services.AddSingleton<IChatClient>(_ =>
         .AsIChatClient());
 
 // ── Storage: durable Postgres when configured, else in-memory (the default) ──
-var databaseUrl = Get("SMOOTH_DATABASE_URL");
+// Canonical SMOOTH_AGENT_DATABASE_URL (what the Rust adapters and the Helm chart's Secret
+// already write); SMOOTH_DATABASE_URL is this host's pre-parity name, DATABASE_URL the
+// bare fallback the Rust adapters also accept.
+var databaseUrl = Get("SMOOTH_AGENT_DATABASE_URL", Get("SMOOTH_DATABASE_URL", Get("DATABASE_URL")));
 if (!string.IsNullOrEmpty(databaseUrl))
 {
     builder.Services.AddSingleton<ISessionStore>(_ =>
@@ -70,7 +84,10 @@ if (reranker is not null)
 }
 
 // ── Auth: jwt (verified) / trusted (proxied) / none ──
-var authMode = Enum.TryParse<AuthMode>(Get("SMOOTH_AUTH_MODE", "none"), ignoreCase: true, out var mode) ? mode : AuthMode.None;
+// Canonical SMOOTH_AGENT_AUTH_MODE; SMOOTH_AUTH_MODE is this host's pre-parity name and
+// the bare AUTH_MODE is the Rust host's, both kept so either spelling keeps working.
+var authModeRaw = Get("SMOOTH_AGENT_AUTH_MODE", Get("SMOOTH_AUTH_MODE", Get("AUTH_MODE", "none")));
+var authMode = Enum.TryParse<AuthMode>(authModeRaw, ignoreCase: true, out var mode) ? mode : AuthMode.None;
 builder.Services.AddSingleton(new TokenAccessResolver(new AuthOptions
 {
     Mode = authMode,
@@ -123,9 +140,9 @@ if (confirmTools.Length > 0)
 //    budget and return empty, or the upstream 400s). The ceiling fetch is best-effort at boot — this
 //    single-model server resolves it once rather than the Rust server's per-turn lazy cache; any
 //    gateway problem ⇒ null ⇒ unclamped. SMOOTH_MAX_TOKENS / SMOOTH_MAX_ITERATIONS override the
-//    defaults. ──
-var maxTokens = int.TryParse(Get("SMOOTH_MAX_TOKENS"), out var mt) && mt > 0 ? mt : TurnLimits.DefaultMaxTokens;
-var maxIterations = int.TryParse(Get("SMOOTH_MAX_ITERATIONS"), out var mi) && mi > 0 ? mi : TurnLimits.DefaultMaxIterations;
+//    defaults (canonical SMOOTH_AGENT_*; the bare SMOOTH_* names stay as aliases). ──
+var maxTokens = int.TryParse(Get("SMOOTH_AGENT_MAX_TOKENS", Get("SMOOTH_MAX_TOKENS")), out var mt) && mt > 0 ? mt : TurnLimits.DefaultMaxTokens;
+var maxIterations = int.TryParse(Get("SMOOTH_AGENT_MAX_ITERATIONS", Get("SMOOTH_MAX_ITERATIONS")), out var mi) && mi > 0 ? mi : TurnLimits.DefaultMaxIterations;
 int? modelCeiling = string.IsNullOrEmpty(gatewayKey)
     ? null
     : await ModelInfo.FetchCeilingAsync(EmbeddingHttpClient(gatewayUrl, gatewayKey), model);

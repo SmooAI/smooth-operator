@@ -36,7 +36,7 @@
 //!
 //! | var | default | meaning |
 //! | --- | --- | --- |
-//! | `AUTH_MODE` | *(unset → admin disabled, 401)* | `jwt` (BYO) \| `smoo` (hosted) \| `none` (dev only). Unset boots `/ws` but `/admin` returns 401 until configured. |
+//! | `SMOOTH_AGENT_AUTH_MODE` | *(unset → admin disabled, 401)* | `jwt` (BYO) \| `smoo` (hosted) \| `none` (dev only). Unset boots `/ws` but `/admin` returns 401 until configured. The bare `AUTH_MODE` is kept as an alias (this host's pre-parity name); the canonical name wins when both are set. |
 //! | `AUTH_JWT_HS256_SECRET` | — | HS256 shared secret (for `jwt`/`smoo`). |
 //! | `AUTH_JWT_RS256_PUBLIC_KEY` | — | RS256 PEM public key (takes precedence over HS256). |
 //! | `AUTH_JWT_ISSUER` | — | Required `iss` claim (required for `smoo`; optional for `jwt`). |

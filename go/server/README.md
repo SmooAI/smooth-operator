@@ -42,19 +42,24 @@ Every event the server emits is validated against the **same `spec/` schemas + c
 
 ```bash
 docker build -f go/server/Dockerfile -t smooth-operator-server-go .   # from the repo ROOT
-docker run --rm -p 8793:8793 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-go
-# ws://127.0.0.1:8793/ws
+docker run --rm -p 8787:8787 -e SMOOAI_GATEWAY_KEY=sk-... smooth-operator-server-go
+# ws://127.0.0.1:8787/ws
 ```
 
 Build from the repo root — `go/server` has a `replace` onto the sibling client module
 at `go/`, so both have to be in the context.
 
-The image keeps the process's `8793` default port but flips the bind host to
-`0.0.0.0` (`SMOOTH_OPERATOR_BIND=0.0.0.0:8793`), since the process default of
-`127.0.0.1` is unreachable from outside a container. Narrow it back with
-`-e SMOOTH_OPERATOR_BIND=127.0.0.1:8793` when a sidecar fronts it on the pod
-loopback. Runs non-root (uid 10001); the coding tools are confined to `/workspace`,
-so mount your project there: `-v "$PWD:/workspace"`.
+Bind and port come from `SMOOTH_AGENT_BIND` / `SMOOTH_AGENT_PORT`, the canonical names
+every server implementation reads. The image keeps the process's `8787` default port
+but flips the bind host to `0.0.0.0`, since the process default of `127.0.0.1` is
+unreachable from outside a container. Narrow it back with
+`-e SMOOTH_AGENT_BIND=127.0.0.1` when a sidecar fronts it on the pod loopback. Runs
+non-root (uid 10001); the coding tools are confined to `/workspace`, so mount your
+project there: `-v "$PWD:/workspace"`.
+
+> This host's pre-parity `SMOOTH_OPERATOR_BIND` (combined `host:port`) still works as
+> an alias — the canonical name wins when both are set. Its default port also moved
+> from `8793` to `8787` to match the four sibling hosts.
 
 ## Extensible — and safe by construction
 

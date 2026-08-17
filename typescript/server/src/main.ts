@@ -8,25 +8,23 @@
  * `send_message` returns a clean protocol `error` exactly as the keyless test path
  * does (the engine has no client to call).
  *
- * Env:
- *   SMOOTH_OPERATOR_HOST   bind host   (default 127.0.0.1)
- *   SMOOTH_OPERATOR_PORT   bind port   (default 8787)
+ * Env (canonical names, shared with the Rust/Go/Python/.NET hosts — this host's
+ * pre-parity `SMOOTH_OPERATOR_HOST` / `SMOOTH_OPERATOR_PORT` / `SMOOAI_MODEL` still
+ * work as aliases; see `env.ts` for the full table):
+ *   SMOOTH_AGENT_BIND      bind host   (default 127.0.0.1)
+ *   SMOOTH_AGENT_PORT      bind port   (default 8787)
+ *   SMOOTH_AGENT_MODEL     model id    (default claude-haiku-4-5)
  *   SMOOAI_GATEWAY_URL     OpenAI-compatible base URL (enables live turns with a key)
  *   SMOOAI_GATEWAY_KEY     gateway API key
- *   SMOOAI_MODEL           model id    (default claude-haiku-4-5)
  *   SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)
  *   SMOOTH_NO_TOOLS        set to "1" to serve a chat-only agent (no coding tools)
  */
 import type { ChatClientLike, Tool } from '@smooai/smooth-operator-core';
 
 import { codingTools } from './codingTools.js';
+import { resolveBind, resolveModel } from './env.js';
 import { createGatewayModelCeilingResolver, type ModelCeilingResolver } from './modelCeiling.js';
 import { serveLocal } from './server.js';
-
-/** The model id turns run against — SMOOAI_MODEL, else the engine's default. */
-function resolveModel(): string {
-    return process.env.SMOOAI_MODEL ?? 'claude-haiku-4-5';
-}
 
 /**
  * A per-model output-ceiling resolver backed by the gateway's `/model/info`, so each
@@ -77,8 +75,9 @@ async function buildChatClient(): Promise<ChatClientLike> {
         const mod = (await import(openaiModule)) as { default: new (opts: { apiKey: string; baseURL: string }) => ChatClientLike };
         // Pin the resolved model into the env so the turn runner and the ceiling lookup
         // agree on which model is in play (the request model and its /model/info ceiling
-        // must be the same model).
-        process.env.SMOOAI_MODEL = resolveModel();
+        // must be the same model). Pinned under the CANONICAL name, which `resolveModel`
+        // reads first — pinning the alias would be overridden by a set canonical name.
+        process.env.SMOOTH_AGENT_MODEL = resolveModel();
         const openai = new mod.default({ apiKey: key, baseURL: url });
         // The engine's `runStream` needs `chat.completions.createStream`; the raw SDK
         // only exposes `create`. Adapt it: streaming is `create({ ...body, stream: true })`,
@@ -116,8 +115,7 @@ function buildTools(): Tool[] | undefined {
 }
 
 async function main(): Promise<void> {
-    const host = process.env.SMOOTH_OPERATOR_HOST ?? '127.0.0.1';
-    const port = Number(process.env.SMOOTH_OPERATOR_PORT ?? '8787');
+    const { host, port } = resolveBind();
     const chatClient = await buildChatClient();
 
     const server = await serveLocal({ chatClient, host, port, model: resolveModel(), modelCeiling: buildModelCeiling(), tools: buildTools() });

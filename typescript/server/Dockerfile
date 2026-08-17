@@ -65,14 +65,14 @@ WORKDIR /workspace
 
 USER 10001:10001
 
-# Unlike the Go/Python servers, the TS server reads host and port as SEPARATE
-# vars (see typescript/server/src/main.ts). The PROCESS default host is
-# 127.0.0.1, which is unreachable from outside a container — so the IMAGE
-# defaults it to 0.0.0.0, keeping the port on its 8787 default. Narrow it back
-# with -e SMOOTH_OPERATOR_HOST=127.0.0.1 if you front it with a sidecar/proxy on
-# the pod loopback.
-ENV SMOOTH_OPERATOR_HOST=0.0.0.0 \
-    SMOOTH_OPERATOR_PORT=8787
+# Bind + port (both overridable), the canonical names every server implementation
+# reads (see typescript/server/src/env.ts). The PROCESS default host is 127.0.0.1,
+# which is unreachable from outside a container — so the IMAGE defaults it to
+# 0.0.0.0. Narrow it back with -e SMOOTH_AGENT_BIND=127.0.0.1 if you front it with
+# a sidecar/proxy on the pod loopback. The legacy SMOOTH_OPERATOR_HOST/_PORT are
+# still honored for existing deployments.
+ENV SMOOTH_AGENT_BIND=0.0.0.0 \
+    SMOOTH_AGENT_PORT=8787
 EXPOSE 8787
 
 ENTRYPOINT ["node", "/app/dist/main.js"]
