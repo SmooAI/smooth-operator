@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -385,5 +386,90 @@ func TestModelCostsIsUngatedAndDegradesToEmpty(t *testing.T) {
 	modelCostsCache.mu.Unlock()
 	if loaded {
 		t.Error("a failed fetch must not be cached")
+	}
+}
+
+// ── realtime publish ────────────────────────────────────────────────────────
+
+func TestPublishDeliversToAnAttachedConnection(t *testing.T) {
+	bp := NewInMemoryBackplane()
+	got := make(chan map[string]any, 1)
+	bp.Attach(context.Background(), "conn-1", func(e map[string]any) { got <- e })
+	h := New(WithAuth(roleVerifier{}), WithBackplane(bp)).Handler()
+
+	rec := call(t, h, "POST", "/admin/publish", "admin",
+		`{"target":{"type":"connection","id":"conn-1"},"event":{"kind":"job.done"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	if d := decode(t, rec)["delivered"]; d != float64(1) {
+		t.Errorf("delivered = %v, want 1", d)
+	}
+	select {
+	case e := <-got:
+		if e["kind"] != "job.done" {
+			t.Errorf("event = %v", e)
+		}
+	default:
+		t.Error("event never reached the attached sink")
+	}
+}
+
+func TestPublishReportsZeroForAnUnattachedConnection(t *testing.T) {
+	// Truthful zero: the target type IS routable here, the connection just isn't
+	// attached. That is a real "delivered: 0", not a lie.
+	h := New(WithAuth(roleVerifier{}), WithBackplane(NewInMemoryBackplane())).Handler()
+	rec := call(t, h, "POST", "/admin/publish", "admin",
+		`{"target":{"type":"connection","id":"nobody"},"event":{}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d", rec.Code)
+	}
+	if d := decode(t, rec)["delivered"]; d != float64(0) {
+		t.Errorf("delivered = %v, want 0", d)
+	}
+}
+
+func TestPublishRefusesTargetsTheBackplaneCannotRoute(t *testing.T) {
+	// The whole point: session/user/org/agent are NOT routable by a connID→sink
+	// backplane. Answering {"delivered": 0} would read as "accepted, reached
+	// nobody" for an event that was never routable — a 501 says so out loud.
+	h := adminServer(t)
+	for _, kind := range []string{"session", "user", "org", "agent"} {
+		rec := call(t, h, "POST", "/admin/publish", "admin",
+			`{"target":{"type":"`+kind+`","id":"x"},"event":{}}`)
+		if rec.Code != http.StatusNotImplemented {
+			t.Errorf("%s target = %d, want 501", kind, rec.Code)
+			continue
+		}
+		body := decode(t, rec)
+		if code := body["error"].(map[string]any)["code"]; code != "UNSUPPORTED_TARGET" {
+			t.Errorf("%s code = %v", kind, code)
+		}
+		if _, leaked := body["delivered"]; leaked {
+			t.Errorf("%s must not report a delivered count at all: %v", kind, body)
+		}
+	}
+}
+
+func TestPublishValidatesTheBody(t *testing.T) {
+	h := adminServer(t)
+	if rec := call(t, h, "POST", "/admin/publish", "admin", `{"target":{"type":"connection"},"event":{}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("missing id = %d, want 400", rec.Code)
+	}
+	if rec := call(t, h, "POST", "/admin/publish", "admin", `{"target":{"type":"wat","id":"x"}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown type = %d, want 400", rec.Code)
+	}
+	if rec := call(t, h, "POST", "/admin/publish", "admin", `not json`); rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed = %d, want 400", rec.Code)
+	}
+}
+
+func TestPublishIsAdminGated(t *testing.T) {
+	h := adminServer(t)
+	if rec := call(t, h, "POST", "/admin/publish", "curator", `{"target":{"type":"connection","id":"x"},"event":{}}`); rec.Code != http.StatusForbidden {
+		t.Errorf("curator = %d, want 403", rec.Code)
+	}
+	if rec := call(t, h, "POST", "/admin/publish", "", `{}`); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", rec.Code)
 	}
 }

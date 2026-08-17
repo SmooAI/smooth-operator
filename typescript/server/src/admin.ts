@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { AuthVerifier, Principal } from './auth.js';
+import type { Backplane } from './backplane.js';
 import type { SessionStore } from './sessionStore.js';
 
 /** Role ranks, mirroring Rust's `role_rank`. */
@@ -193,6 +194,7 @@ export interface AdminDeps {
     auth: AuthVerifier;
     store: SessionStore;
     stores: AdminStore;
+    backplane: Backplane;
 }
 
 /**
@@ -485,6 +487,45 @@ async function route(
             res.end();
             return;
         }
+    }
+
+    // Push a realtime event to a target over the connection fleet — the plug point
+    // for non-AI publishers (job status, ingestion progress, notifications) that
+    // must reach a connected client without an agent turn. Admin-gated.
+    //
+    // This server's backplane is a connId→sink registry, so only `connection`
+    // targets are routable. Rust additionally fans out to session/user/org/agent
+    // over a richer backplane; here those answer 501 rather than a misleading
+    // `{"delivered": 0}` — a caller must never read "accepted, reached nobody" as
+    // success for an event that was never routable.
+    if (method === 'POST' && path === '/admin/publish') {
+        if (!requireRole(deps, req, res, ROLE_ADMIN)) return;
+        const body = (await readJsonBody(req)) as { target?: { type?: unknown; id?: unknown }; event?: unknown };
+        const kind = String(body?.target?.type ?? '').trim().toLowerCase();
+        const id = String(body?.target?.id ?? '').trim();
+        if (!id) {
+            sendError(res, 400, 'INVALID_BODY', 'target.id is required');
+            return;
+        }
+        if (kind === 'connection') {
+            if (!deps.backplane.publish) {
+                sendError(res, 501, 'UNSUPPORTED_TARGET', 'the configured backplane cannot publish');
+                return;
+            }
+            sendJson(res, 200, { delivered: deps.backplane.publish(id, body.event as never) });
+            return;
+        }
+        if (['session', 'user', 'org', 'agent'].includes(kind)) {
+            sendError(
+                res,
+                501,
+                'UNSUPPORTED_TARGET',
+                `this server's backplane routes by connection id only; "${kind}" targets are not deliverable here`,
+            );
+            return;
+        }
+        sendError(res, 400, 'INVALID_BODY', `unknown target type "${kind}" (want connection|session|user|org|agent)`);
+        return;
     }
 
     if (path === '/admin/settings') {

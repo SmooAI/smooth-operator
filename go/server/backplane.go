@@ -15,8 +15,11 @@ type Backplane interface {
 	// Attach registers a connection's outbound sink. sink delivers an already-built
 	// event frame to the connection's writer.
 	Attach(ctx context.Context, connID string, sink func(event map[string]any))
-	// Publish fans an event out to a connection's attached sink, if present.
-	Publish(ctx context.Context, connID string, event map[string]any)
+	// Publish fans an event out to a connection's attached sink, returning how many
+	// sinks it reached: 1 when the connection is attached, 0 when it is not. The
+	// count is what `POST /admin/publish` reports as `delivered`, so it must never
+	// claim a delivery that did not happen.
+	Publish(ctx context.Context, connID string, event map[string]any) int
 	// Detach removes a connection's sink. Always run on connection teardown.
 	Detach(ctx context.Context, connID string)
 }
@@ -41,13 +44,15 @@ func (b *InMemoryBackplane) Attach(_ context.Context, connID string, sink func(e
 }
 
 // Publish delivers event to connID's sink if it is still attached.
-func (b *InMemoryBackplane) Publish(_ context.Context, connID string, event map[string]any) {
+func (b *InMemoryBackplane) Publish(_ context.Context, connID string, event map[string]any) int {
 	b.mu.Lock()
 	sink := b.sinks[connID]
 	b.mu.Unlock()
-	if sink != nil {
-		sink(event)
+	if sink == nil {
+		return 0
 	}
+	sink(event)
+	return 1
 }
 
 // Detach removes connID's sink.

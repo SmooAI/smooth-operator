@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { ANONYMOUS_PRINCIPAL, type AccessContext, type AuthVerifier } from '../src/auth.js';
+import { InMemoryBackplane } from '../src/backplane.js';
 import { InMemorySessionStore } from '../src/sessionStore.js';
 import { serve, type RunningServer } from '../src/server.js';
 import { mapModelInfo, resetModelCostsCache } from '../src/admin.js';
@@ -300,5 +301,62 @@ describe('model costs', () => {
             process.env.SMOOAI_GATEWAY_URL = prev;
             resetModelCostsCache();
         }
+    });
+});
+
+describe('realtime publish', () => {
+    it('delivers to an attached connection and reports a truthful count', async () => {
+        // serve() owns its backplane, so drive the handler's contract through a
+        // server whose backplane we can attach to.
+        const bp = new InMemoryBackplane();
+        const seen: unknown[] = [];
+        await bp.attach('conn-1', (frame) => seen.push(frame));
+        const chatClient = { chat: { completions: { create: async () => ({ choices: [{ message: { content: '' } }] }) } } } as never;
+        const server = await serve({ port: 0, chatClient, store: new InMemorySessionStore(), auth: new RoleVerifier(), backplane: bp });
+        try {
+            const { status, json } = await call(server, 'POST', '/admin/publish', 'admin', {
+                target: { type: 'connection', id: 'conn-1' },
+                event: { kind: 'job.done' },
+            });
+            expect(status).toBe(200);
+            expect(json.delivered).toBe(1);
+            expect(seen).toHaveLength(1);
+        } finally {
+            await server.close();
+        }
+    });
+
+    it('reports a truthful 0 for a routable-but-unattached connection', async () => {
+        const { status, json } = await call(authed, 'POST', '/admin/publish', 'admin', {
+            target: { type: 'connection', id: 'nobody' },
+            event: {},
+        });
+        expect(status).toBe(200);
+        expect(json.delivered).toBe(0);
+    });
+
+    it('refuses targets the backplane cannot route, rather than reporting 0', async () => {
+        // {"delivered": 0} would read as "accepted, reached nobody" for an event
+        // that was never routable here. 501 says so out loud.
+        for (const kind of ['session', 'user', 'org', 'agent']) {
+            const { status, json } = await call(authed, 'POST', '/admin/publish', 'admin', {
+                target: { type: kind, id: 'x' },
+                event: {},
+            });
+            expect(status, kind).toBe(501);
+            expect(json.error.code, kind).toBe('UNSUPPORTED_TARGET');
+            expect(json, kind).not.toHaveProperty('delivered');
+        }
+    });
+
+    it('validates the body', async () => {
+        expect((await call(authed, 'POST', '/admin/publish', 'admin', { target: { type: 'connection' } })).status).toBe(400);
+        expect((await call(authed, 'POST', '/admin/publish', 'admin', { target: { type: 'wat', id: 'x' } })).status).toBe(400);
+    });
+
+    it('is admin gated', async () => {
+        const denied = await call(authed, 'POST', '/admin/publish', 'curator', { target: { type: 'connection', id: 'x' }, event: {} });
+        expect(denied.status).toBe(403);
+        expect((await call(authed, 'POST', '/admin/publish', undefined, { target: { type: 'connection', id: 'x' } })).status).toBe(401);
     });
 });

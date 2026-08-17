@@ -329,6 +329,8 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /admin/connectors/{id}", s.adminDeleteConnector)
 	mux.HandleFunc("POST /admin/connectors/{id}/index", s.adminIndexConnector)
 
+	mux.HandleFunc("POST /admin/publish", s.adminPublish)
+
 	mux.HandleFunc("GET /admin/settings", s.adminGetSettings)
 	mux.HandleFunc("PUT /admin/settings", s.adminPutSettings)
 }
@@ -756,4 +758,53 @@ func arrOrEmpty(info map[string]any, key string) []any {
 		return v
 	}
 	return []any{}
+}
+
+// ── realtime publish ────────────────────────────────────────────────────────
+
+// publishRequest is the POST /admin/publish body. `target` is the friendlier
+// `{type, id}` shape the Rust server accepts.
+type publishRequest struct {
+	Target struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+	} `json:"target"`
+	Event map[string]any `json:"event"`
+}
+
+// adminPublish serves POST /admin/publish — push a realtime event to a target
+// over the connection fleet. The plug point for non-AI publishers (job status,
+// ingestion progress, notifications) that need to reach a connected client
+// without going through an agent turn. Admin-gated.
+//
+// This server's backplane is a connID→sink registry, so only `connection`
+// targets can be routed. Rust additionally fans out to session/user/org/agent
+// over a richer backplane; here those return 501 rather than a misleading
+// `{"delivered": 0}` — a caller must never read "accepted, reached nobody" as
+// success for an event that was never routable in the first place.
+func (s *Server) adminPublish(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, roleAdmin); !ok {
+		return
+	}
+	var body publishRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "INVALID_BODY", "malformed JSON body")
+		return
+	}
+	kind, id := strings.ToLower(strings.TrimSpace(body.Target.Type)), strings.TrimSpace(body.Target.ID)
+	if id == "" {
+		writeAdminError(w, http.StatusBadRequest, "INVALID_BODY", "target.id is required")
+		return
+	}
+	switch kind {
+	case "connection":
+		delivered := s.backplane.Publish(r.Context(), id, body.Event)
+		writeJSON(w, http.StatusOK, map[string]any{"delivered": delivered})
+	case "session", "user", "org", "agent":
+		writeAdminError(w, http.StatusNotImplemented, "UNSUPPORTED_TARGET",
+			fmt.Sprintf("this server's backplane routes by connection id only; %q targets are not deliverable here", kind))
+	default:
+		writeAdminError(w, http.StatusBadRequest, "INVALID_BODY",
+			fmt.Sprintf("unknown target type %q (want connection|session|user|org|agent)", kind))
+	}
 }
