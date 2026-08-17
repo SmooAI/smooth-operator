@@ -63,6 +63,9 @@ export type { AccessContext, AuthVerifier, Principal } from './auth.js';
 export { InMemoryBackplane } from './backplane.js';
 export type { Backplane, BackplaneSink } from './backplane.js';
 
+export { aclForGroups, DeterministicEmbedder, PostgresKnowledgeStore, PUBLIC_ACL } from './postgresKnowledge.js';
+export type { DocumentAcl, Embedder, IngestView, KnowledgeDocument, KnowledgeQueryResult, KnowledgeView } from './postgresKnowledge.js';
+
 export * as protocol from './protocol.js';
 export type { Citation, Frame } from './protocol.js';
 
