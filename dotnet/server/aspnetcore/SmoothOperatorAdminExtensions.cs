@@ -194,12 +194,21 @@ public static class SmoothOperatorAdminExtensions
             {
                 var row = OwnedConnector(stores, id, gate!.Principal.Org);
                 if (row is null) return NotFoundConnector();
-                row.Name = write!.Name;
-                row.Kind = write.Kind;
-                row.Config = write.Config;
-                row.Enabled = write.Enabled;
-                row.UpdatedAt = DateTimeOffset.UtcNow;
-                return Results.Ok(new { connector = row });
+                // Replace rather than mutate: rows are handed to the serializer, which runs AFTER
+                // this lock releases, so an in-place edit could be torn by a concurrent write.
+                var updated = new ConnectorRow
+                {
+                    Id = row.Id,
+                    Name = write!.Name,
+                    Kind = write.Kind,
+                    Config = write.Config,
+                    Enabled = write.Enabled,
+                    CreatedAt = row.CreatedAt,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    OrgId = row.OrgId,
+                };
+                stores.Connectors[id] = updated;
+                return Results.Ok(new { connector = updated });
             }
         });
 
@@ -472,22 +481,26 @@ public sealed class AdminStores
     public List<IndexingRunRow> Runs { get; } = new();
 }
 
-/// <summary>A persisted, org-scoped connector config — the <c>ConnectorConfig</c> in console/lib/types.ts.</summary>
+/// <summary>
+/// A persisted, org-scoped connector config — the <c>ConnectorConfig</c> in console/lib/types.ts.
+/// Immutable: an update replaces the row, so a row already handed to the serializer can never be
+/// torn by a concurrent write.
+/// </summary>
 public sealed class ConnectorRow
 {
     public required string Id { get; init; }
 
-    public required string Name { get; set; }
+    public required string Name { get; init; }
 
-    public required string Kind { get; set; }
+    public required string Kind { get; init; }
 
-    public required JsonObject Config { get; set; }
+    public required JsonObject Config { get; init; }
 
-    public required bool Enabled { get; set; }
+    public required bool Enabled { get; init; }
 
     public required DateTimeOffset CreatedAt { get; init; }
 
-    public required DateTimeOffset UpdatedAt { get; set; }
+    public required DateTimeOffset UpdatedAt { get; init; }
 
     /// <summary>
     /// The owning org. Internal — never serialized to the wire. Deliberately NOT <c>required</c>:
