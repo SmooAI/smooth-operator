@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import websockets
 from smooth_operator_core import Knowledge
 
+from .admin import AdminStores, start_admin_http_server
 from .agent_config import AgentConfigResolver, NoSessionAuthenticator, SessionAuthenticator, StaticAgentConfigResolver
 from .auth import AccessContext, AuthVerifier, NoAuthVerifier
 from .backplane import Backplane, InMemoryBackplane
@@ -55,6 +56,9 @@ class ServerState:
     chat_client: Any = None
     knowledge: Knowledge | None = None
     auth: AuthVerifier = field(default_factory=NoAuthVerifier)
+    #: In-memory state the /admin/* management API serves (connectors, settings,
+    #: indexing runs). See admin.py.
+    admin: AdminStores = field(default_factory=AdminStores)
     backplane: Backplane = field(default_factory=InMemoryBackplane)
     system_prompt: str | None = None
     model: str | None = None
@@ -203,9 +207,10 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
 class Server:
     """A running smooth-operator WebSocket server with a graceful-drain switch."""
 
-    def __init__(self, state: ServerState, ws_server: Any) -> None:
+    def __init__(self, state: ServerState, ws_server: Any, admin_httpd: Any = None) -> None:
         self._state = state
         self._ws_server = ws_server
+        self._admin_httpd = admin_httpd
 
     @property
     def state(self) -> ServerState:
@@ -231,9 +236,17 @@ class Server:
     async def wait_closed(self) -> None:
         await self._ws_server.wait_closed()
 
+    @property
+    def admin_port(self) -> int:
+        """The port the `/admin/*` API listens on (see admin.py on why it is its own)."""
+        return int(self._admin_httpd.server_address[1])
+
     async def shutdown(self) -> None:
         """Drain and await a clean exit."""
         self.drain()
+        if self._admin_httpd is not None:
+            self._admin_httpd.shutdown()
+            self._admin_httpd.server_close()
         await self.wait_closed()
 
 
@@ -243,6 +256,7 @@ async def serve(
     port: int = DEFAULT_PORT,
     *,
     install_signal_handlers: bool = False,
+    admin_port: int | None = None,
 ) -> Server:
     """Bind and start serving (returns once the listener is up — does NOT block).
 
@@ -261,7 +275,18 @@ async def serve(
         await _connection_loop(websocket, state, access)
 
     ws_server = await websockets.serve(handler, host, port)
-    server = Server(state, ws_server)
+    # The /admin/* API listens on its own port: `websockets`' handshake parser
+    # accepts GET only and rejects any request body, so the process_request hook
+    # cannot serve a POST/PUT API. See admin.py's module docstring.
+    # Port rule: an explicit `admin_port` wins. Otherwise a real deployment (a
+    # concrete ws port) gets ws+1, which is predictable to configure; an ephemeral
+    # ws port (0, what tests use) gets an ephemeral admin port too. Deriving ws+1
+    # from a BOUND ephemeral port collides — that port is very often already taken
+    # by another server in the same process.
+    if admin_port is None:
+        admin_port = 0 if port == 0 else port + 1
+    admin_httpd = start_admin_http_server(state, host, admin_port)
+    server = Server(state, ws_server, admin_httpd)
 
     if install_signal_handlers:
         loop = asyncio.get_running_loop()
