@@ -490,3 +490,70 @@ async def test_in_memory_stores_are_unchanged() -> None:
     assert await admin.list_connectors("public") == []
     assert await admin.get_settings("public") is None
     assert await admin.delete_connector("public", "nope") is False
+
+
+async def test_absent_json_reads_back_as_an_empty_object(store, postgres_dsn: str) -> None:
+    """The integrity constraints: the json columns are NOT NULL DEFAULT '{}', so "absent"
+    has ONE representation on read instead of two.
+
+    These inserts OMIT the json columns rather than passing an explicit NULL, so the
+    DEFAULT fires on its own — no coalesce needed here, unlike the Rust adapter whose
+    inserts name every column. This test is what fails if either half regresses: drop the
+    NOT NULL DEFAULT and these read back NULL; start passing an explicit NULL and the
+    insert dies on the not-null constraint.
+    """
+    import asyncpg
+
+    org_id = org()
+    created = await store.create_session("", "Alice", None, owner_email=None, org_id=org_id)
+    await store.append_message(created.conversation_id, MessageDirection.INBOUND, "hello")
+
+    conn = await asyncpg.connect(postgres_dsn)
+    try:
+        conv = await conn.fetchrow(
+            "SELECT metadata_json, analytics_json FROM conversations WHERE id = $1",
+            created.conversation_id,
+        )
+        assert conv["metadata_json"] == "{}"
+        assert conv["analytics_json"] == "{}"
+
+        msg = await conn.fetchrow(
+            "SELECT metadata_json, analytics_json FROM conversation_messages WHERE conversation_id = $1",
+            created.conversation_id,
+        )
+        assert msg["metadata_json"] == "{}"
+        assert msg["analytics_json"] == "{}"
+
+        part = await conn.fetchrow(
+            "SELECT metadata_json FROM conversation_participants WHERE conversation_id = $1 LIMIT 1",
+            created.conversation_id,
+        )
+        assert part["metadata_json"] == "{}"
+
+        sess = await conn.fetchrow(
+            "SELECT status, created_at, updated_at, last_activity_at FROM conversation_sessions WHERE session_id = $1",
+            created.session_id,
+        )
+        assert sess["status"] == "active"  # passes the new CHECK
+        assert sess["created_at"] is not None
+        assert sess["updated_at"] is not None
+        assert sess["last_activity_at"] is not None
+    finally:
+        await conn.close()
+
+
+async def test_platform_check_rejects_an_unknown_value(store, postgres_dsn: str) -> None:
+    """The CHECK is what stops a typo'd platform reaching the table at all."""
+    import asyncpg
+
+    conn = await asyncpg.connect(postgres_dsn)
+    try:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                """INSERT INTO conversations (id, platform, name, organization_id, idempotency_key)
+                   VALUES ($1, 'carrier-pigeon', '', $2, $1)""",
+                str(uuid.uuid4()),
+                org(),
+            )
+    finally:
+        await conn.close()
