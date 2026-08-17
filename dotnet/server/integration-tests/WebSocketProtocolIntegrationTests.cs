@@ -148,7 +148,7 @@ public class WebSocketProtocolIntegrationTests
         await app.StartAsync();
         using var socket = await ConnectAsync(app.GetTestServer());
 
-        await SendAsync(socket, """{"action":"create_conversation_session","requestId":"cs"}""");
+        await SendAsync(socket, """{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"cs"}""");
         var sessionId = (await ReceiveAsync(socket))["data"]!["sessionId"]!.GetValue<string>();
 
         await SendAsync(socket, $$"""{"action":"send_message","requestId":"sm","sessionId":"{{sessionId}}","message":"hi"}""");
@@ -232,7 +232,7 @@ public class WebSocketProtocolIntegrationTests
         var path = token is null ? "ws" : $"ws?token={token}";
         using var socket = await server.CreateWebSocketClient().ConnectAsync(new Uri(server.BaseAddress, path), CancellationToken.None);
 
-        await SendAsync(socket, """{"action":"create_conversation_session","requestId":"cs"}""");
+        await SendAsync(socket, """{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"cs"}""");
         var sessionId = (await ReceiveAsync(socket))["data"]!["sessionId"]!.GetValue<string>();
 
         await SendAsync(socket, $$"""{"action":"send_message","requestId":"sm","sessionId":"{{sessionId}}","message":"{{message}}"}""");
@@ -346,7 +346,7 @@ public class WebSocketProtocolIntegrationTests
         await app.StartAsync();
         using var socket = await ConnectAsync(app.GetTestServer());
 
-        await SendAsync(socket, """{"action":"create_conversation_session","requestId":"cs"}""");
+        await SendAsync(socket, """{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"cs"}""");
         var sessionId = (await ReceiveAsync(socket))["data"]!["sessionId"]!.GetValue<string>();
 
         await SendAsync(socket, $$"""{"action":"send_message","requestId":"sm","sessionId":"{{sessionId}}","message":"how long to return?"}""");

@@ -325,8 +325,21 @@ public sealed class FrameDispatcher
         // the spoofing vector this closes.
         var ownerEmail = scope.IsUnscoped ? frame["userEmail"]?.GetValue<string>() : scope.UserEmail;
 
+        // agentId is REQUIRED by the Request schema and the generated client type is non-optional, so
+        // absent-or-blank is a malformed request, not an agentless session. Rejected BEFORE the store
+        // is touched, so a bad request persists nothing: the old code fabricated a UUID and th-68897a's
+        // first pass silently stored NULL — both skipped the validation that belongs at this boundary.
+        // The column stays nullable for rows that predate this check; it is just no longer reachable
+        // from the create path. th-68897a.
+        var agentId = frame["agentId"]?.GetValue<string>()?.Trim();
+        if (string.IsNullOrEmpty(agentId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "missing 'agentId'"));
+            return;
+        }
+
         var session = await _store.ResumeSessionAsync(
-            frame["agentId"]?.GetValue<string>() ?? string.Empty,
+            agentId,
             frame["userName"]?.GetValue<string>(),
             ownerEmail,
             string.IsNullOrEmpty(conversationId) ? null : conversationId,

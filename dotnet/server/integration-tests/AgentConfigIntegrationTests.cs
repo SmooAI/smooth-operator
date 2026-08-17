@@ -121,7 +121,7 @@ public class AgentConfigIntegrationTests
     {
         await SendAsync(socket, new JsonObject
         {
-            ["action"] = "create_conversation_session",
+            ["action"] = "create_conversation_session", ["agentId"] = "11111111-1111-1111-1111-111111111111",
             ["requestId"] = "r-create",
             ["agentId"] = AgentId,
             ["userName"] = "Alice",
