@@ -43,6 +43,10 @@ class StoredSession:
     #: session predating ownership — and stays reachable by everyone (th-909995); with
     #: auth disabled (the single-tenant local flavor) ownership isn't consulted at all.
     owner_email: str | None = None
+    #: The organization the conversation belongs to — the OUTER scope the dispatcher
+    #: checks before ownership, so a session id alone cannot reach another org's
+    #: conversation. ``None`` for rows created before org capture.
+    owner_org: str | None = None
 
 
 class MessageDirection(Enum):
@@ -211,6 +215,9 @@ class InMemorySessionStore(SessionStore):
         #: by nobody → reachable by every principal (th-909995: anonymous and emailless
         #: principals mint exactly these, and must not be locked out of them).
         self._owners: dict[str, str | None] = {}
+        #: conversation id → owning organization. Written once at creation next to the
+        #: owner and never rewritten: a resume must not re-home a conversation.
+        self._orgs: dict[str, str | None] = {}
         #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
         self._current_step: dict[str, str] = {}
         #: Per-session OTP-verified bit (absent/False = unverified). Set by a
@@ -226,11 +233,8 @@ class InMemorySessionStore(SessionStore):
         *,
         owner_email: str | None = None,
         enforced: bool = False,
-        org_id: str = DEFAULT_ORG_ID,  # noqa: ARG002 — see below
+        org_id: str = DEFAULT_ORG_ID,
     ) -> StoredSession:
-        # ``org_id`` is accepted and ignored: this store is single-tenant by
-        # construction, so there is nothing to partition. A durable store
-        # (postgres_store.py) uses it.
         owner = normalize_email(owner_email)
         with self._gate:
             # Resume: bind to an existing conversation (reuse its id + persisted log) when
@@ -244,6 +248,12 @@ class InMemorySessionStore(SessionStore):
                 bool(conversation_id)
                 and conversation_id in self._messages
                 and (not enforced or self._owners.get(conversation_id) in (None, owner))
+                # Org is the OUTER scope: another org's conversation is unreachable
+                # regardless of ownership. Gated on `enforced` for the same reason
+                # ownership is — auth disabled means single tenant, so there is nothing
+                # to partition. An unrecorded org (rows predating org capture) is not
+                # org-scoped either, so those stay reachable by their owner.
+                and (not enforced or self._orgs.get(conversation_id) in (None, org_id))
             )
             conv_id = conversation_id if resume else str(uuid.uuid4())
             session = StoredSession(
@@ -255,6 +265,7 @@ class InMemorySessionStore(SessionStore):
                 agent_participant_id=str(uuid.uuid4()),
                 contact_email=(user_email.strip() or None) if isinstance(user_email, str) else None,
                 owner_email=owner,
+                owner_org=self._orgs.get(conv_id, org_id) if resume else org_id,
             )
             self._sessions[session.session_id] = session
             # Only seed an empty log + timestamp on a fresh conversation — a resume keeps
@@ -263,6 +274,7 @@ class InMemorySessionStore(SessionStore):
                 self._messages[conv_id] = []
                 self._updated_at[conv_id] = datetime.now(timezone.utc)
                 self._owners[conv_id] = owner
+                self._orgs[conv_id] = org_id
         return session
 
     async def get_session(self, session_id: str) -> StoredSession | None:
