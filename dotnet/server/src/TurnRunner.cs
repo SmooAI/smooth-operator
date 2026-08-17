@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -115,6 +116,38 @@ public sealed class TurnRunner
         _preambleChatClient = preambleChatClient ?? _chatClient;
     }
 
+    /// <summary>
+    /// The configured chat model, emitted as <c>gen_ai.request.model</c> on the turn span. Read from
+    /// the SAME env chain the host resolves the gateway model from (<c>SMOOTH_AGENT_MODEL</c> →
+    /// <c>SMOOAI_MODEL</c> → <c>SMOOTH_MODEL</c> → default), mirroring how <see cref="PreambleModel"/>
+    /// reads its own env — the model is this server's own config surface, so the env IS the source of
+    /// truth (the injected <see cref="IChatClient"/> exposes no model metadata to read off).
+    /// </summary>
+    // ponytail: env is the model config surface (host reads the same chain); no plumbing a model
+    // string through FrameDispatcher just for a span tag. Thread it explicitly if a host ever injects
+    // a client whose model diverges from the env.
+    private static string ConfiguredModel() =>
+        (Environment.GetEnvironmentVariable("SMOOTH_AGENT_MODEL")
+         ?? Environment.GetEnvironmentVariable("SMOOAI_MODEL")
+         ?? Environment.GetEnvironmentVariable("SMOOTH_MODEL"))?.Trim() is { Length: > 0 } model
+            ? model
+            : "claude-haiku-4-5";
+
+    /// <summary>Emit a <c>gen_ai.tool</c> child span (parented to the ambient turn span) for one tool
+    /// call, carrying the tool name and its redacted JSON arguments. No-op when nothing is sampling
+    /// <see cref="Telemetry.Source"/> (<c>StartActivity</c> returns null).</summary>
+    private static void EmitToolSpan(FunctionCallContent call)
+    {
+        using var toolSpan = Telemetry.Source.StartActivity(Telemetry.SpanTool);
+        if (toolSpan is null)
+        {
+            return;
+        }
+        toolSpan.SetTag(Telemetry.GenAiToolName, call.Name);
+        var args = call.Arguments is null ? "{}" : JsonSerializer.Serialize(call.Arguments);
+        toolSpan.SetTag(Telemetry.GenAiToolArguments, Telemetry.RedactToolArguments(args));
+    }
+
     /// <summary>The configured preamble model id, or <c>null</c> when the feature is off (env unset,
     /// empty, or whitespace). Read per turn so a host can flip it without a restart.</summary>
     private static string? PreambleModel() =>
@@ -177,6 +210,16 @@ public sealed class TurnRunner
     /// </summary>
     public async Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, string sessionId, CancellationToken cancellationToken = default, IReadOnlyList<UserImage>? images = null, IReadOnlyList<UserFile>? files = null, string? skillSection = null)
     {
+        // OpenTelemetry GenAI turn span (`gen_ai.chat`), mirroring the Rust runner's turn_span: wraps the
+        // whole turn so the tool child spans nest under it; token usage is recorded onto it once the
+        // stream ends. Null (no-op) unless something is sampling Telemetry.Source — the OTel SDK in the
+        // host (env-gated on OTEL_EXPORTER_OTLP_ENDPOINT) or a test's ActivityListener.
+        using var turnActivity = Telemetry.Source.StartActivity(Telemetry.SpanChat);
+        turnActivity?.SetTag(Telemetry.GenAiSystem, Telemetry.SystemName);
+        turnActivity?.SetTag(Telemetry.GenAiRequestModel, ConfiguredModel());
+        turnActivity?.SetTag(Telemetry.GenAiConversationId, conversationId);
+        turnActivity?.SetTag(Telemetry.GenAiAgentName, Telemetry.AgentName);
+
         // 1. Auto-context citations (what grounded the answer). Mirrors the Rust auto_sources.
         //    With a reranker configured, fetch a wider candidate pool and let it reorder down to
         //    the top few before they become citations; without one, fetch exactly the top few
@@ -404,6 +447,9 @@ public sealed class TurnRunner
                     {
                         case FunctionCallContent call when emittedCalls.Add(call.CallId):
                             toolNames[call.CallId] = call.Name;
+                            // `gen_ai.tool` child span (nests under the turn span), mirroring the Rust
+                            // runner emitting one gen_ai.tool span per tool call with redacted args.
+                            EmitToolSpan(call);
                             // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
                             // gate AFTER write_confirmation_required, so the wire order matches the
                             // canonical (Rust) server. Non-gated tools emit their chunk inline as before.
@@ -434,6 +480,14 @@ public sealed class TurnRunner
             // Turn over: drop any lingering pending confirmation so a stale entry can't mis-route a
             // later confirm_tool_action (mirrors the Rust clear at turn end). No-op when HITL is off.
             _confirmations?.Clear(sessionId);
+        }
+
+        // Record token usage on the turn span (omitted when the engine reported none, per the GenAI
+        // conventions), mirroring the Rust runner's turn_span.record of the usage fields.
+        if (turnActivity is not null && sawUsage)
+        {
+            turnActivity.SetTag(Telemetry.GenAiUsageInputTokens, promptTokens);
+            turnActivity.SetTag(Telemetry.GenAiUsageOutputTokens, completionTokens);
         }
 
         // 5. Persist the outbound reply.
