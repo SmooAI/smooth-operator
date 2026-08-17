@@ -49,9 +49,14 @@ builder.Services.AddSingleton<IChatClient>(_ =>
 
 // ── Storage: durable Postgres when configured, else in-memory (the default) ──
 // Canonical SMOOTH_AGENT_DATABASE_URL (what the Rust adapters and the Helm chart's Secret
-// already write); SMOOTH_DATABASE_URL is this host's pre-parity name, DATABASE_URL the
-// bare fallback the Rust adapters also accept.
-var databaseUrl = Get("SMOOTH_AGENT_DATABASE_URL", Get("SMOOTH_DATABASE_URL", Get("DATABASE_URL")));
+// already write); SMOOTH_DATABASE_URL is this host's pre-parity name.
+//
+// Deliberately NOT falling back to a bare DATABASE_URL, even though the Rust adapters accept
+// one: Rust reads it only after SMOOTH_AGENT_STORAGE=postgres has explicitly selected the
+// backend, whereas this host infers "durable" purely from a URL being present. An ambient
+// DATABASE_URL — which local dev, CI, and Heroku-style platforms set as a matter of course —
+// would therefore silently switch storage backends and try to connect to an unrelated database.
+var databaseUrl = Get("SMOOTH_AGENT_DATABASE_URL", Get("SMOOTH_DATABASE_URL"));
 if (!string.IsNullOrEmpty(databaseUrl))
 {
     builder.Services.AddSingleton<ISessionStore>(_ =>

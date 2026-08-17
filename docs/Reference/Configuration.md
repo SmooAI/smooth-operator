@@ -46,8 +46,14 @@ Each host still accepts the name it read before, so no existing deployment break
 | Seed KB | `SMOOTH_AGENT_SEED_KB` | `SMOOTH_OPERATOR_SEED_KB` | Python |
 | Max tokens | `SMOOTH_AGENT_MAX_TOKENS` | `SMOOTH_MAX_TOKENS` | .NET |
 | Max iterations | `SMOOTH_AGENT_MAX_ITERATIONS` | `SMOOTH_MAX_ITERATIONS` | .NET |
-| Database URL | `SMOOTH_AGENT_DATABASE_URL` | `SMOOTH_DATABASE_URL`, `DATABASE_URL` | .NET (Rust already read both) |
+| Database URL | `SMOOTH_AGENT_DATABASE_URL` | `SMOOTH_DATABASE_URL` (.NET), `DATABASE_URL` (**Rust only**) | .NET |
 | Auth mode | `SMOOTH_AGENT_AUTH_MODE` | `AUTH_MODE`, `SMOOTH_AUTH_MODE` | Rust, .NET |
+
+One asymmetry is deliberate: only the **Rust** host falls back to a bare `DATABASE_URL`,
+and only once `SMOOTH_AGENT_STORAGE=postgres` has explicitly selected the backend. The .NET
+host infers "durable" from a database URL simply being present, so reading an ambient
+`DATABASE_URL` there — which local dev, CI, and Heroku-style platforms set as a matter of
+course — would silently switch its storage backend to an unrelated database.
 
 Two deliberate exceptions, which are **not** renamed:
 

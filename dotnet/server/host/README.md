@@ -40,7 +40,7 @@ docker run -p 8787:8787 -e SMOOAI_GATEWAY_KEY=… -e SMOOTH_AGENT_AUTH_MODE=jwt 
 | `SMOOTH_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for the durable knowledge store (semantic retrieval when a gateway key is set, else a deterministic fallback). |
 | `SMOOTH_AGENT_RERANK` | `off` | Post-retrieval reorder stage: `gateway` (cross-encoder if keyed, else lexical), `lexical` (offline), or `off`. |
 | `SMOOTH_RERANK_MODEL` | `rerank-english-v3.0` | Rerank model id when `SMOOTH_AGENT_RERANK=gateway`. |
-| `SMOOTH_AGENT_DATABASE_URL` | *(in-memory)* | `postgres://…` or an Npgsql connection string. Durable sessions when set. `SMOOTH_DATABASE_URL` and `DATABASE_URL` are accepted as fallbacks. |
+| `SMOOTH_AGENT_DATABASE_URL` | *(in-memory)* | `postgres://…` or an Npgsql connection string. Durable sessions when set. `SMOOTH_DATABASE_URL` is accepted as a fallback. A bare `DATABASE_URL` is deliberately **not** read — this host infers "durable" from the URL alone, so an ambient one would silently switch backends. |
 | `SMOOTH_AGENT_AUTH_MODE` | `none` | `jwt` (verify), `trusted` (proxied identity), or `none`. `SMOOTH_AUTH_MODE` and `AUTH_MODE` are accepted as fallbacks. |
 | `SMOOTH_JWT_HS256_SECRET` | — | Shared secret when `SMOOTH_AGENT_AUTH_MODE=jwt`. |
 | `SMOOTH_GITHUB_REPOS` | — | Comma list of `owner/repo[@ref]` to ingest at startup. |
