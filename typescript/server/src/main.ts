@@ -32,6 +32,7 @@ import { resolveBind, resolveModel } from './env.js';
 import { resolveStorage } from './postgresStore.js';
 import { createGatewayModelCeilingResolver, type ModelCeilingResolver } from './modelCeiling.js';
 import { serveLocal } from './server.js';
+import { initTelemetry } from './telemetry.js';
 
 /**
  * A per-model output-ceiling resolver backed by the gateway's `/model/info`, so each
@@ -105,6 +106,9 @@ function buildTools(): Tool[] | undefined {
 }
 
 async function main(): Promise<void> {
+    // OpenTelemetry GenAI tracing, env-gated on OTEL_EXPORTER_OTLP_ENDPOINT (parity with
+    // the Rust server's `init_telemetry`). No-op when the endpoint is unset.
+    await initTelemetry();
     const { host, port } = resolveBind();
     const chatClient = await buildChatClient();
     // Unset/memory → undefined, and the local flavor stays fully in-memory. A
