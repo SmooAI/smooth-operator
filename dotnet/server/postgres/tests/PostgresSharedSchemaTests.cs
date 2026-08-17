@@ -237,5 +237,74 @@ public sealed class PostgresSharedSchemaTests : IClassFixture<PostgresFixture>
         Assert.True(await TableExistsAsync(legacyConnectionString, "conversations"));
         await store.AppendMessageAsync("conv-1", MessageDirection.Outbound, "after migration");
         Assert.Equal(2, (await store.ListMessagesAsync("conv-1", 50)).Count);
+
+        // The migration closes the NOT NULLs too, so a migrated database ends up with the same
+        // guarantees as a fresh one rather than silently keeping the nullable legacy columns.
+        Assert.False(await IsNullableAsync(legacyConnectionString, "conversation_sessions", "metadata"));
+        Assert.False(await IsNullableAsync(legacyConnectionString, "conversation_sessions", "last_activity_at"));
+    }
+
+    private static async Task<object?> ScalarAsync(string connectionString, string sql)
+    {
+        await using var source = NpgsqlDataSource.Create(connectionString);
+        await using var command = source.CreateCommand(sql);
+        return await command.ExecuteScalarAsync();
+    }
+
+    private static async Task<bool> IsNullableAsync(string connectionString, string table, string column)
+    {
+        var value = await ScalarAsync(connectionString,
+            $"SELECT is_nullable FROM information_schema.columns WHERE table_name = '{table}' AND column_name = '{column}'");
+        return (string?)value == "YES";
+    }
+
+    /// <summary>
+    /// The json columns are NOT NULL DEFAULT '{}', so "absent" has ONE representation on read instead
+    /// of two. This host omits them from its INSERTs, so the DEFAULT fires — it needs no coalesce, and
+    /// this fails if either the NOT NULL or the omission changes.
+    /// </summary>
+    [SkippableFact]
+    public async Task AbsentJsonReadsBackAsAnEmptyObject_NotNull()
+    {
+        Skip.IfNot(_fixture.Available, "Docker unavailable");
+        var store = _fixture.Store!;
+        var connectionString = _fixture.ConnectionString!;
+
+        var session = await store.CreateSessionAsync("agent-json", "Ada", "ada-json@example.com");
+        await store.AppendMessageAsync(session.ConversationId, MessageDirection.Inbound, "hi");
+
+        foreach (var sql in new[]
+        {
+            $"SELECT metadata_json  FROM conversations          WHERE id = '{session.ConversationId}'",
+            $"SELECT analytics_json FROM conversations          WHERE id = '{session.ConversationId}'",
+            $"SELECT metadata_json  FROM conversation_messages  WHERE conversation_id = '{session.ConversationId}'",
+            $"SELECT analytics_json FROM conversation_messages  WHERE conversation_id = '{session.ConversationId}'",
+            $"SELECT metadata_json  FROM conversation_participants WHERE conversation_id = '{session.ConversationId}'",
+        })
+        {
+            Assert.Equal("{}", await ScalarAsync(connectionString, sql));
+        }
+
+        // conversation_sessions timestamps were fully nullable before; now they always carry a value.
+        Assert.NotNull(await ScalarAsync(connectionString,
+            $"SELECT last_activity_at FROM conversation_sessions WHERE session_id = '{session.SessionId}'"));
+    }
+
+    /// <summary>The CHECKs reject a value outside the shared vocabulary rather than storing it.</summary>
+    [SkippableFact]
+    public async Task PlatformAndStatusChecksRejectUnknownValues()
+    {
+        Skip.IfNot(_fixture.Available, "Docker unavailable");
+        var connectionString = _fixture.ConnectionString!;
+
+        // 'smooth-operator' was this host's old platform value — the CHECK is what stops it coming back.
+        await Assert.ThrowsAsync<PostgresException>(() => ScalarAsync(connectionString,
+            "INSERT INTO conversations (id, platform, name, organization_id, idempotency_key) " +
+            "VALUES ('bad-platform', 'smooth-operator', 'x', '', 'bad-platform')"));
+
+        await Assert.ThrowsAsync<PostgresException>(() => ScalarAsync(connectionString,
+            "INSERT INTO conversation_sessions (session_id, conversation_id, agent_id, agent_name, " +
+            "user_participant_id, agent_participant_id, thread_id, status) " +
+            "VALUES ('bad-status', 'c', 'a', 'a', 'u', 'ag', 't', 'wat')"));
     }
 }
