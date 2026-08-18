@@ -98,6 +98,28 @@ pub const COST_UNAVAILABLE: &str = "smooai.gen_ai.cost_unavailable";
 /// same core change as cost provenance, so everything we can see is reported
 /// as the commoner cause rather than guessed at.
 pub const COST_UNAVAILABLE_UNPRICED: &str = "unpriced";
+/// `gen_ai.usage.cost_source` — where a recorded [`GEN_AI_USAGE_COST_USD`] came
+/// from: [`COST_SOURCE_GATEWAY`] (the gateway's own figure, authoritative) or
+/// [`COST_SOURCE_ESTIMATED`] (our local `ModelPricing` table).
+///
+/// Without this a consumer cannot tell a billable figure from a guess, and the
+/// local table returns the FREE tier for any model it doesn't recognise — so an
+/// estimate can be a wild under-count while looking exact. Never set without
+/// [`GEN_AI_USAGE_COST_USD`] beside it.
+pub const GEN_AI_USAGE_COST_SOURCE: &str = "gen_ai.usage.cost_source";
+/// [`GEN_AI_USAGE_COST_SOURCE`]: the gateway priced this turn itself.
+pub const COST_SOURCE_GATEWAY: &str = "gateway";
+/// [`GEN_AI_USAGE_COST_SOURCE`]: at least one call fell back to local pricing.
+pub const COST_SOURCE_ESTIMATED: &str = "estimated";
+/// `gen_ai.response.id` — the gateway's id for the turn's final LLM call
+/// (`chatcmpl-…`).
+///
+/// The single highest-value attribute here: it joins to
+/// `LiteLLM_SpendLogs.request_id`, whose row carries the gateway's authoritative
+/// dollars AND its real prompt/completion counts. While the engine can still
+/// estimate either, that spend row is the only trustworthy source for both, so
+/// this is what makes a cost verifiable after the fact instead of trusted.
+pub const GEN_AI_RESPONSE_ID: &str = "gen_ai.response.id";
 /// `gen_ai.tool.name` — the name of an invoked tool.
 pub const GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
 /// `gen_ai.tool.call.arguments` — the (redacted) JSON arguments passed to a tool.
@@ -157,10 +179,11 @@ pub const SPAN_TOOL: &str = "gen_ai.tool";
 ///
 /// | Engine reported | Span gets |
 /// | --- | --- |
-/// | fabricated usage (`prompt_tokens == 0`) | no counts |
-/// | real usage | both counts |
-/// | a positive cost | [`GEN_AI_USAGE_COST_USD`] |
+/// | `usage_estimated` | no counts |
+/// | measured usage | both counts |
+/// | a positive cost | [`GEN_AI_USAGE_COST_USD`] + [`GEN_AI_USAGE_COST_SOURCE`] |
 /// | zero / non-finite cost | [`COST_UNAVAILABLE`] |
+/// | a response id | [`GEN_AI_RESPONSE_ID`], always |
 ///
 /// A zero cost is never exported as `0` — see [`GEN_AI_USAGE_COST_USD`]. In its
 /// place the span gets [`COST_UNAVAILABLE`], so "we could not price this" is a
@@ -175,32 +198,42 @@ pub fn record_turn_usage(
     prompt_tokens: u64,
     completion_tokens: u64,
     cost_usd: f64,
+    usage_estimated: bool,
+    cost_estimated: bool,
+    response_id: Option<&str>,
 ) {
-    // `prompt_tokens == 0` means the usage struct is FABRICATED, not that the
-    // turn consumed no input. Core's streaming collector invents one whenever
-    // the gateway sends no usage chunk — hardcoding `prompt_tokens = 0` and
-    // estimating `completion_tokens` as `content.len() / 4` — and LiteLLM at
-    // llm.smoo.ai drops that chunk for `smooth-*` aliases (core pearl
-    // th-eff0d0). A grounded turn always consumes prompt tokens, so a zero here
-    // condemns the estimated completion count beside it too. Pearl th-126fe6.
-    if prompt_tokens > 0 {
+    // The engine now TELLS us whether it measured or estimated the counts, so
+    // this no longer infers it from the value. That inference (`prompt_tokens > 0`)
+    // worked on the streaming path, where a fabricated struct hardcodes 0, and
+    // silently failed on the non-streaming path, which estimates prompt tokens
+    // from the request's JSON length and so produces a plausible non-zero.
+    // A flag carries the fact; a heuristic guesses it. Pearl th-126fe6.
+    if !usage_estimated {
         span.record(GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens);
         span.record(GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens);
     }
+    // The join key to LiteLLM's spend log — recorded unconditionally, because it
+    // is exactly when the numbers above are missing that it matters most.
+    if let Some(id) = response_id {
+        if !id.is_empty() {
+            span.record(GEN_AI_RESPONSE_ID, id);
+        }
+    }
     // Cost is judged independently of the counts, on purpose. The gateway
-    // reports cost in an HTTP header and usage in an SSE chunk — two separate
+    // reports cost on an HTTP header and usage on an SSE chunk — two separate
     // channels, so a turn can genuinely have an authoritative cost and no usage.
-    // Suppressing cost whenever usage was fabricated would throw that away and
+    // Suppressing cost whenever usage was estimated would throw that away and
     // recreate the all-zero-rows bug this exists to fix.
-    //
-    // ponytail: the residual hazard is the other direction — fabricated usage
-    // priced LOCALLY yields `ModelPricing × 0 input`, an undercount that looks
-    // authoritative. This layer can't tell that apart from a gateway figure;
-    // cost provenance on `AgentEvent::Completed` is the fix, and it needs a
-    // core change. Prod is not exposed today: its model isn't in the local
-    // pricing table, so the local path yields exactly 0 and is dropped below.
     if cost_usd > 0.0 && cost_usd.is_finite() {
         span.record(GEN_AI_USAGE_COST_USD, cost_usd);
+        span.record(
+            GEN_AI_USAGE_COST_SOURCE,
+            if cost_estimated {
+                COST_SOURCE_ESTIMATED
+            } else {
+                COST_SOURCE_GATEWAY
+            },
+        );
     } else {
         span.record(COST_UNAVAILABLE, COST_UNAVAILABLE_UNPRICED);
     }

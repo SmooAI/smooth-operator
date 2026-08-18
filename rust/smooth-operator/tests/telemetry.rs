@@ -349,7 +349,86 @@ fn priced_response(content: &str, cost_usd: f64) -> LlmResponse {
         gateway_cost_usd: Some(cost_usd),
         resolved_model: None,
         reasoning_content: None,
+        // The gateway reported usage, so nothing is estimated.
+        usage_estimated: false,
+        response_id: Some("chatcmpl-f1e896f1".into()),
     }
+}
+
+/// The hole the old `prompt_tokens > 0` heuristic left, and the reason the flag
+/// had to exist.
+///
+/// There are TWO fabrication sites in core and they differ: the streaming one
+/// hardcodes `prompt_tokens = 0`, but the NON-streaming one estimates it from
+/// the outgoing request's JSON length — so it produces a plausible non-zero.
+/// The heuristic inferred provenance from the value, caught the first, and
+/// silently waved the second through as measured. A flag carries the fact
+/// instead of guessing it. Pearl th-126fe6.
+#[tokio::test]
+async fn estimated_usage_with_nonzero_prompt_tokens_is_still_omitted() {
+    let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
+    let layer = CapturingLayer {
+        sink: Arc::clone(&sink),
+        index: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockLlmClient::new();
+    mock.push_response(LlmResponse {
+        // Non-zero and entirely made up — exactly what the non-streaming
+        // estimator emits. `prompt_tokens > 0` would call this measured.
+        usage: Usage {
+            prompt_tokens: 372,
+            completion_tokens: 14,
+            total_tokens: 386,
+            cached_tokens: 0,
+        },
+        usage_estimated: true,
+        ..priced_response("Within 30 days of delivery.", 0.0042)
+    });
+
+    let runtime = KnowledgeChatRuntime::new(seeded_storage(), test_llm())
+        .with_llm_provider(Arc::new(mock.clone()));
+    runtime
+        .run_turn("conv-otel-est", "What is the return policy?")
+        .await
+        .expect("run_turn");
+
+    let spans = sink.lock().expect("sink poisoned").clone();
+    let chat = spans
+        .iter()
+        .find(|s| s.name == "gen_ai.chat")
+        .unwrap_or_else(|| panic!("expected a `gen_ai.chat` span; got: {spans:#?}"));
+
+    assert!(
+        !chat.fields.contains_key("gen_ai.usage.input_tokens"),
+        "an ESTIMATED count must be omitted however plausible it looks — this is \
+         the case the old value-based heuristic missed; span fields: {:?}",
+        chat.fields
+    );
+    assert!(
+        !chat.fields.contains_key("gen_ai.usage.output_tokens"),
+        "span fields: {:?}",
+        chat.fields
+    );
+    // The gateway still priced the call, so the cost survives and is labelled
+    // authoritative — cost and counts are judged independently.
+    assert_eq!(
+        chat.fields
+            .get("gen_ai.usage.cost_source")
+            .map(String::as_str),
+        Some("gateway"),
+        "span fields: {:?}",
+        chat.fields
+    );
+    assert_eq!(
+        chat.fields.get("gen_ai.response.id").map(String::as_str),
+        Some("chatcmpl-f1e896f1"),
+        "the spend-log join key is MOST valuable exactly when the counts are \
+         missing; span fields: {:?}",
+        chat.fields
+    );
 }
 
 /// The gateway's authoritative per-request cost reaches the turn span as

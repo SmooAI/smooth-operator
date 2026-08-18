@@ -195,6 +195,9 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             arguments_chunk: json!({ "query": "return policy refund window" }).to_string(),
         },
         StreamEvent::Cost { usd: 0.0042 },
+        StreamEvent::ResponseId {
+            id: "chatcmpl-turn-1".into(),
+        },
         StreamEvent::Done {
             finish_reason: "tool_calls".into(),
         },
@@ -204,6 +207,10 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             content: "Items are accepted within 30 days for a full refund.".into(),
         },
         StreamEvent::Cost { usd: 0.0011 },
+        // The tracker keeps the LAST call's id, so this is the one recorded.
+        StreamEvent::ResponseId {
+            id: "chatcmpl-turn-2".into(),
+        },
         StreamEvent::Done {
             finish_reason: "stop".into(),
         },
@@ -316,6 +323,23 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
     assert!(
         (cost - 0.0053).abs() < 1e-9,
         "expected the two streams' gateway costs summed; got {cost}"
+    );
+    assert_eq!(
+        chat.fields
+            .get("gen_ai.usage.cost_source")
+            .map(String::as_str),
+        Some("gateway"),
+        "a gateway-reported cost must be labelled authoritative; fields: {:?}",
+        chat.fields
+    );
+
+    // (5) The join key to LiteLLM's spend log, which carries the gateway's own
+    // dollars AND real token counts — the cross-check on everything above.
+    assert_eq!(
+        chat.fields.get("gen_ai.response.id").map(String::as_str),
+        Some("chatcmpl-turn-2"),
+        "expected the FINAL call's response id; fields: {:?}",
+        chat.fields
     );
 }
 
@@ -472,17 +496,23 @@ async fn fabricated_usage_omits_both_token_counts() {
         chat.fields
     );
 
-    // Pinning the KNOWN-IMPERFECT half so it can't change unnoticed. Cost is
-    // judged independently of the counts (gateway sends them over separate
-    // channels), and `openai/gpt-4o` IS in the local `ModelPricing` table — so
-    // this turn gets a locally-derived cost computed against a zero input
-    // count, i.e. an undercount. Only cost provenance on the engine's
-    // `Completed` event can distinguish that from a gateway figure; prod is not
-    // exposed because its model isn't in the local table (local path → 0 →
-    // dropped). If this assertion ever starts failing, provenance landed.
+    // Cost is still judged independently of the counts (separate channels), and
+    // `openai/gpt-4o` IS in the local `ModelPricing` table — so this turn does
+    // get a locally-derived cost computed against a zero input count. What is
+    // no longer ambiguous is WHERE it came from: provenance now says so out
+    // loud, which is what closes the gap this test used to merely document.
     assert!(
         chat.fields.contains_key("gen_ai.usage.cost_usd"),
-        "documents today's residual gap, not desired behaviour; fields: {:?}",
+        "fields: {:?}",
+        chat.fields
+    );
+    assert_eq!(
+        chat.fields
+            .get("gen_ai.usage.cost_source")
+            .map(String::as_str),
+        Some("estimated"),
+        "a locally-priced turn must be labelled an estimate, not passed off as \
+         the gateway's figure; fields: {:?}",
         chat.fields
     );
 }
