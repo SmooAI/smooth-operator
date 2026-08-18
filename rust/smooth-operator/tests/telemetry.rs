@@ -321,6 +321,15 @@ async fn run_turn_omits_cost_for_an_unpriced_model() {
          missing price must never read as free; span fields: {:?}",
         chat.fields
     );
+    assert_eq!(
+        chat.fields
+            .get("smooai.gen_ai.cost_unavailable")
+            .map(String::as_str),
+        Some("unpriced"),
+        "…and says WHY, with the same attribute name + value the TS lane emits; \
+         span fields: {:?}",
+        chat.fields
+    );
 }
 
 /// One `LlmResponse` carrying a gateway-reported cost, as the LiteLLM

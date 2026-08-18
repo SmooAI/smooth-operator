@@ -79,6 +79,25 @@ pub const GEN_AI_USAGE_COST_USD: &str = "gen_ai.usage.cost_usd";
 /// `gen_ai.operation.name` — the GenAI operation a span represents
 /// ([`OPERATION_CHAT`] on a turn span, [`OPERATION_TOOL`] on a tool span).
 pub const GEN_AI_OPERATION_NAME: &str = "gen_ai.operation.name";
+/// `smooai.gen_ai.cost_unavailable` — why [`GEN_AI_USAGE_COST_USD`] is absent.
+///
+/// Cross-language attribute: the TS lane emits this exact name and the same
+/// values, so a consumer never has to special-case per engine. Set INSTEAD of
+/// the cost, never alongside it. It lands in the ingest's `attributes` JSONB
+/// blob (there is no column), readable as
+/// `attributes->>'smooai.gen_ai.cost_unavailable'`.
+pub const COST_UNAVAILABLE: &str = "smooai.gen_ai.cost_unavailable";
+/// [`COST_UNAVAILABLE`] value: a cost was expected but none could be
+/// established — the gateway reported `0` for a model it has no price for, and
+/// no local price applied either. Actionable: someone has to price the model.
+///
+/// ponytail: the TS lane also distinguishes `"unparseable"` (a cost header that
+/// wasn't a number). This layer cannot — core's `parse_gateway_cost` collapses
+/// unparseable and unpriced into the same `None`, then the local pricing
+/// fallback collapses it again into a plain `f64`. Splitting them needs the
+/// same core change as cost provenance, so everything we can see is reported
+/// as the commoner cause rather than guessed at.
+pub const COST_UNAVAILABLE_UNPRICED: &str = "unpriced";
 /// `gen_ai.tool.name` — the name of an invoked tool.
 pub const GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
 /// `gen_ai.tool.call.arguments` — the (redacted) JSON arguments passed to a tool.
@@ -125,16 +144,65 @@ pub const SPAN_CHAT: &str = "gen_ai.chat";
 /// Span name for a per-tool-call child span (`gen_ai.tool`).
 pub const SPAN_TOOL: &str = "gen_ai.tool";
 
-/// Record `cost_usd` on `span` as [`GEN_AI_USAGE_COST_USD`], but only when it is
-/// a genuinely measured number.
+/// Record a turn's token counts and cost on `span` — but only the parts that
+/// were genuinely measured.
 ///
-/// A non-positive or non-finite cost is dropped rather than exported as `0`,
-/// because at this layer a zero cost is indistinguishable from an unpriced one
-/// — see [`GEN_AI_USAGE_COST_USD`]. The span must declare the field as
-/// `tracing::field::Empty` at creation for the record to take.
-pub fn record_cost_usd(span: &tracing::Span, cost_usd: f64) {
+/// This is the single place the "measured or absent" policy lives, so the
+/// streaming runner and [`KnowledgeChatRuntime`](crate::runtime) cannot drift
+/// apart on it. Three outcomes:
+///
+/// Counts and cost are judged separately, because the gateway reports them over
+/// separate channels (an SSE chunk vs an HTTP header) and either can arrive
+/// without the other:
+///
+/// | Engine reported | Span gets |
+/// | --- | --- |
+/// | fabricated usage (`prompt_tokens == 0`) | no counts |
+/// | real usage | both counts |
+/// | a positive cost | [`GEN_AI_USAGE_COST_USD`] |
+/// | zero / non-finite cost | [`COST_UNAVAILABLE`] |
+///
+/// A zero cost is never exported as `0` — see [`GEN_AI_USAGE_COST_USD`]. In its
+/// place the span gets [`COST_UNAVAILABLE`], so "we could not price this" is a
+/// positive signal a consumer can act on rather than an absence it must infer.
+///
+/// Call this only for a turn that actually ran an LLM call. A turn with no
+/// `Completed` event gets no attributes at all — nothing was expected, so
+/// nothing is missing. Every field it records must be declared
+/// `tracing::field::Empty` at span creation for the record to take.
+pub fn record_turn_usage(
+    span: &tracing::Span,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cost_usd: f64,
+) {
+    // `prompt_tokens == 0` means the usage struct is FABRICATED, not that the
+    // turn consumed no input. Core's streaming collector invents one whenever
+    // the gateway sends no usage chunk — hardcoding `prompt_tokens = 0` and
+    // estimating `completion_tokens` as `content.len() / 4` — and LiteLLM at
+    // llm.smoo.ai drops that chunk for `smooth-*` aliases (core pearl
+    // th-eff0d0). A grounded turn always consumes prompt tokens, so a zero here
+    // condemns the estimated completion count beside it too. Pearl th-126fe6.
+    if prompt_tokens > 0 {
+        span.record(GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens);
+        span.record(GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens);
+    }
+    // Cost is judged independently of the counts, on purpose. The gateway
+    // reports cost in an HTTP header and usage in an SSE chunk — two separate
+    // channels, so a turn can genuinely have an authoritative cost and no usage.
+    // Suppressing cost whenever usage was fabricated would throw that away and
+    // recreate the all-zero-rows bug this exists to fix.
+    //
+    // ponytail: the residual hazard is the other direction — fabricated usage
+    // priced LOCALLY yields `ModelPricing × 0 input`, an undercount that looks
+    // authoritative. This layer can't tell that apart from a gateway figure;
+    // cost provenance on `AgentEvent::Completed` is the fix, and it needs a
+    // core change. Prod is not exposed today: its model isn't in the local
+    // pricing table, so the local path yields exactly 0 and is dropped below.
     if cost_usd > 0.0 && cost_usd.is_finite() {
         span.record(GEN_AI_USAGE_COST_USD, cost_usd);
+    } else {
+        span.record(COST_UNAVAILABLE, COST_UNAVAILABLE_UNPRICED);
     }
 }
 

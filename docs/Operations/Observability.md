@@ -34,9 +34,29 @@ turn (engine loop + message persistence). It carries:
 | `gen_ai.conversation.id`      | the `conversation_id` arg                 | Ties the turn to its conversation. |
 | `gen_ai.agent.name`           | constant `"smooth-agent-chat"`            | The agent/persona driving the turn. |
 | `smooai.org_id`               | the turn's `org_id` (streaming path)      | Set only when an org is resolved. **Matches the monorepo TS chat handler's attribute exactly**, so the observability studio groups Rust + TS turns by org. |
-| `gen_ai.usage.input_tokens`   | `AgentEvent::Completed.prompt_tokens`     | Recorded on completion **only when the engine reported usage** (non-zero). Omitted otherwise — e.g. a mock turn — per the convention's "omit if unknown" rule. |
-| `gen_ai.usage.output_tokens`  | `AgentEvent::Completed.completion_tokens` | Same gating as input tokens. |
+| `gen_ai.usage.input_tokens`   | `AgentEvent::Completed.prompt_tokens`     | Recorded **only when `prompt_tokens > 0`** — see "Zero prompt tokens means fabricated usage" below. |
+| `gen_ai.usage.output_tokens`  | `AgentEvent::Completed.completion_tokens` | Same gating as input tokens: both or neither. |
 | `gen_ai.usage.cost_usd`       | `AgentEvent::Completed.cost_usd`          | The turn's cost in USD. **Recorded only when positive** — see "A zero cost is never recorded" below. |
+| `smooai.gen_ai.cost_unavailable` | constant `"unpriced"`                  | Set **instead of** `cost_usd` when no cost could be established. Same attribute name and values as the TypeScript lane, so a consumer never special-cases per engine. |
+
+#### Zero prompt tokens means fabricated usage
+
+`prompt_tokens = 0` does not mean the turn consumed no input — a grounded turn
+always does. It is the signature of core's streaming collector **inventing** a
+usage struct, which it does whenever no `StreamEvent::Usage` arrives: it
+hardcodes `prompt_tokens = 0` and estimates `completion_tokens` as
+`content.len() / 4`. LiteLLM at `llm.smoo.ai` drops the usage chunk for
+`smooth-*` aliases, so this is the common case, not the edge case.
+
+Both counts are therefore omitted together. The plausible-looking output number
+beside a zero input is an estimate, not a measurement, and shipping it next to a
+dollar figure makes a guess look authoritative. Absent is honest; `0` is a lie.
+
+The real fix is in `smooth-operator-core` — either stop fabricating, or mark the
+struct as estimated. Until then this instrumentation declines to export it.
+
+`telemetry::record_turn_usage` is the single place this policy lives, so the
+streaming runner and `KnowledgeChatRuntime` cannot drift apart on it.
 
 #### A zero cost is never recorded
 
@@ -54,10 +74,27 @@ fallback prices any model it doesn't recognise at `0`. So a zero always means
 render a paid turn as a confident `$0.00`. An absent attribute lets a consumer
 say "not measured" instead.
 
-A *positive* value may be either the gateway's authoritative number or the
-local `ModelPricing` estimate; the engine sums both onto one `f64`, so the
+Cost is judged **independently of the token counts**, on purpose: the gateway
+reports cost in an HTTP header and usage in an SSE chunk — two separate channels
+— so a turn can legitimately have an authoritative cost and no usage.
+Suppressing cost whenever usage was fabricated would throw that away and
+recreate the all-zero-rows bug.
+
+A *positive* value may be either the gateway's authoritative number or the local
+`ModelPricing` estimate; the engine sums both onto one `f64`, so the
 instrumentation cannot tell them apart. Separating them needs a second field on
-`AgentEvent::Completed`.
+`AgentEvent::Completed`. The residual hazard is a locally-priced model with
+fabricated usage: `ModelPricing × 0 input` is an undercount that still looks
+authoritative. Production is not exposed today, because its model is not in the
+local pricing table — the local path yields exactly `0`, which is dropped.
+
+Independently, `gen_ai_events.response_id` joins to
+`LiteLLM_SpendLogs.request_id`, which carries the gateway's own dollars **and**
+its real prompt/completion counts. The Rust operator does **not** populate
+`gen_ai.response.id` yet: core never captures the `chatcmpl-…` id — neither
+`ChatResponse` nor `StreamChunk` deserializes an `id` field, and `LlmResponse`
+has nowhere to put one. Adding it is a core change, and it would make
+"measured vs estimated" verifiable after the fact rather than a matter of trust.
 
 ### `gen_ai.tool` span — one per tool call
 

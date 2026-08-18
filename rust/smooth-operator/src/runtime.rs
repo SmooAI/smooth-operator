@@ -22,11 +22,11 @@ use crate::adapter::{MessageQuery, StorageAdapter};
 use crate::curation::{CuratedKnowledgeStore, RetrievalFilter};
 use crate::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use crate::telemetry::{
-    record_cost_usd, redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
-    GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS,
-    GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
-    OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SPAN_CHAT, SPAN_TOOL,
-    SYSTEM_NAME,
+    record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM,
+    GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE,
+    OTEL_STATUS_MESSAGE, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
 };
 use crate::tools::{KnowledgeResultSink, KnowledgeSearchTool};
 use tracing::Instrument;
@@ -195,35 +195,22 @@ pub struct TurnOutcome {
     pub citations: Vec<Citation>,
 }
 
-/// Extract `(input_tokens, output_tokens)` from the engine's terminal
-/// [`AgentEvent::Completed`] event, if one is present and carries usage. The
-/// engine reports `prompt_tokens` / `completion_tokens` on `Completed`; those
-/// map directly onto the GenAI `gen_ai.usage.input_tokens` /
-/// `gen_ai.usage.output_tokens` attributes. Returns `None` when there is no
-/// `Completed` event (e.g. a mock turn that didn't surface usage), so the
-/// caller omits the attributes rather than recording zeros.
-fn usage_from_events(events: &[AgentEvent]) -> Option<(u64, u64)> {
+/// The turn's token counts and cost from the terminal [`AgentEvent::Completed`],
+/// or `None` when the turn produced no `Completed` event (e.g. an offline mock
+/// turn) and therefore reported nothing at all.
+///
+/// Deliberately unfiltered: it hands back whatever the engine said, including a
+/// fabricated `prompt_tokens = 0`. Deciding which of those numbers may be
+/// exported is [`record_turn_usage`](crate::telemetry::record_turn_usage)'s
+/// job, so that policy lives in exactly one place for both turn paths.
+fn usage_from_events(events: &[AgentEvent]) -> Option<(u64, u64, f64)> {
     events.iter().find_map(|e| match e {
         AgentEvent::Completed {
             prompt_tokens,
             completion_tokens,
+            cost_usd,
             ..
-        } if *prompt_tokens > 0 || *completion_tokens > 0 => {
-            Some((*prompt_tokens, *completion_tokens))
-        }
-        _ => None,
-    })
-}
-
-/// The turn's accumulated cost in USD from the terminal
-/// [`AgentEvent::Completed`], or `None` when the turn produced no `Completed`
-/// event. The value still needs the zero check in
-/// [`record_cost_usd`](crate::telemetry::record_cost_usd) before it can be
-/// exported — the engine reports `0.0` both for a free turn and for one it
-/// could not price.
-fn cost_from_events(events: &[AgentEvent]) -> Option<f64> {
-    events.iter().find_map(|e| match e {
-        AgentEvent::Completed { cost_usd, .. } => Some(*cost_usd),
+        } => Some((*prompt_tokens, *completion_tokens, *cost_usd)),
         _ => None,
     })
 }
@@ -557,6 +544,7 @@ impl KnowledgeChatRuntime {
             { GEN_AI_USAGE_INPUT_TOKENS } = tracing::field::Empty,
             { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
             { GEN_AI_USAGE_COST_USD } = tracing::field::Empty,
+            { COST_UNAVAILABLE } = tracing::field::Empty,
         );
 
         // Run the turn body inside the span so any engine-internal spans nest
@@ -568,14 +556,9 @@ impl KnowledgeChatRuntime {
 
         // Record token usage on the turn span if the engine reported it via the
         // terminal `Completed` event (omitted otherwise, per the GenAI convs).
-        if let Some((input, output)) = usage_from_events(&outcome.events) {
-            turn_span.record(GEN_AI_USAGE_INPUT_TOKENS, input);
-            turn_span.record(GEN_AI_USAGE_OUTPUT_TOKENS, output);
-        }
-        // Gateway-authoritative per-turn cost, dropped when zero (= unpriced,
-        // not free). See `record_cost_usd`.
-        if let Some(cost) = cost_from_events(&outcome.events) {
-            record_cost_usd(&turn_span, cost);
+        // One helper owns the "measured or absent" policy for both turn paths.
+        if let Some((input, output, cost)) = usage_from_events(&outcome.events) {
+            record_turn_usage(&turn_span, input, output, cost);
         }
 
         // Emit a child `gen_ai.tool` span per tool call so each invocation is an

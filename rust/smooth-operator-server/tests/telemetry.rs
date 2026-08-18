@@ -393,4 +393,96 @@ async fn unpriced_turn_omits_cost_rather_than_recording_zero() {
          missing price must never read as free; fields: {:?}",
         chat.fields
     );
+    // …and says WHY, with the same attribute name + value the TS lane emits, so
+    // a consumer never special-cases per engine. "unpriced" is actionable:
+    // someone has to price the model.
+    assert_eq!(
+        chat.fields
+            .get("smooai.gen_ai.cost_unavailable")
+            .map(String::as_str),
+        Some("unpriced"),
+        "absence alone makes a consumer infer the reason; fields: {:?}",
+        chat.fields
+    );
+}
+
+/// The prod signature, four for four across every chat-ws turn ever recorded:
+/// `input_tokens = 0` with a plausible-looking output count.
+///
+/// Its cause is not this crate — core's `collect_stream` fabricates the whole
+/// usage struct when the gateway sends no usage chunk (LiteLLM drops it for
+/// `smooth-*` aliases), hardcoding `prompt_tokens = 0` and estimating
+/// `completion_tokens` as `content.len() / 4`. So the "plausible" output count
+/// was never a measurement either. Until core stops fabricating, the honest
+/// move is to export neither. Pearl th-126fe6.
+#[tokio::test]
+async fn fabricated_usage_omits_both_token_counts() {
+    let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
+    let layer = CapturingLayer {
+        sink: Arc::clone(&sink),
+        index: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // No `StreamEvent::Usage` at all — exactly what the gateway sends today.
+    // Core will fabricate: prompt 0, completion ≈ len/4.
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::Delta {
+            content: "Items are accepted within 30 days for a full refund.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+
+    let (tx, mut rx) = unbounded_channel::<serde_json::Value>();
+    runner::run_streaming_turn(
+        TurnRequest {
+            llm_provider: Some(Arc::new(mock.clone())),
+            conversation_id: "conv-otel-fabricated",
+            request_id: "req-otel-fabricated",
+            ..base_turn_request()
+        },
+        &tx,
+    )
+    .await
+    .expect("run_streaming_turn");
+    drop(tx);
+    while rx.try_recv().is_ok() {}
+
+    let spans = sink.lock().expect("sink poisoned").clone();
+    let chat = spans
+        .iter()
+        .find(|s| s.name == "gen_ai.chat")
+        .unwrap_or_else(|| panic!("expected a `gen_ai.chat` span; got: {spans:#?}"));
+
+    assert!(
+        !chat.fields.contains_key("gen_ai.usage.input_tokens"),
+        "input_tokens = 0 is impossible on a grounded turn — it must be ABSENT, \
+         not 0; fields: {:?}",
+        chat.fields
+    );
+    assert!(
+        !chat.fields.contains_key("gen_ai.usage.output_tokens"),
+        "the output count beside a fabricated input is core's content.len()/4 \
+         estimate, not a measurement — shipping it next to a dollar figure \
+         would look authoritative; fields: {:?}",
+        chat.fields
+    );
+
+    // Pinning the KNOWN-IMPERFECT half so it can't change unnoticed. Cost is
+    // judged independently of the counts (gateway sends them over separate
+    // channels), and `openai/gpt-4o` IS in the local `ModelPricing` table — so
+    // this turn gets a locally-derived cost computed against a zero input
+    // count, i.e. an undercount. Only cost provenance on the engine's
+    // `Completed` event can distinguish that from a gateway figure; prod is not
+    // exposed because its model isn't in the local table (local path → 0 →
+    // dropped). If this assertion ever starts failing, provenance landed.
+    assert!(
+        chat.fields.contains_key("gen_ai.usage.cost_usd"),
+        "documents today's residual gap, not desired behaviour; fields: {:?}",
+        chat.fields
+    );
 }
