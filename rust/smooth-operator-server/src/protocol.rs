@@ -114,9 +114,11 @@ pub fn stream_chunk(request_id: &str, node: &str, state: Value) -> Value {
 /// Per-turn token-accounting + cost, captured from the engine's terminal
 /// [`AgentEvent::Completed`](smooth_operator_core::AgentEvent::Completed) and
 /// surfaced on the `eventual_response` so clients can accumulate a live session
-/// cost. All fields are accumulated across every LLM call in the turn. `Copy` so
-/// it threads through the runner → handler → protocol by value.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// cost. All fields are accumulated across every LLM call in the turn.
+///
+/// No longer `Copy`: `response_id` is an owned `String`. Callers that threaded
+/// it by value now pass `&`/clone, which is what the one call site already did.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnUsage {
     /// Accumulated cost in USD for this turn (gateway-priced).
     pub cost_usd: f64,
@@ -124,6 +126,16 @@ pub struct TurnUsage {
     pub prompt_tokens: u64,
     /// Accumulated completion (output) tokens for this turn.
     pub completion_tokens: u64,
+    /// Engine flag: the token counts above were ESTIMATED from character counts,
+    /// not reported by the gateway. Telemetry-only — deliberately not on the
+    /// wire, which stays `{ costUsd, promptTokens, completionTokens }`.
+    pub usage_estimated: bool,
+    /// Engine flag: `cost_usd` is tainted by at least one call priced from the
+    /// local table rather than the gateway. Telemetry-only, as above.
+    pub cost_estimated: bool,
+    /// Gateway response id (`chatcmpl-…`) for the turn's final LLM call — the
+    /// join key to `LiteLLM_SpendLogs.request_id`. Telemetry-only, as above.
+    pub response_id: Option<String>,
 }
 
 /// `eventual_response` — the terminal event of a streaming turn. The payload is
@@ -583,6 +595,10 @@ mod tests {
             cost_usd: 0.0123,
             prompt_tokens: 1500,
             completion_tokens: 42,
+            // Telemetry-only fields; the wire shape below must not grow them.
+            usage_estimated: true,
+            cost_estimated: true,
+            response_id: Some("chatcmpl-f1e896f1".into()),
         };
         let ev = eventual_response(
             "r1",
@@ -603,6 +619,13 @@ mod tests {
         assert!((cost - 0.0123).abs() < 1e-9, "costUsd should round-trip");
         assert_eq!(u["promptTokens"], 1500);
         assert_eq!(u["completionTokens"], 42);
+        // The provenance fields are TELEMETRY-only. The fixture sets all three,
+        // so this fails the moment one leaks onto a client-visible payload.
+        assert_eq!(
+            u.as_object().map(|o| o.len()),
+            Some(3),
+            "wire usage must stay {{costUsd, promptTokens, completionTokens}}; got {u}"
+        );
     }
 
     #[test]

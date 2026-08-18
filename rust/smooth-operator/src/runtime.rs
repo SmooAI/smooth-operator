@@ -23,10 +23,10 @@ use crate::curation::{CuratedKnowledgeStore, RetrievalFilter};
 use crate::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use crate::telemetry::{
     record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
-    GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM,
-    GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE,
-    OTEL_STATUS_MESSAGE, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+    GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
+    GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_SOURCE,
+    GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT,
+    OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
 };
 use crate::tools::{KnowledgeResultSink, KnowledgeSearchTool};
 use tracing::Instrument;
@@ -195,22 +195,42 @@ pub struct TurnOutcome {
     pub citations: Vec<Citation>,
 }
 
-/// The turn's token counts and cost from the terminal [`AgentEvent::Completed`],
-/// or `None` when the turn produced no `Completed` event (e.g. an offline mock
-/// turn) and therefore reported nothing at all.
+/// What the terminal [`AgentEvent::Completed`] reported about the turn's cost
+/// and tokens, including the engine's own provenance flags.
+pub(crate) struct TurnAccounting {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+    pub usage_estimated: bool,
+    pub cost_estimated: bool,
+    pub response_id: Option<String>,
+}
+
+/// The turn's accounting from the terminal [`AgentEvent::Completed`], or `None`
+/// when the turn produced no `Completed` event (e.g. an offline mock turn).
 ///
-/// Deliberately unfiltered: it hands back whatever the engine said, including a
-/// fabricated `prompt_tokens = 0`. Deciding which of those numbers may be
-/// exported is [`record_turn_usage`](crate::telemetry::record_turn_usage)'s
-/// job, so that policy lives in exactly one place for both turn paths.
-fn usage_from_events(events: &[AgentEvent]) -> Option<(u64, u64, f64)> {
+/// Deliberately unfiltered: it hands back whatever the engine said, flags and
+/// all. Deciding what may be exported is
+/// [`record_turn_usage`](crate::telemetry::record_turn_usage)'s job, so that
+/// policy lives in exactly one place for both turn paths.
+fn usage_from_events(events: &[AgentEvent]) -> Option<TurnAccounting> {
     events.iter().find_map(|e| match e {
         AgentEvent::Completed {
             prompt_tokens,
             completion_tokens,
             cost_usd,
+            usage_estimated,
+            cost_estimated,
+            response_id,
             ..
-        } => Some((*prompt_tokens, *completion_tokens, *cost_usd)),
+        } => Some(TurnAccounting {
+            prompt_tokens: *prompt_tokens,
+            completion_tokens: *completion_tokens,
+            cost_usd: *cost_usd,
+            usage_estimated: *usage_estimated,
+            cost_estimated: *cost_estimated,
+            response_id: response_id.clone(),
+        }),
         _ => None,
     })
 }
@@ -545,6 +565,8 @@ impl KnowledgeChatRuntime {
             { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
             { GEN_AI_USAGE_COST_USD } = tracing::field::Empty,
             { COST_UNAVAILABLE } = tracing::field::Empty,
+            { GEN_AI_USAGE_COST_SOURCE } = tracing::field::Empty,
+            { GEN_AI_RESPONSE_ID } = tracing::field::Empty,
         );
 
         // Run the turn body inside the span so any engine-internal spans nest
@@ -557,8 +579,16 @@ impl KnowledgeChatRuntime {
         // Record token usage on the turn span if the engine reported it via the
         // terminal `Completed` event (omitted otherwise, per the GenAI convs).
         // One helper owns the "measured or absent" policy for both turn paths.
-        if let Some((input, output, cost)) = usage_from_events(&outcome.events) {
-            record_turn_usage(&turn_span, input, output, cost);
+        if let Some(u) = usage_from_events(&outcome.events) {
+            record_turn_usage(
+                &turn_span,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.cost_usd,
+                u.usage_estimated,
+                u.cost_estimated,
+                u.response_id.as_deref(),
+            );
         }
 
         // Emit a child `gen_ai.tool` span per tool call so each invocation is an

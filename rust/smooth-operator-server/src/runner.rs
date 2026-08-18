@@ -49,10 +49,11 @@ use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry, Inte
 use smooth_operator::rerank::Reranker;
 use smooth_operator::telemetry::{
     record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
-    GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM,
-    GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE,
-    OTEL_STATUS_MESSAGE, SMOOAI_ORG_ID, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+    GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
+    GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_SOURCE,
+    GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT,
+    OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SMOOAI_ORG_ID, SPAN_CHAT, SPAN_TOOL,
+    SYSTEM_NAME,
 };
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator::tools::{
@@ -1024,6 +1025,8 @@ pub async fn run_streaming_turn(
         { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
         { GEN_AI_USAGE_COST_USD } = tracing::field::Empty,
         { COST_UNAVAILABLE } = tracing::field::Empty,
+        { GEN_AI_USAGE_COST_SOURCE } = tracing::field::Empty,
+        { GEN_AI_RESPONSE_ID } = tracing::field::Empty,
     );
     if let Some(org) = org_id_for_span.as_deref() {
         turn_span.record(SMOOAI_ORG_ID, org);
@@ -1201,12 +1204,18 @@ pub async fn run_streaming_turn(
                     cost_usd,
                     prompt_tokens,
                     completion_tokens,
+                    usage_estimated,
+                    cost_estimated,
+                    response_id,
                     ..
                 } => {
                     usage = Some(crate::protocol::TurnUsage {
                         cost_usd,
                         prompt_tokens,
                         completion_tokens,
+                        usage_estimated,
+                        cost_estimated,
+                        response_id,
                     });
                 }
                 // Other Started / token-accounting events are terminal or
@@ -1288,7 +1297,15 @@ pub async fn run_streaming_turn(
     if let Some(u) = usage.as_ref() {
         // One helper owns the "measured or absent" policy for both turn paths —
         // which counts are real, and whether a cost may be trusted beside them.
-        record_turn_usage(&turn_span, u.prompt_tokens, u.completion_tokens, u.cost_usd);
+        record_turn_usage(
+            &turn_span,
+            u.prompt_tokens,
+            u.completion_tokens,
+            u.cost_usd,
+            u.usage_estimated,
+            u.cost_estimated,
+            u.response_id.as_deref(),
+        );
     }
     for rec in &tool_records {
         // The OTLP ingest merges resource attrs with THIS span's attrs and does
