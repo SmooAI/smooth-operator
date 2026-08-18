@@ -63,6 +63,22 @@ type FrameDispatcher struct {
 	// the gateway's /model/info, forwarded to every turn runner to clamp max_tokens.
 	// nil → the raised default is unclamped (EPIC th-1cc9fa).
 	modelCeiling *int
+	// interactionKinds is the stateless catalog of Rich Interaction kinds hosted this
+	// connection (choices, …). Threaded into every turn so the runner registers one
+	// raise tool per kind. Defaults to DefaultInteractionKinds() in the constructor.
+	interactionKinds *InteractionKinds
+	// interactions is the per-connection session-keyed park/resume registry a
+	// submit_interaction frame resolves (the Rich Interactions analog of confirmations).
+	// Shared with the turn runner's raise tools. Created on demand in the constructor.
+	interactions *InteractionRegistry
+	// supports maps sessionId → the render capabilities its client declared at
+	// create_conversation_session (`supports`). A kind's rich card path is offered only
+	// when its capability is present; otherwise the turn degrades to the conversational
+	// fallback. Per-connection (like confirmations): the create + send + submit frames
+	// for a session all ride the same connection. th-choices.
+	supports   map[string]map[string]bool
+	supportsMu sync.Mutex
+
 	// turns tracks in-flight spawned send_message turns so the connection loop can wait
 	// for them to finish (and flush their eventual_response) on teardown — the
 	// graceful-drain contract. send_message runs its turn as a goroutine (so the read
@@ -108,6 +124,9 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 		tools:              tools,
 		confirmTools:       confirmTools,
 		confirmations:      confirmations,
+		interactionKinds:   DefaultInteractionKinds(),
+		interactions:       NewInteractionRegistry(),
+		supports:           map[string]map[string]bool{},
 		agentConfigs:       agentConfigs,
 		judgeModel:         judgeModel,
 		authRequiringTools: authRequiringTools,
@@ -173,6 +192,11 @@ type inboundFrame struct {
 	AgentID   string `json:"agentId"`
 	UserName  string `json:"userName"`
 	UserEmail string `json:"userEmail"`
+	// create_conversation_session — the client's render capabilities for this session
+	// (per spec/actions/create-conversation-session.schema.json). A per-kind list gating
+	// the Rich Interactions the server may emit mid-turn; absent ⇒ text-only, every kind
+	// degrades to its conversational fallback. Unknown values are ignored (forward-compat).
+	Supports []string `json:"supports"`
 	// create_conversation_session — optional: resume an existing conversation (bind the new
 	// session to it) when known; absent/unknown → a fresh conversation (unchanged). th-d5b446.
 	ConversationID string `json:"conversationId"`
@@ -198,6 +222,14 @@ type inboundFrame struct {
 	Approved *bool `json:"approved"`
 	// verify_otp — the one-time code the user entered.
 	Code string `json:"code"`
+	// submit_interaction — resume a parked Rich Interaction. InteractionID must echo the
+	// interaction_required event's id (a stale card can't resolve a newer park); Kind, when
+	// present, is cross-checked against the parked kind. Declined resumes with a decline;
+	// otherwise Values (raw, kind-shaped) is routed to the kind's server-side validator.
+	InteractionID string          `json:"interactionId"`
+	Kind          string          `json:"kind"`
+	Declined      bool            `json:"declined"`
+	Values        json.RawMessage `json:"values"`
 }
 
 // Dispatch parses one raw frame and routes it. A handler failure mid-turn emits a
@@ -227,6 +259,8 @@ func (d *FrameDispatcher) Dispatch(ctx context.Context, raw []byte, sink EventSi
 		d.handleCancel(frame, sink)
 	case "confirm_tool_action":
 		d.handleConfirmToolAction(frame, sink)
+	case "submit_interaction":
+		d.handleSubmitInteraction(ctx, frame, sink)
 	case "verify_otp":
 		d.handleVerifyOtp(ctx, frame, sink)
 	case "":
@@ -307,6 +341,9 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 	}
 	// A freshly created session never passes through scopedSession, so associate here too.
 	d.associateSession(&session)
+	// Record the client's declared render capabilities for this session so a later turn
+	// offers a kind's rich card only when its capability is present (else the fallback).
+	d.setSupports(session.SessionID, frame.Supports)
 	data := map[string]any{
 		"sessionId":          session.SessionID,
 		"conversationId":     session.ConversationID,
@@ -674,6 +711,12 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		defer extTurn.Close(ctx)
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
 		runner.hooks = d.hooks
+		// Rich Interactions: give the runner the hosted kinds, the park/resume registry,
+		// and this session's declared capabilities, so it registers one raise tool per
+		// kind (rich park when the capability is declared, else conversational fallback).
+		runner.interactionKinds = d.interactionKinds
+		runner.interactions = d.interactions
+		runner.capabilities = d.capabilities(frame.SessionID)
 		// Span attribution: the owning org (grouped by smooai.org_id on the turn span).
 		runner.orgID = d.access.Principal.Org
 		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
@@ -752,6 +795,132 @@ func (d *FrameDispatcher) handleConfirmToolAction(frame inboundFrame, sink Event
 		"sessionId": frame.SessionID,
 		"approved":  approved,
 	}))
+}
+
+// setSupports records a session's declared render capabilities (from
+// create_conversation_session). An absent/empty list means text-only. Idempotent.
+func (d *FrameDispatcher) setSupports(sessionID string, supports []string) {
+	caps := make(map[string]bool, len(supports))
+	for _, c := range supports {
+		if c != "" {
+			caps[c] = true
+		}
+	}
+	d.supportsMu.Lock()
+	d.supports[sessionID] = caps
+	d.supportsMu.Unlock()
+}
+
+// capabilities returns the render capabilities a session declared at create time (an
+// empty set when it declared none or is unknown on this connection → every kind
+// degrades to its conversational fallback).
+func (d *FrameDispatcher) capabilities(sessionID string) map[string]bool {
+	d.supportsMu.Lock()
+	defer d.supportsMu.Unlock()
+	if caps, ok := d.supports[sessionID]; ok {
+		return caps
+	}
+	return map[string]bool{}
+}
+
+// handleSubmitInteraction resumes a turn parked on a Rich Interaction.
+//
+// Per spec/actions/submit-interaction.schema.json the client replies with
+// {action, sessionId, requestId, interactionId, kind?, values?, declined?} to an
+// interaction_required event. Validation is SERVER-SIDE, routed to the parked kind's
+// validator against the spec the raise carried:
+//   - invalid → an interaction_invalid event with per-field errors; the turn STAYS
+//     parked so the card can resubmit (mirrors otp_invalid — never a terminal error);
+//   - valid → the parked raise resumes with the canonical values, and an
+//     immediate_response acks;
+//   - declined:true → the raise resumes with a declined payload.
+//
+// The interactionId must echo the event's, so a stale submit can never resolve a newer
+// park; the pending record is taken only on resolution, so a duplicate submit is a clean
+// NO_PENDING_INTERACTION no-op. The requestId is load-bearing (it echoes the originating
+// interaction_required and keys the resumed stream), so require it.
+func (d *FrameDispatcher) handleSubmitInteraction(ctx context.Context, frame inboundFrame, sink EventSink) {
+	if frame.RequestID == "" {
+		sink(errorEvent("", "VALIDATION_ERROR", "submit_interaction requires a 'requestId'"))
+		return
+	}
+	if frame.SessionID == "" {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "submit_interaction requires a 'sessionId'"))
+		return
+	}
+
+	// Peek the pending interaction WITHOUT consuming the park — an invalid submit must
+	// leave the turn parked for a resubmit. Scope the session first: an unreadable session
+	// reports the identical NO_PENDING_INTERACTION an unknown id produces, so a submit can
+	// never land in another user's parked turn.
+	session, err := d.scopedSession(ctx, frame.SessionID)
+	if err != nil {
+		d.internalError(sink, frame.RequestID, "submit_interaction", err)
+		return
+	}
+	var pending pendingInteraction
+	var havePending bool
+	if session != nil {
+		pending, havePending = d.interactions.Pending(frame.SessionID)
+	}
+	if !havePending {
+		sink(errorEvent(frame.RequestID, "NO_PENDING_INTERACTION", "no interaction is awaiting submission for session '"+frame.SessionID+"'"))
+		return
+	}
+
+	// The submit must target THIS interaction instance (and, when it names a kind, the
+	// right kind) — a stale card can never resolve a newer park.
+	if frame.InteractionID != pending.InteractionID {
+		sink(errorEvent(frame.RequestID, "INTERACTION_MISMATCH", "the submitted 'interactionId' does not match the pending interaction"))
+		return
+	}
+	if frame.Kind != "" && frame.Kind != pending.Kind {
+		sink(errorEvent(frame.RequestID, "INTERACTION_MISMATCH", "the pending interaction is '"+pending.Kind+"', not '"+frame.Kind+"'"))
+		return
+	}
+
+	// Decline path: resume the raise with a declined payload.
+	if frame.Declined {
+		if d.interactions.Resolve(frame.SessionID, pending.InteractionID, InteractionOutcome{Status: outcomeDeclined}) {
+			sink(immediateResponse(frame.RequestID, 200, "Interaction declined", map[string]any{
+				"sessionId":     frame.SessionID,
+				"interactionId": pending.InteractionID,
+				"declined":      true,
+			}))
+		}
+		return
+	}
+
+	// Values path: route to the parked kind's server-side validator.
+	if len(frame.Values) == 0 {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "submit_interaction requires 'values' (or 'declined': true)"))
+		return
+	}
+	kind := d.interactionKinds.Get(pending.Kind)
+	if kind == nil {
+		// A parked kind the catalog no longer hosts (shouldn't happen).
+		sink(errorEvent(frame.RequestID, "NO_PENDING_INTERACTION", "interaction kind '"+pending.Kind+"' is not hosted by this server"))
+		return
+	}
+	var values any
+	if err := json.Unmarshal(frame.Values, &values); err != nil {
+		sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "submit_interaction 'values' is not valid JSON"))
+		return
+	}
+
+	canonical, fieldErrs := kind.Validate(pending.Spec, values)
+	if len(fieldErrs) > 0 {
+		// Retryable: the turn stays parked; the client re-renders the card with the
+		// per-field errors (never a terminal error event).
+		sink(interactionInvalid(frame.RequestID, pending.InteractionID, pending.Kind, fieldErrs, "Some fields need attention."))
+		return
+	}
+	if d.interactions.Resolve(frame.SessionID, pending.InteractionID, InteractionOutcome{Status: outcomeSubmitted, Values: canonical}) {
+		sink(immediateResponse(frame.RequestID, 200, "Interaction submitted", map[string]any{
+			"sessionId":     frame.SessionID,
+			"interactionId": pending.InteractionID,
+		}))
+	}
 }
 
 // offerOtp emits the OTP-offer sequence for a turn whose end_user tool was refused for lack
