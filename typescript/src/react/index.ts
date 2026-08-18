@@ -27,4 +27,15 @@ export { safeHttpUrl, extractCitations, extractFinalText } from './response.js';
 export { SmoothChat, type SmoothChatProps } from './components/SmoothChat.js';
 export { MessageList, MessageBubble, Citations, Composer, ConnectionStatusLabel } from './components/parts.js';
 
+// Rich Interaction cards — kind → card registry (see `interactionCards`).
+export {
+    ChoicesCard,
+    interactionCards,
+    buildChoicesValues,
+    type ChoicesCardProps,
+    type ChoiceOption,
+    type ChoiceQuestion,
+    type ChoiceError,
+} from './components/ChoicesCard.js';
+
 export type { ChatMessage, ConnectionStatus, Role, Citation } from './types.js';

@@ -1,1 +1,14 @@
 @import 'tailwindcss';
+
+/* Dark `--smooth-*` tokens for the Rich Interaction card, matching this example's
+   slate palette (the SDK card CSS reads these from the nearest ancestor). */
+.smooth-choices-host {
+    --smooth-color-text: #f1f5f9;
+    --smooth-color-bg: #0f172a;
+    --smooth-color-surface: #1e293b;
+    --smooth-color-primary: #0d9488;
+    --smooth-color-primary-text: #ffffff;
+    --smooth-color-border: #334155;
+    --smooth-color-muted: #94a3b8;
+    --smooth-radius: 12px;
+}

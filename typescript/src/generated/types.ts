@@ -86,7 +86,7 @@ export interface CreateConversationSessionRequest {
      */
     browserFingerprint?: string;
     /**
-     * Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
+     * Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`, kind `choices` → capability `choice_chips`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
      */
     supports?: string[];
     /**
@@ -130,7 +130,7 @@ export interface CreateConversationSessionResponse {
     /**
      * ID of the agent handling this session.
      */
-    agentId: string;
+    agentId?: string;
     /**
      * Display name of the agent.
      */
@@ -839,9 +839,9 @@ export interface Session {
      */
     organizationId: string;
     /**
-     * The agent handling this session.
+     * The agent handling this session. OPTIONAL in storage: create_conversation_session REJECTS an absent or blank agentId, so a session created through the protocol always has one. It stays optional here for rows that predate that validation — it used to be filled with a fresh UUID, pointing every agentless session at an agent that had never existed (th-68897a). Absence is represented by omitting the field, never by a fabricated id.
      */
-    agentId: string;
+    agentId?: string;
     /**
      * Human-readable display name of the agent.
      */
@@ -1728,6 +1728,1247 @@ export interface WriteConfirmationRequired {
      * Unix epoch milliseconds when the event was emitted.
      */
     timestamp?: number;
+}
+
+// ── from interactions/choices.schema.json ──
+/**
+ * The `spec` carried on `interaction_required` for kind `choices`: the questions to ask.
+ */
+export interface ChoicesSpec {
+    /**
+     * The questions to ask, in display order (1–4).
+     *
+     * @minItems 1
+     * @maxItems 4
+     */
+    questions:
+        | [
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+          ]
+        | [
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+          ]
+        | [
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+          ]
+        | [
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+              {
+                  /**
+                   * The question prompt shown to the visitor.
+                   */
+                  question: string;
+                  /**
+                   * A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption.
+                   */
+                  header: string;
+                  /**
+                   * The enumerated options. A free-text `other` answer is always available in addition to these.
+                   *
+                   * @minItems 2
+                   * @maxItems 4
+                   */
+                  options:
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ]
+                      | [
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                            {
+                                /**
+                                 * The option label — the value the visitor submits.
+                                 */
+                                label: string;
+                                /**
+                                 * A short human-readable gloss for the option.
+                                 */
+                                description?: string;
+                            },
+                        ];
+                  /**
+                   * Whether the visitor may select more than one option (default false).
+                   */
+                  multiSelect?: boolean;
+              },
+          ];
+}
+
+// ── from interactions/choices.schema.json ──
+/**
+ * The `values` a client submits via `submit_interaction` for kind `choices`. Validated server-side: every question answered, each selected label is one of that question's options, single-select takes exactly one pick. The free-text `other` is always accepted (the AskUserQuestion 'Other' escape hatch).
+ */
+export interface ChoicesValues {
+    /**
+     * One entry per question, keyed by the question's `header`.
+     */
+    answers: {
+        /**
+         * Which question this answers — matches the spec question's `header`.
+         */
+        header: string;
+        /**
+         * The selected option label(s). One for single-select; empty when the visitor only used `other`.
+         */
+        options?: string[];
+        /**
+         * A free-text answer outside the enumerated options (the 'Other' escape hatch). Blank ⇒ omitted.
+         */
+        other?: string;
+    }[];
+}
+
+// ── from interactions/choices.schema.json ──
+/**
+ * The canonical validated payload the parked turn resumes with (identical on the chip and conversational paths).
+ */
+export interface ChoicesPayload {
+    /**
+     * How the interaction resolved.
+     */
+    status: 'submitted' | 'declined' | 'no_response';
+    /**
+     * Present when `status` is `submitted`: the validated, normalized answers.
+     */
+    values?: {
+        answers: {
+            header: string;
+            options?: string[];
+            other?: string;
+        }[];
+    };
+    /**
+     * Guidance for the agent when `status` is `declined` / `no_response`.
+     */
+    message?: string;
 }
 
 // ── from interactions/identity-intake.schema.json ──
