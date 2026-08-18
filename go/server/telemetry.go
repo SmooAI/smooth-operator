@@ -42,6 +42,34 @@ const (
 	// SmooaiOrgID is `smooai.org_id` — the owning org. Matches the monorepo TS chat
 	// handler's attribute exactly so the observability studio groups Rust + Go turns by org.
 	SmooaiOrgID = "smooai.org_id"
+	// GenAIOperationName is `gen_ai.operation.name` — the operation a span represents.
+	//
+	// The api-prime OTLP ingest takes this attribute VERBATIM when present and only
+	// derives it from the span name as a fallback, and its queries filter on
+	// `operation_name = 'tool'`. So the values must be exactly OperationChat /
+	// OperationTool — a spelling like "execute_tool" would land in the column and
+	// match nothing.
+	GenAIOperationName = "gen_ai.operation.name"
+	// GenAIUsageCostUSD is `gen_ai.usage.cost_usd` — the turn's cost in USD.
+	//
+	// Recorded ONLY when positive. A zero is ambiguous: the gateway answers 0 for a
+	// model it has no price for, and local pricing returns the free tier for anything
+	// it does not recognise, so a zero means "not measured", never "free". Exporting
+	// it would render a paid turn as a confident $0.00.
+	GenAIUsageCostUSD = "gen_ai.usage.cost_usd"
+	// CostUnavailable is `smooai.gen_ai.cost_unavailable` — why GenAIUsageCostUSD is
+	// absent. Set INSTEAD of the cost, never alongside it. Same attribute name and
+	// values across every engine so a consumer never special-cases per language.
+	CostUnavailable = "smooai.gen_ai.cost_unavailable"
+	// CostUnavailableUnpriced is the CostUnavailable value for "no price could be
+	// established for this model".
+	CostUnavailableUnpriced = "unpriced"
+)
+
+// OperationChat / OperationTool are the GenAIOperationName values.
+const (
+	OperationChat = "chat"
+	OperationTool = "tool"
 )
 
 // SystemName is emitted for GenAISystem and used as the tracer + service name.

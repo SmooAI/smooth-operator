@@ -121,6 +121,26 @@ public class TelemetryTests
         var args = toolSpan.GetTagItem(Telemetry.GenAiToolArguments) as string ?? string.Empty;
         Assert.Contains("return policy refund window", args);
         Assert.Equal(chatSpan.Id, toolSpan.ParentId);
+
+        // Being a child is NOT enough. The OTLP ingest builds a span's attributes from
+        // the resource attrs plus THAT span's own, with no parent inheritance, so the
+        // tool span repeats the identifiers itself — and without gen_ai.system it fails
+        // the ingest's LLM-event gate outright and is discarded, which is what happened
+        // to Rust's tool spans for their entire existence.
+        Assert.Equal(Telemetry.SystemName, toolSpan.GetTagItem(Telemetry.GenAiSystem));
+        Assert.Equal(Telemetry.OperationTool, toolSpan.GetTagItem(Telemetry.GenAiOperationName));
+        Assert.Equal(conversationId, toolSpan.GetTagItem(Telemetry.GenAiConversationId));
+
+        // Must be exactly "chat"/"tool" — the ingest takes the attribute verbatim when
+        // present and its queries filter on operation_name = 'tool'.
+        Assert.Equal(Telemetry.OperationChat, chatSpan.GetTagItem(Telemetry.GenAiOperationName));
+
+        // Cost: exactly one of the two is ever set. This scripted turn is unpriced, so
+        // the marker must be there INSTEAD of a $0.00 — a missing price must never read
+        // as free. Before this, .NET was the one engine that shipped a literal
+        // `new TurnUsage(0, ...)` on the fallback path.
+        Assert.Null(chatSpan.GetTagItem(Telemetry.GenAiUsageCostUsd));
+        Assert.Equal(Telemetry.CostUnavailableUnpriced, chatSpan.GetTagItem(Telemetry.CostUnavailable));
     }
 
     [Fact]

@@ -112,6 +112,34 @@ func TestStreamingTurnEmitsGenAISpans(t *testing.T) {
 		t.Errorf("gen_ai.tool span should be a child of gen_ai.chat; parent=%s chat=%s",
 			tool.Parent.SpanID(), chat.SpanContext.SpanID())
 	}
+
+	// Being a child is NOT enough. The OTLP ingest builds a span's attributes from the
+	// resource attrs plus THAT span's own, with no parent inheritance, so the tool span
+	// repeats the identifiers itself — and without gen_ai.system it fails the ingest's
+	// LLM-event gate outright and is discarded, which is what happened to Rust's tool
+	// spans for their entire existence (zero rows with operation_name='tool', all time).
+	assertAttr(t, tool.Attributes, GenAISystem, SystemName)
+	assertAttr(t, tool.Attributes, GenAIOperationName, OperationTool)
+	assertAttr(t, tool.Attributes, GenAIConversationID, session.ConversationID)
+	assertAttr(t, tool.Attributes, SmooaiOrgID, "org-telemetry")
+
+	// Must be exactly "chat"/"tool" — the ingest takes the attribute verbatim when
+	// present and its queries filter on operation_name = 'tool'.
+	assertAttr(t, chat.Attributes, GenAIOperationName, OperationChat)
+
+	// Cost: exactly one of the two is ever set. The mock turn IS priced (local
+	// ModelPricing knows openai/gpt-4o), so the cost lands and the marker must not —
+	// a zero must never be exported as a real cost, and a real cost must never carry
+	// an "unavailable" marker beside it.
+	cost, hasCost := attr(chat.Attributes, GenAIUsageCostUSD)
+	if !hasCost {
+		t.Errorf("a priced turn must record %s; got attrs %+v", GenAIUsageCostUSD, chat.Attributes)
+	} else if cost == "0" || cost == "0.000000" {
+		t.Errorf("%s must never be exported as zero — that means unpriced, not free", GenAIUsageCostUSD)
+	}
+	if _, ok := attr(chat.Attributes, CostUnavailable); ok {
+		t.Errorf("%s must not be set alongside a real cost", CostUnavailable)
+	}
 }
 
 func assertAttr(t *testing.T, kvs []attribute.KeyValue, key, want string) {

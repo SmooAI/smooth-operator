@@ -146,13 +146,20 @@ public sealed class TurnRunner
     /// <summary>Emit a <c>gen_ai.tool</c> child span (parented to the ambient turn span) for one tool
     /// call, carrying the tool name and its redacted JSON arguments. No-op when nothing is sampling
     /// <see cref="Telemetry.Source"/> (<c>StartActivity</c> returns null).</summary>
-    private static void EmitToolSpan(FunctionCallContent call)
+    private static void EmitToolSpan(FunctionCallContent call, string conversationId)
     {
         using var toolSpan = Telemetry.Source.StartActivity(Telemetry.SpanTool);
         if (toolSpan is null)
         {
             return;
         }
+        // The OTLP ingest builds a span's attributes from the resource attrs plus THAT span's own,
+        // with no inheritance from the parent — so a child repeats its identifiers or it cannot be
+        // joined. Omitting gen_ai.system is worse than losing the join: the ingest's LLM-event gate
+        // keys on it, so bare tool spans are DISCARDED. Rust's were, for their entire existence.
+        toolSpan.SetTag(Telemetry.GenAiSystem, Telemetry.SystemName);
+        toolSpan.SetTag(Telemetry.GenAiOperationName, Telemetry.OperationTool);
+        toolSpan.SetTag(Telemetry.GenAiConversationId, conversationId);
         toolSpan.SetTag(Telemetry.GenAiToolName, call.Name);
         var args = call.Arguments is null ? "{}" : JsonSerializer.Serialize(call.Arguments);
         toolSpan.SetTag(Telemetry.GenAiToolArguments, Telemetry.RedactToolArguments(args));
@@ -226,6 +233,7 @@ public sealed class TurnRunner
         // host (env-gated on OTEL_EXPORTER_OTLP_ENDPOINT) or a test's ActivityListener.
         using var turnActivity = Telemetry.Source.StartActivity(Telemetry.SpanChat);
         turnActivity?.SetTag(Telemetry.GenAiSystem, Telemetry.SystemName);
+        turnActivity?.SetTag(Telemetry.GenAiOperationName, Telemetry.OperationChat);
         turnActivity?.SetTag(Telemetry.GenAiRequestModel, ConfiguredModel());
         turnActivity?.SetTag(Telemetry.GenAiConversationId, conversationId);
         turnActivity?.SetTag(Telemetry.GenAiAgentName, Telemetry.AgentName);
@@ -480,7 +488,7 @@ public sealed class TurnRunner
                             toolNames[call.CallId] = call.Name;
                             // `gen_ai.tool` child span (nests under the turn span), mirroring the Rust
                             // runner emitting one gen_ai.tool span per tool call with redacted args.
-                            EmitToolSpan(call);
+                            EmitToolSpan(call, conversationId);
                             // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
                             // gate AFTER write_confirmation_required, so the wire order matches the
                             // canonical (Rust) server. Non-gated tools emit their chunk inline as before.
@@ -516,12 +524,31 @@ public sealed class TurnRunner
             _interactionPark?.Clear(sessionId);
         }
 
-        // Record token usage on the turn span (omitted when the engine reported none, per the GenAI
-        // conventions), mirroring the Rust runner's turn_span.record of the usage fields.
-        if (turnActivity is not null && sawUsage)
+        // Token counts and cost on the turn span, recording only what was actually measured.
+        //
+        // `sawUsage` alone was NOT enough: a usage chunk carrying null counts sets it while both
+        // totals resolve to 0 via `?? 0`, so this published `input_tokens = 0` on a grounded turn.
+        // Every other engine guards on the counts themselves. Absent is honest; 0 is a lie.
+        if (turnActivity is not null)
         {
-            turnActivity.SetTag(Telemetry.GenAiUsageInputTokens, promptTokens);
-            turnActivity.SetTag(Telemetry.GenAiUsageOutputTokens, completionTokens);
+            if (sawUsage && (promptTokens > 0 || completionTokens > 0))
+            {
+                turnActivity.SetTag(Telemetry.GenAiUsageInputTokens, promptTokens);
+                turnActivity.SetTag(Telemetry.GenAiUsageOutputTokens, completionTokens);
+            }
+
+            // Cost is judged separately from the counts: the gateway reports it on an HTTP header
+            // while usage arrives on an SSE chunk, so either can turn up without the other. A
+            // non-positive cost becomes an explicit "unpriced" marker, never a confident $0.00.
+            var costUsd = TurnUsageFrom(agent, sawUsage, promptTokens, completionTokens)?.CostUsd ?? 0;
+            if (costUsd > 0 && double.IsFinite(costUsd))
+            {
+                turnActivity.SetTag(Telemetry.GenAiUsageCostUsd, costUsd);
+            }
+            else
+            {
+                turnActivity.SetTag(Telemetry.CostUnavailable, Telemetry.CostUnavailableUnpriced);
+            }
         }
 
         // 5. Persist the outbound reply.

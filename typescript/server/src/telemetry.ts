@@ -26,6 +26,33 @@ export const GEN_AI_TOOL_NAME = 'gen_ai.tool.name';
 export const GEN_AI_TOOL_ARGUMENTS = 'gen_ai.tool.call.arguments';
 export const GEN_AI_AGENT_NAME = 'gen_ai.agent.name';
 export const SMOOAI_ORG_ID = 'smooai.org_id';
+/**
+ * `gen_ai.operation.name` — the operation a span represents.
+ *
+ * The api-prime OTLP ingest takes this attribute VERBATIM when present and only
+ * derives it from the span name as a fallback, and its queries filter on
+ * `operation_name = 'tool'`. So the values must be exactly {@link OPERATION_CHAT}
+ * / {@link OPERATION_TOOL} — a spelling like `execute_tool` would land in the
+ * column and match nothing.
+ */
+export const GEN_AI_OPERATION_NAME = 'gen_ai.operation.name';
+/**
+ * `gen_ai.usage.cost_usd` — the turn's cost in USD.
+ *
+ * Recorded ONLY when positive. A zero is ambiguous: the gateway answers `0` for
+ * a model it has no price for, and local pricing returns the free tier for
+ * anything it doesn't recognise, so a zero means "not measured", never "free".
+ * Exporting it would render a paid turn as a confident $0.00.
+ */
+export const GEN_AI_USAGE_COST_USD = 'gen_ai.usage.cost_usd';
+/**
+ * `smooai.gen_ai.cost_unavailable` — why {@link GEN_AI_USAGE_COST_USD} is absent.
+ * Set INSTEAD of the cost, never alongside it. Same attribute name and values
+ * across every engine so a consumer never special-cases per language.
+ */
+export const COST_UNAVAILABLE = 'smooai.gen_ai.cost_unavailable';
+/** {@link COST_UNAVAILABLE} value: no price could be established for the model. */
+export const COST_UNAVAILABLE_UNPRICED = 'unpriced';
 
 /** `gen_ai.system` value identifying the polyglot operator to the studio. */
 export const SYSTEM_NAME = 'smooth-operator';
@@ -36,6 +63,11 @@ export const AGENT_NAME = 'smooth-agent-chat';
 export const SPAN_CHAT = 'gen_ai.chat';
 /** Span name for a per-tool-call child span (`gen_ai.tool`). */
 export const SPAN_TOOL = 'gen_ai.tool';
+
+/** {@link GEN_AI_OPERATION_NAME} value on a {@link SPAN_CHAT} span. */
+export const OPERATION_CHAT = 'chat';
+/** {@link GEN_AI_OPERATION_NAME} value on a {@link SPAN_TOOL} span. */
+export const OPERATION_TOOL = 'tool';
 
 /** Instrumentation-scope name the tracer is fetched under. */
 export const TRACER_NAME = SYSTEM_NAME;
@@ -108,6 +140,7 @@ export function getTracer(): Tracer {
 export function startTurnSpan(model: string, conversationId: string, orgId: string | undefined): Span {
     const attributes: Record<string, string> = {
         [GEN_AI_SYSTEM]: SYSTEM_NAME,
+        [GEN_AI_OPERATION_NAME]: OPERATION_CHAT,
         [GEN_AI_REQUEST_MODEL]: model,
         [GEN_AI_CONVERSATION_ID]: conversationId,
         [GEN_AI_AGENT_NAME]: AGENT_NAME,
@@ -117,15 +150,54 @@ export function startTurnSpan(model: string, conversationId: string, orgId: stri
 }
 
 /**
+ * Record the turn's token counts and cost on the turn span — only the parts that
+ * were actually measured.
+ *
+ * Counts are omitted entirely when the engine reported none: absent is honest,
+ * `0` is a lie (a grounded turn always consumes prompt tokens). Cost is judged
+ * separately, because the gateway reports it on an HTTP header while usage comes
+ * on an SSE chunk — either can arrive without the other. A non-positive cost
+ * becomes {@link COST_UNAVAILABLE} rather than a `$0.00`.
+ */
+export function recordTurnUsage(turnSpan: Span, usage: { promptTokens: number; completionTokens: number; costUsd: number } | undefined): void {
+    if (!usage) return;
+    if (usage.promptTokens > 0 || usage.completionTokens > 0) {
+        turnSpan.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.promptTokens);
+        turnSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.completionTokens);
+    }
+    if (usage.costUsd > 0 && Number.isFinite(usage.costUsd)) {
+        turnSpan.setAttribute(GEN_AI_USAGE_COST_USD, usage.costUsd);
+    } else {
+        turnSpan.setAttribute(COST_UNAVAILABLE, COST_UNAVAILABLE_UNPRICED);
+    }
+}
+
+/**
  * Emit a child `gen_ai.tool` span for one tool call under `turnSpan`, carrying the
  * tool name and redacted arguments. `durationMs`, when known, is recorded too.
  */
-export function recordToolSpan(turnSpan: Span, toolName: string, argumentsJson: string, durationMs?: number): void {
+export function recordToolSpan(
+    turnSpan: Span,
+    toolName: string,
+    argumentsJson: string,
+    conversationId: string,
+    orgId?: string,
+    durationMs?: number,
+): void {
     const ctx = trace.setSpan(context.active(), turnSpan);
+    // The OTLP ingest builds a span's attributes from the resource attrs plus
+    // THAT span's own, with no inheritance from the parent — so a child repeats
+    // its identifiers or it cannot be joined. Omitting `gen_ai.system` is worse
+    // than losing the join: the ingest's LLM-event gate keys on it, so bare tool
+    // spans are DISCARDED. Rust's were, for their entire existence.
     const attributes: Record<string, string | number> = {
+        [GEN_AI_SYSTEM]: SYSTEM_NAME,
+        [GEN_AI_OPERATION_NAME]: OPERATION_TOOL,
+        [GEN_AI_CONVERSATION_ID]: conversationId,
         [GEN_AI_TOOL_NAME]: toolName,
         [GEN_AI_TOOL_ARGUMENTS]: redactToolArguments(argumentsJson),
     };
+    if (orgId) attributes[SMOOAI_ORG_ID] = orgId;
     if (durationMs !== undefined) attributes.duration_ms = durationMs;
     getTracer().startSpan(SPAN_TOOL, { attributes }, ctx).end();
 }
