@@ -1,5 +1,17 @@
 # @smooai/smooth-operator
 
+## 1.54.1
+
+### Patch Changes
+
+- fdd94bb: Port the Rich Interactions runtime + the `choices` kind (AskUserQuestion) to the .NET (C#) server, at parity with the Rust reference.
+
+  The C# server now hosts a kind-agnostic interaction framework (`IInteractionKind` / `InteractionCatalog` / a session-keyed `InteractionParkRegistry` generalizing the write-confirmation park/resume) and the `choices` kind (`request_choices` raise tool, `validate_choices`, conversational fallback, capability id `choice_chips`). A turn on a `choice_chips`-capable session parks emitting `interaction_required` and resumes on a `submit_interaction` frame (invalid values → retryable `interaction_invalid`, never a terminal error); text-only sessions degrade to the enumerated conversational directive and submit via the `submit_interaction` tool. Validated against the shared `spec/interactions/choices.schema.json` conformance fixtures.
+
+- bdcab4e: Port the Rich Interactions runtime + the `choices` kind (AskUserQuestion) to the **Go** LocalServer, mirroring the Rust reference (PR #475) — wave 2 of the polyglot rollout.
+
+  The Go server now hosts a kind-agnostic interaction framework (`InteractionKind` / `InteractionKinds` catalog / a per-connection park-resume `InteractionRegistry`, the analog of the write-confirmation `ConfirmationRegistry`) plus the `choices` kind. Each turn registers one `request_<kind>` raise tool per hosted kind: on a session that declared the kind's render capability (`supports` at `create_conversation_session`) the raise **parks the turn** — the tool blocks awaiting a `submit_interaction` while the server emits `interaction_required` — and on a text-only channel it degrades to the kind's conversational fallback directive. A new `submit_interaction` dispatcher action routes the visitor's values to the kind's server-side validator: invalid → retryable `interaction_invalid` (the turn stays parked), valid → the parked raise resumes with the canonical payload. The `choices` validator (`validateChoices`) enforces the same rules as the Rust reference and validates against the shared `spec/interactions/choices.schema.json` conformance fixtures. Capability id: `choice_chips`.
+
 ## 1.54.0
 
 ### Minor Changes
