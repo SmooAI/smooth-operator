@@ -47,6 +47,7 @@ GetSessionRequest = _g.GetSessionRequest
 GetMessagesRequest = _g.GetMessagesRequest
 ConfirmToolActionRequest = _g.ConfirmToolActionRequest
 VerifyOtpRequest = _g.VerifyOtpRequest
+CancelRequest = _g.CancelRequest
 PingRequest = _g.PingRequest
 AuthContext = _g.AuthContext
 
@@ -70,6 +71,7 @@ OtpVerificationRequired = _g.OtpVerificationRequired
 OtpSent = _g.OtpSent
 OtpVerified = _g.OtpVerified
 OtpInvalid = _g.OtpInvalid
+Cancelled = _g.Cancelled
 Pong = _g.Pong
 
 # The generated `error` event model is named ``Error`` — which shadows the builtin.
@@ -107,6 +109,7 @@ class ActionType(StrEnum):
     get_conversation_messages = "get_conversation_messages"
     confirm_tool_action = "confirm_tool_action"
     verify_otp = "verify_otp"
+    cancel = "cancel"
     ping = "ping"
 
 
@@ -123,6 +126,7 @@ class EventType(StrEnum):
     otp_sent = "otp_sent"
     otp_verified = "otp_verified"
     otp_invalid = "otp_invalid"
+    cancelled = "cancelled"
     error = "error"
     pong = "pong"
 
@@ -147,6 +151,7 @@ ServerEvent = Annotated[
         OtpSent,
         OtpVerified,
         OtpInvalid,
+        Cancelled,
         ErrorEvent,
         Pong,
     ],
@@ -166,6 +171,7 @@ ClientAction = Annotated[
         GetMessagesRequest,
         ConfirmToolActionRequest,
         VerifyOtpRequest,
+        CancelRequest,
         PingRequest,
     ],
     Field(discriminator="action"),
@@ -225,6 +231,7 @@ EventTypeLiteral = Literal[
     "otp_sent",
     "otp_verified",
     "otp_invalid",
+    "cancelled",
     "error",
     "pong",
 ]

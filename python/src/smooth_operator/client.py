@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator, Callable
 from . import _generated as _g
 from .transport import Transport, WebSocketTransport
 from .types import (
+    Cancelled,
     CreateConversationSessionResponse,
     EventualResponse,
     GetMessagesResponse,
@@ -89,10 +90,13 @@ class MessageTurn:
         request_id: str,
         on_close: Callable[[], None],
         turn_timeout: float = 0.0,
+        on_cancel: Callable[[], None] | None = None,
     ) -> None:
         self.request_id = request_id
         self._on_close = on_close
         self._turn_timeout = turn_timeout
+        self._on_cancel = on_cancel
+        self._cancelled = False
         # asyncio.Queue / asyncio.Event bind to the running loop lazily on first use,
         # so they need no explicit loop capture. The settled future, however, is bound
         # at construction — use get_running_loop() so it attaches to the loop that is
@@ -102,10 +106,10 @@ class MessageTurn:
         # to hang silently.
         self._queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
         self._done = asyncio.Event()
-        self._final: EventualResponse | None = None
+        self._final: EventualResponse | Cancelled | None = None
         self._error: BaseException | None = None
         loop = asyncio.get_running_loop()
-        self._settled: asyncio.Future[EventualResponse] = loop.create_future()
+        self._settled: asyncio.Future[EventualResponse | Cancelled] = loop.create_future()
         # Avoid "Future exception was never retrieved" noise when the caller only
         # iterates (and surfaces the error via __aiter__) and never awaits the turn.
         self._settled.add_done_callback(lambda f: f.cancelled() or f.exception())
@@ -114,6 +118,15 @@ class MessageTurn:
         self._timeout_handle: asyncio.TimerHandle | None = None
         if turn_timeout > 0:
             self._timeout_handle = loop.call_later(turn_timeout, self._on_timeout)
+
+    @property
+    def cancelled(self) -> bool:
+        """True if this turn ended because the user stopped it — a terminal
+        ``cancelled`` event settled it, as opposed to completing
+        (``eventual_response``) or erroring. This is the UI's signal to tell a
+        user-stop apart from a failure: on a user-stop the turn *resolves* (``await
+        turn`` yields the terminal :class:`Cancelled` event, never raises)."""
+        return self._cancelled
 
     # ── feed (called by the client dispatcher) ─────────────────────────────────
     def push(self, event: ServerEvent) -> None:
@@ -130,6 +143,24 @@ class MessageTurn:
 
         if event.type == "eventual_response":
             self._finish(event, None)
+        elif event.type == "cancelled":
+            # Terminal user-stop: settle by *resolving* (never erroring) so the async
+            # iterator ends cleanly and ``await turn`` yields the Cancelled event.
+            # ``cancelled`` is set for the UI to tell a user-stop from a completed
+            # or errored turn.
+            self._cancelled = True
+            self._finish(event, None)
+
+    def cancel(self) -> None:
+        """Request cancellation of THIS turn — the ergonomic "Stop" button. Sends a
+        ``cancel`` frame carrying the turn's own ``requestId`` (and originating
+        ``sessionId``) via the client. Idempotent: a no-op once the turn has settled.
+        The turn itself settles when the server's terminal ``cancelled`` event arrives
+        (see :attr:`cancelled`); this only sends the request."""
+        if self._done.is_set():
+            return
+        if self._on_cancel is not None:
+            self._on_cancel()
 
     def abort(self, err: BaseException) -> None:
         """Force-close the turn (e.g. on disconnect)."""
@@ -143,7 +174,7 @@ class MessageTurn:
             return
         self._finish(None, TurnTimeoutError(self.request_id, self._turn_timeout))
 
-    def _finish(self, final: EventualResponse | None, err: BaseException | None) -> None:
+    def _finish(self, final: EventualResponse | Cancelled | None, err: BaseException | None) -> None:
         if self._done.is_set():
             return
         if self._timeout_handle is not None:
@@ -192,8 +223,11 @@ class MessageTurn:
     def __await__(self):
         return self._settled.__await__()
 
-    async def result(self) -> EventualResponse:
-        """Await the terminal :class:`EventualResponse` (or raise ProtocolError)."""
+    async def result(self) -> EventualResponse | Cancelled:
+        """Await the terminal event: an :class:`EventualResponse` on completion, or a
+        :class:`Cancelled` on a user-stop (never raises for a cancel — check
+        :attr:`cancelled` or narrow on ``.type``). Raises :class:`ProtocolError` on an
+        ``error`` event."""
         return await self._settled
 
 
@@ -316,6 +350,7 @@ class SmoothAgentClient:
             request_id,
             lambda: self._turns.pop(request_id, None),
             turn_timeout=self._turn_timeout,
+            on_cancel=lambda: self.cancel(request_id=request_id, session_id=session_id),
         )
         self._turns[request_id] = turn
         try:
@@ -334,6 +369,23 @@ class SmoothAgentClient:
             self._turns.pop(request_id, None)
             turn.abort(err)
         return turn
+
+    def cancel(self, *, request_id: str, session_id: str | None = None) -> None:
+        """Client-initiated turn cancellation — the "Stop" button. Sends a ``cancel``
+        frame for the in-flight ``send_message`` turn identified by ``request_id``. The
+        server aborts the turn's LLM + tool work, frees the turn slot, and emits a
+        terminal ``cancelled`` event (in place of ``eventual_response``) echoing that
+        ``request_id``; the matching :class:`MessageTurn` then settles as a user-stop —
+        it *resolves* (never raises), ``await turn`` yields the :class:`Cancelled`
+        event, and ``turn.cancelled`` is ``True``.
+
+        Idempotent: a cancel with no active turn is a silent server no-op, and this
+        never raises on that account. For the common "stop THIS turn" case, prefer
+        :meth:`MessageTurn.cancel`."""
+        frame: dict = {"action": "cancel", "requestId": request_id}
+        if session_id is not None:
+            frame["sessionId"] = session_id
+        self._transport.send(json.dumps(frame))
 
     def confirm_tool_action(self, *, session_id: str, request_id: str, approved: bool) -> None:
         """Approve/reject a pending tool write, resuming the paused turn for

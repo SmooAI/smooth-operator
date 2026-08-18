@@ -44,6 +44,7 @@ _EVENT_SCHEMA_FILE: dict[str, str] = {
     "otp_sent": "events/otp-sent.schema.json",
     "otp_verified": "events/otp-verified.schema.json",
     "otp_invalid": "events/otp-invalid.schema.json",
+    "cancelled": "events/cancelled.schema.json",
     "error": "events/error.schema.json",
     "pong": "events/pong.schema.json",
 }
@@ -56,6 +57,7 @@ _ACTION_SCHEMA_REF: dict[str, str] = {
     "get_conversation_messages": "actions/get-messages.schema.json#/$defs/Request",
     "confirm_tool_action": "actions/confirm-tool-action.schema.json#/$defs/Request",
     "verify_otp": "actions/verify-otp.schema.json#/$defs/Request",
+    "cancel": "actions/cancel.schema.json#/$defs/Request",
     "ping": "actions/ping.schema.json#/$defs/Request",
 }
 

@@ -75,6 +75,23 @@ final = await turn                                    # the terminal eventual_re
 print("\nmessageId:", final.data.payload.message_id)
 ```
 
+### Stop button
+
+Call `turn.cancel()` (or `client.cancel(request_id=..., session_id=...)`) to stop an
+in-flight turn. The server aborts its LLM + tool work and replies with a terminal
+`cancelled` event: the turn **resolves** as a user-stop — `await turn` yields the
+`Cancelled` (never raises), the `async for` ends cleanly, and `turn.cancelled` is
+`True` so you can tell a stop apart from an error. Idempotent — cancelling with
+nothing in flight is a harmless no-op.
+
+```python
+turn = client.send_message(session_id=session.session_id, message="write a novel")
+turn.cancel()                       # the user hit Stop
+final = await turn                  # resolves; does NOT raise
+if turn.cancelled:                  # final.type == "cancelled", final.status == 499
+    print("stopped by user")
+```
+
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6','signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram
