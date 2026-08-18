@@ -32,6 +32,7 @@ from .agent_config import (
 from .auth import AccessContext, normalize_email
 from .backplane import Target
 from .confirmation import ConfirmationRegistry
+from .interaction import InteractionOutcome, InteractionRegistry, PendingInteractions
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
 from .turn_runner import Sink, TurnContext, TurnRunner
@@ -56,6 +57,8 @@ class FrameDispatcher:
         tools: list[Any] | None = None,
         confirm_tools: list[str] | None = None,
         confirmations: ConfirmationRegistry | None = None,
+        interactions: InteractionRegistry | None = None,
+        interaction_pending: PendingInteractions | None = None,
         agent_config_resolver: AgentConfigResolver | None = None,
         session_authenticator: SessionAuthenticator | None = None,
         judge_model: str | None = None,
@@ -75,6 +78,17 @@ class FrameDispatcher:
         #: `confirm_tool_action` frame resolves the future a parked turn awaits.
         #: Created on demand (one per connection) when HITL is enabled.
         self._confirmations = confirmations if confirmations is not None else ConfirmationRegistry()
+        #: Rich Interactions catalog (default: the reference ``choices`` kind) + the
+        #: session-keyed park registry. A turn registers the per-kind raise tools; a
+        #: ``submit_interaction`` frame resolves the park a raise tool awaits — always on
+        #: this same connection, so (like confirmations) the registry is connection-local.
+        self._interactions = interactions if interactions is not None else InteractionRegistry.default()
+        self._interaction_pending = interaction_pending if interaction_pending is not None else PendingInteractions()
+        #: ``supports`` (client render capabilities) declared per session at
+        #: ``create_conversation_session``, connection-local: park/resume happen on this
+        #: connection, so this need not be persisted. Gates each kind's rich-vs-fallback
+        #: path per turn.
+        self._session_supports: dict[str, list[str]] = {}
         #: Per-agent config resolver (SMOODEV-590). Resolved per turn from the session's
         #: agent; the default (empty static resolver) returns None → the server-wide
         #: default prompt drives every turn.
@@ -190,6 +204,8 @@ class FrameDispatcher:
                     await self._handle_send_message(frame, request_id, sink)
             elif action == "confirm_tool_action":
                 self._handle_confirm_tool_action(frame, request_id, sink)
+            elif action == "submit_interaction":
+                await self._handle_submit_interaction(frame, request_id, sink)
             elif action == "verify_otp":
                 await self._handle_verify_otp(frame, request_id, sink)
             elif action is None:
@@ -315,6 +331,13 @@ class FrameDispatcher:
             org_id=self._access.principal.org,
         )
         await self._associate_session(session)
+        # Capture the session's declared render capabilities (``supports``), connection-
+        # local, to gate Rich Interactions per turn. Unknown values are kept as-is and
+        # simply never match a kind's capability (forward-compatible). A non-list is
+        # ignored (no capabilities → every kind degrades to its conversational fallback).
+        raw_supports = frame.get("supports")
+        if isinstance(raw_supports, list):
+            self._session_supports[session.session_id] = [s for s in raw_supports if isinstance(s, str)]
         data = {
             "sessionId": session.session_id,
             "conversationId": session.conversation_id,
@@ -536,6 +559,9 @@ class FrameDispatcher:
             agent_config=agent_config,
             judge_model=self._judge_model,
             org_id=self._access.principal.org,
+            interactions=self._interactions,
+            interaction_pending=self._interaction_pending,
+            capabilities=self._session_supports.get(session_id),
         )
 
         # Run the turn as a background task, NOT awaited inline. A turn that calls a
@@ -728,6 +754,110 @@ class FrameDispatcher:
                 200,
                 "Tool action approved" if approved else "Tool action rejected",
                 {"sessionId": session_id, "approved": approved},
+            )
+        )
+
+    async def _handle_submit_interaction(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``submit_interaction`` — the single Rich Interactions resume verb: resolve a
+        turn parked on a raised interaction with the visitor's values (or ``declined``).
+
+        Per ``spec/actions/submit-interaction.schema.json`` the client replies with
+        ``{action, sessionId, requestId, interactionId, kind?, values?, declined?}`` to an
+        ``interaction_required`` event. Flow mirrors the Rust ``handle_submit_interaction``
+        exactly: require ``requestId`` + ``sessionId`` + ``interactionId``; the session
+        must be visible; PEEK the park (don't consume) so an invalid submit leaves the
+        turn parked; the ``interactionId`` (and ``kind``, if given) must match the park
+        (else ``INTERACTION_MISMATCH``, so a stale card can't resolve a newer park). A
+        decline resolves with a declined payload; values route to the kind's validator —
+        invalid values emit ``interaction_invalid`` and KEEP the turn parked (retryable,
+        never a terminal ``error``, like ``otp_invalid``); valid values resolve the park
+        with the canonical payload. Continuation is signalled by the resumed streaming
+        sequence; we ack with an ``immediate_response``."""
+        # requestId echoes the originating interaction_required — require it, don't invent.
+        if not request_id:
+            sink(protocol.error(None, "VALIDATION_ERROR", "submit_interaction requires a 'requestId'"))
+            return
+        session_id = frame.get("sessionId")
+        if not session_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "submit_interaction requires a 'sessionId'"))
+            return
+        interaction_id = frame.get("interactionId")
+        if not interaction_id:
+            sink(protocol.error(request_id, "VALIDATION_ERROR", "submit_interaction requires an 'interactionId'"))
+            return
+
+        # Not-yours is reported identically to not-found — no existence oracle.
+        session = await self._visible_session(session_id)
+        if session is None:
+            sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
+            return
+
+        # Peek (don't consume): an invalid submit must leave the turn parked for a resubmit.
+        pending = self._interaction_pending.peek(session_id)
+        if pending is None:
+            sink(
+                protocol.error(
+                    request_id,
+                    "NO_PENDING_INTERACTION",
+                    f"no interaction is awaiting a submit for session '{session_id}'",
+                )
+            )
+            return
+        if interaction_id != pending.interaction_id:
+            sink(
+                protocol.error(
+                    request_id,
+                    "INTERACTION_MISMATCH",
+                    "interactionId does not match the parked interaction",
+                )
+            )
+            return
+        claimed_kind = frame.get("kind")
+        if isinstance(claimed_kind, str) and claimed_kind and claimed_kind != pending.kind:
+            sink(protocol.error(request_id, "INTERACTION_MISMATCH", "kind does not match the parked interaction"))
+            return
+
+        # Decline: resume the turn with a declined payload so the agent proceeds gracefully.
+        if frame.get("declined") is True:
+            self._interaction_pending.resolve(session_id, InteractionOutcome.declined())
+            sink(protocol.immediate_response(request_id, 200, "Interaction declined", {"sessionId": session_id}))
+            return
+
+        values = frame.get("values")
+        if not isinstance(values, dict):
+            sink(
+                protocol.error(
+                    request_id, "VALIDATION_ERROR", "submit_interaction requires 'values' unless 'declined' is true"
+                )
+            )
+            return
+
+        kind = self._interactions.get(pending.kind)
+        if kind is None:  # a hosted-kind park whose kind was since removed — defensive.
+            sink(protocol.error(request_id, "NO_PENDING_INTERACTION", f"unknown interaction kind '{pending.kind}'"))
+            return
+        canonical, errors = kind.validate(pending.spec, values)
+        if errors:
+            # Retryable: re-render the card with the per-field errors; the turn stays parked.
+            sink(
+                protocol.interaction_invalid(
+                    request_id,
+                    pending.interaction_id,
+                    pending.kind,
+                    [e.to_dict() for e in errors],
+                    "Some fields need attention.",
+                )
+            )
+            return
+
+        # Valid: consume the park and resume the turn with the canonical payload.
+        self._interaction_pending.resolve(session_id, InteractionOutcome.submitted(canonical or {}))
+        sink(
+            protocol.immediate_response(
+                request_id,
+                200,
+                "Interaction submitted",
+                {"sessionId": session_id, "interactionId": pending.interaction_id, "values": canonical},
             )
         )
 

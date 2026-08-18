@@ -160,6 +160,58 @@ def write_confirmation_required(request_id: str, tool_id: str, action_descriptio
     }
 
 
+def interaction_required(
+    request_id: str, interaction_id: str, kind: str, spec: dict[str, Any], reason: str
+) -> dict[str, Any]:
+    """``interaction_required`` — the Rich Interactions envelope, emitted mid-turn when
+    the agent raises a structured interaction (kind ``choices``, ``identity_intake``, …)
+    on a session that declared the kind's render capability in ``supports``. The turn is
+    **parked** until the client replies with a ``submit_interaction`` action carrying the
+    same ``requestId`` + ``interactionId`` (values or ``declined: true``). Sessions
+    without the capability never receive this — the server degrades that kind to its
+    conversational fallback instead.
+
+    Wire shape matches ``spec/events/interaction-required.schema.json`` and the Rust
+    reference's ``protocol::interaction_required`` byte-for-byte: the prompt detail is
+    double-nested under ``data.data.{interactionId, kind, spec, reason}``.
+    ``interactionId`` is a server-generated id echoed on the submit so a stale card can
+    never resolve a newer park; ``kind`` selects the client card + the server validator;
+    ``spec`` is the kind-specific render payload."""
+    return {
+        "type": "interaction_required",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {"interactionId": interaction_id, "kind": kind, "spec": spec, "reason": reason},
+        },
+        "timestamp": _now_ms(),
+    }
+
+
+def interaction_invalid(
+    request_id: str, interaction_id: str, kind: str, errors: list[dict[str, Any]], message: str
+) -> dict[str, Any]:
+    """``interaction_invalid`` — a ``submit_interaction`` carried values that failed the
+    kind's server-side validation. The turn **stays parked** (the client re-renders the
+    card with the per-field errors and lets the visitor resubmit); like ``otp_invalid``,
+    invalid input is a retryable state, never a terminal ``error`` event.
+
+    Wire shape matches ``spec/events/interaction-invalid.schema.json`` and the Rust
+    reference byte-for-byte: the detail is double-nested under
+    ``data.data.{interactionId, kind, errors, message}``, where each ``errors`` entry is
+    ``{field, message}`` (``field`` is a kind-specific key — for ``choices`` the question
+    ``header``)."""
+    return {
+        "type": "interaction_invalid",
+        "requestId": request_id,
+        "data": {
+            "requestId": request_id,
+            "data": {"interactionId": interaction_id, "kind": kind, "errors": errors, "message": message},
+        },
+        "timestamp": _now_ms(),
+    }
+
+
 def otp_verification_required(
     request_id: str,
     tool_id: str,
