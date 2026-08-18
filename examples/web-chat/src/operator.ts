@@ -8,7 +8,7 @@
 // Everything here drives a *real* running server; there is no mock. See the
 // README for how to start `smooth-operator-server` and point this at it.
 
-import { SmoothAgentClient, type ConversationSummary } from '@smooai/smooth-operator';
+import { SmoothAgentClient, type ChoicesSpec, type ChoicesValues, type ConversationSummary } from '@smooai/smooth-operator';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /** The agent's live presence — what the header reflects. */
@@ -49,6 +49,21 @@ export interface Approval {
     description: string;
 }
 
+/** A parked Rich Interaction the agent raised mid-turn (a `choices` ask, etc.).
+ * The turn stays parked until we `submitInteraction` / `declineInteraction`,
+ * echoing `interactionId` so a stale card can never resolve a newer park. */
+export interface Interaction {
+    turnRequestId: string;
+    interactionId: string;
+    kind: string;
+    spec: ChoicesSpec;
+    reason: string;
+    /** Per-question server errors from an `interaction_invalid` reply (still parked). */
+    errors?: { field: string; message: string }[];
+    /** True after a submit, until the turn resumes or comes back invalid. */
+    busy?: boolean;
+}
+
 export interface Status {
     connected: boolean;
     error?: string;
@@ -58,9 +73,12 @@ interface OperatorApi {
     state: AgentState;
     messages: ChatMessage[];
     approvals: Approval[];
+    interaction: Interaction | null;
     status: Status;
     sendMessage: (text: string) => void;
     respond: (turnRequestId: string, approved: boolean) => void;
+    submitInteraction: (values: ChoicesValues) => void;
+    declineInteraction: () => void;
     conversations: ConversationSummary[];
     activeConversationId: string | null;
     resumeConversation: (conversationId: string) => void;
@@ -117,6 +135,7 @@ function renderHistory(raw: any[]): ChatMessage[] {
 export function useOperator(): OperatorApi {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [approvals, setApprovals] = useState<Approval[]>([]);
+    const [interaction, setInteraction] = useState<Interaction | null>(null);
     const [conversations, setConversations] = useState<ConversationSummary[]>([]);
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const [connected, setConnected] = useState(false);
@@ -163,6 +182,8 @@ export function useOperator(): OperatorApi {
                     switch (v.type) {
                         case 'stream_token': {
                             setStreaming(true);
+                            // A valid submit resumed the turn — retire the parked card.
+                            setInteraction((prev) => (prev?.busy ? null : prev));
                             const tok = v.token ?? v.data?.token ?? '';
                             patchStreaming((m) => {
                                 const blocks = m.blocks.slice();
@@ -217,6 +238,26 @@ export function useOperator(): OperatorApi {
                             ]);
                             break;
                         }
+                        // A Rich Interaction was raised mid-turn (`choices`, …): park a
+                        // card. The generic envelope nests the payload at data.data.
+                        case 'interaction_required': {
+                            const d = v.data?.data ?? {};
+                            setInteraction({
+                                turnRequestId: turn.requestId,
+                                interactionId: d.interactionId,
+                                kind: d.kind,
+                                spec: d.spec,
+                                reason: d.reason ?? '',
+                            });
+                            break;
+                        }
+                        // Server rejected the submitted values — stay parked, re-render
+                        // the card with per-question errors (never a terminal error).
+                        case 'interaction_invalid': {
+                            const d = v.data?.data ?? {};
+                            setInteraction((prev) => (prev ? { ...prev, errors: d.errors ?? [], busy: false } : prev));
+                            break;
+                        }
                         default:
                             break;
                     }
@@ -230,6 +271,7 @@ export function useOperator(): OperatorApi {
                 setTurnActive(false);
                 setStreaming(false);
                 setApprovals((prev) => prev.filter((a) => a.turnRequestId !== turn.requestId));
+                setInteraction((prev) => (prev?.turnRequestId === turn.requestId ? null : prev));
                 patchStreaming((m) => ({ ...m, streaming: false }));
                 void refreshConversations();
             }
@@ -247,7 +289,7 @@ export function useOperator(): OperatorApi {
         (async () => {
             try {
                 await client.connect();
-                const session = await client.createConversationSession({ agentId, userName: 'web-chat-example' });
+                const session = await client.createConversationSession({ agentId, userName: 'web-chat-example', supports: ['choice_chips'] });
                 if (cancelled) return;
                 sessionRef.current = session.sessionId;
                 setActiveConversationId(session.conversationId);
@@ -290,15 +332,40 @@ export function useOperator(): OperatorApi {
         client.confirmToolAction({ sessionId: sessionRef.current, requestId: turnRequestId, approved });
     }, []);
 
+    // Resume a parked Rich Interaction. The ONE `submitInteraction` verb serves
+    // every kind; the server validates and either resumes the turn (valid) or
+    // replies `interaction_invalid` (still parked). We mark the card busy and
+    // echo `interactionId` so a stale submit can't resolve a newer park.
+    const submitInteraction = useCallback((values: ChoicesValues) => {
+        const client = clientRef.current;
+        if (!client || !sessionRef.current) return;
+        setInteraction((prev) => {
+            if (!prev) return prev;
+            client.submitInteraction({ sessionId: sessionRef.current!, requestId: prev.turnRequestId, interactionId: prev.interactionId, kind: prev.kind, values: values as unknown as Record<string, unknown> });
+            return { ...prev, busy: true, errors: undefined };
+        });
+    }, []);
+
+    const declineInteraction = useCallback(() => {
+        const client = clientRef.current;
+        if (!client || !sessionRef.current) return;
+        setInteraction((prev) => {
+            if (!prev) return prev;
+            client.submitInteraction({ sessionId: sessionRef.current!, requestId: prev.turnRequestId, interactionId: prev.interactionId, kind: prev.kind, declined: true });
+            return null;
+        });
+    }, []);
+
     const resumeConversation = useCallback(async (conversationId: string) => {
         const client = clientRef.current;
         if (!client || !conversationId) return;
         setActiveConversationId(conversationId);
         setMessages([]);
         setApprovals([]);
+        setInteraction(null);
         sessionRef.current = null;
         const { agentId } = targetRef.current;
-        const session = await client.createConversationSession({ agentId, conversationId, userName: 'web-chat-example' });
+        const session = await client.createConversationSession({ agentId, conversationId, userName: 'web-chat-example', supports: ['choice_chips'] });
         sessionRef.current = session.sessionId;
         const { messages } = await client.getMessages({ sessionId: session.sessionId });
         setMessages(renderHistory(messages));
@@ -309,9 +376,10 @@ export function useOperator(): OperatorApi {
         if (!client) return;
         setMessages([]);
         setApprovals([]);
+        setInteraction(null);
         sessionRef.current = null;
         const { agentId } = targetRef.current;
-        const session = await client.createConversationSession({ agentId, userName: 'web-chat-example' });
+        const session = await client.createConversationSession({ agentId, userName: 'web-chat-example', supports: ['choice_chips'] });
         sessionRef.current = session.sessionId;
         setActiveConversationId(session.conversationId);
         void refreshConversations();
@@ -320,19 +388,22 @@ export function useOperator(): OperatorApi {
     const state: AgentState = useMemo(() => {
         if (error && !connected) return 'offline';
         if (!connected) return 'connecting';
-        if (approvals.length) return 'awaiting';
+        if (approvals.length || interaction) return 'awaiting';
         if (streaming) return 'speaking';
         if (turnActive) return 'thinking';
         return 'awake';
-    }, [error, connected, approvals.length, streaming, turnActive]);
+    }, [error, connected, approvals.length, interaction, streaming, turnActive]);
 
     return {
         state,
         messages,
         approvals,
+        interaction,
         status: { connected, error },
         sendMessage,
         respond,
+        submitInteraction,
+        declineInteraction,
         conversations,
         activeConversationId,
         resumeConversation,

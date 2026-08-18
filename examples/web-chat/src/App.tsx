@@ -3,6 +3,7 @@
 // A deliberately minimal, dependency-light port of the daemon PWA so the
 // interesting part — driving the protocol — stays legible.
 
+import { interactionCards } from '@smooai/smooth-operator/react';
 import { useEffect, useRef, useState } from 'react';
 import { useOperator, type ChatMessage, type ToolCall } from './operator';
 
@@ -127,6 +128,27 @@ export default function App() {
                         </div>
                     </div>
                 ))}
+
+                {/* Rich Interaction — a parked `choices` card (AskUserQuestion). The
+                    kind → card lookup mirrors the widget's registry; the card brings
+                    its own `--smooth-*`-themed styling (dark tokens set in styles.css). */}
+                {op.interaction && interactionCards[op.interaction.kind as keyof typeof interactionCards] && (
+                    <div className="smooth-choices-host mx-6 mb-3">
+                        {(() => {
+                            const Card = interactionCards[op.interaction.kind as keyof typeof interactionCards];
+                            return (
+                                <Card
+                                    spec={op.interaction.spec}
+                                    reason={op.interaction.reason}
+                                    errors={op.interaction.errors}
+                                    busy={op.interaction.busy}
+                                    onSubmit={op.submitInteraction}
+                                    onDecline={op.declineInteraction}
+                                />
+                            );
+                        })()}
+                    </div>
+                )}
 
                 {/* Composer */}
                 <div className="border-t border-slate-800 px-6 py-4">
