@@ -10,7 +10,7 @@ Agents constantly need **structured input** from the visitor mid-conversation �
 
 A **Rich Interaction** is a typed, server-validated ask the agent raises mid-turn. On a channel whose client can render it, it appears as a **rich card** (inline form / picker / chips) and the turn parks until the visitor answers. On a text-only channel the SAME raise degrades to a **conversational fallback**: kind-specific instructions the model follows turn by turn, submitting through a generic validated tool. **Either way the turn resumes with the same canonical, server-validated payload** — the agent's downstream flow is channel-independent.
 
-`identity_intake` (name/email/phone lead capture) is the first kind and the reference implementation. Candidate future kinds the shape is proven against on paper: **date/appointment picker**, **choice chips / menus**, **file upload**, **address input**, **rating / CSAT**, **payment handoff**, **e-sign**.
+`identity_intake` (name/email/phone lead capture) is the first kind and the reference implementation; `choices` (a structured multiple-choice ask, modeled on Claude Code's AskUserQuestion) is the second (Rust). Candidate future kinds the shape is proven against on paper: **date/appointment picker**, **file upload**, **address input**, **rating / CSAT**, **payment handoff**, **e-sign**.
 
 ### Wire surface (generic envelope, typed kinds)
 
@@ -55,14 +55,24 @@ Each kind names the capability that gates its rich path (`identity_intake` → `
 
 All park/resume/event/registry machinery is shared and kind-agnostic. A kind supplies exactly what differs (`smooth_operator::interaction::InteractionKind`):
 
-| Trait surface | Role | identity_intake |
-| --- | --- | --- |
-| `kind()` / `capability()` | identity | `identity_intake` / `identity_form` |
-| `tool_schema()` + `parse_request()` | the per-kind **raise tool** (precise LLM parameter schema) → canonical `spec` + `reason` | `request_identity_intake { fields, reason }` |
-| `validate(spec, values)` | **server-side validator** → canonical values or per-field errors (shared by the card path's WS handler and the fallback path's tool) | required fields, email shape, phone → E.164 |
-| `fallback_directive(spec, reason)` | **conversational degradation** for text channels | "ask ONE field at a time … submit via `submit_interaction`" |
+| Trait surface | Role | identity_intake | choices |
+| --- | --- | --- | --- |
+| `kind()` / `capability()` | identity | `identity_intake` / `identity_form` | `choices` / `choice_chips` |
+| `tool_schema()` + `parse_request()` | the per-kind **raise tool** (precise LLM parameter schema) → canonical `spec` + `reason` | `request_identity_intake { fields, reason }` | `request_choices { questions, reason }` |
+| `validate(spec, values)` | **server-side validator** → canonical values or per-field errors (shared by the card path's WS handler and the fallback path's tool) | required fields, email shape, phone → E.164 | every question answered, each label offered, single vs multi-select, free-text `other` accepted |
+| `fallback_directive(spec, reason)` | **conversational degradation** for text channels | "ask ONE field at a time … submit via `submit_interaction`" | "enumerate each question + its options … submit via `submit_interaction`" |
 
 Fallback strategies are per kind by design: identity = field-by-field collect+validate; choices = enumerated ask; date = natural-language date accepted by the kind's validator.
+
+### `choices` — a structured multiple-choice ask (AskUserQuestion)
+
+The second reference kind (Rust). The agent raises `request_choices` with **1–4 questions**, each `{ question, header (short ≤12-char label), options: [{ label, description }] (2–4), multiSelect? (default false) }` and a `reason`. Render capability: **`choice_chips`** — a client that declares it gets a parked chips/menu card; text/voice channels inherit the enumerated conversational fallback.
+
+- **Spec** (`spec/interactions/choices.schema.json#/$defs/Spec`): `{ questions: [{ question, header, options: [{label, description}], multiSelect }] }`.
+- **Values** (what the client submits, `#/$defs/Values`): `{ answers: [{ header, options: [selected labels], other? }] }`. Every question is keyed by its `header`. An implicit free-text **`other`** escape hatch is always available (mirrors AskUserQuestion's ever-present "Other"), so a visitor can answer outside the enumerated options.
+- **Validator** (`validate_choices`): every question must be answered (a selection or a non-blank `other`); each selected label must be one of that question's options; single-select takes exactly one pick (one label XOR `other`), multi-select one or more; blank `other` is dropped, labels trimmed. Invalid → `interaction_invalid` (retryable, per-question `field` = the `header`), never a terminal error.
+- **Payload** (`#/$defs/Payload`): the framework-uniform `{ status, values: { answers }, message? }`.
+- **Host effect**: none — `choices` collects an answer, it doesn't mutate the session (unlike `identity_intake`'s contact attach).
 
 **Adding a kind = one module + three registrations:**
 
@@ -101,8 +111,8 @@ Intake = **collect** (who are you?), OTP = **verify** (prove it). Shared machine
 
 | Layer | Change |
 | ----- | ------ |
-| `spec/` | `events/interaction-required.schema.json`, `events/interaction-invalid.schema.json`, `actions/submit-interaction.schema.json`, `spec/interactions/identity-intake.schema.json` (the kind catalog dir), `supports` on `create-conversation-session`, envelope enums, conformance fixtures |
-| `rust/smooth-operator` | `interaction` module (the `InteractionKind` trait + `InteractionRegistry`); `identity_intake` module (validation + `IdentityIntakeKind`); `tools/interaction.rs` (generic raise wrapper + `submit_interaction` tool) |
+| `spec/` | `events/interaction-required.schema.json`, `events/interaction-invalid.schema.json`, `actions/submit-interaction.schema.json`, `spec/interactions/identity-intake.schema.json` + `spec/interactions/choices.schema.json` (the kind catalog dir), `supports` on `create-conversation-session`, envelope enums, conformance fixtures (identity + choices) |
+| `rust/smooth-operator` | `interaction` module (the `InteractionKind` trait + `InteractionRegistry`); `identity_intake` + `choices` modules (validation + `IdentityIntakeKind` / `ChoicesKind`, both in the default registry); `tools/interaction.rs` (generic raise wrapper + `submit_interaction` tool) |
 | `rust/smooth-operator-server` | generic protocol constructors, `pending_interactions` registry + `session_capabilities`, `submit_interaction` dispatch, runner wiring (`TurnRequest::interactions`), kind-routed attach seam |
 | `typescript/` (client) | regenerated types, `supports`, the single `submitInteraction()` resume verb |
 | chat-widget repo | card registry + the identity card; declares `supports` from the registry |

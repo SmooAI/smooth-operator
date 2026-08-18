@@ -24,6 +24,7 @@ pub mod adapter;
 pub mod agent_config;
 pub mod auth;
 pub mod backplane;
+pub mod choices;
 pub mod connector_config;
 pub mod curation;
 pub mod domain;
@@ -52,6 +53,10 @@ pub use agent_config::{
 pub use auth::{
     AuthConfig, AuthError, AuthVerifier, JwtVerifier, LocalTokenVerifier, NoAuthVerifier,
     Principal, Role, SmooIdentityVerifier,
+};
+pub use choices::{
+    validate_choices, ChoiceAnswer, ChoiceFieldError, ChoiceOption, ChoiceQuestion, ChoiceValues,
+    ChoicesKind,
 };
 pub use connector_config::{
     ConnectorConfig, ConnectorConfigStore, ConnectorKind, InMemoryConnectorConfigStore,
