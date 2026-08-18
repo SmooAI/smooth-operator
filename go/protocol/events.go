@@ -17,6 +17,7 @@ const (
 	EventOTPSent                   EventType = "otp_sent"
 	EventOTPVerified               EventType = "otp_verified"
 	EventOTPInvalid                EventType = "otp_invalid"
+	EventCancelled                 EventType = "cancelled"
 	EventError                     EventType = "error"
 	EventPong                      EventType = "pong"
 )
@@ -33,6 +34,7 @@ var eventTypes = map[EventType]struct{}{
 	EventOTPSent:                   {},
 	EventOTPVerified:               {},
 	EventOTPInvalid:                {},
+	EventCancelled:                 {},
 	EventError:                     {},
 	EventPong:                      {},
 }
@@ -54,6 +56,7 @@ const (
 	ActionGetConversationMessages   ActionType = "get_conversation_messages"
 	ActionConfirmToolAction         ActionType = "confirm_tool_action"
 	ActionVerifyOTP                 ActionType = "verify_otp"
+	ActionCancel                    ActionType = "cancel"
 	ActionPing                      ActionType = "ping"
 )
 
@@ -176,6 +179,11 @@ func (e ServerEvent) AsOTPInvalid() (OTPInvalid, error) {
 	return decode[OTPInvalid](e.Raw)
 }
 
+// AsCancelled decodes the event as a cancelled event (terminal user-stop).
+func (e ServerEvent) AsCancelled() (Cancelled, error) {
+	return decode[Cancelled](e.Raw)
+}
+
 // AsError decodes the event as an error event.
 func (e ServerEvent) AsError() (Error, error) {
 	return decode[Error](e.Raw)
@@ -186,9 +194,9 @@ func (e ServerEvent) AsPong() (Pong, error) {
 	return decode[Pong](e.Raw)
 }
 
-// IsTerminal reports whether this event ends a streaming turn (success or error).
+// IsTerminal reports whether this event ends a streaming turn (completion, user-stop, or error).
 func (e ServerEvent) IsTerminal() bool {
-	return e.Type == EventEventualResponse || e.Type == EventError
+	return e.Type == EventEventualResponse || e.Type == EventCancelled || e.Type == EventError
 }
 
 func decode[T any](raw json.RawMessage) (T, error) {

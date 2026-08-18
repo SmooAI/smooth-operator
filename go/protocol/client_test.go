@@ -410,6 +410,138 @@ func TestTransportCloseFailsPending(t *testing.T) {
 	}
 }
 
+// TestClientCancelEmitsFrame asserts Client.Cancel sends a cancel frame carrying the
+// requestId (and optional sessionId).
+func TestClientCancelEmitsFrame(t *testing.T) {
+	c, tr := makeClient(t)
+	defer c.Close()
+
+	if err := c.Cancel(CancelParams{RequestID: "req-42", SessionID: "sess-7"}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	sent := tr.lastSent(t)
+	if sent["action"] != string(ActionCancel) {
+		t.Errorf("action = %v, want %q", sent["action"], ActionCancel)
+	}
+	if sent["requestId"] != "req-42" {
+		t.Errorf("requestId = %v, want req-42", sent["requestId"])
+	}
+	if sent["sessionId"] != "sess-7" {
+		t.Errorf("sessionId = %v, want sess-7", sent["sessionId"])
+	}
+
+	// sessionId is optional — omitted from the wire when empty.
+	if err := c.Cancel(CancelParams{RequestID: "req-99"}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	sent = tr.lastSent(t)
+	if _, present := sent["sessionId"]; present {
+		t.Errorf("sessionId should be omitted when empty, got %v", sent["sessionId"])
+	}
+}
+
+// TestTurnCancelSettlesAsUserStop asserts a terminal `cancelled` event settles the
+// matching turn as a user-stop: the event is delivered on Events(), the channel
+// closes cleanly, Wait resolves WITHOUT an error, and Cancelled() reports true.
+func TestTurnCancelSettlesAsUserStop(t *testing.T) {
+	c, tr := makeClient(t)
+	defer c.Close()
+
+	turn := c.SendMessage(SendMessageParams{SessionID: "sess-1", Message: "long one"})
+	reqID := turn.RequestID()
+
+	var seen []EventType
+	done := make(chan struct{})
+	go func() {
+		for ev := range turn.Events() {
+			seen = append(seen, ev.Type)
+		}
+		close(done)
+	}()
+
+	// A token streams, then the user hits stop — the ergonomic turn-level cancel.
+	tr.emit(t, map[string]any{"type": "stream_token", "requestId": reqID, "token": "Wor", "data": map[string]any{"requestId": reqID, "token": "Wor"}})
+	time.Sleep(20 * time.Millisecond)
+
+	turn.Cancel()
+	sent := tr.lastSent(t)
+	if sent["action"] != string(ActionCancel) || sent["requestId"] != reqID {
+		t.Fatalf("unexpected cancel frame: %v", sent)
+	}
+	if sent["sessionId"] != "sess-1" {
+		t.Errorf("turn.Cancel should carry the originating sessionId, got %v", sent["sessionId"])
+	}
+
+	// Server acknowledges with the terminal cancelled event echoing the requestId.
+	tr.emit(t, map[string]any{"type": "cancelled", "requestId": reqID, "status": 499,
+		"data": map[string]any{"requestId": reqID, "status": 499}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	final, err := turn.Wait(ctx)
+	if err != nil {
+		t.Fatalf("cancelled turn must resolve without error, got %v", err)
+	}
+	if final.Data.Data.MessageID != "" {
+		t.Errorf("cancelled turn should carry no answer payload, got messageId %q", final.Data.Data.MessageID)
+	}
+	if !turn.Cancelled() {
+		t.Error("turn.Cancelled() = false, want true")
+	}
+	<-done
+
+	want := []EventType{EventStreamToken, EventCancelled}
+	if len(seen) != len(want) || seen[0] != want[0] || seen[1] != want[1] {
+		t.Fatalf("seen = %v, want %v", seen, want)
+	}
+}
+
+// TestCancelIdempotentNoMatchingTurn asserts a `cancelled` event with no matching
+// in-flight turn is a harmless no-op (routed to listeners, never panics), and that a
+// turn-level Cancel after the turn has settled is also a no-op.
+func TestCancelIdempotentNoMatchingTurn(t *testing.T) {
+	c, tr := makeClient(t)
+	defer c.Close()
+
+	// cancelled with no matching turn — must not panic; delivered to listeners.
+	got := make(chan ServerEvent, 1)
+	c.OnEvent(func(ev ServerEvent) { got <- ev })
+	tr.emit(t, map[string]any{"type": "cancelled", "requestId": "ghost", "status": 499,
+		"data": map[string]any{"requestId": "ghost", "status": 499}})
+	select {
+	case ev := <-got:
+		if ev.Type != EventCancelled {
+			t.Errorf("listener got %q", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("uncorrelated cancelled not delivered to listener")
+	}
+
+	// A turn that already completed: a later Cancel sends nothing.
+	turn := c.SendMessage(SendMessageParams{SessionID: "s", Message: "q"})
+	reqID := turn.RequestID()
+	tr.emit(t, map[string]any{"type": "eventual_response", "requestId": reqID, "status": 200,
+		"data": map[string]any{"requestId": reqID, "status": 200, "data": map[string]any{"messageId": "m", "response": nil}}})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	tr.mu.Lock()
+	before := len(tr.sent)
+	tr.mu.Unlock()
+	turn.Cancel() // no-op: turn already settled
+	tr.mu.Lock()
+	after := len(tr.sent)
+	tr.mu.Unlock()
+	if after != before {
+		t.Errorf("Cancel on a settled turn sent a frame (%d -> %d)", before, after)
+	}
+	if turn.Cancelled() {
+		t.Error("a completed turn must not report Cancelled()")
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // waitForLastRequestID polls until a frame has been sent and returns its requestId.
