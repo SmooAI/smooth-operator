@@ -64,6 +64,30 @@ describe('TurnRunner GenAI OTel spans', () => {
         // The tool span is a child of the turn span (same trace).
         expect(toolSpan!.spanContext().traceId).toBe(chatSpan!.spanContext().traceId);
         expect(toolSpan!.parentSpanContext?.spanId).toBe(chatSpan!.spanContext().spanId);
+
+        // (3) Being a child is NOT enough. The OTLP ingest builds a span's attributes
+        // from the resource attrs plus THAT span's own, with no parent inheritance, so
+        // the tool span repeats the identifiers itself — and without gen_ai.system it
+        // fails the ingest's LLM-event gate outright and is discarded, which is what
+        // happened to Rust's tool spans for their entire existence.
+        expect(attr(toolSpan!, 'gen_ai.system')).toBe('smooth-operator');
+        expect(attr(toolSpan!, 'gen_ai.operation.name')).toBe('tool');
+        expect(attr(toolSpan!, 'gen_ai.conversation.id')).toBe(session.conversationId);
+        expect(attr(toolSpan!, 'smooai.org_id')).toBe('org-telemetry');
+
+        // Must be exactly 'chat'/'tool' — the ingest takes the attribute verbatim when
+        // present and its queries filter on operation_name = 'tool'.
+        expect(attr(chatSpan!, 'gen_ai.operation.name')).toBe('chat');
+
+        // (4) Cost: exactly one of the two is ever set, and a zero is never exported as
+        // a real cost (it means "unpriced", not "free").
+        const cost = attr(chatSpan!, 'gen_ai.usage.cost_usd');
+        if (cost === undefined) {
+            expect(attr(chatSpan!, 'smooai.gen_ai.cost_unavailable')).toBe('unpriced');
+        } else {
+            expect(Number(cost)).toBeGreaterThan(0);
+            expect(attr(chatSpan!, 'smooai.gen_ai.cost_unavailable')).toBeUndefined();
+        }
     });
 });
 

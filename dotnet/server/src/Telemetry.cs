@@ -40,6 +40,46 @@ public static class Telemetry
     public const string GenAiToolArguments = "gen_ai.tool.call.arguments";
     public const string GenAiAgentName = "gen_ai.agent.name";
 
+    /// <summary>
+    /// <c>gen_ai.operation.name</c> — the operation a span represents.
+    /// <para>
+    /// The api-prime OTLP ingest takes this attribute VERBATIM when present and only derives it
+    /// from the span name as a fallback, and its queries filter on <c>operation_name = 'tool'</c>.
+    /// So the values must be exactly <see cref="OperationChat"/> / <see cref="OperationTool"/> —
+    /// a spelling like <c>execute_tool</c> would land in the column and match nothing.
+    /// </para></summary>
+    public const string GenAiOperationName = "gen_ai.operation.name";
+
+    /// <summary>
+    /// <c>gen_ai.usage.cost_usd</c> — the turn's cost in USD.
+    /// <para>
+    /// Recorded ONLY when positive. A zero is ambiguous: the gateway answers 0 for a model it has
+    /// no price for, and local pricing returns the free tier for anything it does not recognise, so
+    /// a zero means "not measured", never "free". Exporting it would render a paid turn as a
+    /// confident $0.00.
+    /// </para></summary>
+    public const string GenAiUsageCostUsd = "gen_ai.usage.cost_usd";
+
+    /// <summary><c>smooai.gen_ai.cost_unavailable</c> — why <see cref="GenAiUsageCostUsd"/> is
+    /// absent. Set INSTEAD of the cost, never alongside it. Same attribute name and values across
+    /// every engine so a consumer never special-cases per language.</summary>
+    public const string CostUnavailable = "smooai.gen_ai.cost_unavailable";
+
+    /// <summary><see cref="CostUnavailable"/> value: no price could be established.</summary>
+    public const string CostUnavailableUnpriced = "unpriced";
+
+    /// <summary><c>smooai.org_id</c> — the owning org, matching every other engine.
+    /// <para>ponytail: declared here but never set — the .NET server has no org concept at all
+    /// (no <c>orgId</c> anywhere in <c>dotnet/server/src</c>), so wiring it is a plumbing change
+    /// through FrameDispatcher, not a span tag. Set it here once that exists.</para></summary>
+    public const string SmooaiOrgId = "smooai.org_id";
+
+    /// <summary><see cref="GenAiOperationName"/> value on a <see cref="SpanChat"/> span.</summary>
+    public const string OperationChat = "chat";
+
+    /// <summary><see cref="GenAiOperationName"/> value on a <see cref="SpanTool"/> span.</summary>
+    public const string OperationTool = "tool";
+
     /// <summary>Span name for the per-turn GenAI chat span (<c>gen_ai.chat</c>).</summary>
     public const string SpanChat = "gen_ai.chat";
 

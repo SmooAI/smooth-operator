@@ -20,7 +20,7 @@ import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Citation, Frame, TurnUsage } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
-import { GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, recordToolSpan, startTurnSpan } from './telemetry.js';
+import { recordToolSpan, recordTurnUsage, startTurnSpan } from './telemetry.js';
 import { withUserImages, type UserImage } from './toolContext.js';
 import { advanceStep, judgeStep, resolveCurrentStep, type ConversationWorkflow } from './workflow.js';
 
@@ -425,7 +425,7 @@ export class TurnRunner {
                 // Emit a `gen_ai.tool` child span for every tool call the engine makes —
                 // BEFORE the gated `continue` below, so a confirmation-gated tool is
                 // traced too (parity with the Rust runner collecting all tool records).
-                if (event.type === 'tool_call') recordToolSpan(turnSpan, event.name, event.arguments);
+                if (event.type === 'tool_call') recordToolSpan(turnSpan, event.name, event.arguments, conversationId, this.orgId);
                 // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from
                 // the gate AFTER `write_confirmation_required`, so the wire order matches
                 // the reference (Rust) server. Non-gated tools emit their chunk inline.
@@ -445,12 +445,10 @@ export class TurnRunner {
                     };
                 }
             }
-            // Record token usage on the turn span, omitting a turn that reported none
-            // (per the GenAI conventions), matching the Rust runner.
-            if (usage && (usage.promptTokens > 0 || usage.completionTokens > 0)) {
-                turnSpan.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.promptTokens);
-                turnSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.completionTokens);
-            }
+            // Token counts (omitted when the engine reported none) plus cost and,
+            // when there is none, an explicit "unpriced" marker. One helper owns
+            // that policy so it can't drift from the other engines.
+            recordTurnUsage(turnSpan, usage);
         } finally {
             turnSpan.end();
             // Turn over: drop any lingering pending confirmation so a stale entry can't

@@ -56,6 +56,27 @@ GEN_AI_AGENT_NAME = "gen_ai.agent.name"
 #: ``smooai.org_id`` — the owning org. Matches the monorepo TS chat handler so the
 #: observability studio groups Python + Rust + TS turns by org.
 SMOOAI_ORG_ID = "smooai.org_id"
+#: ``gen_ai.operation.name`` — the operation a span represents.
+#:
+#: The api-prime OTLP ingest takes this attribute VERBATIM when present and only
+#: derives it from the span name as a fallback, and its queries filter on
+#: ``operation_name = 'tool'``. So the values must be exactly :data:`OPERATION_CHAT`
+#: / :data:`OPERATION_TOOL` — a spelling like ``execute_tool`` would land in the
+#: column and match nothing.
+GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
+#: ``gen_ai.usage.cost_usd`` — the turn's cost in USD.
+#:
+#: Recorded ONLY when positive. A zero is ambiguous: the gateway answers 0 for a
+#: model it has no price for, and local pricing returns the free tier for anything
+#: it does not recognise, so a zero means "not measured", never "free". Exporting
+#: it would render a paid turn as a confident $0.00.
+GEN_AI_USAGE_COST_USD = "gen_ai.usage.cost_usd"
+#: ``smooai.gen_ai.cost_unavailable`` — why :data:`GEN_AI_USAGE_COST_USD` is absent.
+#: Set INSTEAD of the cost, never alongside it. Same attribute name and values
+#: across every engine so a consumer never special-cases per language.
+COST_UNAVAILABLE = "smooai.gen_ai.cost_unavailable"
+#: :data:`COST_UNAVAILABLE` value: no price could be established for the model.
+COST_UNAVAILABLE_UNPRICED = "unpriced"
 
 #: The value emitted for :data:`GEN_AI_SYSTEM` — identifies these traces.
 SYSTEM_NAME = "smooth-operator"
@@ -67,6 +88,11 @@ AGENT_NAME = "smooth-agent-chat"
 SPAN_CHAT = "gen_ai.chat"
 #: Span name for a per-tool-call child span (``gen_ai.tool``).
 SPAN_TOOL = "gen_ai.tool"
+
+#: :data:`GEN_AI_OPERATION_NAME` value on a :data:`SPAN_CHAT` span.
+OPERATION_CHAT = "chat"
+#: :data:`GEN_AI_OPERATION_NAME` value on a :data:`SPAN_TOOL` span.
+OPERATION_TOOL = "tool"
 
 #: Env var that switches :func:`init_telemetry` to a real OTLP exporter.
 OTLP_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"

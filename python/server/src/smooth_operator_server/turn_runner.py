@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Callable
@@ -498,6 +499,7 @@ class TurnRunner:
         # (zero cost) until `init_telemetry` installs a provider.
         span_attrs: dict[str, Any] = {
             telemetry.GEN_AI_SYSTEM: telemetry.SYSTEM_NAME,
+            telemetry.GEN_AI_OPERATION_NAME: telemetry.OPERATION_CHAT,
             telemetry.GEN_AI_REQUEST_MODEL: self._model or DEFAULT_MODEL,
             telemetry.GEN_AI_CONVERSATION_ID: conversation_id,
             telemetry.GEN_AI_AGENT_NAME: telemetry.AGENT_NAME,
@@ -526,7 +528,7 @@ class TurnRunner:
                         # name + redacted arguments (mirrors the Rust runner's per-tool
                         # child span). Emitted for gated tools too — the span is
                         # independent of the deferred wire chunk below.
-                        _emit_tool_span(event)
+                        _emit_tool_span(event, conversation_id, self._org_id)
                         # DEFER a confirmation-gated tool's toolCall chunk: it is emitted
                         # from the gate AFTER `write_confirmation_required`, so the wire
                         # order matches the reference (Rust) server. Non-gated tools emit
@@ -545,13 +547,12 @@ class TurnRunner:
                             "promptTokens": event.response.usage.prompt_tokens,
                             "completionTokens": event.response.usage.completion_tokens,
                         }
-                        # Record token usage on the turn span (omitted when the engine
-                        # reported none, per the GenAI conventions).
-                        prompt = event.response.usage.prompt_tokens
-                        completion = event.response.usage.completion_tokens
-                        if prompt or completion:
-                            turn_span.set_attribute(telemetry.GEN_AI_USAGE_INPUT_TOKENS, prompt)
-                            turn_span.set_attribute(telemetry.GEN_AI_USAGE_OUTPUT_TOKENS, completion)
+                        _record_turn_usage(
+                            turn_span,
+                            event.response.usage.prompt_tokens,
+                            event.response.usage.completion_tokens,
+                            event.response.cost_usd,
+                        )
         finally:
             # Turn over: the preamble window is closed for good. Cancel and reap the
             # task so a still-in-flight preamble can neither emit late nor linger as
@@ -750,18 +751,47 @@ def _truncate(value: str, max_chars: int) -> str:
     return value if len(value) <= max_chars else value[:max_chars]
 
 
-def _emit_tool_span(event: ToolCallEvent) -> None:
+def _record_turn_usage(turn_span: Any, prompt: int, completion: int, cost_usd: float) -> None:
+    """Record the turn's token counts and cost — only the parts actually measured.
+
+    Counts are omitted when the engine reported none: absent is honest, ``0`` is a lie
+    (a grounded turn always consumes prompt tokens). Cost is judged separately, because
+    the gateway reports it on an HTTP header while usage arrives on an SSE chunk — either
+    can turn up without the other. A non-positive cost becomes an explicit ``unpriced``
+    marker rather than a confident ``$0.00``."""
+    if prompt or completion:
+        turn_span.set_attribute(telemetry.GEN_AI_USAGE_INPUT_TOKENS, prompt)
+        turn_span.set_attribute(telemetry.GEN_AI_USAGE_OUTPUT_TOKENS, completion)
+    if cost_usd > 0 and math.isfinite(cost_usd):
+        turn_span.set_attribute(telemetry.GEN_AI_USAGE_COST_USD, cost_usd)
+    else:
+        turn_span.set_attribute(telemetry.COST_UNAVAILABLE, telemetry.COST_UNAVAILABLE_UNPRICED)
+
+
+def _emit_tool_span(event: ToolCallEvent, conversation_id: str, org_id: str | None) -> None:
     """Emit a ``gen_ai.tool`` child span for a tool call, carrying the tool name and
     the redacted JSON arguments (mirrors the Rust runner's per-tool child span). The
     span opens as a child of the current ``gen_ai.chat`` turn span and closes
     immediately — a marker, not a duration measured around execution (the engine owns
-    tool execution). No-op cost until a tracer provider is installed."""
+    tool execution). No-op cost until a tracer provider is installed.
+
+    It repeats the turn's identifiers rather than relying on the parent: the OTLP ingest
+    builds a span's attributes from the resource attrs plus THAT span's own, with no
+    parent inheritance. Omitting ``gen_ai.system`` is worse than losing the join — the
+    ingest's LLM-event gate keys on it, so bare tool spans are DISCARDED. Rust's were,
+    for their entire existence."""
+    attributes: dict[str, Any] = {
+        telemetry.GEN_AI_SYSTEM: telemetry.SYSTEM_NAME,
+        telemetry.GEN_AI_OPERATION_NAME: telemetry.OPERATION_TOOL,
+        telemetry.GEN_AI_CONVERSATION_ID: conversation_id,
+        telemetry.GEN_AI_TOOL_NAME: event.name,
+        telemetry.GEN_AI_TOOL_ARGUMENTS: telemetry.redact_tool_arguments(event.arguments or ""),
+    }
+    if org_id:
+        attributes[telemetry.SMOOAI_ORG_ID] = org_id
     with telemetry.tracer().start_as_current_span(
         telemetry.SPAN_TOOL,
-        attributes={
-            telemetry.GEN_AI_TOOL_NAME: event.name,
-            telemetry.GEN_AI_TOOL_ARGUMENTS: telemetry.redact_tool_arguments(event.arguments or ""),
-        },
+        attributes=attributes,
     ):
         pass
 

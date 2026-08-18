@@ -92,6 +92,28 @@ async def test_turn_emits_gen_ai_spans_with_org_and_tool_args(span_exporter: InM
     assert "return policy refund window" in args, f"tool args should carry the query; got {args!r}"
     assert tool.parent is not None and tool.parent.span_id == chat.context.span_id
 
+    # Being a child is NOT enough. The OTLP ingest builds a span's attributes from the
+    # resource attrs plus THAT span's own, with no parent inheritance, so the tool span
+    # repeats the identifiers itself — and without gen_ai.system it fails the ingest's
+    # LLM-event gate outright and is discarded, which is what happened to Rust's tool
+    # spans for their entire existence (zero rows with operation_name='tool', all time).
+    assert tool.attributes[telemetry.GEN_AI_SYSTEM] == telemetry.SYSTEM_NAME
+    assert tool.attributes[telemetry.GEN_AI_OPERATION_NAME] == telemetry.OPERATION_TOOL
+    assert tool.attributes[telemetry.GEN_AI_CONVERSATION_ID] == "conv-otel-srv"
+    assert tool.attributes[telemetry.SMOOAI_ORG_ID] == "org-telemetry"
+
+    # Must be exactly "chat"/"tool" — the ingest takes the attribute verbatim when
+    # present and its queries filter on operation_name = 'tool'.
+    assert chat.attributes[telemetry.GEN_AI_OPERATION_NAME] == telemetry.OPERATION_CHAT
+
+    # Cost: exactly one of the two is ever set, and a zero is never exported as a real
+    # cost (it means "unpriced", not "free").
+    if telemetry.GEN_AI_USAGE_COST_USD in chat.attributes:
+        assert chat.attributes[telemetry.GEN_AI_USAGE_COST_USD] > 0
+        assert telemetry.COST_UNAVAILABLE not in chat.attributes
+    else:
+        assert chat.attributes[telemetry.COST_UNAVAILABLE] == telemetry.COST_UNAVAILABLE_UNPRICED
+
 
 def test_redact_tool_arguments_scrubs_secret_named_keys() -> None:
     out = telemetry.redact_tool_arguments('{"query":"weather","api_key":"sk-live-123"}')

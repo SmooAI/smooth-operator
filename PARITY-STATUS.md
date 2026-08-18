@@ -70,12 +70,30 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
 | Shared scenario conformance corpus | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Postgres conversation store | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Server `gen_ai.*` OTel telemetry (chat + tool spans · redacted tool args · env-gated OTLP) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| └ ingest-joinable spans (`gen_ai.operation.name` · self-identifying tool spans) [^ingest] | ✅ | ✅ | ✅ | ✅ | ✅ |
+| └ cost on the span (`gen_ai.usage.cost_usd` / `smooai.gen_ai.cost_unavailable`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| └ usage/cost provenance + `gen_ai.response.id` [^provenance] | ✅ | — | — | — | — |
 | Second storage backend (DynamoDB + S3 Vectors) | ✅ | — | — | — | — |
 | Persistent checkpoint / knowledge / ACL-knowledge stores [^knowledge] | ✅ | ✅ | ◐ | ◐ | ◐ |
 | Deep ingestion + ACL surface | ✅ | ✅ | ◐ | ◐ | ◐ |
 | Backplane `attach`/`detach` | ✅ | — | ✅ | ✅ | ✅ |
 | Backplane `publish` (event fan-out) | ✅ | — | ✅ | ✅ | — |
 | **Cross-pod backplane (Redis / NATS)** | ✅ | — | — | — | — |
+
+[^ingest]: The api-prime OTLP ingest builds a span's attribute set from the resource
+    attrs plus **that span's own**, with no inheritance from the parent. A tool span
+    without its own `gen_ai.system` therefore fails the ingest's LLM-event gate and is
+    **discarded** — Rust's were, for their entire existence (zero rows with
+    `operation_name = 'tool'`, all time). `gen_ai.operation.name` must be literally
+    `"chat"` / `"tool"`: the ingest takes the attribute verbatim when present and only
+    derives it from the span name as a fallback, so any other spelling lands in the
+    column and matches nothing.
+
+[^provenance]: Rust-only because it needs engine support that exists only in the Rust
+    core (1.10.0): `usage_estimated` / `cost_estimated` on `AgentEvent::Completed`, plus
+    capturing the gateway's `chatcmpl-…` response id. Until the other four cores carry
+    the same fields, those engines cannot distinguish a measured token count from an
+    estimated one, and have no join key to `LiteLLM_SpendLogs`. Tracked in th-73c8b5.
 
 [^knowledge]: The durable **knowledge + ACL-knowledge** Postgres stores now ship in **Go, TypeScript and Python** too ([PRs #442, #443, #444](https://github.com/SmooAI/smooth-operator/pulls)) — on the shared `knowledge_vectors` table + pgvector — alongside Rust and .NET (which already had them, e.g. Python's `postgres_knowledge.py`: `PostgresVectorKnowledge` / `PostgresAclKnowledge`). These three cells stay **◐ rather than ✅** for two honest reasons: the persistent **checkpoint** store is still pending in Go/TS/Python, and the **TS + Python** knowledge stores are shipped and contract-tested but **not yet wired into the live dispatcher** (a sync-engine vs async-pg bridge). The **second storage backend** (DynamoDB + S3-Vectors, the row above) remains Rust-only.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -200,6 +201,7 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	tr := otel.Tracer(SystemName)
 	ctx, turnSpan := tr.Start(ctx, SpanChat, oteltrace.WithAttributes(
 		attribute.String(GenAISystem, SystemName),
+		attribute.String(GenAIOperationName, OperationChat),
 		attribute.String(GenAIRequestModel, r.spanModel()),
 		attribute.String(GenAIConversationID, conversationID),
 		attribute.String(GenAIAgentName, AgentName),
@@ -444,19 +446,43 @@ consume:
 	// GenAI conventions) and emit one `gen_ai.tool` child span per tool call — carrying
 	// the redacted arguments, measured latency, and an ERROR status on failure. Mirrors the
 	// Rust runner's post-turn span emission.
-	if usage != nil && (usage.PromptTokens > 0 || usage.CompletionTokens > 0) {
-		turnSpan.SetAttributes(
-			attribute.Int(GenAIUsageInputTokens, usage.PromptTokens),
-			attribute.Int(GenAIUsageOutputTokens, usage.CompletionTokens),
-		)
+	if usage != nil {
+		// Counts are omitted when the engine reported none: absent is honest, 0 is a
+		// lie (a grounded turn always consumes prompt tokens).
+		if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+			turnSpan.SetAttributes(
+				attribute.Int(GenAIUsageInputTokens, usage.PromptTokens),
+				attribute.Int(GenAIUsageOutputTokens, usage.CompletionTokens),
+			)
+		}
+		// Cost is judged separately from the counts: the gateway reports it on an HTTP
+		// header while usage arrives on an SSE chunk, so either can turn up without the
+		// other. A non-positive cost becomes an explicit "unpriced" marker, never $0.00.
+		if usage.CostUSD > 0 && !math.IsInf(usage.CostUSD, 0) && !math.IsNaN(usage.CostUSD) {
+			turnSpan.SetAttributes(attribute.Float64(GenAIUsageCostUSD, usage.CostUSD))
+		} else {
+			turnSpan.SetAttributes(attribute.String(CostUnavailable, CostUnavailableUnpriced))
+		}
 	}
 	for _, rec := range toolRecords {
-		_, toolSpan := tr.Start(ctx, SpanTool, oteltrace.WithAttributes(
+		// The OTLP ingest builds a span's attributes from the resource attrs plus THAT
+		// span's own, with no inheritance from the parent — so a child repeats its
+		// identifiers or it cannot be joined. Omitting gen_ai.system is worse than
+		// losing the join: the ingest's LLM-event gate keys on it, so bare tool spans
+		// are DISCARDED. Rust's were, for their entire existence.
+		toolAttrs := []attribute.KeyValue{
+			attribute.String(GenAISystem, SystemName),
+			attribute.String(GenAIOperationName, OperationTool),
+			attribute.String(GenAIConversationID, conversationID),
 			attribute.String(GenAIToolName, rec.name),
 			attribute.String(GenAIToolArguments, redactToolArguments(rec.arguments)),
 			attribute.Int64("duration_ms", rec.durationMs),
 			attribute.Bool("is_error", rec.isError),
-		))
+		}
+		if r.orgID != "" {
+			toolAttrs = append(toolAttrs, attribute.String(SmooaiOrgID, r.orgID))
+		}
+		_, toolSpan := tr.Start(ctx, SpanTool, oteltrace.WithAttributes(toolAttrs...))
 		if rec.isError {
 			toolSpan.SetStatus(codes.Error, rec.errText)
 		}
