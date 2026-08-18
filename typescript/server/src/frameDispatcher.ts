@@ -146,7 +146,7 @@ export class FrameDispatcher {
      * `TURN_IN_PROGRESS` rather than run concurrently (interleaved streams + racing
      * storage writes). A `cancel` action — or a disconnect — aborts this turn.
      */
-    private activeTurn: { requestId: string; controller: AbortController; promise: Promise<void> } | undefined;
+    private activeTurn: { requestId: string; sessionId: string; controller: AbortController; promise: Promise<void> } | undefined;
 
     constructor(options: FrameDispatcherOptions) {
         this.store = options.store;
@@ -195,10 +195,14 @@ export class FrameDispatcher {
      *
      * The turn's own {@link AbortController} is fired, so the runner throws
      * {@link TurnCancelledError} at its next stream event — no further protocol events,
-     * and the partial assistant reply is never persisted. Any confirmation the turn is
-     * parked on is rejected so it unparks and reaches that check. The turn is also
-     * dropped from the drain set: {@link waitForTurns} must not block teardown on a turn
-     * nobody is waiting for.
+     * and the partial assistant reply is never persisted. If the turn is PARKED at a
+     * write-confirmation, the park awaits a bare deferred the abort does NOT complete —
+     * so we ALSO discard the session's pending confirmation, resolving it denied so the
+     * park unblocks immediately (its result is dropped: the sink is gagged and the slot
+     * is already cleared). Without this the parked turn would linger until the next
+     * register/disconnect evicts it. Mirrors the Rust reference dropping the confirmation
+     * future on abort and the .NET fix (#460). The turn is also dropped from the drain
+     * set: {@link waitForTurns} must not block teardown on a turn nobody is waiting for.
      *
      * Used by the `cancel` action (which then emits the terminal `cancelled` event) and
      * by the connection loop on a client DISCONNECT (no client remains to receive the
@@ -210,7 +214,11 @@ export class FrameDispatcher {
         if (!turn) return false;
         this.activeTurn = undefined;
         turn.controller.abort();
-        this.confirmations.rejectAll();
+        // Discard THIS turn's pending write-confirmation (if it is parked on one) so the
+        // park's bare `await` unblocks — resolves denied, result dropped. Per-session, not
+        // a connection-wide sweep: the disconnect path rejects every confirmation
+        // separately via {@link rejectPendingConfirmations}. No-op when the turn isn't parked.
+        this.confirmations.resolve(turn.sessionId, false);
         this.turns.delete(turn.promise);
         return true;
     }
@@ -744,7 +752,7 @@ export class FrameDispatcher {
         })();
         // Track it as the connection's single active turn — unless it already finished
         // synchronously, in which case there is nothing to cancel.
-        if (!settled) this.activeTurn = { requestId: reqId, controller, promise: turn };
+        if (!settled) this.activeTurn = { requestId: reqId, sessionId, controller, promise: turn };
         this.turns.add(turn);
         void turn.finally(() => this.turns.delete(turn));
     }
