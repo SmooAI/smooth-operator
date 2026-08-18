@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -67,6 +68,9 @@ public sealed class TurnRunner
     private readonly IReadOnlyList<IToolHook> _toolHooks;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry? _confirmations;
+    private readonly InteractionCatalog? _interactions;
+    private readonly InteractionParkRegistry? _interactionPark;
+    private readonly IReadOnlyCollection<string> _capabilities;
     private readonly AgentConfig _agentConfig;
     private readonly IWorkflowJudge? _judge;
     private readonly TurnLimits _limits;
@@ -81,7 +85,7 @@ public sealed class TurnRunner
     /// </summary>
     public Task PreambleCompleted { get; private set; } = Task.CompletedTask;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -99,6 +103,12 @@ public sealed class TurnRunner
         _confirmTools = confirmTools ?? Array.Empty<string>();
         // The session-keyed pending-confirmation registry the gate parks on (null → HITL off).
         _confirmations = confirmations;
+        // Rich Interactions: the hosted kinds catalog + the session-keyed park registry the raise tools
+        // park on, and the session's declared render capabilities (from `supports`). Any null ⇒ no
+        // interaction tools are registered → behavior identical to before Rich Interactions.
+        _interactions = interactions;
+        _interactionPark = interactionPark;
+        _capabilities = capabilities ?? Array.Empty<string>();
         // Per-agent config: instructions.prompt overrides the default persona; conversation_workflow
         // drives the guided-agency flow. Empty (the default) ⇒ the org/default persona, unchanged.
         _agentConfig = agentConfig ?? AgentConfig.Empty;
@@ -333,6 +343,27 @@ public sealed class TurnRunner
             });
         }
 
+        // Rich Interactions: register a per-kind raise tool (request_<kind>) for each hosted kind. A kind
+        // whose render capability the session declared in `supports` gets the RICH path (park + emit
+        // interaction_required); a kind without it gets the conversational FALLBACK (a directive the
+        // model asks + submits via the submit_interaction tool). When any kind is in fallback, the
+        // generic submit_interaction tool is registered too. Mirrors the Rust runner's interaction wiring.
+        if (_interactions is not null && _interactionPark is not null && _interactions.Kinds.Count > 0)
+        {
+            var raised = new ConcurrentDictionary<string, JsonNode>();
+            var anyFallback = false;
+            foreach (var kind in _interactions.Kinds)
+            {
+                var rich = _capabilities.Contains(kind.Capability);
+                anyFallback |= !rich;
+                options.Tools.Add(new RequestInteractionTool(kind, rich, sink, requestId, sessionId, _interactionPark, raised));
+            }
+            if (anyFallback)
+            {
+                options.Tools.Add(new SubmitInteractionTool(_interactions, raised));
+            }
+        }
+
         var agent = new SmoothAgent(_chatClient, options);
         var thread = agent.GetNewThread();
         foreach (var message in priorMessages)
@@ -480,6 +511,9 @@ public sealed class TurnRunner
             // Turn over: drop any lingering pending confirmation so a stale entry can't mis-route a
             // later confirm_tool_action (mirrors the Rust clear at turn end). No-op when HITL is off.
             _confirmations?.Clear(sessionId);
+            // Same for a lingering interaction park, so a stale entry can't mis-route a later
+            // submit_interaction. No-op when Rich Interactions are off.
+            _interactionPark?.Clear(sessionId);
         }
 
         // Record token usage on the turn span (omitted when the engine reported none, per the GenAI

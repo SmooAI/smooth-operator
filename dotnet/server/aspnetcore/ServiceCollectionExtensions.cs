@@ -21,6 +21,11 @@ public static class ServiceCollectionExtensions
     {
         services.TryAddSingleton<ISessionStore, InMemorySessionStore>();
 
+        // The hosted Rich Interaction kinds. Default catalog = the `choices` kind; a host can register
+        // its own InteractionCatalog (more kinds) before calling this. Per-connection park state lives
+        // in the FrameDispatcher; the rich-vs-fallback path is decided per session by its `supports`.
+        services.TryAddSingleton(InteractionCatalog.Default);
+
         // The executor a turn runs on (ADR-030) — the one place a durable backend plugs in, mirroring
         // the Rust server's runner.rs::turn_executor. A host that wants durable turns registers a
         // durable IAgentExecutor under ExecutorSelection.DurableExecutorServiceKey (it may reference

@@ -153,6 +153,64 @@ public static class ProtocolEvents
     };
 
     /// <summary>
+    /// <c>interaction_required</c> — the Rich Interactions envelope: emitted mid-turn when the agent
+    /// raises a structured interaction (a choices card, …) on a session that declared the kind's render
+    /// capability. The turn is <b>parked</b> until the client replies with a <c>submit_interaction</c>
+    /// action carrying the same <c>requestId</c> + <c>interactionId</c>. Wire shape matches
+    /// <c>spec/events/interaction-required.schema.json</c> and the Rust reference byte-for-byte (the
+    /// double-nested <c>data.data.{interactionId, kind, spec, reason}</c>).
+    /// </summary>
+    public static JsonObject InteractionRequired(string requestId, string interactionId, string kind, JsonNode spec, string reason) => new()
+    {
+        ["type"] = "interaction_required",
+        ["requestId"] = requestId,
+        ["data"] = new JsonObject
+        {
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject
+            {
+                ["interactionId"] = interactionId,
+                ["kind"] = kind,
+                ["spec"] = spec,
+                ["reason"] = reason,
+            },
+        },
+        ["timestamp"] = NowMs(),
+    };
+
+    /// <summary>
+    /// <c>interaction_invalid</c> — emitted when a <c>submit_interaction</c> carried values that failed
+    /// the kind's server-side validation. The turn REMAINS parked (retryable, like <c>otp_invalid</c> —
+    /// never a terminal <c>error</c>); the client re-renders the card with the per-field errors. Wire
+    /// shape matches <c>spec/events/interaction-invalid.schema.json</c> (double-nested <c>data.data</c>).
+    /// </summary>
+    public static JsonObject InteractionInvalid(string requestId, string interactionId, string kind, IReadOnlyList<InteractionFieldError> errors, string message)
+    {
+        var errorArray = new JsonArray();
+        foreach (var error in errors)
+        {
+            errorArray.Add(error.ToWire());
+        }
+        return new JsonObject
+        {
+            ["type"] = "interaction_invalid",
+            ["requestId"] = requestId,
+            ["data"] = new JsonObject
+            {
+                ["requestId"] = requestId,
+                ["data"] = new JsonObject
+                {
+                    ["interactionId"] = interactionId,
+                    ["kind"] = kind,
+                    ["errors"] = errorArray,
+                    ["message"] = message,
+                },
+            },
+            ["timestamp"] = NowMs(),
+        };
+    }
+
+    /// <summary>
     /// <c>otp_verification_required</c> — emitted after a turn's auth gate refused an <c>end_user</c>
     /// tool on an unverified session and the host has an OTP service installed. Tells the client to
     /// collect a one-time code. Wire shape matches <c>spec/events/otp-verification-required.schema.json</c>

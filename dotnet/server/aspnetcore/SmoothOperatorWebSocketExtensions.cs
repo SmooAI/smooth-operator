@@ -99,6 +99,10 @@ public static class SmoothOperatorWebSocketExtensions
                                                                  // Tool-name patterns gated behind write-confirmation HITL (default none). Each connection
                                                                  // gets its own ConfirmationRegistry (see the ConfirmTools type doc).
             confirmTools: services.GetService<ConfirmTools>()?.Patterns,
+            // The hosted Rich Interaction kinds. A host may register its own InteractionCatalog to add
+            // kinds; absent one, the FrameDispatcher defaults to InteractionCatalog.Default (the choices
+            // kind). Each connection gets its own interaction park registry (built inside the dispatcher).
+            interactions: services.GetService<InteractionCatalog>(),
             agentConfigResolver: agentConfigResolver,
             judge: judge,
             // Identity-verification seam for end_user tools on public agents (default fails closed).
