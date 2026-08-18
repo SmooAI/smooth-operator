@@ -77,6 +77,15 @@ export interface StoredSession {
      * reference server's `session.metadata.otpVerified`.
      */
     otpVerified?: boolean;
+    /**
+     * The client render capabilities this session declared at create-session
+     * (`supports`) — the per-kind gate for Rich Interactions. A kind whose
+     * `capability` is present here parks the turn on a rich card
+     * (`interaction_required`); anything else degrades to the kind's conversational
+     * fallback. `undefined`/empty → a text-only channel (every kind falls back). The
+     * TS analog of the Rust reference server's `session_capabilities`.
+     */
+    supports?: string[];
 }
 
 /** Whether a stored message came from the user (`inbound`) or the agent (`outbound`). */
@@ -119,7 +128,7 @@ export interface SessionStore {
      * so subsequent turns append and history replays). An absent or unknown id mints
      * a fresh conversation (unchanged behavior).
      */
-    createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string, orgId?: string): Promise<StoredSession>;
+    createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string, orgId?: string, supports?: string[]): Promise<StoredSession>;
     getSession(sessionId: string): Promise<StoredSession | null>;
     /**
      * A conversation by id, or null if unknown — the resume-binding existence check.
@@ -189,7 +198,7 @@ export class InMemorySessionStore implements SessionStore {
      */
     private readonly convOrg = new Map<string, string | undefined>();
 
-    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string, orgId?: string): Promise<StoredSession> {
+    async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string, orgId?: string, supports?: string[]): Promise<StoredSession> {
         // Resume: bind to an existing conversation (reuse its id + persisted log) when
         // the caller passes a known conversationId. Unknown/absent → mint a fresh one.
         const resume = conversationId && this.messages.has(conversationId);
@@ -210,6 +219,9 @@ export class InMemorySessionStore implements SessionStore {
             // Stash the caller's email as an OTP delivery contact for the end_user
             // auth-gate flow (mirrors the Rust reference capturing contactEmail).
             ...(userEmail ? { contactEmail: userEmail } : {}),
+            // The declared render capabilities gate this session's Rich Interactions.
+            // Empty/absent ⇒ a text-only channel (every kind falls back).
+            ...(supports && supports.length > 0 ? { supports } : {}),
         };
         this.sessions.set(session.sessionId, session);
         // Only initialize the message log on a fresh conversation — a resume keeps its history.

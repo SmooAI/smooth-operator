@@ -175,6 +175,8 @@ interface SessionMetadata {
     contactPhone?: string;
     otpVerified?: boolean;
     currentStepId?: string;
+    /** The session's declared render capabilities (`supports`) — the Rich Interactions gate. */
+    supports?: string[];
 }
 
 /** ISO-8601 in UTC, the shape every timestamp crosses this interface as. */
@@ -211,7 +213,7 @@ export class PostgresStore implements SessionStore, AdminStore {
      * another org's — mints a fresh conversation through the identical branch, so a
      * caller cannot use resume as an oracle for which conversation ids exist.
      */
-    async createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string, orgId: string = DEFAULT_ORG_ID): Promise<StoredSession> {
+    async createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string, orgId: string = DEFAULT_ORG_ID, supports?: string[]): Promise<StoredSession> {
         const owner = userEmail?.trim() || undefined;
 
         let resumeId: string | undefined;
@@ -242,6 +244,8 @@ export class PostgresStore implements SessionStore, AdminStore {
             ...(resumeId ? (resumedOwner ? { userEmail: resumedOwner } : {}) : owner ? { userEmail: owner } : {}),
             // The caller's email doubles as the OTP delivery contact.
             ...(owner ? { contactEmail: owner } : {}),
+            // The declared render capabilities gate this session's Rich Interactions.
+            ...(supports && supports.length > 0 ? { supports } : {}),
         };
 
         const now = new Date().toISOString();
@@ -271,7 +275,10 @@ export class PostgresStore implements SessionStore, AdminStore {
                     [session.agentParticipantId, convId, orgId, AGENT_NAME, now],
                 );
             }
-            const metadata: SessionMetadata = owner ? { contactEmail: owner } : {};
+            const metadata: SessionMetadata = {
+                ...(owner ? { contactEmail: owner } : {}),
+                ...(supports && supports.length > 0 ? { supports } : {}),
+            };
             await client.query(
                 `INSERT INTO conversation_sessions
                     (session_id, conversation_id, organization_id, agent_id, agent_name, user_participant_id,
@@ -329,6 +336,7 @@ export class PostgresStore implements SessionStore, AdminStore {
             ...(metadata.contactPhone ? { contactPhone: metadata.contactPhone } : {}),
             ...(metadata.otpVerified ? { otpVerified: true } : {}),
             ...(metadata.currentStepId ? { currentStepId: metadata.currentStepId } : {}),
+            ...(metadata.supports && metadata.supports.length > 0 ? { supports: metadata.supports } : {}),
         };
     }
 
