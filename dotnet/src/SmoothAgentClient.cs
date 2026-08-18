@@ -85,19 +85,38 @@ public sealed class MessageTurn : IAsyncEnumerable<ServerEvent>
 
     private readonly Channel<ServerEvent> _channel =
         Channel.CreateUnbounded<ServerEvent>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = true });
-    private readonly TaskCompletionSource<EventualResponseEvent> _completion =
+    private readonly TaskCompletionSource<EventualResponseEvent?> _completion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Action _onClose;
+    private readonly Action? _onCancel;
     private int _done;
 
-    internal MessageTurn(string requestId, Action onClose)
+    internal MessageTurn(string requestId, Action onClose, Action? onCancel = null)
     {
         RequestId = requestId;
         _onClose = onClose;
+        _onCancel = onCancel;
     }
 
-    /// <summary>Resolves with the terminal <c>eventual_response</c>, or faults with a <see cref="ProtocolException"/>.</summary>
-    public Task<EventualResponseEvent> Completion => _completion.Task;
+    /// <summary>
+    /// Resolves with the terminal <c>eventual_response</c> on completion, <c>null</c> on a
+    /// user-stop (see <see cref="Cancelled"/>), or faults with a <see cref="ProtocolException"/>
+    /// on error. A cancel resolves — it never faults; inspect <see cref="Cancelled"/> to tell a
+    /// user-stop from a completed turn.
+    /// </summary>
+    public Task<EventualResponseEvent?> Completion => _completion.Task;
+
+    /// <summary>
+    /// True if this turn ended because the user stopped it — a terminal <c>cancelled</c> event
+    /// settled it, as opposed to completing (<c>eventual_response</c>) or erroring. On a user-stop
+    /// the turn <em>resolves</em> (never faults): <see cref="Completion"/> yields <c>null</c>, the
+    /// async iterator ends cleanly after yielding the terminal <see cref="CancelledEvent"/>, and
+    /// this flag is the UI's signal to distinguish a stop from a failure.
+    /// </summary>
+    public bool Cancelled { get; private set; }
+
+    /// <summary>The terminal <c>cancelled</c> event (status 499, no answer) when <see cref="Cancelled"/> is true; otherwise null.</summary>
+    public CancelledEvent? CancelledEvent { get; private set; }
 
     /// <summary>Feed an event into the turn (called by the client's dispatcher).</summary>
     internal void Push(ServerEvent ev)
@@ -119,10 +138,30 @@ public sealed class MessageTurn : IAsyncEnumerable<ServerEvent>
                 Finish(done, null);
                 break;
 
+            case CancelledEvent cancelled:
+                // Terminal user-stop: yield the cancelled event, then settle WITHOUT
+                // faulting so the iterator ends cleanly and Completion resolves (null).
+                _channel.Writer.TryWrite(cancelled);
+                FinishCancelled(cancelled);
+                break;
+
             default:
                 _channel.Writer.TryWrite(ev);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Request cancellation of THIS turn — the ergonomic "stop this turn" button. Sends a
+    /// <c>cancel</c> frame carrying the turn's own <see cref="RequestId"/> via the client.
+    /// Idempotent: a no-op once the turn has already settled. The turn itself settles when
+    /// the server's terminal <c>cancelled</c> event arrives (see <see cref="Cancelled"/>);
+    /// this only sends the request.
+    /// </summary>
+    public void Cancel()
+    {
+        if (Volatile.Read(ref _done) != 0) return;
+        _onCancel?.Invoke();
     }
 
     /// <summary>Force-close the turn (e.g. on disconnect) with an error.</summary>
@@ -138,6 +177,18 @@ public sealed class MessageTurn : IAsyncEnumerable<ServerEvent>
         if (error is not null) _completion.TrySetException(error);
         else if (final is not null) _completion.TrySetResult(final);
         else _completion.TrySetException(new ProtocolException("ABORTED", "Turn aborted without a terminal event", RequestId));
+    }
+
+    /// <summary>Settle the turn as a user-stop: resolve (never fault) and end the stream cleanly.</summary>
+    private void FinishCancelled(CancelledEvent ev)
+    {
+        if (Interlocked.Exchange(ref _done, 1) != 0) return;
+
+        Cancelled = true;
+        CancelledEvent = ev;
+        _channel.Writer.TryComplete();
+        _onClose();
+        _completion.TrySetResult(null);
     }
 
     public async IAsyncEnumerator<ServerEvent> GetAsyncEnumerator(CancellationToken cancellationToken = default)
@@ -264,7 +315,10 @@ public sealed class SmoothAgentClient : IAsyncDisposable
         var requestId = request.RequestId ?? _generateRequestId();
         request.RequestId = requestId;
 
-        var turn = new MessageTurn(requestId, () => _turns.TryRemove(requestId, out _));
+        var turn = new MessageTurn(
+            requestId,
+            () => _turns.TryRemove(requestId, out _),
+            onCancel: () => Cancel(requestId, request.SessionId));
         _turns[requestId] = turn;
 
         try
@@ -292,6 +346,23 @@ public sealed class SmoothAgentClient : IAsyncDisposable
             RequestId = requestId,
             Approved = approved,
         }), cancellationToken);
+
+    /// <summary>
+    /// Client-initiated turn cancellation — the "Stop" button. Sends a <c>cancel</c> frame for
+    /// the in-flight <c>send_message</c> turn identified by <paramref name="requestId"/>. The
+    /// server aborts the turn's LLM + tool work, frees the turn slot, and emits a terminal
+    /// <c>cancelled</c> event (in place of <c>eventual_response</c>) echoing that
+    /// <paramref name="requestId"/>; the matching <see cref="MessageTurn"/> then settles as a
+    /// user-stop — it <em>resolves</em> (never faults), <see cref="MessageTurn.Completion"/>
+    /// yields <c>null</c>, and <see cref="MessageTurn.Cancelled"/> is <c>true</c>.
+    /// <para>
+    /// Fire-and-forget and idempotent: a cancel with no active turn is a silent server no-op, and
+    /// this never throws on that account. For the common "stop THIS turn" case, prefer
+    /// <see cref="MessageTurn.Cancel"/>.
+    /// </para>
+    /// </summary>
+    public void Cancel(string requestId, string? sessionId = null)
+        => _ = _transport.SendAsync(Serialize(new CancelAction { RequestId = requestId, SessionId = sessionId }));
 
     /// <summary>
     /// Submit an OTP code, resuming the paused turn identified by <paramref name="requestId"/>.

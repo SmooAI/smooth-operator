@@ -47,6 +47,7 @@ public sealed class ProtocolValidator
         [EventTypes.OtpSent] = "events/otp-sent.schema.json",
         [EventTypes.OtpVerified] = "events/otp-verified.schema.json",
         [EventTypes.OtpInvalid] = "events/otp-invalid.schema.json",
+        [EventTypes.Cancelled] = "events/cancelled.schema.json",
         [EventTypes.Error] = "events/error.schema.json",
         [EventTypes.Pong] = "events/pong.schema.json",
     };
@@ -60,6 +61,7 @@ public sealed class ProtocolValidator
         [ActionTypes.GetConversationMessages] = "actions/get-messages.schema.json#/$defs/Request",
         [ActionTypes.ConfirmToolAction] = "actions/confirm-tool-action.schema.json#/$defs/Request",
         [ActionTypes.VerifyOtp] = "actions/verify-otp.schema.json#/$defs/Request",
+        [ActionTypes.Cancel] = "actions/cancel.schema.json#/$defs/Request",
         [ActionTypes.Ping] = "actions/ping.schema.json#/$defs/Request",
     };
 

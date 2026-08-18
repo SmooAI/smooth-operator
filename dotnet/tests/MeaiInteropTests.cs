@@ -207,7 +207,8 @@ public sealed class MeaiInteropTests
 
         transport.Emit(Frame("""{"type":"eventual_response","requestId":"{rid}","status":200,"data":{"requestId":"{rid}","status":200,"data":{"messageId":"m","response":"ok"}}}""", reqId));
         var final = await turn.Completion;
-        Assert.Equal("m", final.Data.Payload.MessageId);
+        Assert.NotNull(final);
+        Assert.Equal("m", final!.Data.Payload.MessageId);
     }
 
     /// <summary>Spin until <paramref name="predicate"/> is true or a short timeout elapses.</summary>

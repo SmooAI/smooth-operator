@@ -175,7 +175,7 @@ public sealed class SmoothAgentChatClient : IChatClient
         var text = LastUserText(messages);
 
         var turn = thread.RunStreamingAsync(text);
-        EventualResponseEvent eventual;
+        EventualResponseEvent? eventual;
         try
         {
             eventual = await turn.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -184,6 +184,11 @@ public sealed class SmoothAgentChatClient : IChatClient
         {
             throw;
         }
+
+        // A null completion means the turn was stopped via SmoothAgentClient.Cancel while this
+        // MEAI call was in flight — surface it as the idiomatic "generation cancelled" signal.
+        if (eventual is null)
+            throw new OperationCanceledException("The agent turn was cancelled.");
 
         var reply = ExtractText(eventual);
         var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, reply))
