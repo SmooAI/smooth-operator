@@ -108,8 +108,9 @@ pub trait InteractionKind: Send + Sync {
 }
 
 /// The set of interaction kinds a server hosts. The default registry contains
-/// the reference kinds ([`IdentityIntakeKind`](crate::identity_intake::IdentityIntakeKind));
-/// a host may extend or replace it.
+/// the reference kinds ([`IdentityIntakeKind`](crate::identity_intake::IdentityIntakeKind)
+/// and [`ChoicesKind`](crate::choices::ChoicesKind)); a host may extend or
+/// replace it.
 #[derive(Clone)]
 pub struct InteractionRegistry {
     kinds: Vec<Arc<dyn InteractionKind>>,
@@ -144,9 +145,11 @@ impl InteractionRegistry {
 }
 
 impl Default for InteractionRegistry {
-    /// The reference catalog: `identity_intake`.
+    /// The reference catalog: `identity_intake` and `choices`.
     fn default() -> Self {
-        Self::empty().with(Arc::new(crate::identity_intake::IdentityIntakeKind))
+        Self::empty()
+            .with(Arc::new(crate::identity_intake::IdentityIntakeKind))
+            .with(Arc::new(crate::choices::ChoicesKind))
     }
 }
 
@@ -162,6 +165,11 @@ mod tests {
             .expect("identity_intake registered");
         assert_eq!(kind.capability(), "identity_form");
         assert_eq!(kind.tool_schema().name, "request_identity_intake");
+
+        let choices = reg.get("choices").expect("choices registered");
+        assert_eq!(choices.capability(), "choice_chips");
+        assert_eq!(choices.tool_schema().name, "request_choices");
+
         assert!(reg.get("date_picker").is_none(), "unknown kinds are None");
     }
 }

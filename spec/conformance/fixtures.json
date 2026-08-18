@@ -304,6 +304,55 @@
       }
     }
   },
+  "choices_spec": {
+    "$schema_ref": "interactions/choices.schema.json#/$defs/Spec",
+    "description": "The choices kind's spec, as carried in interaction_required.data.data.spec.",
+    "instance": {
+      "questions": [
+        {
+          "question": "Which plan are you interested in?",
+          "header": "Plan",
+          "options": [
+            { "label": "Basic", "description": "For individuals" },
+            { "label": "Pro", "description": "For growing teams" }
+          ]
+        },
+        {
+          "question": "What topics can we help with?",
+          "header": "Topics",
+          "options": [
+            { "label": "Sales" },
+            { "label": "Support" },
+            { "label": "Billing" }
+          ],
+          "multiSelect": true
+        }
+      ]
+    }
+  },
+  "choices_values": {
+    "$schema_ref": "interactions/choices.schema.json#/$defs/Values",
+    "description": "The choices kind's submit values, as carried in submit_interaction.values.",
+    "instance": {
+      "answers": [
+        { "header": "Plan", "options": ["Pro"] },
+        { "header": "Topics", "options": ["Sales", "Billing"], "other": "Partnerships" }
+      ]
+    }
+  },
+  "choices_payload": {
+    "$schema_ref": "interactions/choices.schema.json#/$defs/Payload",
+    "description": "The canonical validated choices payload the parked turn resumes with.",
+    "instance": {
+      "status": "submitted",
+      "values": {
+        "answers": [
+          { "header": "Plan", "options": ["Pro"] },
+          { "header": "Topics", "options": ["Sales", "Billing"], "other": "Partnerships" }
+        ]
+      }
+    }
+  },
   "submit_interaction_declined_request": {
     "$schema_ref": "actions/submit-interaction.schema.json#/$defs/Request",
     "description": "Resume a parked interaction with a decline; the agent handles it gracefully.",

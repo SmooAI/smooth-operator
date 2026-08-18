@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/interactions/choices.schema.json",
+  "title": "ChoicesInteraction",
+  "description": "The `choices` interaction kind — a structured multiple-choice ask modeled on Claude Code's AskUserQuestion: 1–4 short questions, each with 2–4 labeled options, that the turn parks on until the visitor picks. Render capability: `choice_chips`. On capable channels the client renders chips/menus from `Spec`; on text-only channels the server degrades to an enumerated conversational ask. Every question also carries an implicit free-text `other` escape hatch, so the visitor can always answer outside the enumerated options. Either way the turn resumes with the same validated `Payload`. Kind-specific shapes referenced by the generic `interaction_required` / `submit_interaction` envelope.",
+
+  "$defs": {
+    "Spec": {
+      "title": "ChoicesSpec",
+      "description": "The `spec` carried on `interaction_required` for kind `choices`: the questions to ask.",
+      "type": "object",
+      "required": ["questions"],
+      "additionalProperties": false,
+      "properties": {
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "description": "The questions to ask, in display order (1–4).",
+          "items": {
+            "type": "object",
+            "required": ["question", "header", "options"],
+            "additionalProperties": false,
+            "properties": {
+              "question": {
+                "type": "string",
+                "description": "The question prompt shown to the visitor."
+              },
+              "header": {
+                "type": "string",
+                "maxLength": 12,
+                "description": "A short label (≤12 chars), unique within the raise. The answer key and the chip/tab caption."
+              },
+              "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "description": "The enumerated options. A free-text `other` answer is always available in addition to these.",
+                "items": {
+                  "type": "object",
+                  "required": ["label"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "label": {
+                      "type": "string",
+                      "description": "The option label — the value the visitor submits."
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "A short human-readable gloss for the option."
+                    }
+                  }
+                }
+              },
+              "multiSelect": {
+                "type": "boolean",
+                "default": false,
+                "description": "Whether the visitor may select more than one option (default false)."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "Values": {
+      "title": "ChoicesValues",
+      "description": "The `values` a client submits via `submit_interaction` for kind `choices`. Validated server-side: every question answered, each selected label is one of that question's options, single-select takes exactly one pick. The free-text `other` is always accepted (the AskUserQuestion 'Other' escape hatch).",
+      "type": "object",
+      "required": ["answers"],
+      "additionalProperties": false,
+      "properties": {
+        "answers": {
+          "type": "array",
+          "description": "One entry per question, keyed by the question's `header`.",
+          "items": {
+            "type": "object",
+            "required": ["header"],
+            "additionalProperties": false,
+            "properties": {
+              "header": {
+                "type": "string",
+                "description": "Which question this answers — matches the spec question's `header`."
+              },
+              "options": {
+                "type": "array",
+                "description": "The selected option label(s). One for single-select; empty when the visitor only used `other`.",
+                "items": { "type": "string" }
+              },
+              "other": {
+                "type": "string",
+                "description": "A free-text answer outside the enumerated options (the 'Other' escape hatch). Blank ⇒ omitted."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "Payload": {
+      "title": "ChoicesPayload",
+      "description": "The canonical validated payload the parked turn resumes with (identical on the chip and conversational paths).",
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["submitted", "declined", "no_response"],
+          "description": "How the interaction resolved."
+        },
+        "values": {
+          "type": "object",
+          "description": "Present when `status` is `submitted`: the validated, normalized answers.",
+          "required": ["answers"],
+          "additionalProperties": false,
+          "properties": {
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["header"],
+                "additionalProperties": false,
+                "properties": {
+                  "header": { "type": "string" },
+                  "options": { "type": "array", "items": { "type": "string" } },
+                  "other": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "message": {
+          "type": "string",
+          "description": "Guidance for the agent when `status` is `declined` / `no_response`."
+        }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Spec" },
+    { "$ref": "#/$defs/Values" },
+    { "$ref": "#/$defs/Payload" }
+  ]
+}
