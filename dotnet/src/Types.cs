@@ -33,6 +33,7 @@ public static class EventTypes
     public const string OtpSent = "otp_sent";
     public const string OtpVerified = "otp_verified";
     public const string OtpInvalid = "otp_invalid";
+    public const string Cancelled = "cancelled";
     public const string Error = "error";
     public const string Pong = "pong";
 
@@ -40,7 +41,7 @@ public static class EventTypes
     {
         ImmediateResponse, EventualResponse, StreamChunk, StreamToken, Keepalive,
         WriteConfirmationRequired, OtpVerificationRequired, OtpSent, OtpVerified,
-        OtpInvalid, Error, Pong,
+        OtpInvalid, Cancelled, Error, Pong,
     };
 }
 
@@ -53,12 +54,13 @@ public static class ActionTypes
     public const string GetConversationMessages = "get_conversation_messages";
     public const string ConfirmToolAction = "confirm_tool_action";
     public const string VerifyOtp = "verify_otp";
+    public const string Cancel = "cancel";
     public const string Ping = "ping";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>
     {
         CreateConversationSession, SendMessage, GetSession, GetConversationMessages,
-        ConfirmToolAction, VerifyOtp, Ping,
+        ConfirmToolAction, VerifyOtp, Cancel, Ping,
     };
 }
 
@@ -111,6 +113,7 @@ public sealed class ServerEventConverter : JsonConverter<ServerEvent>
         [EventTypes.OtpSent] = typeof(OtpSentEvent),
         [EventTypes.OtpVerified] = typeof(OtpVerifiedEvent),
         [EventTypes.OtpInvalid] = typeof(OtpInvalidEvent),
+        [EventTypes.Cancelled] = typeof(CancelledEvent),
         [EventTypes.Error] = typeof(ErrorEvent),
         [EventTypes.Pong] = typeof(PongEvent),
     };
@@ -405,6 +408,38 @@ public sealed class OtpInvalidDetails
     public string? Message { get; set; }
 }
 
+/// <summary>
+/// Terminal event of a turn the client aborted with a <c>cancel</c> action — emitted
+/// IN PLACE OF the <c>eventual_response</c> a completed turn would send. Echoes the
+/// cancelled <c>send_message</c>'s <see cref="ServerEvent.RequestId"/> so the client
+/// correlates it to the in-flight <see cref="MessageTurn"/>. <see cref="Status"/> is
+/// <c>499</c> ("client closed request") and there is NO answer payload.
+/// </summary>
+public sealed class CancelledEvent : ServerEvent
+{
+    public override string Type => EventTypes.Cancelled;
+
+    /// <summary>Terminal cancellation status — always <c>499</c> ("client closed request").</summary>
+    [JsonPropertyName("status")]
+    public int Status { get; set; } = 499;
+
+    [JsonPropertyName("data")]
+    public CancelledData? Data { get; set; }
+
+    [JsonPropertyName("timestamp")]
+    public long? Timestamp { get; set; }
+}
+
+/// <summary>The <c>data</c> mirror of a <see cref="CancelledEvent"/> (<c>requestId</c> + <c>status</c>).</summary>
+public sealed class CancelledData
+{
+    [JsonPropertyName("requestId")]
+    public string? RequestId { get; set; }
+
+    [JsonPropertyName("status")]
+    public int Status { get; set; } = 499;
+}
+
 /// <summary>An unrecoverable protocol error.</summary>
 public sealed class ErrorEvent : ServerEvent
 {
@@ -486,6 +521,7 @@ public sealed class NestedData<T> where T : new()
 [JsonDerivedType(typeof(GetMessagesAction), ActionTypes.GetConversationMessages)]
 [JsonDerivedType(typeof(ConfirmToolAction), ActionTypes.ConfirmToolAction)]
 [JsonDerivedType(typeof(VerifyOtpAction), ActionTypes.VerifyOtp)]
+[JsonDerivedType(typeof(CancelAction), ActionTypes.Cancel)]
 [JsonDerivedType(typeof(PingAction), ActionTypes.Ping)]
 public abstract class ClientAction
 {
@@ -576,6 +612,19 @@ public sealed class VerifyOtpAction : ClientAction
 
     [JsonPropertyName("code")]
     public string Code { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Client-initiated turn cancellation — the "Stop" button. <see cref="RequestId"/> SHOULD
+/// be the in-flight <c>send_message</c> turn's requestId (echoed on the terminal
+/// <c>cancelled</c> event); <see cref="SessionId"/> is optional and advisory.
+/// </summary>
+public sealed class CancelAction : ClientAction
+{
+    public override string Action => ActionTypes.Cancel;
+
+    [JsonPropertyName("sessionId")]
+    public string? SessionId { get; set; }
 }
 
 public sealed class PingAction : ClientAction

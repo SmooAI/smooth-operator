@@ -146,7 +146,8 @@ public sealed class LiveE2ETests
         await foreach (var ev in turn.WithCancellation(cts.Token))
             events.Add(ev);
 
-        var eventual = await turn.Completion;
+        var eventual = await turn.Completion
+            ?? throw new InvalidOperationException("Turn settled without an eventual_response (unexpected cancel).");
         return (events, eventual);
     }
 

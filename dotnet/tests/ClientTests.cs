@@ -66,7 +66,8 @@ public sealed class ClientTests
         await iterate;
 
         // Terminal response resolves the turn.
-        Assert.Equal(EventTypes.EventualResponse, final.Type);
+        Assert.NotNull(final);
+        Assert.Equal(EventTypes.EventualResponse, final!.Type);
         Assert.Equal("msg-1", final.Data.Payload.MessageId);
 
         // Events arrived in order through iteration.
@@ -143,6 +144,99 @@ public sealed class ClientTests
         await turn.Completion;
         await iterate;
         Assert.Equal(new[] { "write_confirmation_required", "eventual_response" }, seen.ToArray());
+    }
+
+    [Fact]
+    public async Task Cancel_EmitsCancelFrameWithRequestIdAndSessionId()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        client.Cancel("req-42", "sess-7");
+
+        var sent = transport.LastSent();
+        Assert.Equal("cancel", sent.GetProperty("action").GetString());
+        Assert.Equal("req-42", sent.GetProperty("requestId").GetString());
+        Assert.Equal("sess-7", sent.GetProperty("sessionId").GetString());
+    }
+
+    [Fact]
+    public async Task TurnCancel_EmitsCancelFrameCarryingTheTurnsOwnRequestIdAndSession()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        var turn = client.SendMessageAsync(new SendMessageAction { SessionId = "sess-9", Message = "long one" });
+        var reqId = transport.LastRequestId();
+
+        // The ergonomic "stop THIS turn" button.
+        turn.Cancel();
+
+        var sent = transport.LastSent();
+        Assert.Equal("cancel", sent.GetProperty("action").GetString());
+        Assert.Equal(reqId, sent.GetProperty("requestId").GetString());
+        Assert.Equal("sess-9", sent.GetProperty("sessionId").GetString());
+    }
+
+    [Fact]
+    public async Task CancelledEvent_SettlesMatchingTurnAsUserStop_NotException()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        var turn = client.SendMessageAsync(new SendMessageAction { SessionId = "s", Message = "stop me" });
+        var reqId = transport.LastRequestId();
+
+        var seen = new List<string>();
+        var iterate = Task.Run(async () =>
+        {
+            await foreach (var ev in turn)
+                seen.Add(ev.Type);
+        });
+
+        // Some streamed tokens, then a user-stop.
+        transport.Emit(Frame("""{"type":"stream_token","requestId":"{rid}","token":"Hel","data":{"requestId":"{rid}","token":"Hel"}}""", reqId));
+        transport.Emit(Frame("""{"type":"cancelled","requestId":"{rid}","status":499,"data":{"requestId":"{rid}","status":499}}""", reqId));
+
+        // Resolves (never throws) and yields null on a user-stop.
+        var final = await turn.Completion;
+        await iterate; // iterator ends cleanly — no exception
+
+        Assert.Null(final);
+        Assert.True(turn.Cancelled);
+        Assert.NotNull(turn.CancelledEvent);
+        Assert.Equal(499, turn.CancelledEvent!.Status);
+        Assert.Equal(new[] { "stream_token", "cancelled" }, seen.ToArray());
+    }
+
+    [Fact]
+    public async Task Cancel_WithNothingRunning_IsANoOpThatDoesNotThrow()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        // No active turn — a harmless send; the server would no-op.
+        var ex = Record.Exception(() => client.Cancel("req-does-not-exist"));
+        Assert.Null(ex);
+        Assert.Equal("cancel", transport.LastSent().GetProperty("action").GetString());
+    }
+
+    [Fact]
+    public async Task CancelledEvent_WithNoMatchingTurn_IsIgnored_DoesNotThrow()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        var received = new List<ServerEvent>();
+        client.Event += ev => received.Add(ev);
+
+        // cancelled for an unknown requestId: no matching turn/pending → routed to listeners, no throw.
+        var ex = Record.Exception(() =>
+            transport.Emit("""{"type":"cancelled","requestId":"ghost","status":499,"data":{"requestId":"ghost","status":499}}"""));
+
+        Assert.Null(ex);
+        Assert.Single(received);
+        Assert.Equal(EventTypes.Cancelled, received[0].Type);
     }
 
     [Fact]

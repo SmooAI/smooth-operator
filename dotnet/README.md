@@ -46,8 +46,8 @@ var turn = client.SendMessageAsync(new SendMessageAction
     Message = "How long is your return window?",
 });
 
-EventualResponseEvent final = await turn.Completion;
-Console.WriteLine(final.Data.Payload.MessageId);
+EventualResponseEvent? final = await turn.Completion;
+Console.WriteLine(final?.Data.Payload.MessageId);
 ```
 
 (Point `Url` at your own [`smooth-operator-server`](../rust/README.md) or the hosted endpoint.)
@@ -75,9 +75,30 @@ await foreach (var ev in turn)
         await client.ConfirmToolActionAsync(session.SessionId, turn.RequestId, approved: true);
 }
 
-EventualResponseEvent final = await turn.Completion;
-Console.WriteLine($"\nmessageId: {final.Data.Payload.MessageId}");
+EventualResponseEvent? final = await turn.Completion;
+Console.WriteLine($"\nmessageId: {final?.Data.Payload.MessageId}");
 ```
+
+---
+
+## Stop button — client-initiated cancellation
+
+Call `turn.Cancel()` (or `client.Cancel(requestId, sessionId)`) to stop the in-flight turn. The server aborts the LLM + tool work and replies with a terminal `cancelled` event, and the matching `MessageTurn` settles as a **user-stop**: it resolves (never throws), the `await foreach` ends cleanly, `turn.Completion` yields `null`, and `turn.Cancelled` is `true`. Errors still throw — that is how you tell a stop from a failure.
+
+```csharp
+var turn = client.SendMessageAsync(new SendMessageAction { SessionId = session.SessionId, Message = "write me a novel" });
+
+// … from your "Stop" button, on another thread:
+turn.Cancel();
+
+await foreach (var ev in turn) { /* streamed tokens stop arriving */ }
+
+EventualResponseEvent? final = await turn.Completion;   // resolves — never throws — on a stop
+if (turn.Cancelled)
+    Console.WriteLine($"stopped by user (status {turn.CancelledEvent!.Status})");   // 499, no answer
+```
+
+Idempotent: cancelling a turn that already finished, or a `cancel` with nothing running, is a harmless no-op.
 
 ---
 
