@@ -254,6 +254,16 @@ async def test_tool_config_filters_tools_per_agent() -> None:
         )
         await dispatcher.wait_for_turns()
 
-    # agent-a restricted to its allow-list; agent-b (no config) sees the full set.
-    assert _sent_tool_names(mock.calls[0]) == ["crm"]
-    assert _sent_tool_names(mock.calls[1]) == ["crm", "knowledge_search", "notify_humans"]
+    # agent-a restricted to its allow-list; agent-b (no config) sees the full set. The
+    # Rich Interaction framework tools (request_<kind> + submit_interaction) are always
+    # registered — NOT subject to the agent allow-list, mirroring the Rust runner — so
+    # assert the AGENT tool subset with those filtered out.
+    _INTERACTION = {"request_choices", "submit_interaction"}
+    assert [n for n in _sent_tool_names(mock.calls[0]) if n not in _INTERACTION] == ["crm"]
+    assert [n for n in _sent_tool_names(mock.calls[1]) if n not in _INTERACTION] == [
+        "crm",
+        "knowledge_search",
+        "notify_humans",
+    ]
+    # …and the interaction tools ARE present regardless of the agent's allow-list.
+    assert _INTERACTION.issubset(set(_sent_tool_names(mock.calls[0])))

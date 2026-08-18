@@ -25,8 +25,17 @@ from .auth import (
     Principal,
 )
 from .backplane import Backplane, InMemoryBackplane
+from .choices import ChoicesKind, validate_choices
 from .coding_tools import coding_tools, coding_tools_from_env, resolve_workspace_path
 from .dispatcher import FrameDispatcher
+from .interaction import (
+    InteractionFieldError,
+    InteractionKind,
+    InteractionOutcome,
+    InteractionRegistry,
+    InteractionRequest,
+    PendingInteractions,
+)
 from .otp import (
     OtpChannel,
     OtpContact,
@@ -67,6 +76,14 @@ __all__ = [
     "coding_tools_from_env",
     "resolve_workspace_path",
     "FrameDispatcher",
+    "ChoicesKind",
+    "validate_choices",
+    "InteractionFieldError",
+    "InteractionKind",
+    "InteractionOutcome",
+    "InteractionRegistry",
+    "InteractionRequest",
+    "PendingInteractions",
     "OtpChannel",
     "OtpContact",
     "OtpDelivery",

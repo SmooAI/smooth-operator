@@ -39,6 +39,8 @@ from . import protocol, telemetry
 from .agent_config import AgentConfig, filter_tools
 from .confirmation import ConfirmationRegistry
 from .extensions import build_extension_host
+from .interaction import InteractionRegistry, PendingInteractions
+from .interaction_tools import build_interaction_tools
 from .model_info import model_output_ceiling
 from .session_store import MessageDirection, SessionStore
 from .workflow import (
@@ -248,6 +250,9 @@ class TurnRunner:
         tool_hooks: list[Any] | None = None,
         org_id: str | None = None,
         executor: AgentExecutor | None = None,
+        interactions: InteractionRegistry | None = None,
+        interaction_pending: PendingInteractions | None = None,
+        capabilities: list[str] | None = None,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
@@ -280,6 +285,16 @@ class TurnRunner:
         #: span so the observability studio groups turns by org (mirrors the Rust
         #: runner's ``org_id`` span field). ``None`` ⇒ the attribute is omitted.
         self._org_id = org_id
+        #: Rich Interactions catalog + the session-keyed park registry (shared with the
+        #: dispatcher's ``submit_interaction`` handler). When both are wired, this turn
+        #: registers the per-kind ``request_<kind>`` raise tools + the generic
+        #: ``submit_interaction`` fallback tool. ``None`` ⇒ no interaction tools (behavior
+        #: unchanged).
+        self._interactions = interactions
+        self._interaction_pending = interaction_pending
+        #: The client render capabilities this session declared in ``supports`` — gates
+        #: whether each kind's raise tool parks (rich) or degrades (fallback).
+        self._capabilities = set(capabilities or [])
 
     def _is_gated(self, tool_name: str) -> bool:
         """True when ``tool_name`` matches a confirmation-gated pattern (substring,
@@ -327,6 +342,25 @@ class TurnRunner:
         agent_tools = list(self._tools)
         if ext_turn is not None:
             agent_tools.extend(filter_tools(ext_turn.host.tools(), self._agent_config))
+
+        # Rich Interactions: register this turn's per-kind `request_<kind>` raise tools
+        # (rich when the session declared the kind's capability, else conversational
+        # fallback) + the generic `submit_interaction` tool. Framework tools, appended
+        # raw (not through the agent allow-list) so they are always available, mirroring
+        # the Rust runner's unconditional registration. `interaction_required` events
+        # emit through this connection's sink; a rich raise parks on
+        # `_interaction_pending` until the dispatcher's `submit_interaction` resolves it.
+        if self._interactions is not None and self._interaction_pending is not None:
+            agent_tools.extend(
+                build_interaction_tools(
+                    self._interactions,
+                    self._capabilities,
+                    confirm_session,
+                    request_id,
+                    sink,
+                    self._interaction_pending,
+                )
+            )
 
         # 1. Build the agent. The knowledge base (when present) auto-injects the
         #    top hits into the system prompt — the engine handles retrieval + rerank
@@ -532,6 +566,11 @@ class TurnRunner:
             # `(cfg.clear)(session_id)` at turn end). No-op when HITL is off.
             if self._confirmations is not None:
                 self._confirmations.clear(confirm_session)
+            # Drop any interaction still parked (mirrors the Rust `(cfg.clear)` at turn
+            # end): a raise tool awaiting at teardown unblocks `no_response`, and a stale
+            # registration can't mis-route a later `submit_interaction`. No-op when off.
+            if self._interaction_pending is not None:
+                self._interaction_pending.clear(confirm_session)
             # SEP — stop the extension subprocesses this turn spawned (and clear any
             # ui/confirm still parked). No-op when no host was built (default deny).
             if ext_turn is not None:

@@ -37,6 +37,7 @@ from .backplane import Backplane, InMemoryBackplane, Target
 from .coding_tools import coding_tools_from_env
 from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
+from .interaction import InteractionRegistry, PendingInteractions
 from .otp import OtpService
 from .session_store import InMemorySessionStore, SessionStore
 from .workflow import WORKFLOW_JUDGE_MODEL
@@ -88,6 +89,11 @@ class ServerState:
     otp_service: OtpService | None = None
     #: Fast/cheap model for the post-turn workflow judge (default haiku-tier).
     judge_model: str = WORKFLOW_JUDGE_MODEL
+    #: Rich Interactions catalog — the kinds this server hosts (default: the reference
+    #: ``choices`` kind). Each turn registers the per-kind ``request_<kind>`` raise tools;
+    #: a client submits back through the ``submit_interaction`` action / tool. Extend or
+    #: replace to host more kinds.
+    interactions: InteractionRegistry = field(default_factory=InteractionRegistry.default)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -147,6 +153,10 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
     # frame and the parked turn it resumes are always on the same connection (the
     # session id keys within it), so the registry need not be server-wide.
     confirmations = ConfirmationRegistry()
+    # One pending-interaction registry per connection: a `submit_interaction` frame and
+    # the parked turn it resumes are always on the same connection (session-keyed within
+    # it), so — like confirmations — it need not be server-wide.
+    interaction_pending = PendingInteractions()
     dispatcher = FrameDispatcher(
         state.store,
         state.chat_client,
@@ -157,6 +167,8 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         tools=state.tools,
         confirm_tools=state.confirm_tools,
         confirmations=confirmations,
+        interactions=state.interactions,
+        interaction_pending=interaction_pending,
         agent_config_resolver=state.agent_config_resolver,
         session_authenticator=state.session_authenticator,
         judge_model=state.judge_model,
@@ -207,6 +219,9 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         # graceful-drain "in-flight turn finishes" contract now that turns run as
         # background tasks rather than inline).
         confirmations.reject_all()
+        # Likewise unpark any turn parked on a raised interaction (fail soft — the agent
+        # continues without the answer) so its `eventual_response` flushes before drain.
+        interaction_pending.reject_all()
         await dispatcher.wait_for_turns()
         # Stop the writer (drain any already-queued events first), then detach —
         # the detach-after-loop runs regardless of how the loop exited.
