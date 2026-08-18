@@ -358,6 +358,7 @@ async fn grounded_turn_over_served_storage_answers_from_the_ingested_repo() {
 
     let turn = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage: state.storage.clone(),
             llm,
             max_iterations: 6,

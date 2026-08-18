@@ -8,9 +8,11 @@ just a terminal front-end instead of a browser one.
 **What it demonstrates** (all against a real server, no mocks):
 
 - **Token streaming** — the assistant reply prints token-by-token.
-- **Inline tool-call / result** — `⚙ knowledge_search …` then `✓`/`✗` with the result.
-- **Human-in-the-loop approval** — a parked write tool prompts `approve? [y/N]`;
-  answering resumes the exact turn (the SDK correlates it by request id).
+- **Inline tool-call / result** — `⚙ issue_refund …` then `✓`/`✗` with the result
+  (and `⚙ knowledge_search …` for the read that precedes it).
+- **Human-in-the-loop approval** — the parked `issue_refund` write prompts
+  `approve? [y/N]`; answering resumes the exact turn (the SDK correlates it by
+  request id).
 - **Durable conversations** — `/list`, `/resume <id>`, `/new` against Postgres.
 
 The whole client is one dependency-free file: [`src/index.mjs`](src/index.mjs)
@@ -29,12 +31,13 @@ First run builds the Rust server image (a few minutes; cached after). Then you'r
 dropped into the chat. Try:
 
 ```
-you  What is your return policy?
+you  I want to return order ORD-1234 for a refund.
 ```
 
-The seeded knowledge base answers (17-day return window). Because the compose
-file sets `SMOOTH_AGENT_CONFIRM_TOOLS=knowledge_search`, the retrieval tool parks
-for your approval first — say `y` to let it run.
+The agent checks the seeded return policy (17-day window) and then calls the
+`issue_refund` **write** tool. Because the compose file sets
+`SMOOTH_AGENT_CONFIRM_TOOLS=issue_refund`, that write parks for your approval
+first — say `y` to let it run.
 
 Commands: `/new` · `/list` · `/resume <conversationId>` · `/exit`
 

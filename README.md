@@ -39,9 +39,9 @@
 > This is the open-source heart of [Smoo AI](https://smoo.ai) — the same operator engine that runs Smooth Operator in your org, MIT-licensed, yours to run. **MIT-licensed. Bring your own model. You approve every write.**
 
 <p align="center">
-  <img src=".github/demo-hitl.gif" alt="The operator streams a reply, stops at a knowledge_search tool call for approval, and answers from its knowledge base once approved" width="100%" />
+  <img src=".github/demo-hitl.gif" alt="The operator streams a reply, checks the return policy, then stops at an issue_refund tool call for approval and processes the refund once approved" width="100%" />
   <br />
-  <em>Not a mockup — the <a href="./examples/web-chat">web-chat example</a> against a live server. The turn <b>parks</b> at <code>knowledge_search</code> until a human approves, then answers from the knowledge base.</em>
+  <em>Not a mockup — the <a href="./examples/web-chat">web-chat example</a> against a live server. The turn checks the return policy, then <b>parks</b> at the <code>issue_refund</code> write until a human approves, and only then processes the refund.</em>
 </p>
 
 ---
@@ -107,12 +107,12 @@ An agent you'd point at prod stops before it *writes*. A state-mutating tool cal
 
 ```jsonc
 ← { "type": "write_confirmation_required",
-    "data": { "requestId": "r-9", "data": { "toolId": "create_ticket", "actionDescription": "Open a support ticket" } } }
+    "data": { "requestId": "r-9", "data": { "toolId": "issue_refund", "actionDescription": "Issue a refund for order ORD-1234" } } }
 → { "action": "confirm_tool_action", "sessionId": "…", "requestId": "r-9", "approved": true }  // ← a human decides
 ← { "type": "stream_token", … }   // parked turn resumes, same requestId
 ```
 
-> Watch it happen in the demo at the top — the turn parks at `knowledge_search` and only answers once a human approves.
+> Watch it happen in the demo at the top — the turn looks up the return policy, then parks at the `issue_refund` write and only processes the refund once a human approves.
 
 ### ⏱️ Durable execution *(new)*
 

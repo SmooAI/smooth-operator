@@ -1664,6 +1664,11 @@ async fn handle_send_message(
                 files,
                 // Per-agent LLM-request metadata (spend attribution etc).
                 request_metadata,
+                // Seeded-demo flavor (`SMOOTH_AGENT_SEED_KB=1`): registers the mock
+                // `issue_refund` write tool + the refund-flow persona so the HITL
+                // demo gates approval on a write. False in every other flavor
+                // (byte-for-byte unchanged).
+                demo_tools: state_for_turn.config.seed_kb,
             },
             &sink_owned,
         )

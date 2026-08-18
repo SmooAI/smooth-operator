@@ -37,7 +37,7 @@ services:
             SMOOTH_AGENT_STORAGE: postgres
             SMOOTH_AGENT_DATABASE_URL: postgresql://smooth:smooth@postgres:5432/smooth?sslmode=disable
             SMOOTH_AGENT_SEED_KB: '1'
-            SMOOTH_AGENT_CONFIRM_TOOLS: knowledge_search
+            SMOOTH_AGENT_CONFIRM_TOOLS: issue_refund # the write tool parks for human approval (a read never does)
             RUST_LOG: info,smooth_operator_server=info
 
     tui:

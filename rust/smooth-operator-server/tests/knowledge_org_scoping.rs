@@ -200,6 +200,7 @@ async fn run_turn_as(storage: Arc<dyn StorageAdapter>, access: AccessContext) {
 
     runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,

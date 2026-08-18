@@ -82,6 +82,7 @@ async fn run_turn(
 
     let result = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,
@@ -266,6 +267,7 @@ async fn run_turn_on(
     let (tx, _rx) = unbounded_channel::<Value>();
     runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,

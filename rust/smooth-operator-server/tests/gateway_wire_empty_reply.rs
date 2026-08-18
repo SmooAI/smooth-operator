@@ -66,6 +66,7 @@ async fn run_against(chunks: Vec<String>) -> (String, Vec<String>, Vec<String>, 
     let (tx, mut rx) = unbounded_channel::<Value>();
     let result = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm,
             max_iterations: 4,

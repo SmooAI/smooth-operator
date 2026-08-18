@@ -119,6 +119,7 @@ async fn run_turn_with_key(
     let (tx, rx): (_, UnboundedReceiver<Value>) = unbounded_channel();
     let result = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,
@@ -214,6 +215,7 @@ async fn run_turn_with_storage(
     let (tx, mut rx): (_, UnboundedReceiver<Value>) = unbounded_channel();
     runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,
@@ -485,6 +487,7 @@ async fn injected_tool_hook_observes_tool_calls() {
     let (tx, mut rx): (_, UnboundedReceiver<Value>) = unbounded_channel();
     runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,

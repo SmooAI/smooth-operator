@@ -46,6 +46,7 @@ async fn run_turn(deltas: &[&str]) -> (TurnResult, Vec<String>, String) {
     let (tx, mut rx) = unbounded_channel::<Value>();
     let result = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o"),
             max_iterations: 4,

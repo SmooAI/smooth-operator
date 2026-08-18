@@ -14,9 +14,11 @@ Both demonstrate, against a real server with no mocks:
 
 - **Token streaming** — replies grow token-by-token.
 - **Knowledge retrieval** — a seeded KB (`SMOOTH_AGENT_SEED_KB=1`) grounds answers.
-- **Inline tool-call / result** — the `knowledge_search` tool renders as it runs.
-- **Human-in-the-loop approval** — `SMOOTH_AGENT_CONFIRM_TOOLS` parks the tool for
-  a human verdict; the SDK resumes the exact turn on approve.
+- **Inline tool-call / result** — tools like `knowledge_search` (read) and
+  `issue_refund` (write) render as they run.
+- **Human-in-the-loop approval** — `SMOOTH_AGENT_CONFIRM_TOOLS=issue_refund` parks
+  the **write** for a human verdict before it runs (the read never parks); the SDK
+  resumes the exact turn on approve.
 - **Durable conversations** — stored in Postgres; list, resume, start new.
 
 ## Provider setup — BYO gateway, one file

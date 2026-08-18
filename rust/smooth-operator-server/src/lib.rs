@@ -39,6 +39,7 @@
 
 pub mod admin;
 pub mod config;
+pub mod demo_tools;
 pub mod embedder;
 pub mod extensions;
 pub mod handler;

@@ -116,6 +116,7 @@ async fn empty_terminal_content_falls_back_to_streamed_reply() {
 
     let result = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o"),
             max_iterations: 4,
