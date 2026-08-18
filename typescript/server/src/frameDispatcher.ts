@@ -20,6 +20,7 @@ import { resolveSection, type SkillResolver } from './skills.js';
 import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
+import { InteractionParkRegistry, InteractionRegistry, requestInteractionTool, submitInteractionTool, type InteractionOutcome, type RaisedSpecs } from './interaction.js';
 import { buildExtensionHost } from './extensions.js';
 import { availableChannels, isContactEmpty, type OtpContact, type OtpRefusal, type OtpService } from './otp.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
@@ -98,6 +99,13 @@ export interface FrameDispatcherOptions {
      * connection). Created on demand if not supplied.
      */
     confirmations?: ConfirmationRegistry;
+    /**
+     * The Rich Interactions the server hosts (raise tools registered per turn, gated
+     * per-kind by the session's declared `supports`). Defaults to an empty registry →
+     * no interaction tools, behaviour unchanged. The server passes the reference
+     * catalog (the `choices` kind).
+     */
+    interactions?: InteractionRegistry;
     /** Model id for turns (default {@link DEFAULT_MODEL}); forwarded to the {@link TurnRunner}. */
     model?: string;
     /** Best-effort per-model output-ceiling resolver; forwarded to the {@link TurnRunner} (EPIC th-1cc9fa). */
@@ -131,6 +139,10 @@ export class FrameDispatcher {
     private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
     private readonly confirmations: ConfirmationRegistry;
+    /** The hosted interaction kinds (raise/submit tools). Empty ⇒ no interaction tools. */
+    private readonly interactions: InteractionRegistry;
+    /** Session-keyed park registry for in-flight Rich Interactions (one per connection). */
+    private readonly interactionPark = new InteractionParkRegistry();
     private readonly agentConfig?: AgentConfigResolver;
     private readonly judgeModel?: string;
     private readonly sessionAuthenticator?: SessionAuthenticator;
@@ -159,6 +171,7 @@ export class FrameDispatcher {
         this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations ?? new ConfirmationRegistry();
+        this.interactions = options.interactions ?? new InteractionRegistry();
         this.agentConfig = options.agentConfig;
         this.judgeModel = options.judgeModel;
         this.sessionAuthenticator = options.sessionAuthenticator;
@@ -187,6 +200,15 @@ export class FrameDispatcher {
      */
     rejectPendingConfirmations(): void {
         this.confirmations.rejectAll();
+    }
+
+    /**
+     * Resolve every outstanding Rich Interaction as `no_response`, unparking any turn
+     * awaiting a raise so it can finish (the visitor never answered the card). Called
+     * by the connection loop alongside {@link rejectPendingConfirmations} on teardown.
+     */
+    rejectPendingInteractions(): void {
+        this.interactionPark.rejectAll();
     }
 
     /**
@@ -219,6 +241,9 @@ export class FrameDispatcher {
         // a connection-wide sweep: the disconnect path rejects every confirmation
         // separately via {@link rejectPendingConfirmations}. No-op when the turn isn't parked.
         this.confirmations.resolve(turn.sessionId, false);
+        // Same for a turn parked on a Rich Interaction raise: unblock it (no_response)
+        // so the park's `await` returns and the turn finishes.
+        this.interactionPark.resolve(turn.sessionId, { status: 'no_response' });
         this.turns.delete(turn.promise);
         return true;
     }
@@ -283,6 +308,9 @@ export class FrameDispatcher {
                     break;
                 case 'confirm_tool_action':
                     this.handleConfirmToolAction(frame, requestId, sink);
+                    break;
+                case 'submit_interaction':
+                    await this.handleSubmitInteraction(frame, requestId, sink);
                     break;
                 case 'verify_otp':
                     await this.handleVerifyOtp(frame, requestId, sink);
@@ -405,12 +433,18 @@ export class FrameDispatcher {
         // single-tenant behavior, unchanged).
         const ownerEmail = this.access.authEnabled ? this.access.principal.email : typeof frame.userEmail === 'string' ? frame.userEmail : undefined;
 
+        // The client's declared render capabilities (`supports`) gate this session's
+        // Rich Interactions. Non-string entries are dropped (forward-compatible); an
+        // absent/empty list ⇒ a text-only channel (every kind falls back).
+        const supports = Array.isArray(frame.supports) ? frame.supports.filter((s): s is string => typeof s === 'string') : undefined;
+
         const session = await this.store.createSession(
             agentId,
             typeof frame.userName === 'string' ? frame.userName : undefined,
             ownerEmail,
             conversationId,
             this.access.principal.org,
+            supports,
         );
         // A freshly created session never passes through scopedSession, so associate here too.
         if (this.associate) {
@@ -650,9 +684,18 @@ export class FrameDispatcher {
         // connection. Its eager tools join the base set BEFORE the enabled_tools filter,
         // so a per-agent allow-list drops them exactly like a built-in (SMOODEV-590 parity).
         const extHost = await buildExtensionHost({ confirmations: this.confirmations, sessionId, requestId: reqId, sink });
-        // Static tools + this turn's SEP extension tools + per-turn host-provider tools.
+        // Rich Interactions: one `request_<kind>` raise tool per hosted kind, gated
+        // per-kind by the session's declared `supports`. A declared-capability kind
+        // parks the turn on a rich card (`interaction_required`); the rest degrade to
+        // their conversational fallback (backed by the generic `submit_interaction`
+        // tool). No hosted kinds ⇒ no interaction tools, behaviour unchanged. They join
+        // the base set BEFORE the enabled_tools filter, so a per-agent allow-list can
+        // restrict individual raise tools exactly like a built-in (mirrors the Rust server).
+        const interactionTools = this.buildInteractionTools(sessionId, reqId, sink, session.supports);
+
+        // Static tools + this turn's SEP extension tools + per-turn host-provider tools + interaction tools.
         // All go through the same enabled-tools filter + auth gate below.
-        const baseTools = [...this.tools, ...(extHost ? extHost.tools() : []), ...hostTools];
+        const baseTools = [...this.tools, ...(extHost ? extHost.tools() : []), ...hostTools, ...interactionTools];
         const enabledTools = agentConfig?.enabledTools;
         const filteredTools = enabledTools?.length
             ? baseTools.filter((t) => enabledTools.some((e) => e.enabled && e.toolId === t.name))
@@ -748,6 +791,9 @@ export class FrameDispatcher {
                     this.confirmations?.clear(sessionId);
                     await extHost.shutdownAll();
                 }
+                // Drop any lingering parked interaction so a stale entry can't mis-route a
+                // later `submit_interaction` (mirrors the Rust `(cfg.clear)` at turn end).
+                this.interactionPark.clear(sessionId);
             }
         })();
         // Track it as the connection's single active turn — unless it already finished
@@ -794,6 +840,132 @@ export class FrameDispatcher {
                 approved,
             }),
         );
+    }
+
+    /**
+     * Build this turn's Rich Interaction tools: one `request_<kind>` raise tool per
+     * hosted kind (rich when the session declared the kind's capability, else the
+     * conversational fallback) plus the generic `submit_interaction` tool when any kind
+     * is on the fallback path. Empty when no kinds are hosted. A fresh per-turn
+     * `raisedSpecs` stash lets a same-turn fallback submit validate with full
+     * required-ness. Mirrors the Rust runner's interaction-bridge tool registration.
+     */
+    private buildInteractionTools(sessionId: string, requestId: string, sink: Sink, supports: string[] | undefined): Tool[] {
+        const kinds = this.interactions.all();
+        if (kinds.length === 0) return [];
+        const capabilities = new Set(supports ?? []);
+        const raisedSpecs: RaisedSpecs = new Map();
+        const tools: Tool[] = [];
+        let anyFallback = false;
+        for (const kind of kinds) {
+            const rich = capabilities.has(kind.capability);
+            if (!rich) anyFallback = true;
+            tools.push(requestInteractionTool({ kind, rich, sessionId, requestId, sink, park: this.interactionPark, raisedSpecs }));
+        }
+        // The generic submit tool is only needed when at least one kind falls back
+        // (rich sessions submit via the `submit_interaction` protocol action instead).
+        if (anyFallback) tools.push(submitInteractionTool({ kinds: this.interactions, raisedSpecs }));
+        return tools;
+    }
+
+    /**
+     * `submit_interaction` — resume a turn parked on a Rich Interaction.
+     *
+     * Per `spec/actions/submit-interaction.schema.json` the client replies with
+     * `{ action, sessionId, requestId, interactionId, kind?, values?, declined? }` to an
+     * `interaction_required` event. Validation is server-side, routed to the parked
+     * kind's validator against the spec the raise carried:
+     *   - invalid → an `interaction_invalid` event with per-field errors; the turn STAYS
+     *     parked so the card can resubmit (retryable, mirrors `otp_invalid` — never a
+     *     terminal `error`);
+     *   - valid → the parked raise resumes with the canonical values and an
+     *     `immediate_response` acks;
+     *   - `declined: true` → the raise resumes with a declined payload.
+     *
+     * The `interactionId` must echo the event's, so a stale submit can never resolve a
+     * newer park; peeking (not consuming) on an invalid submit keeps the turn parked, and
+     * resolving takes the pending out so a duplicate submit is a clean
+     * `NO_PENDING_INTERACTION` no-op. Not-yours collapses into `NO_PENDING_INTERACTION`
+     * (the identical response an id with no park produces) so a submit can't land in — or
+     * probe — another user's turn.
+     */
+    private async handleSubmitInteraction(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
+        // requestId is load-bearing (it echoes the originating interaction_required); require it.
+        if (requestId === undefined) {
+            sink(protocol.error(undefined, 'VALIDATION_ERROR', "submit_interaction requires a 'requestId'"));
+            return;
+        }
+        const sessionId = typeof frame.sessionId === 'string' ? frame.sessionId : '';
+        if (!sessionId) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "submit_interaction requires a 'sessionId'"));
+            return;
+        }
+
+        // Peek the pending interaction WITHOUT consuming the park — an invalid submit must
+        // leave the turn parked for a resubmit. A session we may not read reports the
+        // identical event an id with no pending park produces.
+        const owned = (await this.scopedSession(sessionId)) !== undefined;
+        const pending = owned ? this.interactionPark.peek(sessionId) : undefined;
+        if (!pending) {
+            sink(protocol.error(requestId, 'NO_PENDING_INTERACTION', `no interaction is awaiting submission for session '${sessionId}'`));
+            return;
+        }
+
+        // The submit must target THIS interaction instance (and, when it names a kind, the
+        // right kind) — a stale card can never resolve a newer park.
+        const interactionId = typeof frame.interactionId === 'string' ? frame.interactionId : undefined;
+        if (interactionId !== pending.interactionId) {
+            sink(protocol.error(requestId, 'INTERACTION_MISMATCH', "the submitted 'interactionId' does not match the pending interaction"));
+            return;
+        }
+        if (typeof frame.kind === 'string' && frame.kind !== pending.kind) {
+            sink(protocol.error(requestId, 'INTERACTION_MISMATCH', `the pending interaction is '${pending.kind}', not '${frame.kind}'`));
+            return;
+        }
+
+        // Decline path: resume the raise with a declined payload.
+        if (frame.declined === true) {
+            if (this.resolveInteraction(sessionId, requestId, { status: 'declined' }, sink)) {
+                sink(protocol.immediateResponse(requestId, 200, 'Interaction declined', { sessionId, interactionId: pending.interactionId, declined: true }));
+            }
+            return;
+        }
+
+        // Values path: route to the parked kind's server-side validator.
+        if (frame.values === undefined) {
+            sink(protocol.error(requestId, 'VALIDATION_ERROR', "submit_interaction requires 'values' (or 'declined': true)"));
+            return;
+        }
+        const kind = this.interactions.get(pending.kind);
+        if (!kind) {
+            // A parked kind the registry no longer hosts (shouldn't happen).
+            sink(protocol.error(requestId, 'NO_PENDING_INTERACTION', `interaction kind '${pending.kind}' is not hosted by this server`));
+            return;
+        }
+
+        const result = kind.validate(pending.spec, frame.values);
+        if (!result.ok) {
+            // Retryable: the turn stays parked; the client re-renders the card with the
+            // per-field errors (never a terminal `error` event).
+            sink(protocol.interactionInvalid(requestId, pending.interactionId, pending.kind, result.errors, 'Some fields need attention.'));
+            return;
+        }
+        if (this.resolveInteraction(sessionId, requestId, { status: 'submitted', values: result.values }, sink)) {
+            sink(protocol.immediateResponse(requestId, 200, 'Interaction submitted', { sessionId, interactionId: pending.interactionId, kind: pending.kind, values: result.values }));
+        }
+    }
+
+    /**
+     * Consume the pending interaction for `sessionId` and feed it `outcome`. Returns
+     * `true` when the parked turn was resumed; emits `NO_PENDING_INTERACTION` and returns
+     * `false` when the park raced away (duplicate submit, or the parked turn ended first).
+     */
+    private resolveInteraction(sessionId: string, requestId: string, outcome: InteractionOutcome, sink: Sink): boolean {
+        if (!this.interactionPark.resolve(sessionId, outcome)) {
+            sink(protocol.error(requestId, 'NO_PENDING_INTERACTION', `no interaction is awaiting submission for session '${sessionId}'`));
+            return false;
+        }
+        return true;
     }
 
     /**

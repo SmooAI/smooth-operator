@@ -36,6 +36,8 @@ import type { AuthVerifier } from './auth.js';
 import { NoAuthVerifier } from './auth.js';
 import { InMemoryAdminStore, type AdminStore, handleAdminRequest } from './admin.js';
 import { InMemorySessionStore, type SessionStore } from './sessionStore.js';
+import { InteractionRegistry } from './interaction.js';
+import { ChoicesKind } from './choices.js';
 
 export interface ServerOptions {
     /** The OpenAI-compatible engine client (gateway in prod, a mock in tests). */
@@ -117,6 +119,15 @@ export interface ServerOptions {
      * `SKILL_NOT_FOUND`, so a multi-tenant deploy never serves host skills by accident.
      */
     skillResolver?: SkillResolver;
+    /**
+     * The Rich Interactions the server hosts (see `interaction.ts`). Each turn registers
+     * one `request_<kind>` raise tool per kind, gated per-kind by the session's declared
+     * `supports`: a declared-capability kind parks the turn on a rich card
+     * (`interaction_required` → `submit_interaction`), the rest degrade to their
+     * conversational fallback. Defaults to the reference catalog — the `choices` kind
+     * (AskUserQuestion). Pass an empty `new InteractionRegistry()` to host none.
+     */
+    interactions?: InteractionRegistry;
     /** WS path to mount on (default `/ws`). */
     path?: string;
 }
@@ -148,6 +159,9 @@ export function buildServer(options: ServerOptions): {
 } {
     const store = options.store ?? new InMemorySessionStore();
     const auth = options.auth ?? new NoAuthVerifier();
+    // The reference catalog: the `choices` kind (AskUserQuestion). Always wired unless the
+    // host overrides it — rich-vs-fallback is decided per kind from the session's `supports`.
+    const interactions = options.interactions ?? new InteractionRegistry([new ChoicesKind()]);
     const backplane = options.backplane ?? new InMemoryBackplane();
     const path = options.path ?? '/ws';
 
@@ -180,6 +194,7 @@ export function buildServer(options: ServerOptions): {
             tools: options.tools,
             toolHooks: options.toolHooks,
             confirmTools: options.confirmTools,
+            interactions,
             agentConfig: options.agentConfig,
             judgeModel: options.judgeModel,
             sessionAuthenticator: options.sessionAuthenticator,
@@ -404,6 +419,7 @@ async function runConnection(socket: WebSocket, dispatcher: FrameDispatcher, bac
         if (socketClosed) dispatcher.cancelActiveTurn();
 
         dispatcher.rejectPendingConfirmations();
+        dispatcher.rejectPendingInteractions();
         await dispatcher.waitForTurns();
 
         // Stop the writer and let it flush what's queued, then close the socket one-way.

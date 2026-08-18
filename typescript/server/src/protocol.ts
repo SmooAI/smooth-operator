@@ -174,6 +174,55 @@ export function writeConfirmationRequired(requestId: string, toolId: string, act
 }
 
 /**
+ * `interaction_required` — emitted mid-turn when the agent raises a Rich
+ * Interaction on a session that declared the kind's render capability. The turn is
+ * **parked** (the raise tool awaits the visitor's pick) until the client replies
+ * with a `submit_interaction` action echoing the same `interactionId`.
+ *
+ * Wire shape matches `spec/events/interaction-required.schema.json` and the
+ * Rust/Python reference servers byte-for-byte: the `requestId` echoes the
+ * originating `send_message`, and the prompt detail is double-nested under
+ * `data.data.{interactionId, kind, spec, reason}`. `spec` is the kind-specific
+ * render spec the client card is built from; `reason` is why the agent raised it.
+ */
+export function interactionRequired(requestId: string, interactionId: string, kind: string, spec: unknown, reason: string): Frame {
+    return {
+        type: 'interaction_required',
+        requestId,
+        data: {
+            requestId,
+            data: { interactionId, kind, spec, reason },
+        },
+        timestamp: nowMs(),
+    };
+}
+
+/**
+ * `interaction_invalid` — emitted when a `submit_interaction` fails the kind's
+ * server-side validation. Retryable: the turn STAYS parked so the client can
+ * re-render the card with the per-field errors and resubmit (never a terminal
+ * `error` event — mirrors `otp_invalid`). Wire shape matches
+ * `spec/events/interaction-invalid.schema.json` (double-nested `data.data`), with
+ * `errors` a list of `{ field, message }` and a human-readable `message`.
+ */
+export function interactionInvalid(requestId: string, interactionId: string, kind: string, errors: { field: string; message: string }[], message: string): Frame {
+    return {
+        type: 'interaction_invalid',
+        requestId,
+        data: {
+            requestId,
+            data: {
+                interactionId,
+                kind,
+                errors: errors.map((e) => ({ field: e.field, message: e.message })),
+                message,
+            },
+        },
+        timestamp: nowMs(),
+    };
+}
+
+/**
  * `otp_verification_required` — emitted after a turn's auth gate refused an
  * `end_user` tool on an unverified session and the host has an OTP service
  * installed. Tells the client to collect a one-time code. Wire shape matches
