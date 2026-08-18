@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -36,6 +37,13 @@ public sealed class FrameDispatcher
     private readonly IReadOnlyList<IToolHook> _toolHooks;
     private readonly IReadOnlyList<string> _confirmTools;
     private readonly ConfirmationRegistry _confirmations;
+    private readonly InteractionCatalog? _interactions;
+    private readonly InteractionParkRegistry _interactionPark = new();
+    // Per-connection render capabilities declared at create_conversation_session (the `supports` array),
+    // keyed by sessionId. The rich-vs-fallback interaction branch reads this. Captured per connection
+    // (like the confirmation registry) rather than persisted on the session — a client re-declares its
+    // capabilities on every connect, and create always precedes send on a connection.
+    private readonly ConcurrentDictionary<string, HashSet<string>> _sessionSupports = new();
     private readonly IAgentConfigResolver? _agentConfigResolver;
     private readonly IWorkflowJudge? _judge;
     private readonly ISessionAuthenticator _authenticator;
@@ -78,6 +86,7 @@ public sealed class FrameDispatcher
         IReadOnlyList<AITool>? tools = null,
         IReadOnlyList<string>? confirmTools = null,
         ConfirmationRegistry? confirmations = null,
+        InteractionCatalog? interactions = null,
         IAgentConfigResolver? agentConfigResolver = null,
         IWorkflowJudge? judge = null,
         ISessionAuthenticator? authenticator = null,
@@ -105,6 +114,11 @@ public sealed class FrameDispatcher
         // Session-keyed pending-confirmation registry shared with each spawned turn so a
         // confirm_tool_action frame resolves the verdict a parked turn awaits. One per connection.
         _confirmations = confirmations ?? new ConfirmationRegistry();
+        // The hosted Rich Interaction kinds — a host-provided capability wired through DI (like tools /
+        // reranker / OTP), NOT self-defaulted here: absent one (null), no interaction tools are ever
+        // registered and behavior is identical to before Rich Interactions. AddSmoothOperatorServer
+        // registers InteractionCatalog.Default (the `choices` kind) so the WS host gets it out of the box.
+        _interactions = interactions;
         // Per-agent config resolution (null ⇒ no per-agent instructions/workflow are applied; every
         // agent uses the default persona, unchanged) and the post-turn workflow judge.
         _agentConfigResolver = agentConfigResolver;
@@ -195,6 +209,8 @@ public sealed class FrameDispatcher
         // Mirrors the Rust reference dropping the confirmation future on handle.abort(). No-op when the
         // turn wasn't parked. th cancel-unpark.
         _confirmations.Resolve(turn.SessionId, approved: false);
+        // Same for a turn parked on a Rich Interaction: unpark it (no_response) so it unwinds cleanly.
+        _interactionPark.Resolve(turn.SessionId, InteractionOutcome.NoResponse);
         return true;
     }
 
@@ -203,7 +219,12 @@ public sealed class FrameDispatcher
     /// auto-approved on disconnect), so any turn parked on a confirmation unparks and finishes
     /// cleanly. Called by the connection loop on teardown, before <see cref="WaitForTurnsAsync"/>.
     /// </summary>
-    public void RejectPendingConfirmations() => _confirmations.RejectAll();
+    public void RejectPendingConfirmations()
+    {
+        _confirmations.RejectAll();
+        // Unpark any turn parked on a Rich Interaction too (no_response, fail-soft), same teardown contract.
+        _interactionPark.RejectAll();
+    }
 
     public async Task DispatchAsync(string rawFrame, Action<JsonObject> sink, CancellationToken cancellationToken = default)
     {
@@ -260,6 +281,9 @@ public sealed class FrameDispatcher
                     break;
                 case "confirm_tool_action":
                     await HandleConfirmToolActionAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "submit_interaction":
+                    await HandleSubmitInteractionAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
                     break;
                 case "verify_otp":
                     await HandleVerifyOtpAsync(frame, requestId, sink, cancellationToken).ConfigureAwait(false);
@@ -352,6 +376,12 @@ public sealed class FrameDispatcher
             ownerEmail,
             string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
+
+        // Capture the client's render capabilities (`supports`) for this session so a mid-turn Rich
+        // Interaction takes the rich (card) path only on a channel that can render it; an omitted /
+        // empty `supports` (text-only channels: SMS, voice) leaves the set empty → every kind degrades
+        // to its conversational fallback. Unknown values are kept but simply never match a kind.
+        _sessionSupports[session.SessionId] = ParseSupports(frame["supports"]);
 
         // A freshly created session never passes through ScopedSessionAsync, so associate here too.
         AssociateSession(session);
@@ -765,7 +795,10 @@ public sealed class FrameDispatcher
         // 5. Stream the turn, retrieving through knowledge SCOPED to this connection's access (computed
         //    above, and reused to back the built-in knowledge_search tool) — so a user only ever sees
         //    documents their groups grant (ACL enforced on the chat path).
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks);
+        // Rich Interactions: hand the turn the hosted-kind catalog, the connection's park registry, and
+        // THIS session's declared render capabilities (empty for a text-only session → fallback path).
+        var capabilities = _sessionSupports.TryGetValue(session.SessionId, out var supports) ? supports : null;
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's
@@ -986,6 +1019,132 @@ public sealed class FrameDispatcher
             200,
             approved ? "Tool action approved" : "Tool action rejected",
             new JsonObject { ["sessionId"] = sessionId, ["approved"] = approved }));
+    }
+
+    /// <summary>
+    /// <c>submit_interaction</c> — resume a turn parked on a Rich Interaction. Per
+    /// <c>spec/actions/submit-interaction.schema.json</c> the client replies with
+    /// <c>{action, requestId, sessionId, interactionId, kind?, values | declined}</c>. We PEEK (not
+    /// consume) the parked interaction, guard the <c>interactionId</c> (a stale card can't resolve a
+    /// newer park → <c>INTERACTION_MISMATCH</c>), then either decline or run the kind's validator: invalid
+    /// values emit a retryable <c>interaction_invalid</c> and LEAVE the turn parked (mirrors
+    /// <c>otp_invalid</c>); valid values canonicalize, resume the parked turn, and ack with an
+    /// <c>immediate_response</c>. Ownership-scoped (a submit on a session you don't own is refused with the
+    /// same <c>NO_PENDING_INTERACTION</c> an unknown one gets). The C# analog of the Rust
+    /// <c>handle_submit_interaction</c>.
+    /// </summary>
+    private async Task HandleSubmitInteractionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(requestId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "submit_interaction requires a 'requestId'"));
+            return;
+        }
+
+        var sessionId = frame["sessionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "submit_interaction requires a 'sessionId'"));
+            return;
+        }
+
+        var interactionId = frame["interactionId"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(interactionId))
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "submit_interaction requires an 'interactionId'"));
+            return;
+        }
+
+        // SECURITY (th-1b7ed0): scope to the owner, and refuse an unowned/unknown session with the SAME
+        // NO_PENDING_INTERACTION so the two stay indistinguishable. Peek does not consume the park.
+        var scoped = await ScopedSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var pending = scoped is null ? null : _interactionPark.Peek(sessionId);
+        if (pending is null)
+        {
+            sink(ProtocolEvents.Error(requestId, "NO_PENDING_INTERACTION", $"no interaction is awaiting submission for session '{sessionId}'"));
+            return;
+        }
+
+        // Stale-card guard: the submit must target the CURRENT park, not a superseded one.
+        if (interactionId != pending.InteractionId)
+        {
+            sink(ProtocolEvents.Error(requestId, "INTERACTION_MISMATCH", "interactionId does not match the pending interaction"));
+            return;
+        }
+        var kindId = frame["kind"]?.GetValue<string>();
+        if (!string.IsNullOrEmpty(kindId) && kindId != pending.Kind)
+        {
+            sink(ProtocolEvents.Error(requestId, "INTERACTION_MISMATCH", "kind does not match the pending interaction"));
+            return;
+        }
+
+        // Decline: resume the turn with a declined payload so the agent proceeds gracefully.
+        if (frame["declined"] is JsonValue declinedNode && declinedNode.TryGetValue<bool>(out var declined) && declined)
+        {
+            if (!_interactionPark.Resolve(sessionId, InteractionOutcome.Declined))
+            {
+                sink(ProtocolEvents.Error(requestId, "NO_PENDING_INTERACTION", $"no interaction is awaiting submission for session '{sessionId}'"));
+                return;
+            }
+            sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Interaction declined",
+                new JsonObject { ["sessionId"] = sessionId, ["interactionId"] = interactionId, ["kind"] = pending.Kind }));
+            return;
+        }
+
+        var values = frame["values"];
+        if (values is null)
+        {
+            sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "submit_interaction requires 'values' or 'declined': true"));
+            return;
+        }
+
+        // A park only exists when interactions are configured, but guard the nullable for the compiler.
+        var kind = _interactions?.Get(pending.Kind);
+        if (kind is null)
+        {
+            // The parked kind is always a hosted kind; a miss means the park is stale/gone.
+            sink(ProtocolEvents.Error(requestId, "NO_PENDING_INTERACTION", $"no interaction is awaiting submission for session '{sessionId}'"));
+            return;
+        }
+
+        var validation = kind.Validate(pending.Spec, values);
+        if (!validation.Ok)
+        {
+            // Retryable: the turn stays parked (no Resolve). Re-render the card with the field errors.
+            sink(ProtocolEvents.InteractionInvalid(requestId, pending.InteractionId, pending.Kind, validation.Errors!, "Some fields need attention."));
+            return;
+        }
+
+        if (!_interactionPark.Resolve(sessionId, InteractionOutcome.Submitted(validation.Canonical!)))
+        {
+            sink(ProtocolEvents.Error(requestId, "NO_PENDING_INTERACTION", $"no interaction is awaiting submission for session '{sessionId}'"));
+            return;
+        }
+        sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Interaction submitted", new JsonObject
+        {
+            ["sessionId"] = sessionId,
+            ["interactionId"] = interactionId,
+            ["kind"] = pending.Kind,
+            ["values"] = validation.Canonical!.DeepClone(),
+        }));
+    }
+
+    /// <summary>Parse the create-session <c>supports</c> field (a string array of render capabilities)
+    /// into a set. Absent/non-array ⇒ empty (text-only ⇒ every interaction kind uses its fallback).</summary>
+    private static HashSet<string> ParseSupports(JsonNode? node)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (node is JsonArray array)
+        {
+            foreach (var entry in array)
+            {
+                if (entry is JsonValue value && value.TryGetValue<string>(out var capability) && !string.IsNullOrEmpty(capability))
+                {
+                    set.Add(capability);
+                }
+            }
+        }
+        return set;
     }
 
     /// <summary>
