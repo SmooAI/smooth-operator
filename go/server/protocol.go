@@ -1,6 +1,9 @@
 package server
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Builders for the server→client protocol event frames. Every event is a
 // map[string]any serialized as a JSON text frame. The shapes mirror the Rust
@@ -158,6 +161,52 @@ func writeConfirmationRequired(requestID, toolID, actionDescription string) map[
 		"data": map[string]any{
 			"requestId": requestID,
 			"data":      map[string]any{"toolId": toolID, "actionDescription": actionDescription},
+		},
+		"timestamp": nowMs(),
+	}
+}
+
+// interactionRequired is the Rich Interactions envelope: emitted mid-turn when an
+// agent's raise tool parks awaiting the visitor on a session that declared the kind's
+// render capability. The client renders the kind's card and replies with a
+// submit_interaction action carrying the same requestId + interactionId.
+//
+// Wire shape matches spec/events/interaction-required.schema.json and the Rust
+// reference byte-for-byte: double-nested data.data.{interactionId, kind, spec, reason}.
+// spec is the kind-specific render spec (raw JSON) the client's card renders from.
+func interactionRequired(requestID, interactionID, kind string, spec json.RawMessage, reason string) map[string]any {
+	return map[string]any{
+		"type":      "interaction_required",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data": map[string]any{
+				"interactionId": interactionID,
+				"kind":          kind,
+				"spec":          spec,
+				"reason":        reason,
+			},
+		},
+		"timestamp": nowMs(),
+	}
+}
+
+// interactionInvalid is emitted when a submit_interaction carried values that failed
+// the kind's server-side validation. The turn REMAINS parked; the client re-renders
+// the card with the per-field errors. Mirrors otp_invalid (retryable, never a terminal
+// error). Wire shape matches spec/events/interaction-invalid.schema.json.
+func interactionInvalid(requestID, interactionID, kind string, errors []InteractionFieldError, message string) map[string]any {
+	return map[string]any{
+		"type":      "interaction_invalid",
+		"requestId": requestID,
+		"data": map[string]any{
+			"requestId": requestID,
+			"data": map[string]any{
+				"interactionId": interactionID,
+				"kind":          kind,
+				"errors":        errors,
+				"message":       message,
+			},
 		},
 		"timestamp": nowMs(),
 	}

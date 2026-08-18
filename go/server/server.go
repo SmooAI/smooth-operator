@@ -356,6 +356,9 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// rather than inline.
 	teardown := func(status websocket.StatusCode, reason string) {
 		confirmations.RejectAll()
+		// Unpark any turn blocked on a Rich Interaction raise (resolve no_response) so it
+		// finishes cleanly — the same fail-open-to-continue contract as confirmations.
+		dispatcher.interactions.RejectAll()
 		dispatcher.WaitForTurns()
 		sendMu.Lock()
 		if !sinkClosed {

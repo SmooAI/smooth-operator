@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/SmooAI/smooth-operator-core/go/core"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -88,6 +89,19 @@ type TurnRunner struct {
 	// the dispatcher so a confirm_tool_action frame resolves the verdict a parked
 	// turn awaits. nil → HITL off.
 	confirmations *ConfirmationRegistry
+	// interactionKinds is the catalog of Rich Interaction kinds hosted this turn. When
+	// set (with interactions), the runner registers one raise tool per kind: a kind whose
+	// capability the session declared PARKS the turn on raise (emit interaction_required,
+	// await a submit_interaction), the rest degrade to their conversational fallback
+	// directive. nil → no interaction tools (behavior unchanged). Set by the dispatcher.
+	interactionKinds *InteractionKinds
+	// interactions is the session-keyed park/resume registry a submit_interaction frame
+	// resolves, shared with the dispatcher. nil → Rich Interactions off. Set by the dispatcher.
+	interactions *InteractionRegistry
+	// capabilities is the render capabilities the session's client declared at
+	// create_conversation_session — gates which kinds get the rich (parked card) path
+	// vs the conversational fallback. Empty → every kind falls back. Set by the dispatcher.
+	capabilities map[string]bool
 	// workflow is the agent's structured conversation workflow (nil → freeform). When
 	// set, the runner judges the turn after it completes and returns the advanced step
 	// id in TurnResult.NextStepID. The current step is already rendered into systemPrompt
@@ -229,6 +243,16 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	// to the pinned engine version and mirrors the Rust server config (EPIC th-1cc9fa).
 	opts.MaxTokens = clampMaxTokens(DefaultMaxTokens, r.modelCeiling)
 	opts.MaxIterations = DefaultMaxIterations
+
+	// Rich Interactions: register ONE raise tool per hosted kind (choices, …). A kind
+	// whose render capability the session declared PARKS the turn on raise — the raise
+	// tool blocks awaiting a submit_interaction while the server emits interaction_required
+	// — and the rest degrade to their conversational-fallback directive. With no catalog
+	// (the default), nothing is added and behavior is unchanged. Appended AFTER the base
+	// tools so a raise tool never shadows a built-in.
+	if r.interactionKinds != nil && r.interactions != nil {
+		opts.Tools = append(append([]core.Tool{}, opts.Tools...), r.interactionTools(sessionID, requestID, sink)...)
+	}
 
 	// Write-confirmation HITL: when configured with tool patterns AND a registry is
 	// present, install a HumanGate that parks the turn before a gated tool runs (emit
@@ -377,7 +401,12 @@ consume:
 			// DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
 			// gate AFTER write_confirmation_required, so the wire order matches the
 			// reference (Rust) server. Non-gated tools emit their chunk inline as before.
-			if r.isGated(ev.Name) {
+			//
+			// A Rich Interaction raise tool's chunk is likewise deferred and emitted from
+			// INSIDE the tool (right before interaction_required / the fallback result), so
+			// the toolCall chunk deterministically precedes the park event rather than
+			// racing it across goroutines.
+			if r.isGated(ev.Name) || r.isInteractionRaise(ev.Name) {
 				continue
 			}
 			sink(streamChunk(requestID, ev.Name, toolCallState(ev.Name, ev.Arguments)))
@@ -529,4 +558,129 @@ func toolResultState(name, result string) map[string]any {
 			"toolResult": map[string]any{"name": name, "isError": isError, "result": result},
 		},
 	}
+}
+
+// interactionTimeout is how long a parked raise tool waits for a submit_interaction
+// before giving up and letting the turn continue without the details (generous — a human
+// is filling a card). Mirrors the Rust INTERACTION_TIMEOUT.
+const interactionTimeout = 300 * time.Second
+
+// interactionTools builds one raise tool per hosted Rich Interaction kind, closing over
+// this turn's sink + ids so the tool can park (emit interaction_required, block awaiting a
+// submit_interaction) or, on a text-only channel, degrade to the kind's conversational
+// fallback directive. The Go analog of the Rust runner registering RequestInteractionTool
+// per kind (rust/smooth-operator/src/tools/interaction.rs).
+func (r *TurnRunner) interactionTools(sessionID, requestID string, sink EventSink) []core.Tool {
+	var tools []core.Tool
+	for _, kind := range r.interactionKinds.All() {
+		rich := r.capabilities[kind.Capability()]
+		tools = append(tools, r.raiseTool(kind, rich, sessionID, requestID, sink))
+	}
+	return tools
+}
+
+// isInteractionRaise reports whether name is one of the hosted kinds' raise tools
+// (request_<kind>). The stream loop defers these tools' toolCall chunk so it can be
+// emitted deterministically from inside the tool (before interaction_required).
+func (r *TurnRunner) isInteractionRaise(name string) bool {
+	if r.interactionKinds == nil {
+		return false
+	}
+	for _, kind := range r.interactionKinds.All() {
+		if kind.ToolSchema().Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// raiseTool builds the request_<kind> tool for one kind. rich selects the park path:
+//   - rich: register the outcome channel, emit interaction_required, and BLOCK inside the
+//     tool until a submit_interaction resolves it (or the turn's context is cancelled, or
+//     the park times out → the turn continues without the details, never an error).
+//   - text-only: return the kind's conversational-fallback directive immediately.
+//
+// The tool blocks inside Execute; that is safe because the whole turn runs on its own
+// goroutine (send_message spawns it), so the connection's read loop stays free to receive
+// the submit_interaction that unparks it — exactly like the write-confirmation gate.
+func (r *TurnRunner) raiseTool(kind InteractionKind, rich bool, sessionID, requestID string, sink EventSink) core.Tool {
+	schema := kind.ToolSchema()
+	return core.FuncTool{
+		ToolName: schema.Name,
+		Desc:     schema.Description,
+		Params:   schema.Parameters,
+		Fn: func(ctx context.Context, args map[string]any) (string, error) {
+			// Emit the deferred toolCall chunk here (the stream loop skipped it), so it
+			// deterministically precedes interaction_required / the fallback result.
+			if argsJSON, err := json.Marshal(args); err == nil {
+				sink(streamChunk(requestID, schema.Name, toolCallState(schema.Name, string(argsJSON))))
+			}
+
+			req, err := kind.ParseRequest(args)
+			if err != nil {
+				return "", err
+			}
+
+			if !rich {
+				// Text-only channel: degrade to the kind's conversational directive. The
+				// model collects the answer turn by turn and continues; no park.
+				return marshalInteractionResult(map[string]any{
+					"mode":         "conversational",
+					"kind":         req.Kind,
+					"spec":         req.Spec,
+					"reason":       req.Reason,
+					"instructions": kind.FallbackDirective(req.Spec, req.Reason),
+				}), nil
+			}
+
+			// Rich channel: park the turn. Register the outcome channel, emit
+			// interaction_required, then await the visitor's submit_interaction.
+			interactionID := uuid.NewString()
+			outcome := r.interactions.Register(sessionID, interactionID, req.Kind, req.Spec)
+			sink(interactionRequired(requestID, interactionID, req.Kind, req.Spec, req.Reason))
+
+			select {
+			case oc := <-outcome:
+				switch oc.Status {
+				case outcomeSubmitted:
+					return marshalInteractionResult(map[string]any{"status": outcomeSubmitted, "values": oc.Values}), nil
+				case outcomeDeclined:
+					return marshalInteractionResult(map[string]any{
+						"status":  outcomeDeclined,
+						"message": "The visitor declined. Continue helping them without this and do not ask again this conversation.",
+					}), nil
+				default:
+					return noResponseInteractionResult(), nil
+				}
+			case <-ctx.Done():
+				// The turn's context was cancelled (connection torn down / cancel frame)
+				// before a submit landed — drop the park and let the turn unwind.
+				r.interactions.Clear(sessionID)
+				return noResponseInteractionResult(), ctx.Err()
+			case <-time.After(interactionTimeout):
+				// The visitor never answered the card — continue without it (not an error).
+				r.interactions.Clear(sessionID)
+				return noResponseInteractionResult(), nil
+			}
+		},
+	}
+}
+
+// noResponseInteractionResult is the tool result when a parked interaction was not
+// answered (timeout / teardown): the turn continues without the details.
+func noResponseInteractionResult() string {
+	return marshalInteractionResult(map[string]any{
+		"status":  outcomeNoResponse,
+		"message": "The visitor did not respond to the card. Continue without it; you may offer again later if it becomes relevant.",
+	})
+}
+
+// marshalInteractionResult serializes a raise tool's result envelope to a JSON string the
+// model reads. On the (unreachable) marshal error, falls back to a minimal envelope.
+func marshalInteractionResult(v map[string]any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"status":"no_response"}`
+	}
+	return string(b)
 }
