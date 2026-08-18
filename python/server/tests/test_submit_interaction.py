@@ -203,7 +203,9 @@ async def test_fallback_path_without_capability_uses_the_submit_tool() -> None:
     mock = MockLlmProvider()
     mock.push_tool_call("call-1", "request_choices", _RAISE_ARGS)
     mock.push_tool_call(
-        "call-2", "submit_interaction", json.dumps({"kind": "choices", "values": {"answers": [{"header": "Plan", "options": ["Pro"]}]}})
+        "call-2",
+        "submit_interaction",
+        json.dumps({"kind": "choices", "values": {"answers": [{"header": "Plan", "options": ["Pro"]}]}}),
     )
     mock.push_text("Thanks for letting me know.")
     server, _ = await _start(mock)

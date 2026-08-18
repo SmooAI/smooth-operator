@@ -72,9 +72,7 @@ def validate_choices(
             if _selection_count(answer) == 0:
                 errors.append(InteractionFieldError(answer["header"], "select an option or provide an 'other' answer"))
         if not normalized:
-            errors.append(
-                InteractionFieldError("answers", "provide an answer for each question, or declined=true")
-            )
+            errors.append(InteractionFieldError("answers", "provide an answer for each question, or declined=true"))
         if errors:
             return None, errors
         return {"answers": normalized}, []
@@ -201,7 +199,10 @@ class ChoicesKind(InteractionKind):
                         "items": {
                             "type": "object",
                             "properties": {
-                                "question": {"type": "string", "description": "The question prompt shown to the visitor."},
+                                "question": {
+                                    "type": "string",
+                                    "description": "The question prompt shown to the visitor.",
+                                },
                                 "header": {
                                     "type": "string",
                                     "maxLength": HEADER_MAX_CHARS,
@@ -215,8 +216,14 @@ class ChoicesKind(InteractionKind):
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "label": {"type": "string", "description": "The option label (the value submitted)."},
-                                            "description": {"type": "string", "description": "A short gloss for the option."},
+                                            "label": {
+                                                "type": "string",
+                                                "description": "The option label (the value submitted).",
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "A short gloss for the option.",
+                                            },
                                         },
                                         "required": ["label"],
                                     },

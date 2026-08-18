@@ -195,7 +195,9 @@ class PendingInteractions:
 
     _pending: dict[str, _Pending] = field(default_factory=dict)
 
-    def register(self, session_id: str, interaction_id: str, kind: str, spec: dict[str, Any]) -> asyncio.Future[InteractionOutcome]:
+    def register(
+        self, session_id: str, interaction_id: str, kind: str, spec: dict[str, Any]
+    ) -> asyncio.Future[InteractionOutcome]:
         """Register (and return) a fresh outcome future for ``session_id``. Any prior park
         is superseded — resolved ``no_response`` so its raise tool can never dangle
         (mirrors the Rust ``register_interaction`` replacing the prior responder)."""

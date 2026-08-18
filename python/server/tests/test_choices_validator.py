@@ -131,7 +131,13 @@ def test_kind_wires_the_reference_surface() -> None:
 
     req = kind.parse_request(
         {
-            "questions": [{"question": "Which plan interests you?", "header": "Plan", "options": [{"label": "Basic"}, {"label": "Pro"}]}],
+            "questions": [
+                {
+                    "question": "Which plan interests you?",
+                    "header": "Plan",
+                    "options": [{"label": "Basic"}, {"label": "Pro"}],
+                }
+            ],
             "reason": "to route you",
         }
     )
