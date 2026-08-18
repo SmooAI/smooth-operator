@@ -65,6 +65,7 @@ func protocolErrorFromEvent(ev ServerEvent) *ProtocolError {
 type MessageTurn struct {
 	requestID string
 	onClose   func()
+	onCancel  func() // sends a cancel frame for this turn; nil if not cancellable
 
 	events chan ServerEvent
 
@@ -79,6 +80,7 @@ type MessageTurn struct {
 	done      bool
 	final     *EventualResponse
 	failErr   error
+	cancelled bool          // turn settled by a terminal `cancelled` event (user-stop)
 	settled   chan struct{} // closed once the turn finishes
 	closeOnce sync.Once
 
@@ -87,10 +89,11 @@ type MessageTurn struct {
 	timeout time.Duration
 }
 
-func newMessageTurn(requestID string, timeout time.Duration, onClose func()) *MessageTurn {
+func newMessageTurn(requestID string, timeout time.Duration, onClose func(), onCancel func()) *MessageTurn {
 	t := &MessageTurn{
 		requestID: requestID,
 		onClose:   onClose,
+		onCancel:  onCancel,
 		events:    make(chan ServerEvent, 64),
 		settled:   make(chan struct{}),
 		timeout:   timeout,
@@ -108,6 +111,36 @@ func (t *MessageTurn) RequestID() string { return t.requestID }
 // (after the terminal event has been delivered, or on abort / timeout).
 func (t *MessageTurn) Events() <-chan ServerEvent { return t.events }
 
+// Cancelled reports whether this turn ended because the user stopped it — a
+// terminal `cancelled` event settled it, as opposed to completing
+// (eventual_response) or erroring. It is the UI's signal to tell a user-stop apart
+// from a failure: on a user-stop the turn resolves WITHOUT an error (Wait returns a
+// nil error and the Events channel closes cleanly), the terminal `cancelled` event
+// having first been delivered on Events().
+func (t *MessageTurn) Cancelled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cancelled
+}
+
+// Cancel requests cancellation of THIS turn — the ergonomic "Stop" button. It sends
+// a cancel frame carrying the turn's own requestId (and the originating sessionId)
+// via the client. Fire-and-forget and idempotent: a no-op once the turn has already
+// settled, and a harmless no-op if this turn isn't cancellable. The turn itself
+// settles when the server's terminal `cancelled` event arrives (see Cancelled);
+// this method only sends the request.
+func (t *MessageTurn) Cancel() {
+	t.mu.Lock()
+	done := t.done
+	t.mu.Unlock()
+	if done {
+		return
+	}
+	if t.onCancel != nil {
+		t.onCancel()
+	}
+}
+
 // Wait blocks until the turn produces its terminal eventual_response, the turn
 // fails (error event / transport close / timeout), or ctx is cancelled.
 func (t *MessageTurn) Wait(ctx context.Context) (EventualResponse, error) {
@@ -117,6 +150,13 @@ func (t *MessageTurn) Wait(ctx context.Context) (EventualResponse, error) {
 		defer t.mu.Unlock()
 		if t.failErr != nil {
 			return EventualResponse{}, t.failErr
+		}
+		if t.cancelled {
+			// User-stop: resolve WITHOUT an error. A cancelled turn produced no
+			// assistant message, so the EventualResponse is its zero value; callers
+			// distinguish this from completion via Cancelled() (or the terminal
+			// `cancelled` event delivered on Events()).
+			return EventualResponse{}, nil
 		}
 		if t.final != nil {
 			return *t.final, nil
@@ -130,7 +170,7 @@ func (t *MessageTurn) Wait(ctx context.Context) (EventualResponse, error) {
 // onTimeout settles the turn with a TurnTimeoutError when no terminal event has
 // arrived in time.
 func (t *MessageTurn) onTimeout() {
-	t.finish(nil, &TurnTimeoutError{RequestID: t.requestID, Timeout: t.timeout})
+	t.finish(nil, &TurnTimeoutError{RequestID: t.requestID, Timeout: t.timeout}, false)
 }
 
 // push feeds an event into the turn. Called by the client dispatcher.
@@ -168,24 +208,31 @@ func (t *MessageTurn) push(ev ServerEvent) {
 
 	switch ev.Type {
 	case EventError:
-		t.finish(nil, protocolErrorFromEvent(ev))
+		t.finish(nil, protocolErrorFromEvent(ev), false)
 	case EventEventualResponse:
 		final, err := ev.AsEventualResponse()
 		if err != nil {
-			t.finish(nil, err)
+			t.finish(nil, err, false)
 			return
 		}
-		t.finish(&final, nil)
+		t.finish(&final, nil, false)
+	case EventCancelled:
+		// Terminal user-stop: settle WITHOUT an error so Wait resolves and the Events
+		// channel closes cleanly. The `cancelled` event was already delivered on the
+		// channel above; cancelled is set for the UI to tell a user-stop apart from a
+		// completed or errored turn.
+		t.finish(nil, nil, true)
 	}
 }
 
 // abort force-closes the turn with an error (e.g. on disconnect).
 func (t *MessageTurn) abort(err error) {
-	t.finish(nil, err)
+	t.finish(nil, err, false)
 }
 
-// finish settles the turn exactly once, recording the outcome and closing channels.
-func (t *MessageTurn) finish(final *EventualResponse, err error) {
+// finish settles the turn exactly once, recording the outcome (completion,
+// user-stop, or error) and closing channels.
+func (t *MessageTurn) finish(final *EventualResponse, err error, cancelled bool) {
 	t.mu.Lock()
 	if t.done {
 		t.mu.Unlock()
@@ -194,6 +241,7 @@ func (t *MessageTurn) finish(final *EventualResponse, err error) {
 	t.done = true
 	t.final = final
 	t.failErr = err
+	t.cancelled = cancelled
 	t.mu.Unlock()
 
 	if t.timer != nil {

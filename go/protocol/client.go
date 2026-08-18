@@ -211,7 +211,12 @@ type SendMessageParams struct {
 // block for the terminal eventual_response.
 func (c *Client) SendMessage(p SendMessageParams) *MessageTurn {
 	requestID := c.generateReqID()
-	turn := newMessageTurn(requestID, c.turnTimeout, func() { c.removeTurn(requestID) })
+	turn := newMessageTurn(
+		requestID,
+		c.turnTimeout,
+		func() { c.removeTurn(requestID) },
+		func() { _ = c.Cancel(CancelParams{RequestID: requestID, SessionID: p.SessionID}) },
+	)
 
 	c.mu.Lock()
 	if c.closed {
@@ -270,6 +275,43 @@ func (c *Client) VerifyOTP(p VerifyOTPParams) error {
 		return err
 	}
 	return c.transport.Send(frame)
+}
+
+// CancelParams holds the caller-supplied fields for Cancel.
+type CancelParams struct {
+	// RequestID is the in-flight send_message turn's requestId to cancel. The server
+	// echoes it back on the terminal `cancelled` event so the client correlates the
+	// reset. Required in practice, though the server also cancels the connection's
+	// single active turn regardless.
+	RequestID string
+	// SessionID is optional and advisory — the server cancels the connection's single
+	// active turn regardless. Left off the wire when empty.
+	SessionID string
+}
+
+// Cancel is the client-initiated turn cancellation — the "Stop" button. It sends a
+// cancel frame for the in-flight send_message turn identified by p.RequestID. The
+// server aborts the turn's LLM + tool work, frees the turn slot, and emits a terminal
+// `cancelled` event (in place of eventual_response) echoing that requestId; the
+// matching MessageTurn then settles as a user-stop — it resolves (Wait returns a nil
+// error), the terminal `cancelled` event is delivered on Events(), and
+// MessageTurn.Cancelled reports true.
+//
+// Idempotent: a cancel with no active turn is a silent server no-op. For the common
+// "stop THIS turn" case, prefer MessageTurn.Cancel.
+func (c *Client) Cancel(p CancelParams) error {
+	frame := CancelRequest{Action: string(ActionCancel)}
+	if p.RequestID != "" {
+		frame.RequestID = &p.RequestID
+	}
+	if p.SessionID != "" {
+		frame.SessionID = &p.SessionID
+	}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	return c.transport.Send(raw)
 }
 
 // ─────────────────────────────── Internals ──────────────────────────────────

@@ -42,7 +42,7 @@ func makeClientWithTimeout(t *testing.T, turnTimeout time.Duration) (*Client, *m
 // which a naive close(t.events) would panic the pusher.
 func TestConcurrentFinishDuringPush(t *testing.T) {
 	for iter := 0; iter < 200; iter++ {
-		turn := newMessageTurn("req-race", 0 /* no timeout */, func() {})
+		turn := newMessageTurn("req-race", 0 /* no timeout */, func() {}, nil)
 
 		ev := mustParse(t, map[string]any{
 			"type": "stream_token", "requestId": "req-race", "token": "x",

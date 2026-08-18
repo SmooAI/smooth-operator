@@ -89,6 +89,24 @@ final, _ := turn.Wait(ctx)
 fmt.Println("\nmessageId:", final.Data.Data.MessageID)
 ```
 
+### Stop button
+
+`turn.Cancel()` is the client-initiated "stop" — it sends a `cancel` frame for this turn. The server aborts the LLM + tool work and emits a terminal `cancelled` event (in place of `eventual_response`); the turn then settles as a **user-stop**: `Wait` resolves with **no error**, the `Events()` channel closes cleanly, and `turn.Cancelled()` reports `true` so the UI tells a stop apart from a failure. Idempotent — a cancel with nothing in flight is a harmless no-op.
+
+```go
+turn := c.SendMessage(protocol.SendMessageParams{SessionID: sess.SessionID, Message: "Write me an essay…"})
+
+go func() { <-stopButton; turn.Cancel() }() // user hits stop
+
+if _, err := turn.Wait(ctx); err != nil {
+	// a real failure — surface it
+} else if turn.Cancelled() {
+	fmt.Println("stopped by user") // resolved, not errored
+}
+```
+
+`c.Cancel(protocol.CancelParams{RequestID: turn.RequestID(), SessionID: sess.SessionID})` is the lower-level form when you hold the requestId but not the `MessageTurn`.
+
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6','signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram
