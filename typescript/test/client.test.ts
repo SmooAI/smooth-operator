@@ -274,6 +274,94 @@ describe('SmoothAgentClient.sendMessage streaming', () => {
     });
 });
 
+describe('SmoothAgentClient turn cancellation', () => {
+    it('client.cancel emits a well-formed cancel frame', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+        client.cancel({ sessionId: 's', requestId: 'req-abc' });
+        expect(transport.lastSent()).toMatchObject({ action: 'cancel', sessionId: 's', requestId: 'req-abc' });
+    });
+
+    it('a cancelled event resolves the matching turn as a user-stop (not an error) and ends the iterator', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+
+        const turn = client.sendMessage({ sessionId: 's', message: 'long task', stream: true });
+        const reqId = transport.lastSent<{ requestId: string }>().requestId;
+
+        const seen: string[] = [];
+        const iterate = (async () => {
+            for await (const ev of turn) seen.push(ev.type);
+        })();
+
+        // A couple of tokens stream, then the user stops the turn.
+        transport.emit({ type: 'stream_token', requestId: reqId, token: 'Wor', data: { requestId: reqId, token: 'Wor' } });
+        client.cancel({ sessionId: 's', requestId: reqId });
+        expect(transport.lastSent()).toMatchObject({ action: 'cancel', requestId: reqId });
+
+        // Server acknowledges with the terminal `cancelled` event echoing the requestId.
+        transport.emit({ type: 'cancelled', requestId: reqId, status: 499, data: { requestId: reqId, status: 499 } });
+
+        // The turn RESOLVES (does not reject) with the cancelled event, and is flagged.
+        const final = await turn;
+        await iterate; // iterator ended cleanly — no throw
+        expect(final.type).toBe('cancelled');
+        expect(turn.cancelled).toBe(true);
+        expect(seen).toEqual(['stream_token', 'cancelled']);
+    });
+
+    it('MessageTurn.cancel() sends a cancel frame carrying the turn requestId + sessionId', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+
+        const turn = client.sendMessage({ sessionId: 'sess-9', message: 'go' });
+        const reqId = transport.lastSent<{ requestId: string }>().requestId;
+
+        turn.cancel();
+        expect(transport.lastSent()).toMatchObject({ action: 'cancel', requestId: reqId, sessionId: 'sess-9' });
+
+        // Settle it so the turn doesn't dangle.
+        transport.emit({ type: 'cancelled', requestId: reqId, status: 499, data: { requestId: reqId, status: 499 } });
+        await turn;
+        expect(turn.cancelled).toBe(true);
+    });
+
+    it('is an idempotent no-op when nothing is in flight', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+
+        // cancel() with no active turn just sends a frame; the server no-ops. No throw.
+        expect(() => client.cancel({ requestId: 'nope' })).not.toThrow();
+
+        // A cancelled event with no matching turn falls through to listeners, not an error.
+        const spy = vi.fn();
+        client.onEvent(spy);
+        expect(() =>
+            transport.emit({ type: 'cancelled', requestId: 'ghost', status: 499, data: { requestId: 'ghost', status: 499 } }),
+        ).not.toThrow();
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0]![0]).toMatchObject({ type: 'cancelled' });
+    });
+
+    it('MessageTurn.cancel() after the turn has settled is a no-op', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+        const turn = client.sendMessage({ sessionId: 's', message: 'go' });
+        const reqId = transport.lastSent<{ requestId: string }>().requestId;
+        transport.emit({
+            type: 'eventual_response',
+            requestId: reqId,
+            status: 200,
+            data: { requestId: reqId, status: 200, data: { messageId: 'm', response: null } },
+        });
+        await turn;
+        const before = transport.sent.length;
+        turn.cancel(); // already done — must not send
+        expect(transport.sent.length).toBe(before);
+        expect(turn.cancelled).toBe(false);
+    });
+});
+
 describe('SmoothAgentClient request correlation', () => {
     it('createConversationSession resolves with the immediate_response data', async () => {
         const { client, transport } = makeClient();

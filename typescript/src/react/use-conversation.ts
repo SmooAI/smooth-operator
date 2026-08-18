@@ -150,6 +150,13 @@ export function useConversation(options: UseConversationOptions): UseConversatio
                     }
                 }
                 const final = await turn;
+                if (final.type !== 'eventual_response') {
+                    // User-stopped turn: keep whatever partial text streamed, drop the
+                    // streaming indicator. Not an error — no error bubble.
+                    assistant.streaming = false;
+                    publish();
+                    return;
+                }
                 const inner = final.data?.data;
                 const finalText = extractFinalText(inner?.response);
                 if (finalText && finalText.length > assistant.text.length) assistant.text = finalText;

@@ -82,6 +82,30 @@ for await (const ev of turn) {
 const final = await turn; // EventualResponse — the authoritative terminal state
 ```
 
+### Stop button
+
+Cancel the running turn from the client — `turn.cancel()` (stop *this* turn) or
+`client.cancel({ requestId, sessionId })`. The server aborts the turn's LLM + tool
+work and replies with a terminal `cancelled` event; the turn then **resolves** (it
+never rejects on a user-stop), so `await turn` settles and the async iterator ends
+cleanly. Tell a user-stop apart from an error with `turn.cancelled`:
+
+```ts
+const turn = client.sendMessage({ sessionId, message: 'write me an essay' });
+stopButton.onclick = () => turn.cancel();
+
+try {
+  const final = await turn;
+  if (turn.cancelled) {
+    // user stopped it — `final.type === 'cancelled'`, no answer payload
+  } else {
+    // final.type === 'eventual_response'
+  }
+} catch (err) {
+  // a real failure (ProtocolError / transport drop) — NOT a user-stop
+}
+```
+
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6','signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram

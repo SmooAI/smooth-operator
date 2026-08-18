@@ -12,6 +12,8 @@
  * `ServerEvent` (everything received server→client, discriminated by `type`).
  */
 import type {
+    CancelRequest,
+    Cancelled,
     ConfirmToolActionRequest,
     CreateConversationSessionRequest,
     CreateConversationSessionResponse,
@@ -60,6 +62,7 @@ export const ACTION_TYPES = [
     'confirm_tool_action',
     'verify_otp',
     'submit_interaction',
+    'cancel',
     'ping',
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
@@ -79,6 +82,7 @@ export const EVENT_TYPES = [
     'otp_invalid',
     'interaction_required',
     'interaction_invalid',
+    'cancelled',
     'error',
     'pong',
 ] as const;
@@ -98,6 +102,7 @@ export type ClientAction =
     | ConfirmToolActionRequest
     | VerifyOtpRequest
     | SubmitInteractionRequest
+    | CancelRequest
     | PingRequest;
 
 // ───────────────────────────── Server events ───────────────────────────────
@@ -120,6 +125,7 @@ export type ServerEvent =
     | OtpInvalid
     | InteractionRequired
     | InteractionInvalid
+    | Cancelled
     | GeneratedErrorEvent
     | Pong;
 
@@ -140,6 +146,7 @@ export interface ServerEventByType {
     otp_invalid: OtpInvalid;
     interaction_required: InteractionRequired;
     interaction_invalid: InteractionInvalid;
+    cancelled: Cancelled;
     error: GeneratedErrorEvent;
     pong: Pong;
 }
@@ -153,6 +160,7 @@ export interface ClientActionByType {
     confirm_tool_action: ConfirmToolActionRequest;
     verify_otp: VerifyOtpRequest;
     submit_interaction: SubmitInteractionRequest;
+    cancel: CancelRequest;
     ping: PingRequest;
 }
 
