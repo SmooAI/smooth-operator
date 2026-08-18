@@ -48,11 +48,11 @@ use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, Mes
 use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry, InteractionRequest};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::telemetry::{
-    record_cost_usd, redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
-    GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS,
-    GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
-    OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SMOOAI_ORG_ID,
-    SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+    record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM,
+    GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE,
+    OTEL_STATUS_MESSAGE, SMOOAI_ORG_ID, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
 };
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator::tools::{
@@ -1023,6 +1023,7 @@ pub async fn run_streaming_turn(
         { GEN_AI_USAGE_INPUT_TOKENS } = tracing::field::Empty,
         { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
         { GEN_AI_USAGE_COST_USD } = tracing::field::Empty,
+        { COST_UNAVAILABLE } = tracing::field::Empty,
     );
     if let Some(org) = org_id_for_span.as_deref() {
         turn_span.record(SMOOAI_ORG_ID, org);
@@ -1285,14 +1286,9 @@ pub async fn run_streaming_turn(
     // the GenAI conventions); one `gen_ai.tool` child span per tool call with the
     // redacted arguments, latency, and an ERROR status on failure.
     if let Some(u) = usage.as_ref() {
-        if u.prompt_tokens > 0 || u.completion_tokens > 0 {
-            turn_span.record(GEN_AI_USAGE_INPUT_TOKENS, u.prompt_tokens);
-            turn_span.record(GEN_AI_USAGE_OUTPUT_TOKENS, u.completion_tokens);
-        }
-        // Gateway-authoritative cost (LiteLLM's `x-litellm-response-cost`), which
-        // the engine already accumulates onto `Completed`. Dropped when zero —
-        // that means "unpriced", not "free". See `record_cost_usd`.
-        record_cost_usd(&turn_span, u.cost_usd);
+        // One helper owns the "measured or absent" policy for both turn paths —
+        // which counts are real, and whether a cost may be trusted beside them.
+        record_turn_usage(&turn_span, u.prompt_tokens, u.completion_tokens, u.cost_usd);
     }
     for rec in &tool_records {
         // The OTLP ingest merges resource attrs with THIS span's attrs and does
