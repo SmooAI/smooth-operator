@@ -135,6 +135,7 @@ fn spawn_turn(
     tokio::spawn(async move {
         runner::run_streaming_turn(
             TurnRequest {
+                demo_tools: false,
                 storage,
                 llm: mock_llm(),
                 max_iterations: 4,

@@ -35,10 +35,12 @@ docker compose up --build     # first run builds the Rust server (~a few min)
 ```
 
 Open **http://localhost:8080**, wait for the header to go **Ready**, and ask
-_“What is your return policy?”_. The compose file turns on all the bells and
-whistles: seeded knowledge (`SMOOTH_AGENT_SEED_KB=1`), durable Postgres storage,
-and **human-in-the-loop approvals** (`SMOOTH_AGENT_CONFIRM_TOOLS=knowledge_search`)
-so the retrieval tool surfaces an Approve/Deny bar before it runs.
+_“I want to return order ORD-1234 for a refund.”_. The agent checks the return
+policy (a read, no approval) and then calls the `issue_refund` **write** tool. The
+compose file turns on all the bells and whistles: seeded knowledge
+(`SMOOTH_AGENT_SEED_KB=1`), durable Postgres storage, and **human-in-the-loop
+approvals** (`SMOOTH_AGENT_CONFIRM_TOOLS=issue_refund`) so that write surfaces an
+Approve/Deny bar before it runs.
 
 > Provider setup is BYO and lives in one file — `examples/.env`. Point
 > `SMOOAI_GATEWAY_URL` at Smoo AI, OpenAI, Groq, or a local Ollama; set

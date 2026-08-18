@@ -117,6 +117,7 @@ async fn run_turn_as(
 
     let result = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm: mock_llm(),
             max_iterations: 4,

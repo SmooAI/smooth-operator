@@ -164,6 +164,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
     let (tx, mut rx) = unbounded_channel::<serde_json::Value>();
     runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage: seeded_storage(),
             llm: mock_llm(),
             max_iterations: 4,

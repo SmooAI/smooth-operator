@@ -80,6 +80,7 @@ async fn capture_request_body(request_metadata: Option<serde_json::Map<String, V
     let (tx, _rx) = unbounded_channel::<Value>();
     let _ = runner::run_streaming_turn(
         TurnRequest {
+            demo_tools: false,
             storage,
             llm,
             max_iterations: 1,

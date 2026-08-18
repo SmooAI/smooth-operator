@@ -611,6 +611,9 @@ async fn send_message(
             images: vec![],
             files: vec![],
             request_metadata: None,
+            // The seeded-demo flavor is a reference-server-only affordance; the
+            // AWS lambda path never registers the demo write tool.
+            demo_tools: false,
         },
         &tx,
     )

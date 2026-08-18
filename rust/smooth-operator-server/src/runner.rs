@@ -609,6 +609,14 @@ pub struct TurnRequest<'a> {
     /// `metadata` field (byte-for-byte unchanged). Sourced from the resolved
     /// [`AgentBehaviorConfig::llm_metadata`](smooth_operator::agent_config::AgentBehaviorConfig).
     pub request_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// **Seeded-demo flavor.** When `true` (the server's `SMOOTH_AGENT_SEED_KB=1`
+    /// mode), the runner registers the mock [`IssueRefundTool`](crate::demo_tools::IssueRefundTool)
+    /// as an extra built-in and, when no persona override is set, swaps the const
+    /// customer-support prompt for the demo one that drives the refund flow. This
+    /// is what lets the HITL demo gate approval on a **write** (`issue_refund`)
+    /// instead of a read. `false` (the default) registers nothing and keeps the
+    /// const prompt, so production behavior is byte-for-byte unchanged.
+    pub demo_tools: bool,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -663,6 +671,7 @@ pub async fn run_streaming_turn(
         images,
         files,
         request_metadata,
+        demo_tools,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
@@ -734,9 +743,16 @@ pub async fn run_streaming_turn(
     //    built-in const; absent ⇒ the const, so default behavior is byte-for-byte
     //    unchanged. When the agent has a conversation workflow, the current
     //    step's intent/criteria are appended so the model drives that step.
-    let base_prompt = system_prompt
-        .as_deref()
-        .unwrap_or(KNOWLEDGE_CHAT_SYSTEM_PROMPT);
+    // Default prompt: the seeded-demo flavor uses the refund-flow persona so the
+    // demo agent processes returns with the `issue_refund` write tool; every other
+    // flavor keeps the const customer-support prompt (byte-for-byte unchanged). A
+    // host-supplied persona (`system_prompt`) still overrides both.
+    let default_prompt = if demo_tools {
+        crate::demo_tools::DEMO_CHAT_SYSTEM_PROMPT
+    } else {
+        KNOWLEDGE_CHAT_SYSTEM_PROMPT
+    };
+    let base_prompt = system_prompt.as_deref().unwrap_or(default_prompt);
     // Compose base → first-turn greeting → current workflow step. The greeting is
     // injected only when this conversation has no prior messages (first turn).
     let mut sections: Vec<String> = vec![base_prompt.to_string()];
@@ -805,6 +821,11 @@ pub async fn run_streaming_turn(
         knowledge_search = knowledge_search.with_reranker(reranker);
     }
     tools.register(knowledge_search);
+
+    // Seeded-demo flavor: register the mock `issue_refund` write tool so the HITL
+    // demo can gate approval on a write. No-op in the default flavor, so the
+    // registry is exactly the built-ins there (byte-for-byte unchanged).
+    crate::demo_tools::register_demo_tools(&mut tools, demo_tools);
 
     // Rich Interactions (see docs/Architecture/Rich Interactions.md): register
     // ONE raise tool per hosted kind. Kinds whose render capability the session
