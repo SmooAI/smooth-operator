@@ -8,7 +8,13 @@
 //!    `gen_ai.conversation.id`, `gen_ai.agent.name`, and `smooai.org_id` (the
 //!    monorepo TS chat handler's org attribute, so the studio groups by org).
 //! 2. A child `gen_ai.tool` span carrying `gen_ai.tool.name` and the (redacted)
-//!    `gen_ai.tool.call.arguments` the model passed.
+//!    `gen_ai.tool.call.arguments` the model passed — plus its OWN copy of
+//!    `gen_ai.system`, `gen_ai.operation.name`, `gen_ai.conversation.id` and
+//!    `smooai.org_id`, since the OTLP ingest does not inherit attributes from a
+//!    parent span.
+//! 3. `gen_ai.usage.cost_usd` on the turn span when the gateway reported a
+//!    cost — and NO such attribute when it didn't, so an unpriced turn reads as
+//!    "not measured" instead of a confident `$0.00`.
 
 #![allow(clippy::missing_panics_doc)]
 
@@ -21,7 +27,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::StorageAdapter;
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
-use smooth_operator_core::llm::StreamEvent;
+use smooth_operator_core::llm::{StreamEvent, Usage};
 use smooth_operator_core::llm_provider::MockLlmClient;
 use smooth_operator_core::{Document, DocumentType, LlmConfig};
 use smooth_operator_server::runner::{self, TurnRequest};
@@ -67,6 +73,9 @@ impl Visit for FieldVisitor<'_> {
         self.0.insert(field.name().to_string(), value.to_string());
     }
     fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.insert(field.name().to_string(), value.to_string());
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
         self.0.insert(field.name().to_string(), value.to_string());
     }
 }
@@ -122,6 +131,43 @@ fn mock_llm() -> LlmConfig {
     LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o")
 }
 
+/// A `TurnRequest` with every knob at its inert default, for tests that only
+/// care about a couple of fields and fill the rest with `..base_turn_request()`.
+fn base_turn_request() -> TurnRequest<'static> {
+    TurnRequest {
+        demo_tools: false,
+        storage: seeded_storage(),
+        llm: mock_llm(),
+        max_iterations: 4,
+        conversation_id: "conv-otel-srv",
+        request_id: "req-otel-srv",
+        user_message: "what is the return policy?",
+        model_max_output: None,
+        access: AccessContext::anonymous(),
+        llm_provider: None,
+        executor: None,
+        reranker: None,
+        confirmation: None,
+        interactions: None,
+        tool_provider: None,
+        tool_hooks: vec![],
+        system_prompt: None,
+        org_id: Some("org-telemetry".to_string()),
+        gateway_key: None,
+        workflow: None,
+        judge: None,
+        greeting_section: None,
+        skill_section: None,
+        enabled_tools: None,
+        auth_gate: None,
+        tool_configs: None,
+        extensions: None,
+        images: vec![],
+        files: vec![],
+        request_metadata: None,
+    }
+}
+
 #[tokio::test]
 async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
     let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
@@ -148,6 +194,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
             index: 0,
             arguments_chunk: json!({ "query": "return policy refund window" }).to_string(),
         },
+        StreamEvent::Cost { usd: 0.0042 },
         StreamEvent::Done {
             finish_reason: "tool_calls".into(),
         },
@@ -156,6 +203,7 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
         StreamEvent::Delta {
             content: "Items are accepted within 30 days for a full refund.".into(),
         },
+        StreamEvent::Cost { usd: 0.0011 },
         StreamEvent::Done {
             finish_reason: "stop".into(),
         },
@@ -164,36 +212,8 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
     let (tx, mut rx) = unbounded_channel::<serde_json::Value>();
     runner::run_streaming_turn(
         TurnRequest {
-            demo_tools: false,
-            storage: seeded_storage(),
-            llm: mock_llm(),
-            max_iterations: 4,
-            conversation_id: "conv-otel-srv",
-            request_id: "req-otel-srv",
-            user_message: "what is the return policy?",
-            model_max_output: None,
-            access: AccessContext::anonymous(),
             llm_provider: Some(Arc::new(mock.clone())),
-            executor: None,
-            reranker: None,
-            confirmation: None,
-            interactions: None,
-            tool_provider: None,
-            tool_hooks: vec![],
-            system_prompt: None,
-            org_id: Some("org-telemetry".to_string()),
-            gateway_key: None,
-            workflow: None,
-            judge: None,
-            greeting_section: None,
-            skill_section: None,
-            enabled_tools: None,
-            auth_gate: None,
-            tool_configs: None,
-            extensions: None,
-            images: vec![],
-            files: vec![],
-            request_metadata: None,
+            ..base_turn_request()
         },
         &tx,
     )
@@ -251,5 +271,126 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
     assert!(
         args.contains("return policy refund window"),
         "tool arguments should carry the model's query; got: {args:?}"
+    );
+
+    // (3) The tool span repeats the identifiers itself. The OTLP ingest merges
+    // resource attrs + THIS span's attrs with NO parent inheritance, so a tool
+    // span without these cannot be joined to its conversation — and without
+    // `gen_ai.system` it fails the ingest's LLM-event gate outright.
+    assert_eq!(
+        tool.fields.get("gen_ai.system").map(String::as_str),
+        Some("smooth-operator"),
+        "tool span needs its own gen_ai.system or the ingest drops it; fields: {:?}",
+        tool.fields
+    );
+    assert_eq!(
+        tool.fields.get("gen_ai.operation.name").map(String::as_str),
+        Some("tool"),
+        "must be exactly `tool` — the ingest takes this attribute verbatim and \
+         its queries filter on operation_name = 'tool'; fields: {:?}",
+        tool.fields
+    );
+    assert_eq!(
+        tool.fields
+            .get("gen_ai.conversation.id")
+            .map(String::as_str),
+        Some("conv-otel-srv"),
+        "tool span must be joinable to its conversation; fields: {:?}",
+        tool.fields
+    );
+    assert_eq!(
+        tool.fields.get("smooai.org_id").map(String::as_str),
+        Some("org-telemetry"),
+        "tool span must carry the org; fields: {:?}",
+        tool.fields
+    );
+
+    // (4) Per-turn cost from the gateway's `x-litellm-response-cost` header,
+    // accumulated across both LLM calls in the turn (0.0042 + 0.0011).
+    let cost: f64 = chat
+        .fields
+        .get("gen_ai.usage.cost_usd")
+        .unwrap_or_else(|| panic!("expected gen_ai.usage.cost_usd; fields: {:?}", chat.fields))
+        .parse()
+        .expect("cost is a number");
+    assert!(
+        (cost - 0.0053).abs() < 1e-9,
+        "expected the two streams' gateway costs summed; got {cost}"
+    );
+}
+
+/// A model the gateway can't price yields `cost_usd = 0` — from LiteLLM
+/// answering `x-litellm-response-cost: 0` (which core maps to `None`) and the
+/// local `ModelPricing` fallback pricing an unrecognised model at 0. That zero
+/// must NOT be exported: a consumer has to be able to say "not measured"
+/// instead of rendering a confident `$0.00` on a turn that genuinely cost money.
+///
+/// Token usage still has to land, so this also proves the attribute is absent
+/// because of the zero check rather than because the span recorded nothing.
+#[tokio::test]
+async fn unpriced_turn_omits_cost_rather_than_recording_zero() {
+    let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
+    let layer = CapturingLayer {
+        sink: Arc::clone(&sink),
+        index: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // Real token usage, no `Cost` event — exactly what an unpriced model on the
+    // gateway produces.
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::Delta {
+            content: "Items are accepted within 30 days for a full refund.".into(),
+        },
+        StreamEvent::Usage(Usage {
+            prompt_tokens: 1234,
+            completion_tokens: 56,
+            total_tokens: 1290,
+            cached_tokens: 0,
+        }),
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+
+    let (tx, mut rx) = unbounded_channel::<serde_json::Value>();
+    runner::run_streaming_turn(
+        TurnRequest {
+            // `unpriced-local-model` is in no `ModelPricing` table entry, so the
+            // local fallback prices it at $0.
+            llm: LlmConfig::openrouter("not-a-real-key").with_model("unpriced-local-model"),
+            llm_provider: Some(Arc::new(mock.clone())),
+            conversation_id: "conv-otel-unpriced",
+            request_id: "req-otel-unpriced",
+            ..base_turn_request()
+        },
+        &tx,
+    )
+    .await
+    .expect("run_streaming_turn");
+    drop(tx);
+    while rx.try_recv().is_ok() {}
+
+    let spans = sink.lock().expect("sink poisoned").clone();
+    let chat = spans
+        .iter()
+        .find(|s| s.name == "gen_ai.chat")
+        .unwrap_or_else(|| panic!("expected a `gen_ai.chat` span; got: {spans:#?}"));
+
+    assert_eq!(
+        chat.fields
+            .get("gen_ai.usage.input_tokens")
+            .map(String::as_str),
+        Some("1234"),
+        "usage must still land, or the cost assertion below proves nothing; fields: {:?}",
+        chat.fields
+    );
+    assert!(
+        !chat.fields.contains_key("gen_ai.usage.cost_usd"),
+        "an unpriced turn must leave gen_ai.usage.cost_usd ABSENT, not 0 — a \
+         missing price must never read as free; fields: {:?}",
+        chat.fields
     );
 }

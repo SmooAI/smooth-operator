@@ -22,10 +22,11 @@ use crate::adapter::{MessageQuery, StorageAdapter};
 use crate::curation::{CuratedKnowledgeStore, RetrievalFilter};
 use crate::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use crate::telemetry::{
-    redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
-    GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE,
-    SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+    record_cost_usd, redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
+    GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS,
+    GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
+    OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SPAN_CHAT, SPAN_TOOL,
+    SYSTEM_NAME,
 };
 use crate::tools::{KnowledgeResultSink, KnowledgeSearchTool};
 use tracing::Instrument;
@@ -210,6 +211,19 @@ fn usage_from_events(events: &[AgentEvent]) -> Option<(u64, u64)> {
         } if *prompt_tokens > 0 || *completion_tokens > 0 => {
             Some((*prompt_tokens, *completion_tokens))
         }
+        _ => None,
+    })
+}
+
+/// The turn's accumulated cost in USD from the terminal
+/// [`AgentEvent::Completed`], or `None` when the turn produced no `Completed`
+/// event. The value still needs the zero check in
+/// [`record_cost_usd`](crate::telemetry::record_cost_usd) before it can be
+/// exported — the engine reports `0.0` both for a free turn and for one it
+/// could not price.
+fn cost_from_events(events: &[AgentEvent]) -> Option<f64> {
+    events.iter().find_map(|e| match e {
+        AgentEvent::Completed { cost_usd, .. } => Some(*cost_usd),
         _ => None,
     })
 }
@@ -536,11 +550,13 @@ impl KnowledgeChatRuntime {
         let turn_span = tracing::info_span!(
             SPAN_CHAT,
             { GEN_AI_SYSTEM } = SYSTEM_NAME,
+            { GEN_AI_OPERATION_NAME } = OPERATION_CHAT,
             { GEN_AI_REQUEST_MODEL } = %self.llm.model,
             { GEN_AI_CONVERSATION_ID } = %conversation_id,
             { GEN_AI_AGENT_NAME } = AGENT_NAME,
             { GEN_AI_USAGE_INPUT_TOKENS } = tracing::field::Empty,
             { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
+            { GEN_AI_USAGE_COST_USD } = tracing::field::Empty,
         );
 
         // Run the turn body inside the span so any engine-internal spans nest
@@ -555,6 +571,11 @@ impl KnowledgeChatRuntime {
         if let Some((input, output)) = usage_from_events(&outcome.events) {
             turn_span.record(GEN_AI_USAGE_INPUT_TOKENS, input);
             turn_span.record(GEN_AI_USAGE_OUTPUT_TOKENS, output);
+        }
+        // Gateway-authoritative per-turn cost, dropped when zero (= unpriced,
+        // not free). See `record_cost_usd`.
+        if let Some(cost) = cost_from_events(&outcome.events) {
+            record_cost_usd(&turn_span, cost);
         }
 
         // Emit a child `gen_ai.tool` span per tool call so each invocation is an
@@ -577,9 +598,16 @@ impl KnowledgeChatRuntime {
             } = event
             {
                 let arguments = tool_arguments_for(&outcome.events, *iteration, tool_name);
+                // Repeat the identifying attributes: the OTLP ingest merges
+                // resource + THIS span's attrs with no parent inheritance, so a
+                // bare tool span is unjoinable to its conversation (and, absent
+                // `gen_ai.system`, was dropped by the ingest's LLM-event gate).
                 let tool_span = tracing::info_span!(
                     parent: &turn_span,
                     SPAN_TOOL,
+                    { GEN_AI_SYSTEM } = SYSTEM_NAME,
+                    { GEN_AI_OPERATION_NAME } = OPERATION_TOOL,
+                    { GEN_AI_CONVERSATION_ID } = %conversation_id,
                     { GEN_AI_TOOL_NAME } = %tool_name,
                     { GEN_AI_TOOL_ARGUMENTS } = %redact_tool_arguments(&arguments),
                     { OTEL_STATUS_CODE } = tracing::field::Empty,
