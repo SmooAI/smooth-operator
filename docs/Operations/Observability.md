@@ -29,12 +29,35 @@ turn (engine loop + message persistence). It carries:
 | Attribute                     | Source                                    | Notes |
 | ----------------------------- | ----------------------------------------- | ----- |
 | `gen_ai.system`               | constant `"smooth-operator"`        | Identifies the GenAI system. |
+| `gen_ai.operation.name`       | constant `"chat"`                         | The GenAI operation. The api-prime ingest takes this attribute **verbatim** when present, deriving it from the span name only as a fallback — so the spelling has to match what its queries filter on. |
 | `gen_ai.request.model`        | `LlmConfig.model`                         | The model requested for the turn (e.g. `openai/gpt-4o`). |
 | `gen_ai.conversation.id`      | the `conversation_id` arg                 | Ties the turn to its conversation. |
 | `gen_ai.agent.name`           | constant `"smooth-agent-chat"`            | The agent/persona driving the turn. |
 | `smooai.org_id`               | the turn's `org_id` (streaming path)      | Set only when an org is resolved. **Matches the monorepo TS chat handler's attribute exactly**, so the observability studio groups Rust + TS turns by org. |
 | `gen_ai.usage.input_tokens`   | `AgentEvent::Completed.prompt_tokens`     | Recorded on completion **only when the engine reported usage** (non-zero). Omitted otherwise — e.g. a mock turn — per the convention's "omit if unknown" rule. |
 | `gen_ai.usage.output_tokens`  | `AgentEvent::Completed.completion_tokens` | Same gating as input tokens. |
+| `gen_ai.usage.cost_usd`       | `AgentEvent::Completed.cost_usd`          | The turn's cost in USD. **Recorded only when positive** — see "A zero cost is never recorded" below. |
+
+#### A zero cost is never recorded
+
+The engine sources cost from LiteLLM's `x-litellm-response-cost` response
+header, which `smooth-operator-core` parses off **both** the streaming and the
+non-streaming path — on a stream the headers are read before the SSE body is
+consumed, so the value survives — and accumulates onto `AgentEvent::Completed`.
+
+`telemetry::record_cost_usd` drops a non-positive or non-finite value instead of
+exporting `0`, because at this layer a zero is **ambiguous**: LiteLLM answers
+`x-litellm-response-cost: 0` for a model it has no price for (core's
+`parse_gateway_cost` already maps that to `None`), and the local `ModelPricing`
+fallback prices any model it doesn't recognise at `0`. So a zero always means
+"could not price this turn", never "this turn was free" — exporting it would
+render a paid turn as a confident `$0.00`. An absent attribute lets a consumer
+say "not measured" instead.
+
+A *positive* value may be either the gateway's authoritative number or the
+local `ModelPricing` estimate; the engine sums both onto one `f64`, so the
+instrumentation cannot tell them apart. Separating them needs a second field on
+`AgentEvent::Completed`.
 
 ### `gen_ai.tool` span — one per tool call
 
@@ -44,11 +67,30 @@ carrying:
 
 | Attribute                    | Source                                      |
 | ---------------------------- | ------------------------------------------- |
+| `gen_ai.system`              | constant `"smooth-operator"` — see "Child spans repeat their identifiers" below |
+| `gen_ai.operation.name`      | constant `"tool"` — must stay exactly this; the ingest's queries filter on `operation_name = 'tool'` |
+| `gen_ai.conversation.id`     | the `conversation_id` arg                   |
+| `smooai.org_id`              | the turn's `org_id` (streaming path only)   |
 | `gen_ai.tool.name`           | `ToolCallComplete.tool_name`                |
 | `gen_ai.tool.call.arguments` | the matching `ToolCallStart.arguments`, **redacted** (see below) and length-capped |
 | `duration_ms`                | `ToolCallComplete.duration_ms` (wall clock) |
 | `is_error`                   | `ToolCallComplete.is_error`                 |
 | `otel.status_code` / `otel.status_message` | set to `ERROR` + the tool's error text when `is_error` — so a failed tool call surfaces as an OTLP span with error status |
+
+#### Child spans repeat their identifiers
+
+The OTLP ingest builds each span's attribute set from the **resource** attributes
+overlaid with **that span's own** attributes. There is **no inheritance from the
+parent span**, so anything only `gen_ai.chat` carries is invisible on its
+children. That is why the tool span repeats `gen_ai.system`,
+`gen_ai.operation.name`, `gen_ai.conversation.id` and `smooai.org_id` rather
+than relying on the turn span.
+
+Omitting `gen_ai.system` did more than lose the conversation join: the ingest's
+LLM-event gate keyed on that attribute to decide a span was a GenAI event, so
+tool spans were **discarded at ingest** — `operation_name = 'tool'` had zero
+rows, all time, while the emitter looked healthy. The ingest now also accepts a
+`gen_ai.`-prefixed span name, but the span carries the attributes regardless.
 
 **Argument redaction.** `telemetry::redact_tool_arguments` parses the JSON args
 and replaces the value of any object key whose name looks secret-bearing

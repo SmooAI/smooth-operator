@@ -8,7 +8,13 @@
 //!    attributes `gen_ai.system`, `gen_ai.request.model`, and
 //!    `gen_ai.conversation.id`.
 //! 2. A per-tool span (`gen_ai.tool`) is recorded with `gen_ai.tool.name` when
-//!    a tool fires during the turn.
+//!    a tool fires during the turn, carrying its OWN `gen_ai.system`,
+//!    `gen_ai.operation.name` and `gen_ai.conversation.id` — the OTLP ingest
+//!    merges resource attrs with the span's own and inherits nothing from the
+//!    parent, so a bare child span is unjoinable (and, without `gen_ai.system`,
+//!    dropped by the ingest's LLM-event gate).
+//! 3. `gen_ai.usage.cost_usd` carries the gateway's per-turn cost, and is
+//!    ABSENT — never `0` — when no cost was measured.
 //!
 //! The capturing layer records each span's name plus a flattened map of its
 //! string/int field values, so the assertions read the exact attribute values.
@@ -21,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use smooth_operator::runtime::KnowledgeChatRuntime;
 use smooth_operator::StorageAdapter;
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
+use smooth_operator_core::llm::{LlmResponse, Usage};
 use smooth_operator_core::llm_provider::MockLlmClient;
 use smooth_operator_core::{Document, DocumentType, LlmConfig};
 
@@ -67,6 +74,9 @@ impl Visit for FieldVisitor<'_> {
         self.0.insert(field.name().to_string(), value.to_string());
     }
     fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.insert(field.name().to_string(), value.to_string());
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
         self.0.insert(field.name().to_string(), value.to_string());
     }
 }
@@ -213,5 +223,164 @@ async fn run_turn_records_gen_ai_spans() {
     assert!(
         args.contains("return policy refund window"),
         "gen_ai.tool.call.arguments should carry the model's query; got: {args:?}"
+    );
+
+    // (3) The tool span repeats its identifiers. The OTLP ingest builds a span's
+    //     attribute set from the resource attrs plus THAT span's own attrs, with
+    //     no parent inheritance, so anything only the turn span carries is lost.
+    assert_eq!(
+        tool.fields.get("gen_ai.system").map(String::as_str),
+        Some("smooth-operator"),
+        "tool span needs its own gen_ai.system or the ingest gate drops it; \
+         span fields: {:?}",
+        tool.fields
+    );
+    assert_eq!(
+        tool.fields.get("gen_ai.operation.name").map(String::as_str),
+        Some("tool"),
+        "must be exactly `tool` — the ingest takes this attribute verbatim; \
+         span fields: {:?}",
+        tool.fields
+    );
+    assert_eq!(
+        tool.fields
+            .get("gen_ai.conversation.id")
+            .map(String::as_str),
+        Some("conv-otel-1"),
+        "tool span must be joinable to its conversation; span fields: {:?}",
+        tool.fields
+    );
+
+    // (4) No gateway cost header here, but `openai/gpt-4o` IS in the local
+    //     `ModelPricing` table, so the engine's fallback estimate is positive
+    //     and does get recorded. (What must never be recorded is a *zero*; the
+    //     unpriced-model case below covers that.)
+    let cost: f64 = chat
+        .fields
+        .get("gen_ai.usage.cost_usd")
+        .unwrap_or_else(|| panic!("expected gen_ai.usage.cost_usd; fields: {:?}", chat.fields))
+        .parse()
+        .expect("cost is a number");
+    assert!(
+        cost > 0.0,
+        "a locally-priced model should still produce a positive estimate; got {cost}"
+    );
+}
+
+/// A model no `ModelPricing` entry matches, with no gateway cost header, prices
+/// at exactly `0.0`. That zero must be dropped, not exported: it means "we
+/// could not price this turn", and a consumer rendering it as `$0.00` would
+/// claim a paid turn was free.
+#[tokio::test]
+async fn run_turn_omits_cost_for_an_unpriced_model() {
+    let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
+    let layer = CapturingLayer {
+        sink: Arc::clone(&sink),
+        index: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // Real token usage, no gateway cost — exactly what an unpriced model on the
+    // gateway produces. `ModelPricing::for_model` has no entry for this name, so
+    // it falls to the free tier and the accounted cost is 0.
+    let mock = MockLlmClient::new();
+    mock.push_response(LlmResponse {
+        gateway_cost_usd: None,
+        ..priced_response("Within 30 days of delivery.", 0.0)
+    });
+
+    let runtime = KnowledgeChatRuntime::new(
+        seeded_storage(),
+        LlmConfig::openrouter("not-a-real-key").with_model("unpriced-local-model"),
+    )
+    .with_llm_provider(Arc::new(mock.clone()));
+    runtime
+        .run_turn("conv-otel-unpriced", "What is the return policy?")
+        .await
+        .expect("run_turn");
+
+    let spans = sink.lock().expect("sink poisoned").clone();
+    let chat = spans
+        .iter()
+        .find(|s| s.name == "gen_ai.chat")
+        .unwrap_or_else(|| panic!("expected a `gen_ai.chat` span; got: {spans:#?}"));
+
+    assert_eq!(
+        chat.fields
+            .get("gen_ai.usage.input_tokens")
+            .map(String::as_str),
+        Some("1000"),
+        "usage must still land, or the cost assertion below proves nothing; \
+         span fields: {:?}",
+        chat.fields
+    );
+    assert!(
+        !chat.fields.contains_key("gen_ai.usage.cost_usd"),
+        "an unpriced turn must leave gen_ai.usage.cost_usd ABSENT, not 0 — a \
+         missing price must never read as free; span fields: {:?}",
+        chat.fields
+    );
+}
+
+/// One `LlmResponse` carrying a gateway-reported cost, as the LiteLLM
+/// `x-litellm-response-cost` header produces.
+fn priced_response(content: &str, cost_usd: f64) -> LlmResponse {
+    LlmResponse {
+        content: content.to_string(),
+        tool_calls: Vec::new(),
+        finish_reason: "stop".to_string(),
+        usage: Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 20,
+            total_tokens: 1020,
+            cached_tokens: 0,
+        },
+        rate_limit: None,
+        gateway_cost_usd: Some(cost_usd),
+        resolved_model: None,
+        reasoning_content: None,
+    }
+}
+
+/// The gateway's authoritative per-request cost reaches the turn span as
+/// `gen_ai.usage.cost_usd`. Without this the attribute was populated on 0 of
+/// 108 production rows: nothing recorded it, even though the engine had already
+/// accumulated it from the response header onto `AgentEvent::Completed`.
+#[tokio::test]
+async fn run_turn_records_gateway_cost_on_the_chat_span() {
+    let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
+    let layer = CapturingLayer {
+        sink: Arc::clone(&sink),
+        index: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockLlmClient::new();
+    mock.push_response(priced_response("Within 30 days of delivery.", 0.0042));
+
+    let runtime = KnowledgeChatRuntime::new(seeded_storage(), test_llm())
+        .with_llm_provider(Arc::new(mock.clone()));
+    runtime
+        .run_turn("conv-otel-cost", "What is the return policy?")
+        .await
+        .expect("run_turn");
+
+    let spans = sink.lock().expect("sink poisoned").clone();
+    let chat = spans
+        .iter()
+        .find(|s| s.name == "gen_ai.chat")
+        .unwrap_or_else(|| panic!("expected a `gen_ai.chat` span; got: {spans:#?}"));
+
+    let cost: f64 = chat
+        .fields
+        .get("gen_ai.usage.cost_usd")
+        .unwrap_or_else(|| panic!("expected gen_ai.usage.cost_usd; fields: {:?}", chat.fields))
+        .parse()
+        .expect("cost is a number");
+    assert!(
+        (cost - 0.0042).abs() < 1e-9,
+        "expected the gateway's reported cost on the turn span; got {cost}"
     );
 }

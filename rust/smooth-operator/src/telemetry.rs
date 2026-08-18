@@ -13,11 +13,22 @@
 //! - [`GEN_AI_REQUEST_MODEL`] (`gen_ai.request.model`) — the configured model
 //! - [`GEN_AI_CONVERSATION_ID`] (`gen_ai.conversation.id`) — the conversation id
 //! - on completion, [`GEN_AI_USAGE_INPUT_TOKENS`] /
-//!   [`GEN_AI_USAGE_OUTPUT_TOKENS`] when the engine reported token usage.
+//!   [`GEN_AI_USAGE_OUTPUT_TOKENS`] when the engine reported token usage, and
+//!   [`GEN_AI_USAGE_COST_USD`] when it reported a *measured* cost.
 //!
 //! Each tool call the engine emits opens a child span named [`SPAN_TOOL`]
 //! (`gen_ai.tool`) carrying [`GEN_AI_TOOL_NAME`] (`gen_ai.tool.name`) and the
 //! tool's wall-clock `duration_ms`.
+//!
+//! ## Child spans repeat their identifiers
+//! The OTLP ingest builds each span's attribute set from the resource attrs
+//! plus **that span's own** attrs — there is no inheritance from the parent
+//! span. So a [`SPAN_TOOL`] child repeats [`GEN_AI_SYSTEM`],
+//! [`GEN_AI_OPERATION_NAME`], [`GEN_AI_CONVERSATION_ID`] and (where the caller
+//! has one) [`SMOOAI_ORG_ID`] rather than relying on the turn span carrying
+//! them. Omitting `gen_ai.system` didn't merely lose the join — it put the tool
+//! span on the wrong side of the ingest's LLM-event gate, so those spans were
+//! discarded at ingest.
 //!
 //! ## Exporter gating (no collector needed for tests/binaries)
 //! [`init_telemetry`] installs an OTLP exporter **only** when
@@ -47,6 +58,27 @@ pub const GEN_AI_CONVERSATION_ID: &str = "gen_ai.conversation.id";
 pub const GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// `gen_ai.usage.output_tokens` — completion tokens produced by the turn.
 pub const GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
+/// `gen_ai.usage.cost_usd` — the turn's cost in USD as accounted by the engine.
+///
+/// **Only recorded when the accounted cost is a positive, finite number** — see
+/// [`record_cost_usd`]. Zero is ambiguous and must never be exported as a real
+/// cost: LiteLLM answers `x-litellm-response-cost: 0` for a model it has no
+/// price for (core's `parse_gateway_cost` already maps that to `None`), and the
+/// local `ModelPricing` fallback prices any model it doesn't recognise at 0.
+/// So a zero here always means "not measured", never "this turn was free".
+/// Leaving the attribute absent lets a consumer say "not measured" rather than
+/// render a confident `$0.00`.
+///
+/// ponytail: a positive value may be either the gateway's authoritative number
+/// or the engine's local `ModelPricing` estimate — the engine sums both onto
+/// one `f64` on `AgentEvent::Completed`, so this layer cannot tell them apart.
+/// Both are honest costs, so the distinction only matters if a consumer needs
+/// to know the provenance; that needs a second field on the engine's
+/// `Completed` event, not more logic here.
+pub const GEN_AI_USAGE_COST_USD: &str = "gen_ai.usage.cost_usd";
+/// `gen_ai.operation.name` — the GenAI operation a span represents
+/// ([`OPERATION_CHAT`] on a turn span, [`OPERATION_TOOL`] on a tool span).
+pub const GEN_AI_OPERATION_NAME: &str = "gen_ai.operation.name";
 /// `gen_ai.tool.name` — the name of an invoked tool.
 pub const GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
 /// `gen_ai.tool.call.arguments` — the (redacted) JSON arguments passed to a tool.
@@ -78,10 +110,33 @@ pub const AGENT_NAME: &str = "smooth-agent-chat";
 /// pathological argument blob can't bloat span export.
 const MAX_TOOL_ARGS_LEN: usize = 2048;
 
+/// [`GEN_AI_OPERATION_NAME`] value on a [`SPAN_CHAT`] span.
+pub const OPERATION_CHAT: &str = "chat";
+/// [`GEN_AI_OPERATION_NAME`] value on a [`SPAN_TOOL`] span.
+///
+/// Must stay exactly `"tool"`: the api-prime OTLP ingest takes this attribute
+/// verbatim when it is present (falling back to deriving it from the span name
+/// only when absent), and its queries filter on `operation_name = 'tool'`. A
+/// spelling like `"execute_tool"` would land in the column and match nothing.
+pub const OPERATION_TOOL: &str = "tool";
+
 /// Span name for the per-turn GenAI chat span (`gen_ai.chat`).
 pub const SPAN_CHAT: &str = "gen_ai.chat";
 /// Span name for a per-tool-call child span (`gen_ai.tool`).
 pub const SPAN_TOOL: &str = "gen_ai.tool";
+
+/// Record `cost_usd` on `span` as [`GEN_AI_USAGE_COST_USD`], but only when it is
+/// a genuinely measured number.
+///
+/// A non-positive or non-finite cost is dropped rather than exported as `0`,
+/// because at this layer a zero cost is indistinguishable from an unpriced one
+/// — see [`GEN_AI_USAGE_COST_USD`]. The span must declare the field as
+/// `tracing::field::Empty` at creation for the record to take.
+pub fn record_cost_usd(span: &tracing::Span, cost_usd: f64) {
+    if cost_usd > 0.0 && cost_usd.is_finite() {
+        span.record(GEN_AI_USAGE_COST_USD, cost_usd);
+    }
+}
 
 /// Redact a tool's serialized JSON arguments for span recording.
 ///

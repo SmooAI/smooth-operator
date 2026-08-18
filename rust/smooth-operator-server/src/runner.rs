@@ -48,10 +48,11 @@ use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, Mes
 use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry, InteractionRequest};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::telemetry::{
-    redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
-    GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE,
-    SMOOAI_ORG_ID, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
+    record_cost_usd, redact_tool_arguments, AGENT_NAME, GEN_AI_AGENT_NAME, GEN_AI_CONVERSATION_ID,
+    GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS,
+    GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS,
+    OPERATION_CHAT, OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SMOOAI_ORG_ID,
+    SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
 };
 use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator::tools::{
@@ -1014,12 +1015,14 @@ pub async fn run_streaming_turn(
     let turn_span = tracing::info_span!(
         SPAN_CHAT,
         { GEN_AI_SYSTEM } = SYSTEM_NAME,
+        { GEN_AI_OPERATION_NAME } = OPERATION_CHAT,
         { GEN_AI_REQUEST_MODEL } = %model_for_span,
         { GEN_AI_CONVERSATION_ID } = %conversation_id,
         { GEN_AI_AGENT_NAME } = AGENT_NAME,
         { SMOOAI_ORG_ID } = tracing::field::Empty,
         { GEN_AI_USAGE_INPUT_TOKENS } = tracing::field::Empty,
         { GEN_AI_USAGE_OUTPUT_TOKENS } = tracing::field::Empty,
+        { GEN_AI_USAGE_COST_USD } = tracing::field::Empty,
     );
     if let Some(org) = org_id_for_span.as_deref() {
         turn_span.record(SMOOAI_ORG_ID, org);
@@ -1286,11 +1289,23 @@ pub async fn run_streaming_turn(
             turn_span.record(GEN_AI_USAGE_INPUT_TOKENS, u.prompt_tokens);
             turn_span.record(GEN_AI_USAGE_OUTPUT_TOKENS, u.completion_tokens);
         }
+        // Gateway-authoritative cost (LiteLLM's `x-litellm-response-cost`), which
+        // the engine already accumulates onto `Completed`. Dropped when zero —
+        // that means "unpriced", not "free". See `record_cost_usd`.
+        record_cost_usd(&turn_span, u.cost_usd);
     }
     for rec in &tool_records {
+        // The OTLP ingest merges resource attrs with THIS span's attrs and does
+        // NOT inherit from the parent, so every identifying attribute has to be
+        // repeated here or the tool span arrives unjoinable — and, without
+        // `gen_ai.system`, was dropped outright by the ingest's LLM-event gate.
         let tool_span = tracing::info_span!(
             parent: &turn_span,
             SPAN_TOOL,
+            { GEN_AI_SYSTEM } = SYSTEM_NAME,
+            { GEN_AI_OPERATION_NAME } = OPERATION_TOOL,
+            { GEN_AI_CONVERSATION_ID } = %conversation_id,
+            { SMOOAI_ORG_ID } = tracing::field::Empty,
             { GEN_AI_TOOL_NAME } = %rec.tool_name,
             { GEN_AI_TOOL_ARGUMENTS } = %redact_tool_arguments(&rec.arguments),
             { OTEL_STATUS_CODE } = tracing::field::Empty,
@@ -1298,6 +1313,9 @@ pub async fn run_streaming_turn(
             duration_ms = rec.duration_ms,
             is_error = rec.is_error,
         );
+        if let Some(org) = org_id_for_span.as_deref() {
+            tool_span.record(SMOOAI_ORG_ID, org);
+        }
         if let Some(err) = rec.error.as_deref() {
             tool_span.record(OTEL_STATUS_CODE, "ERROR");
             tool_span.record(OTEL_STATUS_MESSAGE, err);
