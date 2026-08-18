@@ -57,6 +57,7 @@ public sealed class FrameDispatcher
     private sealed class ActiveTurn
     {
         public required string RequestId { get; init; }
+        public required string SessionId { get; init; }
         public required CancellationTokenSource Cts { get; init; }
         // Set the moment the turn is cancelled. The turn's sink checks it, so a cancelled turn emits
         // NOTHING further — `cancelled` stays the terminal event even if the engine yields one last
@@ -187,6 +188,13 @@ public sealed class FrameDispatcher
         {
             // The turn finished and disposed its CTS between our slot read and here — nothing to cancel.
         }
+
+        // If the turn was parked at a write-confirmation, the park awaits a bare TaskCompletionSource
+        // that the CTS cancel does NOT complete — so discard the pending confirmation to unblock it
+        // (resolves denied; the result is dropped because the sink is gagged and _turn is already null).
+        // Mirrors the Rust reference dropping the confirmation future on handle.abort(). No-op when the
+        // turn wasn't parked. th cancel-unpark.
+        _confirmations.Resolve(turn.SessionId, approved: false);
         return true;
     }
 
@@ -777,7 +785,7 @@ public sealed class FrameDispatcher
         // assistant message is discarded — no eventual_response, nothing persisted. (The user's message
         // was persisted at the start of the turn, so it stays.)
         var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var turn = new ActiveTurn { RequestId = requestIdStr, Cts = turnCts };
+        var turn = new ActiveTurn { RequestId = requestIdStr, SessionId = sessionIdStr, Cts = turnCts };
 
         // Everything the turn emits goes through this gate: once the turn is cancelled it drops events,
         // so `cancelled` is genuinely terminal (the engine can still yield one unwinding update as the
