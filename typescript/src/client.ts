@@ -23,6 +23,8 @@ import {
     type WebSocketFactory,
 } from './transport.js';
 import type {
+    Cancelled,
+    CancelRequest,
     ClientAction,
     CreateConversationSessionRequest,
     CreateConversationSessionResponse,
@@ -140,7 +142,7 @@ interface PendingRequest {
  * const final = await turn; // EventualResponse
  * ```
  */
-export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<EventualResponse> {
+export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<EventualResponse | Cancelled> {
     /** The requestId this turn is correlated on. */
     readonly requestId: string;
 
@@ -150,18 +152,21 @@ export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<Even
         reject: (err: unknown) => void;
     } | null = null;
     private done = false;
-    private finalEvent: EventualResponse | null = null;
+    private finalEvent: EventualResponse | Cancelled | null = null;
     private error: unknown = null;
-    private readonly settled: Promise<EventualResponse>;
-    private settle!: (value: EventualResponse) => void;
+    private _cancelled = false;
+    private readonly settled: Promise<EventualResponse | Cancelled>;
+    private settle!: (value: EventualResponse | Cancelled) => void;
     private fail!: (err: unknown) => void;
     private readonly onClose: () => void;
+    private readonly onCancel: (() => void) | undefined;
     private timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
-    constructor(requestId: string, onClose: () => void, turnTimeout = 0) {
+    constructor(requestId: string, onClose: () => void, turnTimeout = 0, onCancel?: () => void) {
         this.requestId = requestId;
         this.onClose = onClose;
-        this.settled = new Promise<EventualResponse>((resolve, reject) => {
+        this.onCancel = onCancel;
+        this.settled = new Promise<EventualResponse | Cancelled>((resolve, reject) => {
             this.settle = resolve;
             this.fail = reject;
         });
@@ -174,6 +179,17 @@ export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<Even
                 this.finish(null, new TurnTimeoutError(this.requestId, turnTimeout));
             }, turnTimeout);
         }
+    }
+
+    /**
+     * True if this turn ended because the user stopped it — a terminal `cancelled`
+     * event settled it, as opposed to completing (`eventual_response`) or erroring.
+     * This is the UI's signal to distinguish a user-stop from a failure: on a
+     * user-stop the turn *resolves* (never rejects), and `await turn` yields the
+     * terminal `Cancelled` event.
+     */
+    get cancelled(): boolean {
+        return this._cancelled;
     }
 
     /** Feed an event into the turn (called by the client's dispatcher). */
@@ -192,7 +208,25 @@ export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<Even
 
         if (event.type === 'eventual_response') {
             this.finish(event, null);
+        } else if (event.type === 'cancelled') {
+            // Terminal user-stop: resolve (do NOT reject) so the async iterator ends
+            // cleanly and `await turn` settles. `cancelled` is set for the UI to tell
+            // a user-stop apart from a completed or errored turn.
+            this._cancelled = true;
+            this.finish(event, null);
         }
+    }
+
+    /**
+     * Request cancellation of THIS turn — the ergonomic "stop this turn" button.
+     * Sends a `cancel` frame carrying the turn's own `requestId` (and the originating
+     * `sessionId`) via the client. Idempotent: a no-op once the turn has already
+     * settled. The turn itself settles when the server's terminal `cancelled` event
+     * arrives (see {@link cancelled}); this method only sends the request.
+     */
+    cancel(): void {
+        if (this.done) return;
+        this.onCancel?.();
     }
 
     /** Force-close the turn (e.g. on disconnect) with an error. */
@@ -211,7 +245,7 @@ export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<Even
         }
     }
 
-    private finish(final: EventualResponse | null, err: unknown): void {
+    private finish(final: EventualResponse | Cancelled | null, err: unknown): void {
         if (this.done) return;
         this.done = true;
         this.finalEvent = final;
@@ -257,9 +291,11 @@ export class MessageTurn implements AsyncIterable<ServerEvent>, PromiseLike<Even
         };
     }
 
-    // PromiseLike — `await turn` resolves with the EventualResponse.
-    then<TResult1 = EventualResponse, TResult2 = never>(
-        onfulfilled?: ((value: EventualResponse) => TResult1 | PromiseLike<TResult1>) | null,
+    // PromiseLike — `await turn` resolves with the terminal event: an
+    // `EventualResponse` on completion, or a `Cancelled` on a user-stop (never
+    // rejects for a cancel). Narrow on `.type` (or check `turn.cancelled`).
+    then<TResult1 = EventualResponse | Cancelled, TResult2 = never>(
+        onfulfilled?: ((value: EventualResponse | Cancelled) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
     ): PromiseLike<TResult1 | TResult2> {
         return this.settled.then(onfulfilled, onrejected);
@@ -373,7 +409,12 @@ export class SmoothAgentClient {
      */
     sendMessage(req: Omit<SendMessageRequest, 'action' | 'requestId'>): MessageTurn {
         const requestId = this.generateRequestId();
-        const turn = new MessageTurn(requestId, () => this.turns.delete(requestId), this.turnTimeout);
+        const turn = new MessageTurn(
+            requestId,
+            () => this.turns.delete(requestId),
+            this.turnTimeout,
+            () => this.cancel({ requestId, sessionId: req.sessionId }),
+        );
         this.turns.set(requestId, turn);
         try {
             this.transport.send(JSON.stringify({ action: 'send_message', requestId, ...req }));
@@ -382,6 +423,23 @@ export class SmoothAgentClient {
             turn.abort(err);
         }
         return turn;
+    }
+
+    /**
+     * Client-initiated turn cancellation — the "Stop" button. Sends a `cancel` frame
+     * for the in-flight `send_message` turn identified by `requestId`. The server aborts
+     * the turn's LLM + tool work, frees the turn slot, and emits a terminal `cancelled`
+     * event (in place of `eventual_response`) echoing that `requestId`; the matching
+     * {@link MessageTurn} then settles as a user-stop — it *resolves* (never rejects),
+     * `await turn` yields the `Cancelled` event, and `turn.cancelled` is `true`.
+     *
+     * Idempotent: a cancel with no active turn is a silent server no-op, and calling
+     * this never throws on that account. For the common "stop THIS turn" case, prefer
+     * {@link MessageTurn.cancel}.
+     */
+    cancel(req: { requestId: string; sessionId?: string }): void {
+        const frame: CancelRequest = { action: 'cancel', requestId: req.requestId, sessionId: req.sessionId };
+        this.transport.send(JSON.stringify(frame));
     }
 
     /**

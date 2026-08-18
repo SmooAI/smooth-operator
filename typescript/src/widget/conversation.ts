@@ -227,6 +227,13 @@ export class ConversationController {
             }
 
             const final = await turn;
+            if (final.type !== 'eventual_response') {
+                // User-stopped turn: keep the partial streamed text, drop the streaming
+                // indicator. Not an error — no error bubble.
+                assistant.streaming = false;
+                this.emitMessages();
+                return;
+            }
             const inner = final.data?.data;
             const finalText = extractFinalText(inner?.response);
             if (finalText && finalText.length > assistant.text.length) {

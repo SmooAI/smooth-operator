@@ -50,6 +50,7 @@ const EVENT_SCHEMA_FILE: Record<EventType, string> = {
     otp_invalid: 'events/otp-invalid.schema.json',
     interaction_required: 'events/interaction-required.schema.json',
     interaction_invalid: 'events/interaction-invalid.schema.json',
+    cancelled: 'events/cancelled.schema.json',
     error: 'events/error.schema.json',
     pong: 'events/pong.schema.json',
 };
@@ -63,6 +64,7 @@ const ACTION_SCHEMA_REF: Record<ActionType, string> = {
     confirm_tool_action: 'actions/confirm-tool-action.schema.json#/$defs/Request',
     verify_otp: 'actions/verify-otp.schema.json#/$defs/Request',
     submit_interaction: 'actions/submit-interaction.schema.json#/$defs/Request',
+    cancel: 'actions/cancel.schema.json#/$defs/Request',
     ping: 'actions/ping.schema.json#/$defs/Request',
 };
 
