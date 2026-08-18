@@ -271,6 +271,114 @@ async def test_routes_hitl_confirm_resume_back_into_the_same_turn() -> None:
     assert seen == ["write_confirmation_required", "eventual_response"]
 
 
+# ─────────────────────────── cancellation ─────────────────────────────────────
+async def test_turn_cancel_emits_a_cancel_frame_for_the_turns_request_id() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    turn = client.send_message(session_id="sess-9", message="long one", stream=True)
+    req_id = transport.last_sent()["requestId"]
+
+    turn.cancel()
+
+    sent = transport.last_sent()
+    assert sent == {"action": "cancel", "requestId": req_id, "sessionId": "sess-9"}
+
+
+async def test_client_cancel_emits_a_cancel_frame_omitting_absent_session() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    client.cancel(request_id="req-abc")
+    assert transport.last_sent() == {"action": "cancel", "requestId": "req-abc"}
+
+
+async def test_cancelled_event_settles_the_turn_as_user_stop_not_error() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    turn = client.send_message(session_id="s", message="stop me")
+    req_id = transport.last_sent()["requestId"]
+
+    seen: list[str] = []
+
+    async def iterate() -> None:
+        # A user-stop must end the iterator cleanly — no exception raised here.
+        async for ev in turn:
+            seen.append(ev.type)
+
+    task = asyncio.create_task(iterate())
+    await asyncio.sleep(0)
+
+    transport.emit(
+        {
+            "type": "stream_token",
+            "requestId": req_id,
+            "token": "Hel",
+            "data": {"requestId": req_id, "token": "Hel"},
+        }
+    )
+    transport.emit(
+        {
+            "type": "cancelled",
+            "requestId": req_id,
+            "status": 499,
+            "data": {"requestId": req_id, "status": 499},
+        }
+    )
+
+    # await turn RESOLVES with the terminal Cancelled event (never raises).
+    final = await turn
+    await task
+
+    assert final.type == "cancelled"
+    assert final.status == 499
+    assert turn.cancelled is True
+    # The iterator yielded the token then the terminal cancelled, then ended cleanly.
+    assert seen == ["stream_token", "cancelled"]
+
+
+async def test_cancel_with_no_active_turn_is_a_harmless_no_op() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    # Cancel with nothing in flight — must not raise, just sends the frame.
+    client.cancel(request_id="never-started")
+    assert transport.last_sent()["action"] == "cancel"
+
+    # A cancelled event that matches no turn is dropped as an uncorrelated no-op.
+    transport.emit({"type": "cancelled", "requestId": "unknown", "status": 499})
+
+
+async def test_cancelled_is_idempotent_after_the_turn_already_settled() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    turn = client.send_message(session_id="s", message="q")
+    req_id = transport.last_sent()["requestId"]
+
+    transport.emit(
+        {
+            "type": "eventual_response",
+            "requestId": req_id,
+            "status": 200,
+            "data": {
+                "requestId": req_id,
+                "status": 200,
+                "data": {"messageId": "00000000-0000-0000-0000-000000000009", "response": None},
+            },
+        }
+    )
+    final = await turn
+    assert final.type == "eventual_response"
+    assert turn.cancelled is False
+
+    # A late cancel / cancelled after completion must not flip state or raise.
+    turn.cancel()
+    transport.emit({"type": "cancelled", "requestId": req_id, "status": 499})
+    assert turn.cancelled is False
+
+
 # ─────────────────────────── correlation ──────────────────────────────────────
 async def test_create_session_resolves_with_immediate_response_data() -> None:
     client, transport = make_client()
