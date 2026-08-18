@@ -195,3 +195,119 @@ async fn no_auth_no_widget_org_falls_back_to_seed() {
         .expect("conversation persisted");
     assert_eq!(conv.organization_id, SEED_ORG_ID);
 }
+
+/// The turn's org must reach the host **tool provider** (SEAM 1), not just the
+/// conversation row.
+///
+/// `handle_send_message` derived the real org from the conversation (for the
+/// gateway key) and then RE-BOUND `org_id` to the seed org a few lines later,
+/// shadowing it. Everything downstream of that second binding — the persona
+/// override and the host tool provider's scope — saw `reference-org` for every
+/// tenant, while the gateway key from the same function stayed correctly
+/// per-org. Billing therefore looked right, which is why it went unnoticed
+/// until `reference-org` showed up on a customer's `gen_ai.chat` span.
+///
+/// This asserts the seam, not the span: a host whose tools are org-scoped (the
+/// SmooAI chat-ws case) would otherwise scope every tenant's tools to the seed
+/// org.
+#[tokio::test]
+async fn send_message_scopes_the_tool_provider_to_the_conversation_org() {
+    use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
+    use smooth_operator_core::Tool;
+    use std::sync::Mutex;
+
+    /// Captures the org the server scoped this turn's tools to.
+    struct OrgRecordingTools(Arc<Mutex<Option<Option<String>>>>);
+
+    #[async_trait::async_trait]
+    impl ToolProvider for OrgRecordingTools {
+        async fn tools_for(&self, ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
+            *self.0.lock().unwrap() = Some(ctx.org_id.clone());
+            Vec::new()
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(None));
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+
+    // A live turn needs a resolvable gateway key and an LLM, or the handler
+    // returns before it ever consults the tool provider.
+    let mock = smooth_operator_core::llm_provider::MockLlmClient::new();
+    mock.push_stream(vec![
+        smooth_operator_core::llm::StreamEvent::Delta {
+            content: "ok".into(),
+        },
+        smooth_operator_core::llm::StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+    let config = ServerConfig {
+        gateway_key: Some("test-key".into()),
+        ..base_config()
+    };
+    let state = AppState::new(storage.clone(), config)
+        .with_tools(Arc::new(OrgRecordingTools(seen.clone())))
+        .with_chat_provider(Arc::new(mock));
+
+    let frame = json!({
+        "action": "create_conversation_session",
+        "requestId": "cs-tools",
+        "agentId": "agent-Y",
+        "userName": "Tenant User",
+    });
+    let conversation_id = create_session(&state, Some("org-TENANT"), None, &frame).await;
+
+    // Sanity: the create path already scoped correctly — so a failure below is
+    // squarely the send path, not session creation.
+    let conv = storage
+        .get_conversation(&conversation_id)
+        .await
+        .expect("get conversation")
+        .expect("conversation persisted");
+    assert_eq!(conv.organization_id, "org-TENANT");
+
+    let session_id = storage
+        .list_sessions_by_conversation(&conversation_id)
+        .await
+        .expect("list sessions")
+        .first()
+        .map(|s| s.session_id.clone())
+        .expect("session persisted");
+
+    let (tx, _rx) = unbounded_channel::<Value>();
+    let send = json!({
+        "action": "send_message",
+        "requestId": "sm-1",
+        "sessionId": session_id,
+        "message": "hello",
+    });
+    handler::handle_frame(
+        &state,
+        &AccessContext::anonymous(),
+        "conn-test",
+        None,
+        Some("org-TENANT"),
+        &handler::UserScope::Unscoped,
+        &send.to_string(),
+        &tx,
+    )
+    .await;
+
+    // The turn runs in a spawned task; poll until the provider is consulted.
+    let mut org = None;
+    for _ in 0..100 {
+        if let Some(v) = seen.lock().unwrap().clone() {
+            org = Some(v);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let org = org.expect("tool provider should be consulted for the turn");
+    assert_eq!(
+        org.as_deref(),
+        Some("org-TENANT"),
+        "host tools were scoped to {org:?} instead of the conversation's org — \
+         the seed-org re-binding in handle_send_message is back"
+    );
+    assert_ne!(org.as_deref(), Some(SEED_ORG_ID));
+}

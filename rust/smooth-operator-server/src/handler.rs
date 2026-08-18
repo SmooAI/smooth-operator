@@ -1418,10 +1418,26 @@ async fn handle_send_message(
         },
     });
 
-    // The reference server is single-org; a multi-tenant host derives this from    // The reference server is single-org; a multi-tenant host derives this from
-    // auth. Used to (a) resolve the org's persona override (SEAM 2) and (b)
-    // scope the host's tool provider (SEAM 1).
-    let org_id = crate::server::SEED_ORG_ID.to_string();
+    // The turn's org, used to (a) resolve the org's persona override (SEAM 2)
+    // and (b) scope the host's tool provider (SEAM 1).
+    //
+    // This REUSES the org already derived from the conversation above for the
+    // gateway key, rather than re-binding the seed org. Re-binding it shadowed
+    // the real value, so on a multi-tenant host every turn scoped its persona
+    // and its host tools to `reference-org` no matter which tenant was talking —
+    // while the gateway key, resolved from the same function a few lines up, was
+    // correctly per-org. That split is what made it survive: billing looked
+    // right, so nothing pointed at the scope being wrong. It also put
+    // `reference-org` on the `gen_ai.chat` turn span, which is where it was
+    // finally caught (SMOODEV-2952).
+    //
+    // Empty (no conversation row, or a flavor without storage) still falls back
+    // to the seed org, so the single-org reference/local behavior is unchanged.
+    let org_id = if org_id.is_empty() {
+        crate::server::SEED_ORG_ID.to_string()
+    } else {
+        org_id
+    };
 
     // SEAM 3 — per-agent behavior config (instructions + conversation workflow),
     // resolved by the connection's `agent_id` so two agents in the same org can
