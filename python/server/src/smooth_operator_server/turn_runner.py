@@ -360,6 +360,7 @@ class TurnRunner:
                     request_id,
                     sink,
                     self._interaction_pending,
+                    self._store,
                 )
             )
 

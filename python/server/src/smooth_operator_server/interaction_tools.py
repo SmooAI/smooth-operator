@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from smooth_operator_core import FunctionTool
 
@@ -35,6 +35,9 @@ from .interaction import (
     InteractionRegistry,
     PendingInteractions,
 )
+
+if TYPE_CHECKING:
+    from .session_store import SessionStore
 
 #: The sink type the raise tool emits ``interaction_required`` through.
 Sink = Callable[[dict[str, Any]], None]
@@ -94,6 +97,8 @@ def _request_tool(
 def _submit_tool(
     kinds: InteractionRegistry,
     raised_specs: dict[str, dict[str, Any]],
+    store: SessionStore,
+    session_id: str,
 ) -> FunctionTool:
     """Build the generic ``submit_interaction`` tool (conversational-fallback submit)."""
     hosted = [k.kind() for k in kinds.kinds()]
@@ -117,6 +122,10 @@ def _submit_tool(
             raise ValueError(
                 f"validation failed — {detail}. Re-ask the visitor for the corrected value(s) and submit again."
             )
+        # Run the kind's host effect on the conversational path too — the SAME kind-agnostic
+        # seam the rich path fires (a no-op for choices; identity_intake stamps the session's
+        # contacts), mirroring the Rust InteractionConfig.attach callback.
+        await kind.host_effect(store, session_id, canonical or {})
         return json.dumps({"status": "submitted", "values": canonical})
 
     return FunctionTool(
@@ -147,11 +156,13 @@ def build_interaction_tools(
     request_id: str,
     sink: Sink,
     pending: PendingInteractions,
+    store: "SessionStore",
 ) -> list[FunctionTool]:
     """Build this turn's Rich Interaction tools: one ``request_<kind>`` per hosted kind
     (rich when the kind's capability is declared, else fallback), plus the generic
     ``submit_interaction`` tool when at least one kind is on the fallback path. Mirrors the
-    Rust runner's per-turn registration + ``any_fallback`` gate."""
+    Rust runner's per-turn registration + ``any_fallback`` gate. ``store`` is threaded through
+    so a valid conversational-fallback submit can run the kind's host effect on the session."""
     raised_specs: dict[str, dict[str, Any]] = {}
     tools: list[FunctionTool] = []
     any_fallback = False
@@ -160,5 +171,5 @@ def build_interaction_tools(
         any_fallback = any_fallback or not rich
         tools.append(_request_tool(kind, rich, session_id, request_id, sink, pending, raised_specs))
     if any_fallback:
-        tools.append(_submit_tool(kinds, raised_specs))
+        tools.append(_submit_tool(kinds, raised_specs, store, session_id))
     return tools

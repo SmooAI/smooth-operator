@@ -638,7 +638,10 @@ class FrameDispatcher:
         tool = refusal.refused_tool
         if tool is None or self._otp_service is None:
             return
-        contact = OtpContact(email=session.contact_email)
+        # Both contacts feed the OTP seam: the pre-chat email, plus a phone captured by an
+        # identity_intake submit (attach_session_identity) — so a captured contact is
+        # immediately OTP-verifiable over whichever channel it filled (email and/or SMS).
+        contact = OtpContact(email=session.contact_email, phone=session.contact_phone)
         if contact.is_empty:
             return
         channels = [c.value for c in contact.available_channels()]
@@ -850,7 +853,11 @@ class FrameDispatcher:
             )
             return
 
-        # Valid: consume the park and resume the turn with the canonical payload.
+        # Valid: run the kind's host effect (e.g. identity_intake stamps the captured contacts
+        # onto the session), THEN consume the park and resume the turn with the canonical payload.
+        # The effect runs before the resume, mirroring the Rust handle_submit_interaction; it is a
+        # no-op for kinds without one (choices), so this stays kind-agnostic.
+        await kind.host_effect(self._store, session_id, canonical or {})
         self._interaction_pending.resolve(session_id, InteractionOutcome.submitted(canonical or {}))
         sink(
             protocol.immediate_response(
