@@ -14,3 +14,5 @@ Impact: a session declaring a Rich Interaction (`identity_form`, `choice_chips`)
 - **TypeScript** — added the missing `stream_reasoning` to `EVENT_TYPES`/`ServerEvent` and to `validate.ts`'s event→schema map. (The shipped web-chat example already had a `case 'stream_reasoning'` that could never fire.)
 
 Each language also gains a drift guard that derives the expected discriminator set from `spec/events/*.schema.json` and `spec/actions/*.schema.json` at test time, so a future event schema that isn't wired into a dispatch union fails the build instead of being dropped at runtime.
+
+Graceful handling of genuinely unknown event types is unchanged and now covered by tests: per the spec, a client that does not recognize an event MUST ignore it, so a frame from a newer server is still dropped quietly rather than raising.
