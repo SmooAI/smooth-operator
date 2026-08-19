@@ -263,8 +263,8 @@ func TestCancelMidTurnAbortsAndEmitsCancelled(t *testing.T) {
 // The regression this guards (th-f2ac48): the engine's agent loop folds a tool failure —
 // including the `context canceled` a tool or the write-confirmation gate returns once the
 // turn is cancelled — back to the model as a tool result and iterates. The runner has
-// already walked away, so that next model call's output was merely discarded: real
-// gateway spend, and real tool side effects, on a turn the user stopped.
+// already walked away, so that next model call and everything it asks for happened on a
+// turn the user stopped, with its output merely discarded.
 //
 // Asserted on deterministic state, not timing: the mock's call count, and the fact that
 // the NEXT turn still finds its scripted response. Without the fix the cancelled turn
