@@ -27,21 +27,26 @@ public static class EventTypes
     public const string EventualResponse = "eventual_response";
     public const string StreamChunk = "stream_chunk";
     public const string StreamToken = "stream_token";
+    public const string StreamPreamble = "stream_preamble";
+    public const string StreamReasoning = "stream_reasoning";
     public const string Keepalive = "keepalive";
     public const string WriteConfirmationRequired = "write_confirmation_required";
     public const string OtpVerificationRequired = "otp_verification_required";
     public const string OtpSent = "otp_sent";
     public const string OtpVerified = "otp_verified";
     public const string OtpInvalid = "otp_invalid";
+    public const string InteractionRequired = "interaction_required";
+    public const string InteractionInvalid = "interaction_invalid";
     public const string Cancelled = "cancelled";
     public const string Error = "error";
     public const string Pong = "pong";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>
     {
-        ImmediateResponse, EventualResponse, StreamChunk, StreamToken, Keepalive,
-        WriteConfirmationRequired, OtpVerificationRequired, OtpSent, OtpVerified,
-        OtpInvalid, Cancelled, Error, Pong,
+        ImmediateResponse, EventualResponse, StreamChunk, StreamToken, StreamPreamble,
+        StreamReasoning, Keepalive, WriteConfirmationRequired, OtpVerificationRequired,
+        OtpSent, OtpVerified, OtpInvalid, InteractionRequired, InteractionInvalid,
+        Cancelled, Error, Pong,
     };
 }
 
@@ -54,13 +59,14 @@ public static class ActionTypes
     public const string GetConversationMessages = "get_conversation_messages";
     public const string ConfirmToolAction = "confirm_tool_action";
     public const string VerifyOtp = "verify_otp";
+    public const string SubmitInteraction = "submit_interaction";
     public const string Cancel = "cancel";
     public const string Ping = "ping";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>
     {
         CreateConversationSession, SendMessage, GetSession, GetConversationMessages,
-        ConfirmToolAction, VerifyOtp, Cancel, Ping,
+        ConfirmToolAction, VerifyOtp, SubmitInteraction, Cancel, Ping,
     };
 }
 
@@ -107,12 +113,16 @@ public sealed class ServerEventConverter : JsonConverter<ServerEvent>
         [EventTypes.EventualResponse] = typeof(EventualResponseEvent),
         [EventTypes.StreamChunk] = typeof(StreamChunkEvent),
         [EventTypes.StreamToken] = typeof(StreamTokenEvent),
+        [EventTypes.StreamPreamble] = typeof(StreamPreambleEvent),
+        [EventTypes.StreamReasoning] = typeof(StreamReasoningEvent),
         [EventTypes.Keepalive] = typeof(KeepaliveEvent),
         [EventTypes.WriteConfirmationRequired] = typeof(WriteConfirmationRequiredEvent),
         [EventTypes.OtpVerificationRequired] = typeof(OtpVerificationRequiredEvent),
         [EventTypes.OtpSent] = typeof(OtpSentEvent),
         [EventTypes.OtpVerified] = typeof(OtpVerifiedEvent),
         [EventTypes.OtpInvalid] = typeof(OtpInvalidEvent),
+        [EventTypes.InteractionRequired] = typeof(InteractionRequiredEvent),
+        [EventTypes.InteractionInvalid] = typeof(InteractionInvalidEvent),
         [EventTypes.Cancelled] = typeof(CancelledEvent),
         [EventTypes.Error] = typeof(ErrorEvent),
         [EventTypes.Pong] = typeof(PongEvent),
@@ -277,6 +287,120 @@ public sealed class StreamTokenData
 
     [JsonPropertyName("token")]
     public string? Token { get; set; }
+}
+
+/// <summary>
+/// An EPHEMERAL status line streamed while the real answer is still being produced.
+/// Shaped identically to <see cref="StreamTokenEvent"/> so the render path is reusable,
+/// but on a distinct type so it is shown as a placeholder the answer replaces — it is
+/// NEVER folded into the answer, and <c>eventual_response</c> excludes it.
+/// </summary>
+public sealed class StreamPreambleEvent : ServerEvent
+{
+    public override string Type => EventTypes.StreamPreamble;
+
+    /// <summary>The raw preamble token text (top-level mirror of <c>data.token</c>).</summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    [JsonPropertyName("data")]
+    public StreamTokenData Data { get; set; } = new();
+
+    [JsonPropertyName("timestamp")]
+    public long? Timestamp { get; set; }
+}
+
+/// <summary>
+/// A single token from a reasoning model's separate thinking channel. Shaped like
+/// <see cref="StreamTokenEvent"/> so it renders the same way, but on a distinct type so
+/// reasoning is shown as collapsible "thinking" and is NEVER folded into the answer.
+/// </summary>
+public sealed class StreamReasoningEvent : ServerEvent
+{
+    public override string Type => EventTypes.StreamReasoning;
+
+    /// <summary>The raw reasoning token text (top-level mirror of <c>data.token</c>).</summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    [JsonPropertyName("data")]
+    public StreamTokenData Data { get; set; } = new();
+
+    [JsonPropertyName("timestamp")]
+    public long? Timestamp { get; set; }
+}
+
+/// <summary>
+/// A mid-turn Rich Interaction prompt. The turn is PARKED until
+/// <c>SubmitInteractionAsync</c> answers it (or the turn times out).
+/// </summary>
+public sealed class InteractionRequiredEvent : ServerEvent
+{
+    public override string Type => EventTypes.InteractionRequired;
+
+    [JsonPropertyName("data")]
+    public NestedData<InteractionRequiredDetails> Data { get; set; } = new();
+
+    [JsonPropertyName("timestamp")]
+    public long? Timestamp { get; set; }
+}
+
+public sealed class InteractionRequiredDetails
+{
+    /// <summary>Echo this on the submit so a stale answer can't resolve a newer park.</summary>
+    [JsonPropertyName("interactionId")]
+    public string InteractionId { get; set; } = string.Empty;
+
+    /// <summary>The interaction kind, e.g. <c>identity_intake</c> or <c>choices</c>.</summary>
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>Kind-shaped render spec, per <c>spec/interactions/&lt;kind&gt;.schema.json</c>.
+    /// Left untyped: one verb serves every kind, so adding a kind needs no new type here.</summary>
+    [JsonPropertyName("spec")]
+    public JsonElement? Spec { get; set; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+}
+
+/// <summary>
+/// The kind's server-side validation rejected a submit. NOT terminal — the turn stays
+/// parked, and the caller resubmits corrected values.
+/// </summary>
+public sealed class InteractionInvalidEvent : ServerEvent
+{
+    public override string Type => EventTypes.InteractionInvalid;
+
+    [JsonPropertyName("data")]
+    public NestedData<InteractionInvalidDetails> Data { get; set; } = new();
+
+    [JsonPropertyName("timestamp")]
+    public long? Timestamp { get; set; }
+}
+
+public sealed class InteractionInvalidDetails
+{
+    [JsonPropertyName("interactionId")]
+    public string InteractionId { get; set; } = string.Empty;
+
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = string.Empty;
+
+    [JsonPropertyName("errors")]
+    public List<InteractionFieldError> Errors { get; set; } = new();
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
+}
+
+public sealed class InteractionFieldError
+{
+    [JsonPropertyName("field")]
+    public string? Field { get; set; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
 }
 
 /// <summary>Server keepalive during long-running turns (distinct from ping/pong).</summary>
@@ -521,6 +645,7 @@ public sealed class NestedData<T> where T : new()
 [JsonDerivedType(typeof(GetMessagesAction), ActionTypes.GetConversationMessages)]
 [JsonDerivedType(typeof(ConfirmToolAction), ActionTypes.ConfirmToolAction)]
 [JsonDerivedType(typeof(VerifyOtpAction), ActionTypes.VerifyOtp)]
+[JsonDerivedType(typeof(SubmitInteractionAction), ActionTypes.SubmitInteraction)]
 [JsonDerivedType(typeof(CancelAction), ActionTypes.Cancel)]
 [JsonDerivedType(typeof(PingAction), ActionTypes.Ping)]
 public abstract class ClientAction
@@ -612,6 +737,42 @@ public sealed class VerifyOtpAction : ClientAction
 
     [JsonPropertyName("code")]
     public string Code { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Submit (or decline) a Rich Interaction, resuming the turn parked by an
+/// <c>interaction_required</c> event. This ONE action serves every interaction kind
+/// (identity intake, choice chips, future date pickers, …) — adding a kind needs no
+/// new action type.
+/// </summary>
+public sealed class SubmitInteractionAction : ClientAction
+{
+    public override string Action => ActionTypes.SubmitInteraction;
+
+    [JsonPropertyName("sessionId")]
+    public string SessionId { get; set; } = string.Empty;
+
+    /// <summary>Echo of the <c>interaction_required</c> event's <c>interactionId</c>, so a
+    /// stale submit can never resolve a newer park.</summary>
+    [JsonPropertyName("interactionId")]
+    public string InteractionId { get; set; } = string.Empty;
+
+    /// <summary>Optional kind cross-check; a mismatch is rejected server-side.</summary>
+    [JsonPropertyName("kind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Kind { get; set; }
+
+    /// <summary>Kind-shaped values, per <c>spec/interactions/&lt;kind&gt;.schema.json#/$defs/Values</c>.
+    /// Required unless <see cref="Declined"/> is true.</summary>
+    [JsonPropertyName("values")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, object?>? Values { get; set; }
+
+    /// <summary>True when the visitor refused. The turn resumes with a declined payload so
+    /// the agent proceeds gracefully; <see cref="Values"/> is ignored.</summary>
+    [JsonPropertyName("declined")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Declined { get; set; }
 }
 
 /// <summary>
