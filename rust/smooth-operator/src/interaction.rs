@@ -46,6 +46,23 @@ pub struct InteractionRequest {
     pub reason: String,
 }
 
+/// A raise on its way to the host's bridge: the parsed request plus the id the
+/// park is waiting on.
+///
+/// The id is minted by the **raise tool**, not by the bridge, because the parked
+/// tool is the one that has to tell its own outcome from a stale park's. Every
+/// raise in a turn shares one outcome channel, so without the id a park consumes
+/// whatever arrives first — including the answer to a question the model asked
+/// five minutes and one timeout ago, of a possibly different kind (th-d121f5).
+#[derive(Debug, Clone)]
+pub struct InteractionRaise {
+    /// Identity of this interaction instance; echoed on `interaction_required`
+    /// and required back on `submit_interaction`.
+    pub id: String,
+    /// What the agent asked the visitor for.
+    pub request: InteractionRequest,
+}
+
 /// How a parked interaction resolved.
 #[derive(Debug, Clone)]
 pub enum InteractionOutcome {
@@ -54,6 +71,19 @@ pub enum InteractionOutcome {
     Submitted { values: Value },
     /// The visitor declined the interaction.
     Declined,
+}
+
+/// An outcome on its way back, tagged with the interaction it answers.
+///
+/// A park consumes a resolution only when [`interaction_id`](Self::interaction_id)
+/// matches the raise it is waiting on; anything else belongs to a park that is
+/// already dead (timed out, cancelled) and is **dropped**.
+#[derive(Debug, Clone)]
+pub struct InteractionResolution {
+    /// The [`InteractionRaise::id`] this answers.
+    pub interaction_id: String,
+    /// How it resolved.
+    pub outcome: InteractionOutcome,
 }
 
 /// One interaction kind — the extension seam of the Rich Interactions pattern.

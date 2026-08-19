@@ -25,7 +25,7 @@ use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorC
 use smooth_operator::domain::Session;
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
 use smooth_operator::identity_intake::IntakeValues;
-use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry};
+use smooth_operator::interaction::{InteractionRegistry, InteractionResolution};
 use smooth_operator::otp::{OtpContact, OtpService};
 use smooth_operator::settings::{InMemorySettingsStore, SettingsStore};
 use smooth_operator::tool_provider::ToolProvider;
@@ -177,7 +177,7 @@ pub struct AppState {
     /// turn is parked (the default, byte-for-byte unchanged from before HITL).
     pending_confirmations: Arc<RwLock<HashMap<String, UnboundedSender<HumanResponse>>>>,
     /// **Rich Interactions pending parks**: `sessionId` → the parked turn's
-    /// interaction (id + kind + spec) and [`InteractionOutcome`] sender. When an
+    /// interaction (id + kind + spec) and [`InteractionResolution`] sender. When an
     /// agent turn's raise tool parks on a capability-declaring session, the
     /// runner's interaction bridge registers here; a subsequent
     /// `submit_interaction` frame validates against the registered kind + spec,
@@ -233,15 +233,15 @@ pub fn scoped_connector_key(org_id: &str, connector_name: &str) -> String {
 /// the sender that resumes it.
 #[derive(Clone)]
 pub struct PendingInteraction {
-    /// Server-generated id for this interaction instance; the submit must echo
-    /// it so a stale submit can never resolve a newer park.
+    /// Id of this interaction instance (minted by the raise tool); the submit
+    /// must echo it so a stale submit can never resolve a newer park.
     pub interaction_id: String,
     /// The interaction kind (routes to its validator).
     pub kind: String,
     /// The kind-specific spec the raise carried (drives validation).
     pub spec: serde_json::Value,
     /// Resumes the parked raise tool.
-    pub responder: UnboundedSender<InteractionOutcome>,
+    pub responder: UnboundedSender<InteractionResolution>,
 }
 
 impl AppState {

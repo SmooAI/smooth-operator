@@ -721,7 +721,7 @@ async fn submit_interaction_cannot_resolve_another_users_parked_card() {
 
     // Park a Rich Interaction on ALICE's session.
     let (responder, mut outcomes) =
-        unbounded_channel::<smooth_operator::interaction::InteractionOutcome>();
+        unbounded_channel::<smooth_operator::interaction::InteractionResolution>();
     state.register_interaction(
         a.session_id.clone(),
         smooth_operator_server::state::PendingInteraction {

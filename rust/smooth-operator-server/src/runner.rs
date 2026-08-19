@@ -45,7 +45,7 @@ use smooth_operator::agent_config::{
     AuthGateHook, ConversationWorkflow, WorkflowJudgeVerdict, JUDGE_SYSTEM_PROMPT,
 };
 use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
-use smooth_operator::interaction::{InteractionOutcome, InteractionRegistry, InteractionRequest};
+use smooth_operator::interaction::{InteractionRaise, InteractionRegistry, InteractionResolution};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::telemetry::{
     record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
@@ -240,6 +240,37 @@ pub struct ConfirmationConfig {
     pub host_approver: Option<HostApprover>,
 }
 
+/// Runs its teardown closure when dropped — **including** when the turn future
+/// is dropped part-way through, which plain post-await code never survives.
+///
+/// This is the difference between "the turn ended" and "the turn was killed".
+/// `cancel` and a mid-turn client disconnect both resolve to `handle.abort()`
+/// (see `server.rs`), which drops the turn future at its current `.await` — and
+/// a turn parked on an interaction or a confirmation is sitting on exactly such
+/// an `.await`. Every teardown written as a statement *after* that await is
+/// therefore skipped precisely when a park is outstanding, leaving the
+/// registration in `AppState` for a later `submit_interaction` to resolve
+/// (th-6fbab2). Registering the teardown as a guard instead makes it run on both
+/// paths; ports without RAII want `try { … } finally { clear() }`.
+///
+/// Drop it explicitly where the teardown used to be written, so the normal path
+/// keeps its original ordering.
+struct ClearOnDrop(Option<Box<dyn FnOnce() + Send>>);
+
+impl ClearOnDrop {
+    fn new(teardown: impl FnOnce() + Send + 'static) -> Self {
+        Self(Some(Box::new(teardown)))
+    }
+}
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        if let Some(teardown) = self.0.take() {
+            teardown();
+        }
+    }
+}
+
 /// Where a parked approval should be sent: the live turn's event sink and the
 /// ids needed to correlate the client's answer back to it.
 #[derive(Clone)]
@@ -357,7 +388,9 @@ impl HostApprover {
 /// sender) under a session id, so a later `submit_interaction` can validate +
 /// resume it. Typically wraps `AppState::register_interaction`.
 pub type RegisterInteraction = Arc<
-    dyn Fn(&str, &str, &str, &serde_json::Value, UnboundedSender<InteractionOutcome>) + Send + Sync,
+    dyn Fn(&str, &str, &str, &serde_json::Value, UnboundedSender<InteractionResolution>)
+        + Send
+        + Sync,
 >;
 
 /// Hooks the runner needs to wire **Rich Interactions** into a turn (see
@@ -871,6 +904,10 @@ pub async fn run_streaming_turn(
         }
         None => None,
     };
+    let interaction_guard = interactions.as_ref().map(|cfg| {
+        let (clear, sid) = (Arc::clone(&cfg.clear), cfg.session_id.clone());
+        ClearOnDrop::new(move || clear(&sid))
+    });
 
     // SEAM 1 — merge host-contributed tools.    // SEAM 1 — merge host-contributed tools. When a provider is installed, ask
     // it (with the turn's org + access context) for extra tools and register
@@ -903,6 +940,11 @@ pub async fn run_streaming_turn(
             tools.register_arc(tool);
         }
     }
+
+    let extension_guard = extensions.as_ref().map(|ext| {
+        let (clear, sid) = (Arc::clone(&ext.clear), ext.session_id.clone());
+        ClearOnDrop::new(move || clear(&sid))
+    });
 
     // SEP — register the hosted extensions' tools. Eager tools go in as ordinary
     // registry entries so the per-agent `enabled_tools` retain below filters them
@@ -966,6 +1008,23 @@ pub async fn run_streaming_turn(
                 register: Arc::clone(&cfg.register),
             });
             ha.clone()
+        })
+    });
+
+    // Teardown guards for everything a turn can leave PARKED. Armed here, before
+    // the turn can park, and dropped below where the teardown used to be written
+    // — so an aborted turn (cancel / disconnect) clears its registrations too.
+    let confirmation_guard = confirmation.as_ref().map(|cfg| {
+        let (clear, sid) = (Arc::clone(&cfg.clear), cfg.session_id.clone());
+        let approver = host_approver.clone();
+        ClearOnDrop::new(move || {
+            // Stop routing approval prompts at this turn's (now dead) sink. The
+            // drain task itself is process-lived and deliberately NOT stopped —
+            // see `HostApprover` (th-2105e9).
+            if let Some(ha) = approver {
+                ha.deactivate();
+            }
+            clear(&sid);
         })
     });
 
@@ -1257,31 +1316,24 @@ pub async fn run_streaming_turn(
     // lets the bridge's `request_rx.recv()` return `None` and the task finish.
     // Without this explicit drop, awaiting the bridge below would hang forever.
     drop(agent);
-    if let (Some(handle), Some(cfg)) = (confirmation_bridge, confirmation.as_ref()) {
+    if let Some(handle) = confirmation_bridge {
         let _ = handle.await;
-        (cfg.clear)(&cfg.session_id);
     }
-    // Stop routing approval prompts at this turn's (now dead) sink. The drain
-    // task itself is process-lived and deliberately NOT stopped — see
-    // `HostApprover` (th-2105e9).
-    if let (Some(ha), Some(cfg)) = (host_approver, confirmation.as_ref()) {
-        ha.deactivate();
-        (cfg.clear)(&cfg.session_id);
-    }
+    // Clears the confirmation registration and deactivates the host approver
+    // (see the guard's construction).
+    drop(confirmation_guard);
     // Same teardown for the interaction bridge: dropping the agent closed the
     // raise tools' request sender, so the bridge drains and finishes; then clear
     // any interaction registration the turn left parked.
-    if let (Some(handle), Some(cfg)) = (interaction_bridge, interactions.as_ref()) {
+    if let Some(handle) = interaction_bridge {
         let _ = handle.await;
-        (cfg.clear)(&cfg.session_id);
     }
+    drop(interaction_guard);
     // SEP — clear any `ui/confirm` responder the turn left parked (a hosted
     // extension that requested a confirm the client never answered), then let the
     // host drop, which kills its extension subprocesses. Mirrors the native
     // confirmation teardown above.
-    if let Some(ext) = &extensions {
-        (ext.clear)(&ext.session_id);
-    }
+    drop(extension_guard);
     drop(extensions);
 
     let (invoked_knowledge_search, usage, tool_records, streamed_reply, streamed_reasoning) =
@@ -1562,30 +1614,31 @@ fn spawn_confirmation_bridge(
 /// channel closes (the tools/agent dropped at turn end); the caller then clears
 /// the registration.
 fn spawn_interaction_bridge(
-    mut request_rx: UnboundedReceiver<InteractionRequest>,
-    outcome_tx: UnboundedSender<InteractionOutcome>,
+    mut request_rx: UnboundedReceiver<InteractionRaise>,
+    outcome_tx: UnboundedSender<InteractionResolution>,
     sink: UnboundedSender<serde_json::Value>,
     request_id: String,
     session_id: String,
     register: RegisterInteraction,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(req) = request_rx.recv().await {
-            let interaction_id = uuid::Uuid::new_v4().to_string();
+        while let Some(raise) = request_rx.recv().await {
+            let req = raise.request;
             // Register THIS turn's outcome sender (+ the kind/spec as the
             // validation contract) so the next `submit_interaction` for this
             // session resumes it. Re-clone per request: the raise tool takes one
-            // outcome per park.
+            // outcome per park. The id comes from the raise tool — it is what
+            // the parked tool correlates the outcome against.
             register(
                 &session_id,
-                &interaction_id,
+                &raise.id,
                 &req.kind,
                 &req.spec,
                 outcome_tx.clone(),
             );
             let _ = sink.send(crate::protocol::interaction_required(
                 &request_id,
-                &interaction_id,
+                &raise.id,
                 &req.kind,
                 &req.spec,
                 &req.reason,

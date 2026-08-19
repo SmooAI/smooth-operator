@@ -78,8 +78,8 @@ pub use identity_intake::{
     IntakeFieldError, IntakeFieldKey, IntakeValues,
 };
 pub use interaction::{
-    InteractionFieldError, InteractionKind, InteractionOutcome, InteractionRegistry,
-    InteractionRequest,
+    InteractionFieldError, InteractionKind, InteractionOutcome, InteractionRaise,
+    InteractionRegistry, InteractionRequest, InteractionResolution,
 };
 pub use mcp::{ChainedToolProvider, McpConfig, McpServerConfig, McpToolProvider};
 pub use otp::{OtpChannel, OtpContact, OtpDelivery, OtpError, OtpService, OtpVerifyOutcome};
