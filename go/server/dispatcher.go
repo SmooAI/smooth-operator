@@ -747,7 +747,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// reference ordering. The reference server does not park/auto-resume; the client
 		// verifies via verify_otp and re-sends its message once the session is authenticated.
 		if tool := refusal.refusedTool(); tool != "" && d.otpService != nil {
-			contact := OtpContact{Email: session.ContactEmail}
+			contact := OtpContact{Email: session.ContactEmail, Phone: session.ContactPhone}
 			if !contact.IsEmpty() {
 				d.offerOtp(ctx, session.SessionID, tool, contact, requestID, sink)
 			}
@@ -916,6 +916,10 @@ func (d *FrameDispatcher) handleSubmitInteraction(ctx context.Context, frame inb
 		return
 	}
 	if d.interactions.Resolve(frame.SessionID, pending.InteractionID, InteractionOutcome{Status: outcomeSubmitted, Values: canonical}) {
+		// Kind-routed host effect (identity_intake: stamp the session identity). Kind-agnostic:
+		// a kind with no host effect (choices) is a no-op. Runs on the valid rich-submit path;
+		// the conversational fallback fires the same seam from the submit_interaction tool.
+		attachInteractionEffect(ctx, d.store, kind, frame.SessionID, canonical)
 		sink(immediateResponse(frame.RequestID, 200, "Interaction submitted", map[string]any{
 			"sessionId":     frame.SessionID,
 			"interactionId": pending.InteractionID,

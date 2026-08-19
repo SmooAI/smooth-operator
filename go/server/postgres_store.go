@@ -230,7 +230,9 @@ func StorageOptionsFromEnv(ctx context.Context) ([]Option, error) {
 // shared schema. Mirrors the Rust reference server's session metadata (which is
 // where its otpVerified lives too).
 type sessionMetadata struct {
+	UserName      string `json:"userName,omitempty"`
 	ContactEmail  string `json:"contactEmail,omitempty"`
+	ContactPhone  string `json:"contactPhone,omitempty"`
 	OtpVerified   bool   `json:"otpVerified,omitempty"`
 	CurrentStepID string `json:"currentStepId,omitempty"`
 }
@@ -424,7 +426,9 @@ func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Stor
 		return nil, fmt.Errorf("postgres: decode session metadata: %w", err)
 	}
 	session.SessionID = sessionID
+	session.UserName = meta.UserName
 	session.ContactEmail = meta.ContactEmail
+	session.ContactPhone = meta.ContactPhone
 	session.OtpVerified = meta.OtpVerified
 	session.CurrentStepID = meta.CurrentStepID
 	return &session, nil
@@ -570,6 +574,26 @@ func (s *PostgresStore) SetCurrentStep(ctx context.Context, sessionID, stepID st
 // SetSessionAuthenticated persists a session's OTP-verified bit. A no-op for an unknown session.
 func (s *PostgresStore) SetSessionAuthenticated(ctx context.Context, sessionID string, verified bool) error {
 	return s.mergeSessionMetadata(ctx, sessionID, map[string]any{"otpVerified": verified})
+}
+
+// AttachSessionContact stamps a captured identity onto a session's metadata (merge — only
+// the non-blank fields, so an existing contact is never clobbered). A no-op for an unknown
+// session (the UPDATE matches no row).
+func (s *PostgresStore) AttachSessionContact(ctx context.Context, sessionID, userName, email, phone string) error {
+	patch := map[string]any{}
+	if userName != "" {
+		patch["userName"] = userName
+	}
+	if email != "" {
+		patch["contactEmail"] = email
+	}
+	if phone != "" {
+		patch["contactPhone"] = phone
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	return s.mergeSessionMetadata(ctx, sessionID, patch)
 }
 
 // mergeSessionMetadata merges patch into a session's metadata JSON. `||` on jsonb is a
