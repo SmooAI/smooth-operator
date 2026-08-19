@@ -14,6 +14,13 @@ import (
 	core "github.com/SmooAI/smooth-operator-core/go/core"
 )
 
+// patience bounds every wait in this file. It is deliberately far longer than any of
+// these steps needs, because the thing being tested is a WEDGE: a wedged turn never
+// finishes, so a generous bound costs nothing on a healthy run (it returns in
+// milliseconds) and only spends real time when there IS a regression. That keeps the
+// test from flaking on a loaded CI box, where a tight deadline is a false failure.
+const patience = 60 * time.Second
+
 // burstClient streams one token, signals that the turn is provably in-flight, then —
 // once released — blasts far more tokens than the connection's outbound sink can buffer.
 // That is the shape that wedges the server when the socket dies mid-stream: the writer
@@ -66,7 +73,7 @@ func dialCapturingTCP(t *testing.T, ls *LocalServer) (*websocket.Conn, *net.TCPC
 			return c, nil
 		},
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), patience)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, ls.WSURL(), &websocket.DialOptions{HTTPClient: httpClient})
 	if err != nil {
@@ -85,7 +92,7 @@ func writeFrame(t *testing.T, conn *websocket.Conn, frame map[string]any) {
 	if err != nil {
 		t.Fatalf("marshal frame: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), patience)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		t.Fatalf("write frame: %v", err)
@@ -95,9 +102,9 @@ func writeFrame(t *testing.T, conn *websocket.Conn, frame map[string]any) {
 // readEventUntil reads events until match returns true, or fails the test.
 func readEventUntil(t *testing.T, conn *websocket.Conn, match func(map[string]any) bool) map[string]any {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(patience)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), patience)
 		_, data, err := conn.Read(ctx)
 		cancel()
 		if err != nil {
@@ -161,7 +168,7 @@ func TestClientDisconnectMidStreamDoesNotWedgeTurn(t *testing.T) {
 
 	select {
 	case <-burst.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(patience):
 		t.Fatal("turn never started")
 	}
 
@@ -191,7 +198,7 @@ func TestClientDisconnectMidStreamDoesNotWedgeTurn(t *testing.T) {
 		if err != nil {
 			t.Fatalf("shutdown errored: %v", err)
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(patience):
 		t.Fatal("shutdown never returned: the turn goroutine is wedged on a full sink with no reader")
 	}
 }
