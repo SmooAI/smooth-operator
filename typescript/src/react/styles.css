@@ -317,6 +317,39 @@ span.smooth-chat__source-title {
     font-size: 14px;
     outline: none;
 }
+.smooth-chat__interaction-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.smooth-chat__interaction-field-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--smooth-color-muted);
+}
+.smooth-chat__interaction-required {
+    color: var(--smooth-color-primary);
+}
+.smooth-chat__interaction-input {
+    padding: 8px 10px;
+    border: 1px solid var(--smooth-color-border);
+    border-radius: calc(var(--smooth-radius) - 4px);
+    background: var(--smooth-color-bg);
+    color: var(--smooth-color-text);
+    font: inherit;
+    font-size: 14px;
+    outline: none;
+}
+.smooth-chat__interaction-input:focus {
+    border-color: var(--smooth-color-primary);
+    outline: 1px solid var(--smooth-color-primary);
+}
+.smooth-chat__interaction-input--invalid {
+    border-color: #dc2626;
+}
 .smooth-chat__interaction-error {
     margin: 0;
     font-size: 12px;
