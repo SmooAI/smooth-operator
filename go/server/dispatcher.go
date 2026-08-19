@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -709,6 +710,24 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// ui/confirm and shut the subprocesses down. No-op when no host was built.
 		// Uses the connection ctx, not the turn's, so a cancelled turn still cleans up.
 		defer extTurn.Close(ctx)
+		// Confine a panicking turn to THIS goroutine. Go's default is to take the whole
+		// PROCESS down on an unrecovered panic in ANY goroutine, and a turn runs on a bare
+		// one — so a host store/config/hook that explodes would drop every other live
+		// connection on the pod. Rust confines a panicking turn to its JoinHandle; this is
+		// the Go equivalent: the client gets a clean INTERNAL_ERROR and the connection
+		// stays up. Registered LAST so it unwinds FIRST — before turnCancel (whose
+		// cancelled ctx would suppress the event) and before turns.Done (which lets
+		// teardown close the sink out from under us).
+		//
+		// This covers the turn goroutine's own stack. A panic inside a TOOL is still fatal:
+		// the engine runs the tool loop on its own recover-less goroutine in
+		// smooth-operator-core (core/agent.go RunStream), so that guard belongs there.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("turn panicked", "requestId", requestID, "panic", r, "stack", string(debug.Stack()))
+				sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+			}
+		}()
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
 		runner.hooks = d.hooks
 		// Rich Interactions: give the runner the hosted kinds, the park/resume registry,

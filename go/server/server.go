@@ -291,13 +291,24 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	writerWG.Add(1)
 	go func() {
 		defer writerWG.Done()
+		// Once the socket is dead we keep DRAINING the sink (discarding) instead of
+		// returning. Returning would leave a BOUNDED channel with no reader, so the 65th
+		// send from a streaming turn blocks forever — and `send` holds sendMu across that
+		// send, so the turn, the read loop and the backplane all wedge, WaitForTurns never
+		// returns, and the connection leaks out of s.conns for the process's lifetime.
+		// Matches the Rust reference, whose unbounded sink_tx can never block a turn on a
+		// dead socket (rust/smooth-operator-server/src/server.rs).
+		dead := false
 		for event := range sink {
+			if dead {
+				continue
+			}
 			data, err := json.Marshal(event)
 			if err != nil {
 				continue
 			}
 			if err := conn.Write(ioCtx, websocket.MessageText, data); err != nil {
-				return
+				dead = true
 			}
 		}
 	}()

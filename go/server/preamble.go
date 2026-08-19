@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 
@@ -48,6 +49,13 @@ func preambleModel() string {
 // answerStarted is the shared first-answer-token guard: it is checked immediately before
 // emitting so a slow preamble can never land after the real answer has begun.
 func runPreamble(ctx context.Context, client core.ChatClient, model, requestID, userMessage string, answerStarted *atomic.Bool, sink EventSink) {
+	// Best-effort means best-effort: this runs on its own goroutine, so a panicking host
+	// chat client would otherwise take the whole PROCESS down over an optional preamble.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("preamble panicked (ignored)", "requestId", requestID, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
 	resp, err := client.Chat(ctx, core.ChatRequest{
 		Model: model,
 		Messages: []core.ChatMessage{
