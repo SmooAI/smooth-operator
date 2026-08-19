@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -103,6 +105,13 @@ type TurnRunner struct {
 	// create_conversation_session — gates which kinds get the rich (parked card) path
 	// vs the conversational fallback. Empty → every kind falls back. Set by the dispatcher.
 	capabilities map[string]bool
+	// raisedSpecs stashes the spec of each kind raised on the CONVERSATIONAL fallback path
+	// THIS turn (keyed by kind id), so a same-turn submit_interaction tool call validates
+	// against the raised required-ness rather than degrading to format-only. Per-turn (the
+	// runner is per-turn); guarded because tools may dispatch concurrently. The Go analog of
+	// the Rust RaisedSpecs. nil until the first fallback raise stashes into it.
+	raisedMu    sync.Mutex
+	raisedSpecs map[string]json.RawMessage
 	// workflow is the agent's structured conversation workflow (nil → freeform). When
 	// set, the runner judges the turn after it completes and returns the advanced step
 	// id in TurnResult.NextStepID. The current step is already rendered into systemPrompt
@@ -598,11 +607,95 @@ const interactionTimeout = 300 * time.Second
 // per kind (rust/smooth-operator/src/tools/interaction.rs).
 func (r *TurnRunner) interactionTools(sessionID, requestID string, sink EventSink) []core.Tool {
 	var tools []core.Tool
+	anyFallback := false
 	for _, kind := range r.interactionKinds.All() {
 		rich := r.capabilities[kind.Capability()]
+		if !rich {
+			anyFallback = true
+		}
 		tools = append(tools, r.raiseTool(kind, rich, sessionID, requestID, sink))
 	}
+	// Register the generic submit_interaction tool ONLY when at least one kind is on the
+	// conversational fallback path (rich sessions submit via the protocol action instead).
+	// It validates the model's collected values against the raised spec and fires the kind's
+	// host effect — the fallback-path half of the effect seam. Mirrors the Rust
+	// SubmitInteractionTool registration.
+	if anyFallback {
+		tools = append(tools, r.submitInteractionTool(sessionID))
+	}
 	return tools
+}
+
+// stashRaisedSpec records the spec of a kind raised on the fallback path this turn, so a
+// same-turn submit_interaction tool call validates against its required-ness.
+func (r *TurnRunner) stashRaisedSpec(kind string, spec json.RawMessage) {
+	r.raisedMu.Lock()
+	defer r.raisedMu.Unlock()
+	if r.raisedSpecs == nil {
+		r.raisedSpecs = map[string]json.RawMessage{}
+	}
+	r.raisedSpecs[kind] = spec
+}
+
+// raisedSpec returns the spec stashed for a kind this turn (nil when none — the kind then
+// validates format-only, e.g. a prior-turn raise whose spec is gone).
+func (r *TurnRunner) raisedSpec(kind string) json.RawMessage {
+	r.raisedMu.Lock()
+	defer r.raisedMu.Unlock()
+	return r.raisedSpecs[kind]
+}
+
+// submitInteractionTool builds the generic submit_interaction tool for the conversational
+// fallback: the model calls it with { kind, values | declined } after collecting the answers
+// turn by turn. Values are validated server-side against the raised spec; on success the
+// kind's host effect runs (identity_intake: stamp the session identity), on failure it errors
+// so the model re-asks. The Go analog of the Rust SubmitInteractionTool.
+func (r *TurnRunner) submitInteractionTool(sessionID string) core.Tool {
+	kindIDs := make([]any, 0)
+	for _, k := range r.interactionKinds.All() {
+		kindIDs = append(kindIDs, k.Kind())
+	}
+	return core.FuncTool{
+		ToolName: "submit_interaction",
+		Desc: "Submit the visitor's answers collected conversationally after a request_* interaction " +
+			"directive. Values are validated server-side; on a validation error, apologize, re-ask for " +
+			"the corrected field, and submit again. If the visitor declined, set declined=true.",
+		Params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"kind":     map[string]any{"type": "string", "enum": kindIDs, "description": "The interaction kind being submitted (from the directive)."},
+				"values":   map[string]any{"type": "object", "description": "The collected values, shaped per the interaction kind."},
+				"declined": map[string]any{"type": "boolean", "description": "True when the visitor declined the interaction."},
+			},
+			"required": []any{"kind"},
+		},
+		Fn: func(ctx context.Context, args map[string]any) (string, error) {
+			kindID := strings.TrimSpace(asString(args["kind"]))
+			kind := r.interactionKinds.Get(kindID)
+			if kind == nil {
+				return "", fmt.Errorf("unknown interaction kind '%s'", kindID)
+			}
+			if declined, _ := args["declined"].(bool); declined {
+				return marshalInteractionResult(map[string]any{
+					"status":  outcomeDeclined,
+					"message": "Noted. Continue helping the visitor without this and do not ask again this conversation.",
+				}), nil
+			}
+			values := args["values"]
+			canonical, fieldErrs := kind.Validate(r.raisedSpec(kindID), values)
+			if len(fieldErrs) > 0 {
+				parts := make([]string, 0, len(fieldErrs))
+				for _, e := range fieldErrs {
+					parts = append(parts, e.Field+": "+e.Message)
+				}
+				return "", fmt.Errorf("validation failed — %s. Re-ask the visitor for the corrected value(s) and submit again", strings.Join(parts, "; "))
+			}
+			// Host effect (identity_intake: stamp the session identity) — the fallback-path half
+			// of the effect seam, the same seam the rich submit fires from the dispatcher.
+			attachInteractionEffect(ctx, r.store, kind, sessionID, canonical)
+			return marshalInteractionResult(map[string]any{"status": outcomeSubmitted, "values": canonical}), nil
+		},
+	}
 }
 
 // isInteractionRaise reports whether name is one of the hosted kinds' raise tools
@@ -649,7 +742,9 @@ func (r *TurnRunner) raiseTool(kind InteractionKind, rich bool, sessionID, reque
 
 			if !rich {
 				// Text-only channel: degrade to the kind's conversational directive. The
-				// model collects the answer turn by turn and continues; no park.
+				// model collects the answer turn by turn and submits via submit_interaction.
+				// Stash the raised spec so that same-turn submit validates required-ness.
+				r.stashRaisedSpec(req.Kind, req.Spec)
 				return marshalInteractionResult(map[string]any{
 					"mode":         "conversational",
 					"kind":         req.Kind,

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 )
@@ -101,6 +102,29 @@ type InteractionKind interface {
 	FallbackDirective(spec json.RawMessage, reason string) string
 }
 
+// InteractionEffect is the OPTIONAL host effect a kind runs after a valid submit — the
+// framework's kind-agnostic effect seam (the Go analog of the Rust attach_interaction_effect
+// switch). A kind with a host side effect (identity_intake: stamp the session identity)
+// implements it; a kind without one (choices) simply doesn't, and attachInteractionEffect is
+// a no-op for it. Fires on BOTH the rich submit_interaction path (dispatcher) and the
+// conversational submit_interaction tool path (turn runner), with the canonical values the
+// kind's Validate returned. Future kinds plug in by implementing this — no framework change.
+type InteractionEffect interface {
+	// AttachEffect applies the accepted interaction's host side effect for a session, given
+	// the store to persist through and the canonical (validated) values. Best-effort: it must
+	// not fail the already-produced turn (swallow persistence errors).
+	AttachEffect(ctx context.Context, store SessionStore, sessionID string, values any)
+}
+
+// attachInteractionEffect runs kind's optional host effect (InteractionEffect) after a valid
+// submit. Kind-agnostic: a kind without a host effect is a no-op. Called from both the rich
+// (dispatcher) and conversational (turn runner) submit paths.
+func attachInteractionEffect(ctx context.Context, store SessionStore, kind InteractionKind, sessionID string, values any) {
+	if effect, ok := kind.(InteractionEffect); ok {
+		effect.AttachEffect(ctx, store, sessionID, values)
+	}
+}
+
 // InteractionKinds is the stateless catalog of interaction kinds a server hosts —
 // the Go analog of the Rust InteractionRegistry-of-kinds. Immutable after build, so
 // it needs no locking and can be shared across connections.
@@ -119,9 +143,9 @@ func NewInteractionKinds(kinds ...InteractionKind) *InteractionKinds {
 	return &InteractionKinds{kinds: kinds, byID: byID}
 }
 
-// DefaultInteractionKinds is the reference catalog: choices.
+// DefaultInteractionKinds is the reference catalog: choices + identity_intake.
 func DefaultInteractionKinds() *InteractionKinds {
-	return NewInteractionKinds(ChoicesKind{})
+	return NewInteractionKinds(ChoicesKind{}, IdentityIntakeKind{})
 }
 
 // Get looks up a kind by its wire id (nil if not hosted).

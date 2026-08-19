@@ -35,11 +35,18 @@ type StoredSession struct {
 	// Advanced by the post-turn workflow judge and persisted so the next turn resumes on
 	// the right step. SMOODEV-590.
 	CurrentStepID string
+	// UserName is the caller's display name — captured at create-session time or later by a
+	// submitted identity_intake interaction (its host effect). Display only; never used for
+	// ownership. The Go analog of the Rust session metadata.userName.
+	UserName string
 	// ContactEmail is the caller's email captured at create-session time, used as the OTP
-	// delivery contact (the server offers OTP to it when an end_user tool is refused). The
-	// reference create path captures only an email; a host that also captures a phone would
-	// add an SMS channel. th-8078dd.
+	// delivery contact (the server offers OTP to it when an end_user tool is refused). Also
+	// stamped by a submitted identity_intake interaction. th-8078dd.
 	ContactEmail string
+	// ContactPhone is the caller's phone (E.164) captured by a submitted identity_intake
+	// interaction — a second OTP delivery channel (SMS). The Go analog of the Rust session
+	// metadata.contactPhone.
+	ContactPhone string
 	// OtpVerified is the session's identity-verified bit, set by a successful verify_otp and
 	// threaded into the auth gate so a verified caller's end_user tools run. The Go analog of
 	// the Rust session metadata.otpVerified. th-8078dd.
@@ -189,6 +196,12 @@ type SessionStore interface {
 	// A no-op for an unknown session. The Go analog of the Rust set_session_authenticated.
 	// th-8078dd.
 	SetSessionAuthenticated(ctx context.Context, sessionID string, verified bool) error
+	// AttachSessionContact stamps a captured identity (userName / email / phone) onto a
+	// session — the host effect of a submitted identity_intake interaction. A MERGE: a blank
+	// field is left untouched, so it never clobbers an existing contact. The email/phone
+	// become OTP delivery channels on subsequent turns. A no-op for an unknown session. The Go
+	// analog of the Rust attach_session_identity.
+	AttachSessionContact(ctx context.Context, sessionID, userName, email, phone string) error
 }
 
 // InMemorySessionStore is an in-process SessionStore. The Go analog of the Rust
@@ -379,5 +392,27 @@ func (s *InMemorySessionStore) SetSessionAuthenticated(_ context.Context, sessio
 		session.OtpVerified = verified
 		s.sessions[sessionID] = session
 	}
+	return nil
+}
+
+// AttachSessionContact stamps a captured identity onto a session (merge — blank fields left
+// untouched). A no-op for an unknown session.
+func (s *InMemorySessionStore) AttachSessionContact(_ context.Context, sessionID, userName, email, phone string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	if userName != "" {
+		session.UserName = userName
+	}
+	if email != "" {
+		session.ContactEmail = email
+	}
+	if phone != "" {
+		session.ContactPhone = phone
+	}
+	s.sessions[sessionID] = session
 	return nil
 }
