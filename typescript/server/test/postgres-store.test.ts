@@ -269,6 +269,26 @@ describe('PostgresStore (needs Docker)', () => {
         await reopened.close();
     });
 
+    pgIt('attachIdentity stamps the contact keys the OTP seam reads, without clobbering siblings', async () => {
+        const store = await newStore();
+        const session = await store.createSession('', 'Alice', undefined, undefined, org());
+        await store.setAuthenticated(session.sessionId, true);
+        // The identity_intake host effect: only the provided fields are stamped.
+        await store.attachIdentity(session.sessionId, { name: 'Alice Example', email: 'alice@example.com', phone: '+15551234567' });
+        await store.close();
+
+        const reopened = await newStore();
+        const fetched = await reopened.getSession(session.sessionId);
+        expect(fetched?.userName).toBe('Alice Example');
+        expect(fetched?.contactEmail).toBe('alice@example.com');
+        expect(fetched?.contactPhone).toBe('+15551234567');
+        // The prior OTP bit survived the metadata merge.
+        expect(fetched?.otpVerified).toBe(true);
+
+        await expect(reopened.attachIdentity('unknown-session', { email: 'x@y.co' })).resolves.toBeUndefined();
+        await reopened.close();
+    });
+
     // The durable store must report the conversation's ORG on the session and on
     // getConversation, not just the owner. `mayRead` treats an absent org as
     // "unrecorded" and falls through to an ownership-only check — so a store that drops

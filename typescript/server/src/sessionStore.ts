@@ -71,6 +71,12 @@ export interface StoredSession {
     /** The caller's phone, if the store captured one — the SMS OTP delivery contact. */
     contactPhone?: string;
     /**
+     * The caller's display name, when known — stamped at create time or captured by an
+     * `identity_intake` interaction's host effect. The TS analog of the Rust reference
+     * server's `session.metadata.userName`.
+     */
+    userName?: string;
+    /**
      * Whether the caller has completed OTP identity verification (set by a successful
      * `verify_otp`). Threaded into the `end_user` auth gate so a verified caller's
      * gated tools run. `undefined`/`false` → unverified. The TS analog of the Rust
@@ -174,6 +180,16 @@ export interface SessionStore {
      * (a verified caller's gated tools won't run, fail-closed).
      */
     setAuthenticated?(sessionId: string, verified: boolean): Promise<void>;
+    /**
+     * Stamp captured identity contacts onto a session — the host effect of a valid
+     * `identity_intake` interaction. Writes `userName` / `contactEmail` / `contactPhone`
+     * (the same keys the pre-chat create path stashes and the OTP contact seam reads),
+     * so a captured contact is immediately OTP-verifiable. Only provided fields are
+     * written (an intake that collected just an email never clobbers a known name). A
+     * no-op for an unknown session. Optional so stores that predate the interaction
+     * seam still satisfy the interface. The TS analog of the Rust `attach_session_identity`.
+     */
+    attachIdentity?(sessionId: string, identity: { name?: string; email?: string; phone?: string }): Promise<void>;
 }
 
 /** In-process {@link SessionStore}. The TS analog of the Rust in-memory adapter. */
@@ -302,5 +318,14 @@ export class InMemorySessionStore implements SessionStore {
     async setAuthenticated(sessionId: string, verified: boolean): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (session) session.otpVerified = verified;
+    }
+
+    async attachIdentity(sessionId: string, identity: { name?: string; email?: string; phone?: string }): Promise<void> {
+        const session = this.sessions.get(sessionId);
+        if (!session) return;
+        // Only provided fields — a partial intake never clobbers a known contact.
+        if (identity.name !== undefined) session.userName = identity.name;
+        if (identity.email !== undefined) session.contactEmail = identity.email;
+        if (identity.phone !== undefined) session.contactPhone = identity.phone;
     }
 }

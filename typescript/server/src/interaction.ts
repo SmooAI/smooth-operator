@@ -64,6 +64,16 @@ export type InteractionValidation = { ok: true; values: unknown } | { ok: false;
 export type InteractionOutcome = { status: 'submitted'; values: unknown } | { status: 'declined' } | { status: 'no_response' };
 
 /**
+ * The kind-routed **host effect** of an accepted interaction — the framework's
+ * kind-agnostic side-effect seam. Runs on a valid submit (both the rich WS path
+ * and the conversational-fallback tool) with the parked `kind` and its canonical
+ * `values`; the host routes by kind (e.g. `identity_intake` → stamp the session's
+ * contact metadata) and no-ops for kinds with no effect (e.g. `choices`). Mirrors
+ * the Rust reference's `attach_interaction_effect`.
+ */
+export type InteractionAttach = (kind: string, values: unknown) => void | Promise<void>;
+
+/**
  * One interaction kind — the extension seam. A kind supplies exactly the pieces
  * that differ per interaction; all park / resume / event / registry machinery is
  * shared and kind-agnostic. Mirrors the Rust `InteractionKind` trait.
@@ -277,8 +287,8 @@ export function requestInteractionTool(opts: {
  * the model relays and re-asks; valid values return the **identical** canonical
  * payload the rich path resumes with. Mirrors the Rust `SubmitInteractionTool`.
  */
-export function submitInteractionTool(opts: { kinds: InteractionRegistry; raisedSpecs: RaisedSpecs }): Tool {
-    const { kinds, raisedSpecs } = opts;
+export function submitInteractionTool(opts: { kinds: InteractionRegistry; raisedSpecs: RaisedSpecs; attach?: InteractionAttach }): Tool {
+    const { kinds, raisedSpecs, attach } = opts;
     const kindIds = kinds.all().map((k) => k.kind);
     return {
         name: SUBMIT_INTERACTION_TOOL,
@@ -313,7 +323,13 @@ export function submitInteractionTool(opts: { kinds: InteractionRegistry; raised
             // prior-turn raise): the kind then validates format-only.
             const spec = raisedSpecs.get(kindId) ?? null;
             const result = kind.validate(spec, values);
-            if (result.ok) return JSON.stringify({ status: 'submitted', values: result.values });
+            if (result.ok) {
+                // Kind-routed host effect on the conversational-fallback submit — the
+                // rich path fires the same effect in the WS handler, which owns
+                // validation there. Mirrors the Rust runner's `(cfg.attach)` call.
+                await attach?.(kindId, result.values);
+                return JSON.stringify({ status: 'submitted', values: result.values });
+            }
             const detail = result.errors.map((e) => `${e.field}: ${e.message}`).join('; ');
             throw new Error(`validation failed — ${detail}. Re-ask the visitor for the corrected value(s) and submit again.`);
         },

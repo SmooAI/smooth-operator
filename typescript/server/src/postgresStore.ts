@@ -173,6 +173,8 @@ const AGENT_NAME = 'smooth-agent';
 interface SessionMetadata {
     contactEmail?: string;
     contactPhone?: string;
+    /** The caller's display name — stamped at create time or by an `identity_intake` host effect. */
+    userName?: string;
     otpVerified?: boolean;
     currentStepId?: string;
     /** The session's declared render capabilities (`supports`) — the Rich Interactions gate. */
@@ -334,6 +336,7 @@ export class PostgresStore implements SessionStore, AdminStore {
             ...(row.owner_email ? { userEmail: row.owner_email as string } : {}),
             ...(metadata.contactEmail ? { contactEmail: metadata.contactEmail } : {}),
             ...(metadata.contactPhone ? { contactPhone: metadata.contactPhone } : {}),
+            ...(metadata.userName ? { userName: metadata.userName } : {}),
             ...(metadata.otpVerified ? { otpVerified: true } : {}),
             ...(metadata.currentStepId ? { currentStepId: metadata.currentStepId } : {}),
             ...(metadata.supports && metadata.supports.length > 0 ? { supports: metadata.supports } : {}),
@@ -461,6 +464,20 @@ export class PostgresStore implements SessionStore, AdminStore {
     /** Persist a session's OTP-verified bit. A no-op for an unknown session. */
     async setAuthenticated(sessionId: string, verified: boolean): Promise<void> {
         await this.mergeMetadata(sessionId, { otpVerified: verified });
+    }
+
+    /**
+     * Stamp captured identity contacts onto a session's metadata — the `identity_intake`
+     * host effect. Only provided fields are merged (a partial intake never clobbers a
+     * known contact); the shallow jsonb `||` merge leaves the sibling keys alone.
+     */
+    async attachIdentity(sessionId: string, identity: { name?: string; email?: string; phone?: string }): Promise<void> {
+        const patch: SessionMetadata = {};
+        if (identity.name !== undefined) patch.userName = identity.name;
+        if (identity.email !== undefined) patch.contactEmail = identity.email;
+        if (identity.phone !== undefined) patch.contactPhone = identity.phone;
+        if (Object.keys(patch).length === 0) return;
+        await this.mergeMetadata(sessionId, patch);
     }
 
     /**

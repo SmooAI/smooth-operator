@@ -21,6 +21,7 @@ import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
 import { ConfirmationRegistry } from './confirmation.js';
 import { InteractionParkRegistry, InteractionRegistry, requestInteractionTool, submitInteractionTool, type InteractionOutcome, type RaisedSpecs } from './interaction.js';
+import type { IntakeValues } from './identityIntake.js';
 import { buildExtensionHost } from './extensions.js';
 import { availableChannels, isContactEmpty, type OtpContact, type OtpRefusal, type OtpService } from './otp.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
@@ -864,7 +865,7 @@ export class FrameDispatcher {
         }
         // The generic submit tool is only needed when at least one kind falls back
         // (rich sessions submit via the `submit_interaction` protocol action instead).
-        if (anyFallback) tools.push(submitInteractionTool({ kinds: this.interactions, raisedSpecs }));
+        if (anyFallback) tools.push(submitInteractionTool({ kinds: this.interactions, raisedSpecs, attach: (kind, values) => this.attachInteractionEffect(sessionId, kind, values) }));
         return tools;
     }
 
@@ -950,8 +951,27 @@ export class FrameDispatcher {
             sink(protocol.interactionInvalid(requestId, pending.interactionId, pending.kind, result.errors, 'Some fields need attention.'));
             return;
         }
+        // Run the kind's host effect, then resume the parked raise (the conversational
+        // fallback fires the same effect from inside the submit_interaction tool).
+        await this.attachInteractionEffect(sessionId, pending.kind, result.values);
         if (this.resolveInteraction(sessionId, requestId, { status: 'submitted', values: result.values }, sink)) {
             sink(protocol.immediateResponse(requestId, 200, 'Interaction submitted', { sessionId, interactionId: pending.interactionId, kind: pending.kind, values: result.values }));
+        }
+    }
+
+    /**
+     * The kind-routed **host effect** of an accepted interaction — the kind-agnostic
+     * side-effect seam shared by the rich WS path ({@link handleSubmitInteraction}) and
+     * the conversational-fallback `submit_interaction` tool. For `identity_intake`,
+     * stamp the validated contacts onto the session (`userName` / `contactEmail` /
+     * `contactPhone` — the keys the pre-chat create path stashes and the OTP contact
+     * seam reads). Kinds with no effect (e.g. `choices`) fall through untouched. Mirrors
+     * the Rust reference's `attach_interaction_effect`.
+     */
+    private async attachInteractionEffect(sessionId: string, kind: string, values: unknown): Promise<void> {
+        if (kind === 'identity_intake') {
+            const v = values as IntakeValues;
+            await this.store.attachIdentity?.(sessionId, { name: v.name, email: v.email, phone: v.phone });
         }
     }
 
