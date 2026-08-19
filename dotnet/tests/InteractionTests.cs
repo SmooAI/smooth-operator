@@ -205,7 +205,7 @@ public sealed class InteractionTests : IAsyncLifetime
         transport.Emit(Terminal(reqId));
 
         await turn.Completion;
-        await iterate.WaitAsync(TimeSpan.FromSeconds(5));
+        await iterate.WaitAsync(TimeSpan.FromSeconds(30));
 
         var types = collected.Select(e => e.Type).ToList();
         Assert.Contains("interaction_required", types);
@@ -259,7 +259,7 @@ public sealed class InteractionTests : IAsyncLifetime
         transport.Emit(Terminal(reqId));
 
         await turn.Completion;
-        await iterate.WaitAsync(TimeSpan.FromSeconds(5));
+        await iterate.WaitAsync(TimeSpan.FromSeconds(30));
 
         var types = collected.Select(e => e.Type).ToList();
         Assert.Contains("stream_preamble", types);
@@ -345,5 +345,46 @@ public sealed class InteractionTests : IAsyncLifetime
 
         var result = _validator.ValidateAt(SubmitRef, transport.Sent[^1]);
         Assert.True(result.IsValid, result.FormatErrors());
+    }
+
+    /// <summary>
+    /// The OTHER half of the contract, and the reason the drift guard must not be
+    /// "fixed" by making unknown types an error: the stream_reasoning schema says
+    /// clients that do not recognize an event MUST ignore it. A frame from a NEWER
+    /// server that this build predates has to be dropped silently, leaving the turn
+    /// healthy and still able to complete.
+    /// </summary>
+    [Fact]
+    public async Task UnknownEventIsIgnoredNotFatal()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        var turn = client.SendMessageAsync(new SendMessageAction { SessionId = "sess-1", Message = "hi" });
+        var reqId = transport.LastRequestId();
+
+        var collected = new List<ServerEvent>();
+        var iterate = Task.Run(async () =>
+        {
+            await foreach (var ev in turn)
+                collected.Add(ev);
+        });
+
+        transport.Emit(Frame(
+            """{"type":"stream_hologram","requestId":"{rid}","token":"from the future","data":{"requestId":"{rid}","token":"from the future"}}""",
+            reqId));
+        transport.Emit(Frame(
+            """{"type":"stream_token","requestId":"{rid}","token":"real","data":{"requestId":"{rid}","token":"real"}}""",
+            reqId));
+        transport.Emit(Terminal(reqId));
+
+        await turn.Completion;
+        await iterate.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var types = collected.Select(e => e.Type).ToList();
+        Assert.DoesNotContain("stream_hologram", types);
+        // The unknown frame must not have derailed the turn: the known events still land.
+        Assert.Contains("stream_token", types);
+        Assert.Contains("eventual_response", types);
     }
 }

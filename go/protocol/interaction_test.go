@@ -1,12 +1,13 @@
 package protocol
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestEventTypesCoverSpec is the drift guard. It derives the expected discriminator
@@ -26,6 +27,73 @@ func TestEventTypesCoverSpec(t *testing.T) {
 				"ParseServerEvent will reject the frame and the dispatch loop will drop it silently", disc)
 		}
 	}
+}
+
+// TestActionTypesCoverSpec is the same guard for the client→server direction: the
+// ActionType constants had drifted too (submit_interaction was missing), which is
+// why the verb could not be expressed at all.
+func TestActionTypesCoverSpec(t *testing.T) {
+	known := map[string]struct{}{
+		string(ActionCreateConversationSession): {},
+		string(ActionSendMessage):               {},
+		string(ActionGetSession):                {},
+		string(ActionGetConversationMessages):   {},
+		string(ActionConfirmToolAction):         {},
+		string(ActionVerifyOTP):                 {},
+		string(ActionSubmitInteraction):         {},
+		string(ActionCancel):                    {},
+		string(ActionPing):                      {},
+	}
+
+	specActions := specActionDiscriminators(t)
+	if len(specActions) == 0 {
+		t.Fatal("no action schemas discovered in spec/actions")
+	}
+	for _, disc := range specActions {
+		if _, ok := known[disc]; !ok {
+			t.Errorf("spec/actions declares action %q but the ActionType constants omit it", disc)
+		}
+	}
+}
+
+// specActionDiscriminators reads every spec/actions/*.schema.json and returns the
+// `const` value of the `action` property on its Request definition.
+func specActionDiscriminators(t *testing.T) []string {
+	t.Helper()
+	dir := filepath.Join(specDir(t), "actions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read spec/actions: %v", err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".schema.json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		// Action schemas nest the frame under $defs/Request.
+		var schema struct {
+			Defs struct {
+				Request struct {
+					Properties struct {
+						Action struct {
+							Const string `json:"const"`
+						} `json:"action"`
+					} `json:"properties"`
+				} `json:"Request"`
+			} `json:"$defs"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("parse %s: %v", e.Name(), err)
+		}
+		if c := schema.Defs.Request.Properties.Action.Const; c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // specEventDiscriminators reads every spec/events/*.schema.json and returns the
@@ -88,19 +156,52 @@ func retarget(t *testing.T, raw json.RawMessage, requestID string) map[string]an
 	return m
 }
 
-// nextEvent pulls one event off the turn, failing if none arrives. A dropped frame
-// (the bug this guards) manifests here as a timeout.
-func nextEvent(t *testing.T, turn *MessageTurn) ServerEvent {
+// drain collects every event the turn surfaces, returning once the terminal event
+// closes the channel. No timer: the terminal eventual_response always decodes (it
+// was never part of this bug), so the drain always completes and a dropped frame
+// shows up as an absent entry in the returned slice rather than as a timeout. That
+// keeps the assertion deterministic on a loaded machine.
+func drain(turn *MessageTurn) []ServerEvent {
+	var out []ServerEvent
+	for ev := range turn.Events() {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// types maps events to their discriminators, for readable assertions.
+func types(evs []ServerEvent) []EventType {
+	out := make([]EventType, len(evs))
+	for i, ev := range evs {
+		out[i] = ev.Type
+	}
+	return out
+}
+
+// find returns the first event of the given type, or fails naming what did arrive.
+func find(t *testing.T, evs []ServerEvent, want EventType) ServerEvent {
 	t.Helper()
-	select {
-	case ev, ok := <-turn.Events():
-		if !ok {
-			t.Fatal("turn events channel closed before the expected event arrived")
+	for _, ev := range evs {
+		if ev.Type == want {
+			return ev
 		}
-		return ev
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for event — the frame was dropped by the dispatch loop")
-		return ServerEvent{}
+	}
+	t.Fatalf("%s was dropped by the dispatch loop; got %v", want, types(evs))
+	return ServerEvent{}
+}
+
+// terminalFrame is a minimal eventual_response that settles a turn and closes its
+// event channel.
+func terminalFrame(requestID string) map[string]any {
+	return map[string]any{
+		"type": "eventual_response", "requestId": requestID, "status": 200,
+		"data": map[string]any{
+			"requestId": requestID, "status": 200,
+			"data": map[string]any{
+				"messageId": "66666666-6666-6666-6666-666666666666",
+				"response":  map[string]any{"responseParts": []any{"done"}},
+			},
+		},
 	}
 }
 
@@ -117,13 +218,16 @@ func TestInteractionFixturesReachTheTurn(t *testing.T) {
 	turn := c.SendMessage(SendMessageParams{SessionID: "sess-1", Message: "quote please"})
 	reqID := turn.RequestID()
 
-	// 1. The park.
+	// The park, the validation rejection (the turn stays parked, so it must arrive
+	// too), then the terminal that settles the turn and closes the channel.
 	tr.emit(t, retarget(t, fixtures["interaction_required_event"].Instance, reqID))
-	ev := nextEvent(t, turn)
-	if ev.Type != EventInteractionRequired {
-		t.Fatalf("event type = %q, want interaction_required", ev.Type)
-	}
-	req, err := ev.AsInteractionRequired()
+	tr.emit(t, retarget(t, fixtures["interaction_invalid_event"].Instance, reqID))
+	tr.emit(t, terminalFrame(reqID))
+
+	evs := drain(turn)
+
+	park := find(t, evs, EventInteractionRequired)
+	req, err := park.AsInteractionRequired()
 	if err != nil {
 		t.Fatalf("AsInteractionRequired: %v", err)
 	}
@@ -135,7 +239,19 @@ func TestInteractionFixturesReachTheTurn(t *testing.T) {
 		t.Errorf("interactionId = %q", interactionID)
 	}
 
-	// 2. Answer it, and assert the produced frame is spec-valid.
+	invalidEv := find(t, evs, EventInteractionInvalid)
+	inv, err := invalidEv.AsInteractionInvalid()
+	if err != nil {
+		t.Fatalf("AsInteractionInvalid: %v", err)
+	}
+	if len(inv.Data.Data.Errors) != 1 || inv.Data.Data.Errors[0].Field != "email" {
+		t.Errorf("errors = %+v, want one error on field email", inv.Data.Data.Errors)
+	}
+	if invalidEv.IsTerminal() {
+		t.Error("interaction_invalid must not be terminal — the turn stays parked for a resubmit")
+	}
+
+	// Answering the park produces a spec-valid frame.
 	if err := c.SubmitInteraction(SubmitInteractionParams{
 		SessionID:     "22222222-2222-2222-2222-222222222222",
 		RequestID:     reqID,
@@ -156,23 +272,6 @@ func TestInteractionFixturesReachTheTurn(t *testing.T) {
 		t.Error("declined must stay off the wire when not declining")
 	}
 	validateAgainstSpec(t, "actions/submit-interaction.schema.json#/$defs/Request", sent)
-
-	// 3. Server rejects the values — the turn stays parked, so this must arrive too.
-	tr.emit(t, retarget(t, fixtures["interaction_invalid_event"].Instance, reqID))
-	ev = nextEvent(t, turn)
-	if ev.Type != EventInteractionInvalid {
-		t.Fatalf("event type = %q, want interaction_invalid", ev.Type)
-	}
-	inv, err := ev.AsInteractionInvalid()
-	if err != nil {
-		t.Fatalf("AsInteractionInvalid: %v", err)
-	}
-	if len(inv.Data.Data.Errors) != 1 || inv.Data.Data.Errors[0].Field != "email" {
-		t.Errorf("errors = %+v, want one error on field email", inv.Data.Data.Errors)
-	}
-	if ev.IsTerminal() {
-		t.Error("interaction_invalid must not be terminal — the turn stays parked for a resubmit")
-	}
 }
 
 // TestSubmitInteractionDeclined covers the decline half of the values-or-declined
@@ -270,13 +369,16 @@ func TestEphemeralStreamEventsReachTheTurn(t *testing.T) {
 	}
 
 	for _, tc := range cases {
+		validateAgainstSpec(t, tc.schema, tc.frame)
+		tr.emit(t, tc.frame)
+	}
+	tr.emit(t, terminalFrame(reqID))
+
+	evs := drain(turn)
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			validateAgainstSpec(t, tc.schema, tc.frame)
-			tr.emit(t, tc.frame)
-			ev := nextEvent(t, turn)
-			if ev.Type != tc.want {
-				t.Fatalf("event type = %q, want %q", ev.Type, tc.want)
-			}
+			ev := find(t, evs, tc.want)
 			if ev.Token == "" {
 				t.Error("envelope Token not populated")
 			}
@@ -284,6 +386,55 @@ func TestEphemeralStreamEventsReachTheTurn(t *testing.T) {
 				t.Errorf("%s must not be terminal", tc.name)
 			}
 		})
+	}
+}
+
+// TestUnknownEventIsIgnoredNotFatal is the OTHER half of the contract, and the
+// reason the drift guard must not be "fixed" by making unknown types an error:
+// the stream_reasoning schema says clients that do not recognize an event MUST
+// ignore it. A future server sending a frame this client version predates has to
+// be dropped silently, leaving the turn healthy and still able to complete.
+func TestUnknownEventIsIgnoredNotFatal(t *testing.T) {
+	c, tr := makeClient(t)
+	defer c.Close()
+
+	turn := c.SendMessage(SendMessageParams{SessionID: "sess-1", Message: "hi"})
+	reqID := turn.RequestID()
+
+	// A plausible frame from a NEWER server, on a type this build has never heard of.
+	tr.emit(t, map[string]any{
+		"type": "stream_hologram", "requestId": reqID, "token": "from the future",
+		"data": map[string]any{"requestId": reqID, "token": "from the future"},
+	})
+	tr.emit(t, map[string]any{
+		"type": "stream_token", "requestId": reqID, "token": "real",
+		"data": map[string]any{"requestId": reqID, "token": "real"},
+	})
+	tr.emit(t, terminalFrame(reqID))
+
+	evs := drain(turn)
+
+	for _, ev := range evs {
+		if ev.Type == "stream_hologram" {
+			t.Error("an unrecognised event type must not be surfaced to consumers")
+		}
+	}
+	// The unknown frame must not have derailed the turn: the known events still land.
+	find(t, evs, EventStreamToken)
+	find(t, evs, EventEventualResponse)
+
+	if _, err := turn.Wait(context.Background()); err != nil {
+		t.Errorf("turn must settle normally despite an unknown frame, got %v", err)
+	}
+
+	// And the parser reports it as unknown rather than as malformed JSON.
+	_, err := ParseServerEvent([]byte(`{"type":"stream_hologram","data":{}}`))
+	var unknown *UnknownEventError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("ParseServerEvent error = %v, want *UnknownEventError", err)
+	}
+	if unknown.Type != "stream_hologram" {
+		t.Errorf("UnknownEventError.Type = %q", unknown.Type)
 	}
 }
 

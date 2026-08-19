@@ -167,7 +167,7 @@ async def test_interaction_required_and_invalid_reach_the_turn() -> None:
     # Terminate the turn so the iterator completes.
     transport.emit(_terminal(req_id))
     await turn
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=30.0)
 
     types = [e.type for e in collected]
     assert "interaction_required" in types, f"interaction_required was dropped; got {types}"
@@ -221,7 +221,7 @@ async def test_stream_preamble_and_reasoning_reach_the_turn(validator: ProtocolV
         transport.emit(frame)
     transport.emit(_terminal(req_id))
     await turn
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=30.0)
 
     types = [e.type for e in collected]
     assert "stream_preamble" in types, f"stream_preamble was dropped; got {types}"
@@ -286,3 +286,48 @@ async def test_submit_interaction_carries_choices_values(validator: ProtocolVali
     assert sent["values"] == values, "choices values lost data in transit"
     result = validator.validate_at(SUBMIT_REF, sent)
     assert result.valid, format_errors(result.errors)
+
+
+async def test_unknown_event_is_ignored_not_fatal() -> None:
+    """The OTHER half of the contract, and the reason the drift guard must not be
+    "fixed" by making unknown types raise: the stream_reasoning schema says clients
+    that do not recognize an event MUST ignore it. A frame from a NEWER server that
+    this build predates has to be dropped silently, leaving the turn healthy."""
+    client, transport = make_client()
+    await client.connect()
+
+    turn = client.send_message(session_id="sess-1", message="hi")
+    req_id = transport.last_sent()["requestId"]
+
+    collected: list = []
+
+    async def iterate() -> None:
+        async for ev in turn:
+            collected.append(ev)
+
+    task = asyncio.create_task(iterate())
+    await asyncio.sleep(0)
+
+    transport.emit(
+        {
+            "type": "stream_hologram",
+            "requestId": req_id,
+            "token": "from the future",
+            "data": {"requestId": req_id, "token": "from the future"},
+        }
+    )
+    transport.emit(
+        {"type": "stream_token", "requestId": req_id, "token": "real", "data": {"requestId": req_id, "token": "real"}}
+    )
+    transport.emit(_terminal(req_id))
+    await turn
+    await asyncio.wait_for(task, timeout=30.0)
+
+    types = [e.type for e in collected]
+    assert "stream_hologram" not in types, "an unrecognised event type must not be surfaced to consumers"
+    # The unknown frame must not have derailed the turn: the known events still land.
+    assert "stream_token" in types, f"unknown frame derailed the turn; got {types}"
+    assert "eventual_response" in types, f"turn did not settle normally; got {types}"
+
+    # And the guard rejects it rather than the parser raising on a malformed frame.
+    assert not is_server_event({"type": "stream_hologram", "data": {}})
