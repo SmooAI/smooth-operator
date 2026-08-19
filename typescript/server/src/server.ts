@@ -38,6 +38,7 @@ import { InMemoryAdminStore, type AdminStore, handleAdminRequest } from './admin
 import { InMemorySessionStore, type SessionStore } from './sessionStore.js';
 import { InteractionRegistry } from './interaction.js';
 import { ChoicesKind } from './choices.js';
+import { IdentityIntakeKind } from './identityIntake.js';
 
 export interface ServerOptions {
     /** The OpenAI-compatible engine client (gateway in prod, a mock in tests). */
@@ -124,8 +125,9 @@ export interface ServerOptions {
      * one `request_<kind>` raise tool per kind, gated per-kind by the session's declared
      * `supports`: a declared-capability kind parks the turn on a rich card
      * (`interaction_required` → `submit_interaction`), the rest degrade to their
-     * conversational fallback. Defaults to the reference catalog — the `choices` kind
-     * (AskUserQuestion). Pass an empty `new InteractionRegistry()` to host none.
+     * conversational fallback. Defaults to the reference catalog — the `choices`
+     * (AskUserQuestion) and `identity_intake` (lead capture) kinds. Pass an empty
+     * `new InteractionRegistry()` to host none.
      */
     interactions?: InteractionRegistry;
     /** WS path to mount on (default `/ws`). */
@@ -161,7 +163,7 @@ export function buildServer(options: ServerOptions): {
     const auth = options.auth ?? new NoAuthVerifier();
     // The reference catalog: the `choices` kind (AskUserQuestion). Always wired unless the
     // host overrides it — rich-vs-fallback is decided per kind from the session's `supports`.
-    const interactions = options.interactions ?? new InteractionRegistry([new ChoicesKind()]);
+    const interactions = options.interactions ?? new InteractionRegistry([new ChoicesKind(), new IdentityIntakeKind()]);
     const backplane = options.backplane ?? new InMemoryBackplane();
     const path = options.path ?? '/ws';
 

@@ -28,9 +28,11 @@ export type { AccessKnowledge, FrameDispatcherOptions } from './frameDispatcher.
 export { ConfirmationRegistry } from './confirmation.js';
 
 export { InteractionParkRegistry, InteractionRegistry, INTERACTION_TIMEOUT_MS, requestInteractionTool, submitInteractionTool, SUBMIT_INTERACTION_TOOL } from './interaction.js';
-export type { InteractionFieldError, InteractionKind, InteractionOutcome, InteractionRequest, InteractionValidation, PendingInteraction, RaisedSpecs } from './interaction.js';
+export type { InteractionAttach, InteractionFieldError, InteractionKind, InteractionOutcome, InteractionRequest, InteractionValidation, PendingInteraction, RaisedSpecs } from './interaction.js';
 export { ChoicesKind, HEADER_MAX_CHARS, parseQuestions, validateChoices } from './choices.js';
 export type { ChoiceAnswer, ChoiceFieldError, ChoiceOption, ChoiceQuestion, ChoiceValues } from './choices.js';
+export { IdentityIntakeKind, normalizeEmail, normalizePhoneE164, parseFields, validateIntake } from './identityIntake.js';
+export type { IntakeField, IntakeFieldError, IntakeFieldKey, IntakeValues } from './identityIntake.js';
 
 export { DEFAULT_MAX_ITERATIONS, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, TurnRunner } from './turnRunner.js';
 export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
