@@ -547,11 +547,9 @@ mod tests {
     /// Runs on tokio's virtual clock so the 5 drops and the expiry are ordered by
     /// the runtime rather than by how loaded the machine is.
     ///
-    /// The park also keeps its ORIGINAL deadline across those drops (`timeout_at`,
-    /// not a fresh `timeout` per message), so stale clicks can't hold a turn open.
-    /// That is deliberately NOT asserted here: an elapsed-time bound cannot
-    /// distinguish the two — the restart bug expires at ~110ms against a 60ms
-    /// park, and no threshold separates those without measuring the scheduler.
+    /// The park ALSO keeps its original deadline across those drops; that half is
+    /// asserted separately by
+    /// [`stale_outcomes_do_not_push_back_the_parks_deadline`].
     #[tokio::test(start_paused = true)]
     async fn stale_outcomes_are_dropped_without_resolving_the_park() {
         let pair = interaction_channel();
@@ -585,6 +583,70 @@ mod tests {
             serde_json::from_str::<Value>(&out).unwrap()["status"],
             "no_response",
             "five outcomes for another park must not resolve this one"
+        );
+    }
+
+    /// th-df3dc0 — a dropped stale outcome must not push the park's deadline back.
+    ///
+    /// The park holds ONE deadline (`timeout_at`); restarting a fresh `timeout`
+    /// per received message would let a visitor clicking stale cards keep a turn
+    /// parked indefinitely. Elapsed-time bounds can't tell the two apart, so this
+    /// drives the clock instead of measuring it: park with a 60ms budget, step to
+    /// 50ms, deliver the stale outcome there, then step past 60ms and assert the
+    /// park has already finished. Under the restart bug its deadline would have
+    /// moved to 110ms and it would still be waiting.
+    ///
+    /// Asserting `is_finished()` rather than awaiting is what makes it a real
+    /// check: `start_paused` auto-advances the clock whenever the runtime goes
+    /// idle, so awaiting the park would happily jump to the *restarted* deadline
+    /// and pass either way.
+    #[tokio::test(start_paused = true)]
+    async fn stale_outcomes_do_not_push_back_the_parks_deadline() {
+        let pair = interaction_channel();
+        let tool = RequestInteractionTool::new(
+            identity(),
+            true,
+            pair.request_tx,
+            Arc::clone(&pair.outcome_rx),
+            raised(),
+        )
+        .with_timeout(Duration::from_millis(60));
+        let mut request_rx = pair.request_rx;
+        let outcome_tx = pair.outcome_tx;
+
+        let park = tokio::spawn(async move {
+            tool.execute(json!({ "fields": ["email"], "reason": "r" }))
+                .await
+                .expect("degrades")
+        });
+        let raise = request_rx.recv().await.expect("parked");
+        assert_ne!(raise.id, "somebody-elses-park");
+
+        // t=50ms: inside the park's budget, so it is still waiting.
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(!park.is_finished(), "precondition: still parked at 50ms");
+
+        outcome_tx
+            .send(InteractionResolution {
+                interaction_id: "somebody-elses-park".to_string(),
+                outcome: InteractionOutcome::Declined,
+            })
+            .expect("stale outcome queued");
+        tokio::task::yield_now().await;
+
+        // t=70ms: past the ORIGINAL 60ms deadline, short of a restarted 110ms one.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            park.is_finished(),
+            "the park must expire on its original deadline — a dropped stale \
+             outcome restarted it"
+        );
+
+        let out = park.await.expect("park task");
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["status"],
+            "no_response"
         );
     }
 
