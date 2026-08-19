@@ -377,6 +377,36 @@ public sealed class SmoothAgentClient : IAsyncDisposable
             Code = code,
         }), cancellationToken);
 
+    /// <summary>
+    /// Submit (or decline) a Rich Interaction, resuming the turn parked by an
+    /// <c>interaction_required</c> event. This ONE verb serves every interaction kind
+    /// (identity intake, choice chips, future date pickers, …) — adding a kind needs no
+    /// new client method.
+    /// </summary>
+    /// <param name="interactionId">Echo of the event's <c>interactionId</c>, so a stale
+    /// submit can never resolve a newer park.</param>
+    /// <param name="kind">Optional kind cross-check (e.g. <c>identity_intake</c>).</param>
+    /// <param name="values">Kind-shaped values. Ignored when <paramref name="declined"/>.</param>
+    /// <param name="declined">True when the visitor refused the interaction.</param>
+    /// <remarks>
+    /// Server-side validation may reply with an <c>interaction_invalid</c> event, in which
+    /// case the turn stays parked and the caller resubmits. A valid submit resumes the
+    /// stream back into the original <see cref="MessageTurn"/>.
+    /// </remarks>
+    public Task SubmitInteractionAsync(string sessionId, string requestId, string interactionId,
+        string? kind = null, Dictionary<string, object?>? values = null, bool declined = false,
+        CancellationToken cancellationToken = default)
+        => _transport.SendAsync(Serialize(new SubmitInteractionAction
+        {
+            SessionId = sessionId,
+            RequestId = requestId,
+            InteractionId = interactionId,
+            Kind = kind,
+            // values-or-declined: a decline ignores values, so keep them off the wire.
+            Values = declined ? null : values,
+            Declined = declined ? true : null,
+        }), cancellationToken);
+
     // ─────────────────────────── Internals ─────────────────────────────────
 
     /// <summary>Send an action that expects a single correlated response event.</summary>

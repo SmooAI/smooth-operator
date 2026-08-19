@@ -277,6 +277,43 @@ func (c *Client) VerifyOTP(p VerifyOTPParams) error {
 	return c.transport.Send(frame)
 }
 
+// SubmitInteractionParams holds the caller-supplied fields for SubmitInteraction.
+type SubmitInteractionParams struct {
+	SessionID string `json:"sessionId"`
+	// RequestID must match the interaction_required event being answered.
+	RequestID string `json:"requestId"`
+	// InteractionID echoes the interaction_required event's interactionId, so a
+	// stale submit can never resolve a newer park.
+	InteractionID string `json:"interactionId"`
+	// Kind is an optional cross-check (e.g. "identity_intake"). Mismatch is rejected.
+	Kind string `json:"kind,omitempty"`
+	// Values are the kind-shaped submitted values, per
+	// spec/interactions/<kind>.schema.json#/$defs/Values. Required unless Declined.
+	Values map[string]any `json:"values,omitempty"`
+	// Declined marks the visitor's refusal. The turn resumes with a declined
+	// payload so the agent proceeds gracefully; Values is ignored when true.
+	Declined bool `json:"declined,omitempty"`
+}
+
+// SubmitInteraction submits (or declines) a Rich Interaction, resuming the turn
+// parked by an interaction_required event. This ONE verb serves every interaction
+// kind (identity intake, choice chips, future date pickers, …) — adding a kind
+// needs no new client method.
+//
+// Server-side validation may reply with an interaction_invalid event, in which
+// case the turn stays parked and the caller resubmits. A valid submit resumes the
+// stream back into the original MessageTurn identified by p.RequestID.
+func (c *Client) SubmitInteraction(p SubmitInteractionParams) error {
+	frame, err := json.Marshal(struct {
+		Action ActionType `json:"action"`
+		SubmitInteractionParams
+	}{Action: ActionSubmitInteraction, SubmitInteractionParams: p})
+	if err != nil {
+		return err
+	}
+	return c.transport.Send(frame)
+}
+
 // CancelParams holds the caller-supplied fields for Cancel.
 type CancelParams struct {
 	// RequestID is the in-flight send_message turn's requestId to cancel. The server

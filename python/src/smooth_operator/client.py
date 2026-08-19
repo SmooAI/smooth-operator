@@ -415,6 +415,44 @@ class SmoothAgentClient:
             )
         )
 
+    def submit_interaction(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        interaction_id: str,
+        kind: str | None = None,
+        values: dict[str, object] | None = None,
+        declined: bool = False,
+    ) -> None:
+        """Submit (or decline) a Rich Interaction, resuming the turn parked by an
+        ``interaction_required`` event.
+
+        This ONE verb serves every interaction kind (identity intake, choice chips,
+        future date pickers, …) — adding a kind needs no new client method.
+
+        ``interaction_id`` echoes the ``interaction_required`` event's
+        ``interactionId``, so a stale submit can never resolve a newer park.
+        ``kind`` is an optional cross-check; a mismatch is rejected server-side.
+        Server-side validation may reply with an ``interaction_invalid`` event, in
+        which case the turn stays parked and the caller resubmits. A valid submit
+        resumes the stream back into the original :class:`MessageTurn`.
+        """
+        frame: dict[str, object] = {
+            "action": "submit_interaction",
+            "sessionId": session_id,
+            "requestId": request_id,
+            "interactionId": interaction_id,
+        }
+        if kind is not None:
+            frame["kind"] = kind
+        # values-or-declined: a decline ignores values, so keep them off the wire.
+        if declined:
+            frame["declined"] = True
+        elif values is not None:
+            frame["values"] = values
+        self._transport.send(json.dumps(frame))
+
     # ── internals ──────────────────────────────────────────────────────────────
     async def _request(self, action: dict) -> ServerEvent:
         request_id = action.get("requestId") or self._generate_request_id()

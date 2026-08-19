@@ -47,6 +47,7 @@ GetSessionRequest = _g.GetSessionRequest
 GetMessagesRequest = _g.GetMessagesRequest
 ConfirmToolActionRequest = _g.ConfirmToolActionRequest
 VerifyOtpRequest = _g.VerifyOtpRequest
+SubmitInteractionRequest = _g.SubmitInteractionRequest
 CancelRequest = _g.CancelRequest
 PingRequest = _g.PingRequest
 AuthContext = _g.AuthContext
@@ -65,12 +66,16 @@ ImmediateResponse = _g.ImmediateResponse
 EventualResponse = _g.EventualResponse
 StreamChunk = _g.StreamChunk
 StreamToken = _g.StreamToken
+StreamPreamble = _g.StreamPreamble
+StreamReasoning = _g.StreamReasoning
 Keepalive = _g.Keepalive
 WriteConfirmationRequired = _g.WriteConfirmationRequired
 OtpVerificationRequired = _g.OtpVerificationRequired
 OtpSent = _g.OtpSent
 OtpVerified = _g.OtpVerified
 OtpInvalid = _g.OtpInvalid
+InteractionRequired = _g.InteractionRequired
+InteractionInvalid = _g.InteractionInvalid
 Cancelled = _g.Cancelled
 Pong = _g.Pong
 
@@ -109,23 +114,34 @@ class ActionType(StrEnum):
     get_conversation_messages = "get_conversation_messages"
     confirm_tool_action = "confirm_tool_action"
     verify_otp = "verify_otp"
+    submit_interaction = "submit_interaction"
     cancel = "cancel"
     ping = "ping"
 
 
 class EventType(StrEnum):
-    """Every server→client ``type`` discriminator value."""
+    """Every server→client ``type`` discriminator value.
+
+    MUST cover every schema in ``spec/events/``. A missing member makes
+    :func:`is_server_event` reject the frame, and the client's dispatch loop
+    drops rejected frames silently. ``test_event_types_cover_spec`` enforces
+    that against the spec directory itself.
+    """
 
     immediate_response = "immediate_response"
     eventual_response = "eventual_response"
     stream_chunk = "stream_chunk"
     stream_token = "stream_token"
+    stream_preamble = "stream_preamble"
+    stream_reasoning = "stream_reasoning"
     keepalive = "keepalive"
     write_confirmation_required = "write_confirmation_required"
     otp_verification_required = "otp_verification_required"
     otp_sent = "otp_sent"
     otp_verified = "otp_verified"
     otp_invalid = "otp_invalid"
+    interaction_required = "interaction_required"
+    interaction_invalid = "interaction_invalid"
     cancelled = "cancelled"
     error = "error"
     pong = "pong"
@@ -145,12 +161,16 @@ ServerEvent = Annotated[
         EventualResponse,
         StreamChunk,
         StreamToken,
+        StreamPreamble,
+        StreamReasoning,
         Keepalive,
         WriteConfirmationRequired,
         OtpVerificationRequired,
         OtpSent,
         OtpVerified,
         OtpInvalid,
+        InteractionRequired,
+        InteractionInvalid,
         Cancelled,
         ErrorEvent,
         Pong,
@@ -171,6 +191,7 @@ ClientAction = Annotated[
         GetMessagesRequest,
         ConfirmToolActionRequest,
         VerifyOtpRequest,
+        SubmitInteractionRequest,
         CancelRequest,
         PingRequest,
     ],

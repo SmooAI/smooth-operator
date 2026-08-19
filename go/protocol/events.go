@@ -11,29 +11,40 @@ const (
 	EventEventualResponse          EventType = "eventual_response"
 	EventStreamChunk               EventType = "stream_chunk"
 	EventStreamToken               EventType = "stream_token"
+	EventStreamPreamble            EventType = "stream_preamble"
+	EventStreamReasoning           EventType = "stream_reasoning"
 	EventKeepalive                 EventType = "keepalive"
 	EventWriteConfirmationRequired EventType = "write_confirmation_required"
 	EventOTPVerificationRequired   EventType = "otp_verification_required"
 	EventOTPSent                   EventType = "otp_sent"
 	EventOTPVerified               EventType = "otp_verified"
 	EventOTPInvalid                EventType = "otp_invalid"
+	EventInteractionRequired       EventType = "interaction_required"
+	EventInteractionInvalid        EventType = "interaction_invalid"
 	EventCancelled                 EventType = "cancelled"
 	EventError                     EventType = "error"
 	EventPong                      EventType = "pong"
 )
 
-// eventTypes is the set of known event discriminators.
+// eventTypes is the set of known event discriminators. It MUST cover every
+// schema in spec/events/ — a missing entry makes ParseServerEvent reject the
+// frame, and the client's dispatch loop drops unparseable frames silently.
+// TestEventTypesCoverSpec enforces that against the spec directory itself.
 var eventTypes = map[EventType]struct{}{
 	EventImmediateResponse:         {},
 	EventEventualResponse:          {},
 	EventStreamChunk:               {},
 	EventStreamToken:               {},
+	EventStreamPreamble:            {},
+	EventStreamReasoning:           {},
 	EventKeepalive:                 {},
 	EventWriteConfirmationRequired: {},
 	EventOTPVerificationRequired:   {},
 	EventOTPSent:                   {},
 	EventOTPVerified:               {},
 	EventOTPInvalid:                {},
+	EventInteractionRequired:       {},
+	EventInteractionInvalid:        {},
 	EventCancelled:                 {},
 	EventError:                     {},
 	EventPong:                      {},
@@ -56,6 +67,7 @@ const (
 	ActionGetConversationMessages   ActionType = "get_conversation_messages"
 	ActionConfirmToolAction         ActionType = "confirm_tool_action"
 	ActionVerifyOTP                 ActionType = "verify_otp"
+	ActionSubmitInteraction         ActionType = "submit_interaction"
 	ActionCancel                    ActionType = "cancel"
 	ActionPing                      ActionType = "ping"
 )
@@ -147,6 +159,32 @@ func (e ServerEvent) AsStreamChunk() (StreamChunk, error) {
 // AsStreamToken decodes the event as a stream_token.
 func (e ServerEvent) AsStreamToken() (StreamToken, error) {
 	return decode[StreamToken](e.Raw)
+}
+
+// AsStreamPreamble decodes the event as a stream_preamble — an EPHEMERAL status
+// line shown while the real answer is still being produced. It is never folded
+// into the answer; the terminal eventual_response excludes it.
+func (e ServerEvent) AsStreamPreamble() (StreamPreamble, error) {
+	return decode[StreamPreamble](e.Raw)
+}
+
+// AsStreamReasoning decodes the event as a stream_reasoning — a token from a
+// reasoning model's separate thinking channel. Render it as collapsible
+// "thinking"; it is never part of the answer.
+func (e ServerEvent) AsStreamReasoning() (StreamReasoning, error) {
+	return decode[StreamReasoning](e.Raw)
+}
+
+// AsInteractionRequired decodes the event as an interaction_required — a Rich
+// Interaction park. The turn stays parked until SubmitInteraction answers it.
+func (e ServerEvent) AsInteractionRequired() (InteractionRequired, error) {
+	return decode[InteractionRequired](e.Raw)
+}
+
+// AsInteractionInvalid decodes the event as an interaction_invalid — the kind's
+// server-side validation rejected a submit. The turn stays parked; resubmit.
+func (e ServerEvent) AsInteractionInvalid() (InteractionInvalid, error) {
+	return decode[InteractionInvalid](e.Raw)
 }
 
 // AsKeepalive decodes the event as a keepalive.
