@@ -768,7 +768,9 @@ public sealed class TurnRunner
 /// remaining output is discarded — but the loop itself keeps running, calling the model again and
 /// acting on whatever it answers, on a turn the user stopped.</para>
 ///
-/// <para>Cancellation is cooperative here, so the loop has to be stopped at the one place it
+/// <para>The live gateway client would fail that call on its own cancelled token, so this is not a
+/// standing spend leak — it is that the server was RELYING on the transport to stop a cancelled
+/// turn. Cancellation is cooperative here, so the loop is stopped at the one place it
 /// re-enters shared state: the model call. Throwing on a cancelled token unwinds
 /// <c>RunStreamingAsync</c> and the turn ends — the .NET analog of dropping the Rust turn future,
 /// which is preemptive and needs no such guard. The runner's caller already treats

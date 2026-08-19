@@ -533,13 +533,16 @@ consume:
 // `context canceled` a tool (or the write-confirmation gate) returns once the turn is
 // cancelled. The runner has already walked away by then — it returns at the first
 // ctx.Done() and drains the stream — so the loop's remaining output is discarded, but
-// the loop itself keeps running: another gateway call, real spend, and whatever tools
-// that call asks for, on a turn the user stopped.
+// the loop itself keeps running: another model call, and whatever that call asks for,
+// on a turn the user stopped.
 //
-// Cancellation in Go is cooperative, so the loop has to be stopped at the one place it
-// re-enters shared state: the model call. Failing it on a cancelled context aborts
-// runStream (`model stream: context canceled`) and the turn unwinds — the Go analog of
-// dropping the Rust turn future, which is preemptive and needs no such guard.
+// The live GatewayClient would fail that call on its own cancelled context, so this is
+// not a standing spend leak — it is that the server was RELYING on the transport to
+// stop a cancelled turn. Cancellation in Go is cooperative, so the loop is stopped here
+// instead, at the one place it re-enters shared state: the model call. Failing it on a
+// cancelled context aborts runStream (`model stream: context canceled`) and the turn
+// unwinds — the Go analog of dropping the Rust turn future, which is preemptive and
+// needs no such guard.
 //
 // A client that does not stream is returned unchanged, so the engine's
 // StreamingChatClient assertion still fails exactly as it did before.
