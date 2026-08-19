@@ -1,0 +1,15 @@
+{
+    "name": "cancel-no-active-turn-noop",
+    "description": "A `cancel` with no active turn is a SILENT no-op: it must emit nothing at all — not a `cancelled` event, not an error, not an ack. The corpus format cannot assert 'nothing arrives', so this asserts it structurally: the cancel step expects zero events, and the very next frame's response must be the FIRST thing on the wire. If a server emitted anything for the stray cancel, the following `create_conversation_session` matcher consumes that stray event instead of the `immediate_response` and fails. Guards the cancel path against phantom terminal events that would reset a client's UI mid-conversation.",
+    "mockLlmScript": [],
+    "steps": [
+        {
+            "send": { "action": "cancel", "requestId": "r-stray" },
+            "expect": []
+        },
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com" },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        }
+    ]
+}

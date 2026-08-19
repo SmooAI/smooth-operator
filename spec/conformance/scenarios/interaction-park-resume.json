@@ -1,0 +1,46 @@
+{
+    "name": "interaction-park-resume",
+    "description": "Rich Interactions, the happy path. A session that DECLARED the `identity_form` render capability in `supports` gets the real card: the agent's server-registered `request_identity_intake` raise tool PARKS the turn and the server emits `interaction_required` (kind `identity_intake`, a server-minted `interactionId`, the canonical `spec.fields`, and the agent's `reason`). A matching `submit_interaction` — same requestId, same interactionId — acks 200 and RESUMES the parked turn, which streams the wrap-up reply. The raise tools are server-registered in every server, so this needs no `server.*` directive; only the mock names the tool. ⚠️ The park event is asserted BEFORE the raise tool's `stream_chunk`, matching the Rust reference and the same ordering the corpus already pins for write-confirmation HITL (`hitl-write-confirmation`). Go / TypeScript / Python / .NET emit the chunk first; see the README's divergence note.",
+    "knownDivergences": ["go", "typescript", "python", "dotnet"],
+    "knownDivergencesReason": "th-eae69d — these four emit the raise tool's `toolCall` stream_chunk BEFORE `interaction_required`; Rust emits the park event first. Ruled a port bug, not a protocol variant: all five already defer the gated tool's chunk until after the prompt for the OTHER park type (`hitl-write-confirmation`), so the four are internally inconsistent between their two park paths while Rust is consistent — and a client that renders tool calls would show \"calling request_identity_intake…\" before the card appears, leaking framework internals ahead of the semantic event. The ports change, not this scenario.",
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"name\", \"required\": false}, {\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
+        { "kind": "text", "text": "Thanks — I've got your details." }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com", "supports": ["identity_form"] },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "send me a quote", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "interaction_required",
+                    "assert": {
+                        "requestId": "r-msg",
+                        "data.requestId": "r-msg",
+                        "data.data.kind": "identity_intake",
+                        "data.data.reason": "to send you the quote",
+                        "data.data.spec.fields.0.key": "name",
+                        "data.data.spec.fields.0.required": false,
+                        "data.data.spec.fields.1.key": "email",
+                        "data.data.spec.fields.1.required": true
+                    },
+                    "capture": { "interactionId": "data.data.interactionId" }
+                },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "request_identity_intake" } }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "kind": "identity_intake", "values": { "name": "Alice Example", "email": "alice@example.com" } },
+            "expect": [
+                { "type": "immediate_response", "status": 200 },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "request_identity_intake", "data.state.rawResponse.toolResult.isError": false } },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Thanks — I've got your details." },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["Thanks — I've got your details."] } }
+            ]
+        }
+    ]
+}

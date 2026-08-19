@@ -1,0 +1,59 @@
+{
+    "name": "interaction-invalid-retryable",
+    "description": "Invalid interaction values are RETRYABLE, never terminal. A `submit_interaction` whose values fail the kind's server-side validator must emit `interaction_invalid` (per-field errors + a card-level summary) and leave the turn PARKED — mirroring `otp_invalid`. This scenario proves the park survives the rejection twice over: a second bad submit is rejected the same way, and only then does a corrected submit ack 200 and resume the turn. A server that terminated the turn with an `error` event, or that dropped the park after the first rejection, fails here.",
+    "knownDivergences": ["go", "typescript", "python", "dotnet"],
+    "knownDivergencesReason": "th-eae69d — the park-ordering divergence, not the retry behavior: these four emit the raise tool's `toolCall` stream_chunk BEFORE `interaction_required`, so they fail in step 2 and never reach the retryable-invalid assertions. See interaction-park-resume for the full ruling.",
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
+        { "kind": "text", "text": "Got it — sending the quote now." }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com", "supports": ["identity_form"] },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "send me a quote", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "interaction_required",
+                    "assert": { "requestId": "r-msg", "data.data.kind": "identity_intake" },
+                    "capture": { "interactionId": "data.data.interactionId" }
+                },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "request_identity_intake" } }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "values": { "email": "not-an-email" } },
+            "expect": [
+                {
+                    "type": "interaction_invalid",
+                    "assert": {
+                        "requestId": "r-msg",
+                        "data.requestId": "r-msg",
+                        "data.data.kind": "identity_intake",
+                        "data.data.errors.0.field": "email",
+                        "data.data.errors.0.message": "must be a valid email address",
+                        "data.data.message": "Some fields need attention."
+                    }
+                }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "values": { "email": "still bad@" } },
+            "expect": [
+                { "type": "interaction_invalid", "assert": { "requestId": "r-msg", "data.data.kind": "identity_intake", "data.data.errors.0.field": "email" } }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "values": { "email": "alice@example.com" } },
+            "expect": [
+                { "type": "immediate_response", "status": 200 },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "request_identity_intake", "data.state.rawResponse.toolResult.isError": false } },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Got it — sending the quote now." },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["Got it — sending the quote now."] } }
+            ]
+        }
+    ]
+}

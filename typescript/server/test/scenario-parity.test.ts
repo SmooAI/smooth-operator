@@ -79,8 +79,13 @@ interface Scenario {
     description?: string;
     mockLlmScript?: MockScriptEntry[];
     server?: { tools?: ToolSpec[]; confirmTools?: string[]; knowledge?: KnowledgeDoc[] };
+    knownDivergences?: string[];
+    knownDivergencesReason?: string;
     steps: Step[];
 }
+
+/** This runner's id in a scenario's `knownDivergences` list. */
+const LANG = 'typescript';
 
 /**
  * Resolve a dotted path (`data.data.response.responseParts`) into a nested object.
@@ -211,6 +216,12 @@ describe('scenario parity — TS server runs the shared conformance corpus', () 
 
     for (const path of SCENARIOS) {
         const scenario = JSON.parse(readFileSync(path, 'utf8')) as Scenario;
+        // `knownDivergences` lists the languages a scenario is known to fail on today,
+        // with `knownDivergencesReason` next to it. An EXPIRING marker, not a skip: a
+        // listed language that fails is reported and tolerated, but one that PASSES
+        // fails the build, so a marker cannot rot silently into a green test that
+        // proves nothing (which is the failure mode this whole corpus exists to catch).
+        const divergent = (scenario.knownDivergences ?? []).includes(LANG);
         it(scenario.name, async () => {
             server = await serve({
                 chatClient: buildMock(scenario.mockLlmScript ?? []),
@@ -231,8 +242,15 @@ describe('scenario parity — TS server runs the shared conformance corpus', () 
                     client.sendAction(subst(step.send, vars) as Record<string, unknown>);
                     await matchExpected(client, step.expect, vars);
                 }
+            } catch (err) {
+                if (!divergent) throw err;
+                console.warn(`[known divergence] ${scenario.name}: ${scenario.knownDivergencesReason ?? ''}\n  ${String(err)}`);
+                return;
             } finally {
                 await client.close();
+            }
+            if (divergent) {
+                throw new Error(`remove ${LANG} from knownDivergences in ${scenario.name}.json — it now passes`);
             }
         });
     }

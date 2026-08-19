@@ -25,6 +25,9 @@ from smooth_operator_server.session_store import InMemorySessionStore
 SCENARIOS_DIR = Path(__file__).resolve().parents[3] / "spec" / "conformance" / "scenarios"
 SCENARIOS = sorted(SCENARIOS_DIR.glob("*.json"))
 
+#: This runner's id in a scenario's ``knownDivergences`` list.
+LANG = "python"
+
 
 def _dot(obj, path: str):
     """Resolve a dotted path (``data.data.response.responseParts``) into a nested
@@ -94,6 +97,21 @@ def _subst(value, vars_: dict):
 @pytest.mark.asyncio
 async def test_scenario_parity(path: Path) -> None:
     scenario = json.loads(path.read_text())
+    # `knownDivergences` lists the languages a scenario is known to fail on today,
+    # with `knownDivergencesReason` next to it. An EXPIRING marker, not a skip: a
+    # listed language that fails is reported and tolerated, but one that PASSES
+    # fails the build, so a marker cannot rot silently into a green test that
+    # proves nothing (which is the failure mode this whole corpus exists to catch).
+    if LANG in scenario.get("knownDivergences", []):
+        try:
+            await _run_scenario(scenario)
+        except AssertionError as exc:
+            pytest.xfail(f"known divergence ({scenario.get('knownDivergencesReason', '')}): {exc}")
+        pytest.fail(f"remove {LANG} from knownDivergences in {path.name} — it now passes")
+    await _run_scenario(scenario)
+
+
+async def _run_scenario(scenario: dict) -> None:
     mock = _build_mock(scenario.get("mockLlmScript", []))
     server_spec = scenario.get("server", {})
     tools = _build_tools(server_spec.get("tools", []))

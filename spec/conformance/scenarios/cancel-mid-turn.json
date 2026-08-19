@@ -1,0 +1,47 @@
+{
+    "name": "cancel-mid-turn",
+    "description": "A turn cancelled while in flight must emit the terminal `cancelled` event (status 499, echoing the CANCELLED TURN's requestId) IN PLACE OF `eventual_response`, and must free the connection's turn slot so the next `send_message` is accepted. The in-flight window is made deterministic by parking the turn on write-confirmation HITL (`server.confirmTools`) — a mock turn otherwise completes faster than a `cancel` frame can race it, and the scenario format has no way to express a slow tool. Per spec/actions/cancel.schema.json the cancel frame carries the requestId of the `send_message` it aborts; per spec/events/cancelled.schema.json the cancelled turn produces NO answer payload.",
+    "server": {
+        "tools": [
+            {
+                "name": "delete_record",
+                "description": "Delete a record by id (a state-mutating write).",
+                "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] },
+                "result": "Record 42 deleted."
+            }
+        ],
+        "confirmTools": ["delete_record"]
+    },
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "delete_record", "arguments": "{\"id\": \"42\"}" },
+        { "kind": "text", "text": "The turn slot was free, so this second turn ran." }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com" },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg-1", "sessionId": "{{sessionId}}", "message": "delete record 42", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                { "type": "write_confirmation_required", "assert": { "requestId": "r-msg-1", "data.data.toolId": "delete_record" } },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "delete_record" } }
+            ]
+        },
+        {
+            "send": { "action": "cancel", "requestId": "r-msg-1", "sessionId": "{{sessionId}}" },
+            "expect": [
+                { "type": "cancelled", "status": 499, "assert": { "requestId": "r-msg-1", "data.requestId": "r-msg-1", "data.status": 499 } }
+            ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg-2", "sessionId": "{{sessionId}}", "message": "never mind, say something", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "The turn slot was free, so this second turn ran." },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["The turn slot was free, so this second turn ran."] } }
+            ]
+        }
+    ]
+}
