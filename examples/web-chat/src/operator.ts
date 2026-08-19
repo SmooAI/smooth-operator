@@ -8,7 +8,19 @@
 // Everything here drives a *real* running server; there is no mock. See the
 // README for how to start `smooth-operator-server` and point this at it.
 
-import { SmoothAgentClient, type ChoicesSpec, type ChoicesValues, type ConversationSummary } from '@smooai/smooth-operator';
+import {
+    SmoothAgentClient,
+    type ChoicesSpec,
+    type ChoicesValues,
+    type ConversationSummary,
+    type IdentityIntakeSpec,
+    type IdentityIntakeValues,
+} from '@smooai/smooth-operator';
+
+/** Any Rich Interaction spec the example can render (one per registered card). */
+type InteractionSpec = ChoicesSpec | IdentityIntakeSpec;
+/** Any Rich Interaction values the example can submit. */
+type InteractionValues = ChoicesValues | IdentityIntakeValues;
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /** The agent's live presence — what the header reflects. */
@@ -56,9 +68,9 @@ export interface Interaction {
     turnRequestId: string;
     interactionId: string;
     kind: string;
-    spec: ChoicesSpec;
+    spec: InteractionSpec;
     reason: string;
-    /** Per-question server errors from an `interaction_invalid` reply (still parked). */
+    /** Per-field server errors from an `interaction_invalid` reply (still parked). */
     errors?: { field: string; message: string }[];
     /** True after a submit, until the turn resumes or comes back invalid. */
     busy?: boolean;
@@ -77,7 +89,7 @@ interface OperatorApi {
     status: Status;
     sendMessage: (text: string) => void;
     respond: (turnRequestId: string, approved: boolean) => void;
-    submitInteraction: (values: ChoicesValues) => void;
+    submitInteraction: (values: InteractionValues) => void;
     declineInteraction: () => void;
     conversations: ConversationSummary[];
     activeConversationId: string | null;
@@ -289,7 +301,7 @@ export function useOperator(): OperatorApi {
         (async () => {
             try {
                 await client.connect();
-                const session = await client.createConversationSession({ agentId, userName: 'web-chat-example', supports: ['choice_chips'] });
+                const session = await client.createConversationSession({ agentId, userName: 'web-chat-example', supports: ['choice_chips', 'identity_form'] });
                 if (cancelled) return;
                 sessionRef.current = session.sessionId;
                 setActiveConversationId(session.conversationId);
@@ -336,7 +348,7 @@ export function useOperator(): OperatorApi {
     // every kind; the server validates and either resumes the turn (valid) or
     // replies `interaction_invalid` (still parked). We mark the card busy and
     // echo `interactionId` so a stale submit can't resolve a newer park.
-    const submitInteraction = useCallback((values: ChoicesValues) => {
+    const submitInteraction = useCallback((values: InteractionValues) => {
         const client = clientRef.current;
         if (!client || !sessionRef.current) return;
         setInteraction((prev) => {
@@ -365,7 +377,7 @@ export function useOperator(): OperatorApi {
         setInteraction(null);
         sessionRef.current = null;
         const { agentId } = targetRef.current;
-        const session = await client.createConversationSession({ agentId, conversationId, userName: 'web-chat-example', supports: ['choice_chips'] });
+        const session = await client.createConversationSession({ agentId, conversationId, userName: 'web-chat-example', supports: ['choice_chips', 'identity_form'] });
         sessionRef.current = session.sessionId;
         const { messages } = await client.getMessages({ sessionId: session.sessionId });
         setMessages(renderHistory(messages));
@@ -379,7 +391,7 @@ export function useOperator(): OperatorApi {
         setInteraction(null);
         sessionRef.current = null;
         const { agentId } = targetRef.current;
-        const session = await client.createConversationSession({ agentId, userName: 'web-chat-example', supports: ['choice_chips'] });
+        const session = await client.createConversationSession({ agentId, userName: 'web-chat-example', supports: ['choice_chips', 'identity_form'] });
         sessionRef.current = session.sessionId;
         setActiveConversationId(session.conversationId);
         void refreshConversations();

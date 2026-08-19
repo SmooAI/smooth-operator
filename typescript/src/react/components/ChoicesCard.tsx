@@ -225,14 +225,3 @@ export function ChoicesCard({ spec, reason, onSubmit, onDecline, errors, busy, c
         </form>
     );
 }
-
-/**
- * The widget's card registry — `kind` → card component. `interaction_required`
- * looks the card up by `kind` and renders it in the overlay slot. Registering a
- * card here IS declaring the kind's render capability; adding a kind is one card
- * component + one entry. (`identity_intake`'s card lives in the chat-widget repo;
- * `choices` is registered here.)
- */
-export const interactionCards = {
-    choices: ChoicesCard,
-} as const;

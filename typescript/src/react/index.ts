@@ -28,14 +28,15 @@ export { SmoothChat, type SmoothChatProps } from './components/SmoothChat.js';
 export { MessageList, MessageBubble, Citations, Composer, ConnectionStatusLabel } from './components/parts.js';
 
 // Rich Interaction cards — kind → card registry (see `interactionCards`).
+export { interactionCards, type InteractionCardProps } from './components/interactionCards.js';
+export { ChoicesCard, buildChoicesValues, type ChoicesCardProps, type ChoiceOption, type ChoiceQuestion, type ChoiceError } from './components/ChoicesCard.js';
 export {
-    ChoicesCard,
-    interactionCards,
-    buildChoicesValues,
-    type ChoicesCardProps,
-    type ChoiceOption,
-    type ChoiceQuestion,
-    type ChoiceError,
-} from './components/ChoicesCard.js';
+    IdentityIntakeCard,
+    buildIdentityValues,
+    type IdentityIntakeCardProps,
+    type IdentityField,
+    type IdentityFieldKey,
+    type IdentityError,
+} from './components/IdentityIntakeCard.js';
 
 export type { ChatMessage, ConnectionStatus, Role, Citation } from './types.js';
