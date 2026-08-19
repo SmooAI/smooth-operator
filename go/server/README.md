@@ -105,7 +105,8 @@ You decide what the agent can touch; the runner enforces it.
 - `AuthVerifier` seam — a default permissive verifier and a `LocalTokenVerifier` (HS256 JWT, fail-closed), chosen at connect from the `?token=` slot.
 - `AgentConfigResolver` seam — resolves a session's `agentId` into its per-agent config (instructions, conversation `Workflow`, greeting, personality, tool allow-list), folded into the turn. A configured `Workflow` runs a stepped, judge-advanced guided-agency flow.
 - SEP extension hosting, host tool injection (`WithTools`), and the authLevel gate + OTP flow above.
-- WebSocket transport (`github.com/coder/websocket`) — one `/ws` endpoint, a per-connection read loop and a single outbound writer goroutine.
+- WebSocket transport (`github.com/coder/websocket`) — one `/ws` endpoint, a per-connection read loop and a single outbound writer goroutine. The writer keeps draining (and discarding) the outbound sink after a failed write, so a client that vanishes mid-stream can never block the turn on a full buffer — the Go equivalent of the Rust reference's unbounded `sink_tx`.
+- **Panic containment** — a turn goroutine that panics settles as an `INTERNAL_ERROR` on that connection instead of taking the process (and every other connection) down. A panic inside a _tool_ is not yet contained: the engine runs the tool loop on its own goroutine in `smooth-operator-core`.
 - **Graceful SIGTERM/SIGINT drain** — one shared drain context; each connection finishes its in-flight turn, flushes the terminal event, then detaches and exits.
 - `ServeLocal` / `SpawnLocal` — the in-memory, loopback, auth-off entrypoint, embeddable in-process.
 

@@ -350,6 +350,12 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	if err != nil {
 		return TurnResult{}, err
 	}
+	// An executor that returns (nil, nil) — a durable backend that declines, or a host
+	// stub — would nil-deref on stream.Events() below and panic the turn. Fail the turn
+	// cleanly instead: the caller emits INTERNAL_ERROR and the connection survives.
+	if stream == nil {
+		return TurnResult{}, fmt.Errorf("server: executor returned a nil stream")
+	}
 	// Turn over: drop any lingering pending confirmation so a stale entry can't
 	// mis-route a later confirm_tool_action (mirrors the Rust (cfg.clear)(session_id)
 	// at turn end). No-op when HITL is off.
