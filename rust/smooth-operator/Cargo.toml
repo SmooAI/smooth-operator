@@ -56,7 +56,10 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+# `test-util` is NOT in tokio's `full` — it has to be asked for by name. It is
+# what `#[tokio::test(start_paused = true)]` needs, so the park-timeout tests
+# assert on the code's deadline arithmetic instead of on the scheduler.
+tokio = { workspace = true, features = ["test-util"] }
 # The telemetry TDD test installs a capturing tracing layer to assert on the
 # recorded `gen_ai.*` span fields without a live OTLP collector.
 tracing-subscriber = { workspace = true }

@@ -541,10 +541,19 @@ mod tests {
         );
     }
 
-    /// A stale outcome is dropped, not treated as a fresh start: the park keeps
-    /// its ORIGINAL deadline, so a stream of stale clicks can't hold a turn open.
-    #[tokio::test]
-    async fn dropping_a_stale_outcome_does_not_extend_the_park() {
+    /// Stale outcomes are dropped one after another without ever resolving the
+    /// park — the park degrades on its own timeout as if they had never arrived.
+    ///
+    /// Runs on tokio's virtual clock so the 5 drops and the expiry are ordered by
+    /// the runtime rather than by how loaded the machine is.
+    ///
+    /// The park also keeps its ORIGINAL deadline across those drops (`timeout_at`,
+    /// not a fresh `timeout` per message), so stale clicks can't hold a turn open.
+    /// That is deliberately NOT asserted here: an elapsed-time bound cannot
+    /// distinguish the two — the restart bug expires at ~110ms against a 60ms
+    /// park, and no threshold separates those without measuring the scheduler.
+    #[tokio::test(start_paused = true)]
+    async fn stale_outcomes_are_dropped_without_resolving_the_park() {
         let pair = interaction_channel();
         let tool = RequestInteractionTool::new(
             identity(),
@@ -568,18 +577,14 @@ mod tests {
             }
         });
 
-        let started = tokio::time::Instant::now();
         let out = tool
             .execute(json!({ "fields": ["email"], "reason": "r" }))
             .await
             .expect("degrades");
         assert_eq!(
             serde_json::from_str::<Value>(&out).unwrap()["status"],
-            "no_response"
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "the park must expire on its original deadline"
+            "no_response",
+            "five outcomes for another park must not resolve this one"
         );
     }
 
