@@ -101,8 +101,9 @@ func (p *slowToolProbe) awaitCancelled(t *testing.T) {
 
 // slowToolServer spins up a server whose mock scripts a single call to the parking tool
 // (so the turn parks and never returns on its own), then a text reply that a
-// non-cancelled turn would settle with.
-func slowToolServer(t *testing.T, probe *slowToolProbe) *LocalServer {
+// non-cancelled turn would settle with. The mock is returned so a test can assert how
+// many model calls the server actually made.
+func slowToolServer(t *testing.T, probe *slowToolProbe) (*LocalServer, *core.MockLlmProvider) {
 	t.Helper()
 	mock := core.NewMockLlmProvider()
 	mock.PushToolCall("call-1", cancelSlowTool, `{}`)
@@ -117,7 +118,7 @@ func slowToolServer(t *testing.T, probe *slowToolProbe) *LocalServer {
 		t.Fatalf("spawn: %v", err)
 	}
 	t.Cleanup(func() { _ = ls.Shutdown() })
-	return ls
+	return ls, mock
 }
 
 // nextRawEv reads the next server event WITHOUT the pong/keepalive filtering nextEv
@@ -191,7 +192,7 @@ func recvUntil(t *testing.T, transport protocol.Transport, typ string, within ti
 // connection stays usable.
 func TestCancelMidTurnAbortsAndEmitsCancelled(t *testing.T) {
 	probe := newSlowToolProbe()
-	ls := slowToolServer(t, probe)
+	ls, _ := slowToolServer(t, probe)
 	transport := connectTransport(t, ls)
 	defer func() { _ = transport.Close() }()
 
@@ -254,6 +255,58 @@ func TestCancelMidTurnAbortsAndEmitsCancelled(t *testing.T) {
 	}
 	if rid, _ := pong["requestId"].(string); rid != "p1" {
 		t.Fatalf("pong requestId = %v, want p1", pong["requestId"])
+	}
+}
+
+// TestCancelledTurnMakesNoFurtherModelCall — cancel is a STOP button, not a mute button.
+//
+// The regression this guards (th-f2ac48): the engine's agent loop folds a tool failure —
+// including the `context canceled` a tool or the write-confirmation gate returns once the
+// turn is cancelled — back to the model as a tool result and iterates. The runner has
+// already walked away, so that next model call's output was merely discarded: real
+// gateway spend, and real tool side effects, on a turn the user stopped.
+//
+// Asserted on deterministic state, not timing: the mock's call count, and the fact that
+// the NEXT turn still finds its scripted response. Without the fix the cancelled turn
+// eats the second script entry, so turn 2 streams nothing (and `go test -race` reports the
+// two turns popping the mock's FIFO concurrently — the same defect from the other side).
+func TestCancelledTurnMakesNoFurtherModelCall(t *testing.T) {
+	probe := newSlowToolProbe()
+	ls, mock := slowToolServer(t, probe)
+	transport := connectTransport(t, ls)
+	defer func() { _ = transport.Close() }()
+
+	sessionID := createSession(t, transport)
+
+	sendFrame(t, transport, map[string]any{
+		"action":    "send_message",
+		"requestId": "turn-1",
+		"sessionId": sessionID,
+		"message":   "please do the slow thing",
+	})
+	probe.awaitStart(t)
+	sendFrame(t, transport, map[string]any{"action": "cancel", "requestId": "turn-1"})
+	recvUntil(t, transport, "cancelled", 5*time.Second)
+	probe.awaitCancelled(t)
+
+	// The second scripted response is still there for the NEXT turn — the cancelled turn
+	// did not consume it. This is the assertion that fails without the fix.
+	sendFrame(t, transport, map[string]any{
+		"action":    "send_message",
+		"requestId": "turn-2",
+		"sessionId": sessionID,
+		"message":   "never mind, say something",
+	})
+	done, _ := recvUntil(t, transport, "eventual_response", 10*time.Second)
+	parts, ok := dot(t, done, "data.data.response.responseParts")
+	if !ok || !jsonEqual(parts, []any{"Finished the slow thing."}) {
+		t.Fatalf("turn 2 must receive the response the cancelled turn did not consume, got %s", mustJSON(done))
+	}
+
+	// Exactly one model call per turn: the cancelled turn made its first call and stopped.
+	// Read once both turns have settled, so this is state, not a race with a live turn.
+	if got := mock.CallCount(); got != 2 {
+		t.Fatalf("model calls = %d, want 2 (one per turn); a cancelled turn must not call the model again", got)
 	}
 }
 
@@ -325,7 +378,7 @@ func TestNormalTurnStillCompletes(t *testing.T) {
 // (no client remains to receive its output).
 func TestDisconnectMidTurnAbortsTheTurn(t *testing.T) {
 	probe := newSlowToolProbe()
-	ls := slowToolServer(t, probe)
+	ls, _ := slowToolServer(t, probe)
 	transport := connectTransport(t, ls)
 
 	sessionID := createSession(t, transport)
@@ -355,7 +408,7 @@ func TestDisconnectMidTurnAbortsTheTurn(t *testing.T) {
 // concurrently.
 func TestSecondSendMessageWhileTurnInFlightIsRejected(t *testing.T) {
 	probe := newSlowToolProbe()
-	ls := slowToolServer(t, probe)
+	ls, _ := slowToolServer(t, probe)
 	transport := connectTransport(t, ls)
 	defer func() { _ = transport.Close() }()
 
