@@ -68,4 +68,17 @@ describe('dispatch unions cover the spec', () => {
         const rejected = specActions.filter((action) => !isClientAction({ action }));
         expect(rejected, `isClientAction() would reject these actions: [${rejected.join(', ')}]`).toEqual([]);
     });
+
+    /**
+     * The OTHER half of the contract, and the reason the guard above must not be
+     * "satisfied" by making unknown types throw: per the stream_reasoning schema,
+     * clients that do not recognize an event MUST ignore it. A frame from a NEWER
+     * server that this build predates has to be rejected quietly by the guard, not
+     * blow up — `handleFrame` returns early on exactly this.
+     */
+    it('ignores an event type this client version predates', () => {
+        expect(() => isServerEvent({ type: 'stream_hologram', data: {} })).not.toThrow();
+        expect(isServerEvent({ type: 'stream_hologram', data: {} })).toBe(false);
+        expect(isServerEvent({ type: 'stream_token', data: {} })).toBe(true);
+    });
 });
