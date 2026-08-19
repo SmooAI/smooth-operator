@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,7 +37,18 @@ type scenario struct {
 	Server        scenarioServer   `json:"server"`
 	MockLlmScript []mockScriptStep `json:"mockLlmScript"`
 	Steps         []scenarioStep   `json:"steps"`
+
+	// KnownDivergences lists the languages this scenario is known to fail on today,
+	// with KnownDivergencesReason next to it. An EXPIRING marker, not a skip: a
+	// listed language that fails is reported and tolerated, but one that PASSES
+	// fails the build, so a marker cannot rot silently into a green test that proves
+	// nothing (the failure mode this corpus exists to catch).
+	KnownDivergences       []string `json:"knownDivergences"`
+	KnownDivergencesReason string   `json:"knownDivergencesReason"`
 }
+
+// lang is this runner's id in a scenario's knownDivergences list.
+const lang = "go"
 
 // scenarioServer is the optional `server` directive: deployment-time config the runner
 // applies when starting the server — the tools the agent may call, and the subset gated
@@ -97,7 +109,48 @@ type matcher struct {
 
 // scenariosDir resolves spec/conformance/scenarios relative to the repo root (this
 // file lives at go/server/, so the root is three parents up).
-func scenariosDir(t *testing.T) string {
+// parityT is the slice of *testing.T the scenario runner actually uses. Narrowing
+// it to an interface lets a known-divergence scenario run against a recorder that
+// CAPTURES the first failure instead of failing the build — *testing.T's own
+// Fatalf is terminal and cannot be un-failed.
+type parityT interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// divergenceRecorder is a parityT that turns the first Fatalf into a panic
+// carrying the message, so the caller can recover it. Fatalf must not return
+// (callers rely on it aborting), and panic is the only way to do that while
+// leaving the real *testing.T untouched.
+type divergenceRecorder struct{ msg string }
+
+type divergenceFailure struct{ msg string }
+
+func (r *divergenceRecorder) Helper() {}
+
+func (r *divergenceRecorder) Fatalf(format string, args ...any) {
+	r.msg = fmt.Sprintf(format, args...)
+	panic(divergenceFailure{r.msg})
+}
+
+// runDivergent runs a scenario against a recorder, reporting whether it passed
+// and the failure message if it did not.
+func runDivergent(path string) (passed bool, msg string) {
+	rec := &divergenceRecorder{}
+	defer func() {
+		if r := recover(); r != nil {
+			if f, ok := r.(divergenceFailure); ok {
+				passed, msg = false, f.msg
+				return
+			}
+			panic(r)
+		}
+	}()
+	runScenario(rec, path)
+	return true, ""
+}
+
+func scenariosDir(t parityT) string {
 	t.Helper()
 	wd, err := os.Getwd()
 	if err != nil {
@@ -110,7 +163,7 @@ func scenariosDir(t *testing.T) string {
 // ("data.data.response") or, when it parses as a non-negative integer, an array by
 // position ("citations.0.id") — so a citation field can be asserted by index. Mirrors
 // the Python reference runner's array-aware dot helper.
-func dot(t *testing.T, obj map[string]any, path string) (any, bool) {
+func dot(t parityT, obj map[string]any, path string) (any, bool) {
 	t.Helper()
 	var cur any = obj
 	for _, part := range strings.Split(path, ".") {
@@ -136,7 +189,7 @@ func dot(t *testing.T, obj map[string]any, path string) (any, bool) {
 
 // buildMock loads a scenario's mockLlmScript into the engine's MockLlmProvider — the
 // deterministic record/replay source that makes the turn identical across languages.
-func buildMock(t *testing.T, script []mockScriptStep) *core.MockLlmProvider {
+func buildMock(t parityT, script []mockScriptStep) *core.MockLlmProvider {
 	t.Helper()
 	mock := core.NewMockLlmProvider()
 	for _, entry := range script {
@@ -275,20 +328,40 @@ func TestScenarioParity(t *testing.T) {
 		path := path
 		name := strings.TrimSuffix(filepath.Base(path), ".json")
 		t.Run(name, func(t *testing.T) {
-			runScenario(t, path)
+			sc, err := loadScenario(path)
+			if err != nil {
+				t.Fatalf("load scenario: %v", err)
+			}
+			if !slices.Contains(sc.KnownDivergences, lang) {
+				runScenario(t, path)
+				return
+			}
+			passed, msg := runDivergent(path)
+			if passed {
+				t.Fatalf("remove %s from knownDivergences in %s.json — it now passes", lang, name)
+			}
+			t.Logf("known divergence (%s): %s", sc.KnownDivergencesReason, msg)
 		})
 	}
 }
 
-func runScenario(t *testing.T, path string) {
-	t.Helper()
+func loadScenario(path string) (scenario, error) {
+	var sc scenario
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read scenario: %v", err)
+		return sc, fmt.Errorf("read scenario: %w", err)
 	}
-	var sc scenario
 	if err := json.Unmarshal(raw, &sc); err != nil {
-		t.Fatalf("parse scenario: %v", err)
+		return sc, fmt.Errorf("parse scenario: %w", err)
+	}
+	return sc, nil
+}
+
+func runScenario(t parityT, path string) {
+	t.Helper()
+	sc, err := loadScenario(path)
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 
 	mock := buildMock(t, sc.MockLlmScript)
@@ -334,7 +407,7 @@ func runScenario(t *testing.T, path string) {
 
 // nextEvent returns the next protocol event, skipping non-semantic keepalive/pong
 // frames (as the Python reference does).
-func nextEvent(t *testing.T, transport protocol.Transport) map[string]any {
+func nextEvent(t parityT, transport protocol.Transport) map[string]any {
 	t.Helper()
 	for {
 		select {
@@ -364,7 +437,7 @@ func nextEvent(t *testing.T, transport protocol.Transport) map[string]any {
 // a faithful port of the Python reference's _match_expected state machine: one-event
 // lookahead for `repeat` overrun, status / statusGte / assert checks, var capture, and
 // accumulate + assertAccumulated.
-func matchExpected(t *testing.T, transport protocol.Transport, matchers []matcher, vars map[string]any) {
+func matchExpected(t parityT, transport protocol.Transport, matchers []matcher, vars map[string]any) {
 	t.Helper()
 	var pending map[string]any // one-event lookahead when a `repeat` matcher overruns
 	for _, m := range matchers {

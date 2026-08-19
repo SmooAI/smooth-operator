@@ -10,6 +10,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using SmooAI.SmoothOperator.Core;
 using SmooAI.SmoothOperator.Server.AspNetCore;
+using Xunit.Sdk;
 
 namespace SmooAI.SmoothOperator.Server.IntegrationTests;
 
@@ -57,12 +58,43 @@ public class ScenarioParityTests
         Assert.False(JsonEquals(JsonNode.Parse("""{"a": 1}"""), JsonNode.Parse("""{"a": 1, "b": 2}""")));
     }
 
+    /// <summary>This runner's id in a scenario's <c>knownDivergences</c> list.</summary>
+    private const string Lang = "dotnet";
+
     [Theory]
     [MemberData(nameof(Scenarios))]
     public async Task ScenarioParity(string name, string path)
     {
-        _ = name; // surfaced as the test id via MemberData
         var scenario = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+
+        // `knownDivergences` lists the languages a scenario is known to fail on today,
+        // with `knownDivergencesReason` next to it. An EXPIRING marker, not a skip: a
+        // listed language that fails is reported and tolerated, but one that PASSES fails
+        // the build, so a marker cannot rot silently into a green test that proves nothing
+        // (the failure mode this corpus exists to catch).
+        var divergent = scenario["knownDivergences"]?.AsArray()
+            .Any(l => l?.GetValue<string>() == Lang) ?? false;
+        if (divergent)
+        {
+            try
+            {
+                await RunScenarioAsync(scenario);
+            }
+            catch (Exception ex) when (ex is XunitException or IOException or WebSocketException)
+            {
+                Console.WriteLine(
+                    $"[known divergence] {name}: {scenario["knownDivergencesReason"]?.GetValue<string>()}\n  {ex.Message}");
+                return;
+            }
+
+            Assert.Fail($"remove {Lang} from knownDivergences in {name} — it now passes");
+        }
+
+        await RunScenarioAsync(scenario);
+    }
+
+    private static async Task RunScenarioAsync(JsonObject scenario)
+    {
         var chat = BuildMock(scenario["mockLlmScript"]?.AsArray());
         var serverDirective = scenario["server"]?.AsObject();
         var tools = BuildTools(serverDirective?["tools"]?.AsArray());

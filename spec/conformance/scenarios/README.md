@@ -97,11 +97,29 @@ Eight scenarios now cover them:
 
 A mock turn finishes faster than a `cancel` frame can race it, and the format has no "slow tool" directive (`server.tools` entries return a fixed string immediately). `cancel-mid-turn` therefore opens its in-flight window with a **write-confirmation park** (`server.confirmTools`) — the one pause this corpus can express. `cancel-no-active-turn-noop` asserts "nothing arrives" structurally, since no runner has a drain check: the cancel step expects zero events, so any stray event is consumed by the *next* step's first matcher and fails it.
 
+### `knownDivergences` — an expiring marker, not a skip
+
+A scenario may name the languages it is known to fail on today, with the reason and pearl id right next to it:
+
+```jsonc
+"knownDivergences": ["go", "typescript", "python", "dotnet"],
+"knownDivergencesReason": "th-eae69d — these four emit the raise tool's toolCall chunk BEFORE interaction_required …",
+```
+
+All five runners honour it, and the contract has two halves — the second is the one that matters:
+
+- a **listed** language that FAILS is reported (with the reason and the actual assertion) and does not fail the build;
+- a **listed** language that PASSES **fails the build**, with `remove <lang> from knownDivergences in <scenario> — it now passes`.
+
+Without that second half the markers rot silently and we recreate the exact "green tests that prove nothing" problem this corpus exists to catch. A marker is a tracked bug with an expiry, never an accepted difference — the entry comes out the moment the port is fixed, and the build tells you when that is.
+
+Implementation note per language, since `*testing.T` and panics do not catch alike: Rust runs a marked scenario on a `tokio::spawn` handle so its panic surfaces as a `JoinError`; Go narrows the runner's `*testing.T` to a small `parityT` interface so a marked scenario can run against a recorder whose `Fatalf` panics with the message instead of failing the build; TypeScript, Python and .NET just catch the assertion. ⚠️ `go test` caches results and does not invalidate on a scenario-JSON edit — use `-count=1` when iterating locally.
+
 ### Known divergences these scenarios expose
 
 Recorded here as facts, not as license to weaken the scenarios. **Do not "fix" a scenario to make a port pass.**
 
-- **Park event vs. the raise tool's `stream_chunk` — Rust is 1 of 5.** For a Rich Interaction, Rust emits `interaction_required` *before* the raise tool's `toolCall` chunk; Go, TypeScript, Python and .NET all emit the chunk first. The five scenarios that park assert **Rust's** order, because Rust is the reference and because it is the order this corpus already pins for the other park type (`hitl-write-confirmation` defers the gated tool's chunk until after the prompt) — the other four are internally inconsistent between their two park paths. Whether the spec should adopt chunk-first instead is a **protocol decision, not a test fix**; until it is made, four ports are red on these five scenarios.
+- **Park event vs. the raise tool's `stream_chunk` — Rust is 1 of 5, and Rust is right.** For a Rich Interaction, Rust emits `interaction_required` *before* the raise tool's `toolCall` chunk; Go, TypeScript, Python and .NET all emit the chunk first. **Ruled a port bug, not a protocol variant**, on three grounds: all five already defer the gated tool's chunk until after the prompt for the *other* park type (`hitl-write-confirmation`), so the four are internally inconsistent between their two park paths while Rust is consistent; Rust is the designated reference and the ports mirror it; and semantically a client that renders tool calls would otherwise show "calling `request_identity_intake`…" before the card appears, leaking framework internals ahead of the semantic event. The four ports change, not these scenarios.
 - **A cancelled turn keeps running in Go and .NET.** In both, the turn after a `cancel` produces no reply because the *cancelled* turn consumed an extra LLM response: the write-confirmation gate returns a deny instead of unwinding, the agent loop makes one more model call, and the output is merely gagged (Go: `if turnCtx.Err() != nil { return }`). Cancellation is a mute button there, not a stop button — a real cost and a real side-effect risk after a visitor hits Stop. Rust, TypeScript and Python abort the turn properly. Verified by re-running with one extra `mockLlmScript` entry: both pass, proving the entry is eaten by the cancelled turn.
 - **Ack payloads differ, so only `status` is asserted on a `submit_interaction` ack.** The five servers put different fields in `data` (Go omits `kind`/`values`; Python omits `kind`, and its decline ack omits `interactionId`/`declined`; .NET's decline ack omits `declined`). Asserting more would pin one language's shape rather than the protocol's.
 

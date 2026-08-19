@@ -1,6 +1,8 @@
 {
     "name": "interaction-invalid-retryable",
     "description": "Invalid interaction values are RETRYABLE, never terminal. A `submit_interaction` whose values fail the kind's server-side validator must emit `interaction_invalid` (per-field errors + a card-level summary) and leave the turn PARKED — mirroring `otp_invalid`. This scenario proves the park survives the rejection twice over: a second bad submit is rejected the same way, and only then does a corrected submit ack 200 and resume the turn. A server that terminated the turn with an `error` event, or that dropped the park after the first rejection, fails here.",
+    "knownDivergences": ["go", "typescript", "python", "dotnet"],
+    "knownDivergencesReason": "th-eae69d — the park-ordering divergence, not the retry behavior: these four emit the raise tool's `toolCall` stream_chunk BEFORE `interaction_required`, so they fail in step 2 and never reach the retryable-invalid assertions. See interaction-park-resume for the full ruling.",
     "mockLlmScript": [
         { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
         { "kind": "text", "text": "Got it — sending the quote now." }

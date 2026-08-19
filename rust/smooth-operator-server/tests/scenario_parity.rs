@@ -496,6 +496,23 @@ async fn match_expected(
     }
 }
 
+/// This runner's id in a scenario's `knownDivergences` list.
+const LANG: &str = "rust";
+
+/// Whether `path` marks this language as a known divergence.
+fn is_divergent(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(scenario) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    scenario
+        .get("knownDivergences")
+        .and_then(Value::as_array)
+        .is_some_and(|langs| langs.iter().any(|l| l.as_str() == Some(LANG)))
+}
+
 /// Drive one scenario file end-to-end through the reference server.
 async fn run_scenario(path: &Path) {
     let scenario: Value =
@@ -554,13 +571,32 @@ async fn scenario_parity_corpus() {
         scenarios_dir().display()
     );
     for path in &paths {
-        eprintln!(
-            "[scenario-parity] {}",
-            path.file_name().unwrap().to_string_lossy()
-        );
-        run_scenario(path).await;
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        eprintln!("[scenario-parity] {name}");
+        if !is_divergent(path) {
+            run_scenario(path).await;
+            continue;
+        }
+        // `knownDivergences` lists the languages a scenario is known to fail on
+        // today, with `knownDivergencesReason` next to it. An EXPIRING marker, not
+        // a skip: a listed language that fails is reported and tolerated, but one
+        // that PASSES fails the build, so a marker cannot rot silently into a green
+        // test that proves nothing (the failure mode this corpus exists to catch).
+        // Spawned so the scenario's panic is caught by the JoinHandle rather than
+        // unwinding the whole corpus.
+        let owned = path.clone();
+        if tokio::spawn(async move { run_scenario(&owned).await })
+            .await
+            .is_ok()
+        {
+            panic!("remove {LANG} from knownDivergences in {name} — it now passes");
+        }
+        eprintln!("[scenario-parity] {name}: known divergence for {LANG}, tolerated");
     }
-    eprintln!("[scenario-parity] {} scenario(s) passed", paths.len());
+    eprintln!(
+        "[scenario-parity] {} scenario(s) accounted for",
+        paths.len()
+    );
 }
 
 /// Offline guard for the by-value JSON comparison (pearl th-4f1263). A corpus

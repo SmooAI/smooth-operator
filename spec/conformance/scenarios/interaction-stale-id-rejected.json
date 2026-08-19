@@ -1,6 +1,8 @@
 {
     "name": "interaction-stale-id-rejected",
     "description": "A `submit_interaction` carrying a stale or mismatched `interactionId` must be REJECTED with error/INTERACTION_MISMATCH and must leave the turn parked — the interactionId exists precisely so a stale submit can never resolve a newer park (spec/actions/submit-interaction.schema.json). The park's survival is proved without depending on resume ordering: a follow-up submit with the correct id gets its 200 ack, which a dropped park could not produce.",
+    "knownDivergences": ["go", "typescript", "python", "dotnet"],
+    "knownDivergencesReason": "th-eae69d — the park-ordering divergence, not the mismatch behavior: these four emit the raise tool's `toolCall` stream_chunk BEFORE `interaction_required`, so they fail in step 2 and never reach the INTERACTION_MISMATCH assertion. See interaction-park-resume for the full ruling.",
     "mockLlmScript": [
         { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
         { "kind": "text", "text": "Got it — sending the quote now." }

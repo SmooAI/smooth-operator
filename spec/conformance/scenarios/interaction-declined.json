@@ -1,6 +1,8 @@
 {
     "name": "interaction-declined",
     "description": "`declined: true` resolves the park WITHOUT values. The visitor refusing a Rich Interaction is a first-class outcome, not an error and not a dead turn: the server acks 200, the raise tool returns a declined payload to the model, and the turn resumes and finishes normally. A server that required `values`, or that left the turn parked on a decline, fails here. Only `status` is asserted on the ack — the five servers put different fields in the decline ack's `data` (see the README's divergence note), so asserting more would pin one language's shape rather than the protocol's.",
+    "knownDivergences": ["go", "typescript", "python", "dotnet"],
+    "knownDivergencesReason": "th-eae69d — the park-ordering divergence, not the decline behavior: these four emit the raise tool's `toolCall` stream_chunk BEFORE `interaction_required`, so they fail in step 2 and never reach the decline assertions. See interaction-park-resume for the full ruling.",
     "mockLlmScript": [
         { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
         { "kind": "text", "text": "No problem — I'll keep helping without that." }

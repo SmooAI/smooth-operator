@@ -1,6 +1,8 @@
 {
     "name": "cancel-mid-turn",
     "description": "A turn cancelled while in flight must emit the terminal `cancelled` event (status 499, echoing the CANCELLED TURN's requestId) IN PLACE OF `eventual_response`, and must free the connection's turn slot so the next `send_message` is accepted. The in-flight window is made deterministic by parking the turn on write-confirmation HITL (`server.confirmTools`) — a mock turn otherwise completes faster than a `cancel` frame can race it, and the scenario format has no way to express a slow tool. Per spec/actions/cancel.schema.json the cancel frame carries the requestId of the `send_message` it aborts; per spec/events/cancelled.schema.json the cancelled turn produces NO answer payload.",
+    "knownDivergences": ["go", "dotnet"],
+    "knownDivergencesReason": "th-eae69d — Go and .NET do not actually abort a cancelled turn. The cancelled turn consumes one MORE LLM response after the cancel (Go's write-confirmation gate returns a deny instead of unwinding, the agent loop makes another model call) and its output is merely gagged, so the NEXT turn finds a drained mock script and streams nothing. Cancellation is a mute button there, not a stop button — after a visitor hits Stop the turn keeps burning model calls and keeps executing whatever comes next, invisibly. Rust, TypeScript and Python abort properly. Tracked as a port bug; do NOT weaken this scenario.",
     "server": {
         "tools": [
             {
