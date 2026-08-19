@@ -28,6 +28,7 @@ from .backplane import Backplane, InMemoryBackplane
 from .choices import ChoicesKind, validate_choices
 from .coding_tools import coding_tools, coding_tools_from_env, resolve_workspace_path
 from .dispatcher import FrameDispatcher
+from .identity_intake import IdentityIntakeKind, validate_intake
 from .interaction import (
     InteractionFieldError,
     InteractionKind,
@@ -78,6 +79,8 @@ __all__ = [
     "FrameDispatcher",
     "ChoicesKind",
     "validate_choices",
+    "IdentityIntakeKind",
+    "validate_intake",
     "InteractionFieldError",
     "InteractionKind",
     "InteractionOutcome",

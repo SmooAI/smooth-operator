@@ -258,7 +258,7 @@ async def test_tool_config_filters_tools_per_agent() -> None:
     # Rich Interaction framework tools (request_<kind> + submit_interaction) are always
     # registered — NOT subject to the agent allow-list, mirroring the Rust runner — so
     # assert the AGENT tool subset with those filtered out.
-    _INTERACTION = {"request_choices", "submit_interaction"}
+    _INTERACTION = {"request_choices", "request_identity_intake", "submit_interaction"}
     assert [n for n in _sent_tool_names(mock.calls[0]) if n not in _INTERACTION] == ["crm"]
     assert [n for n in _sent_tool_names(mock.calls[1]) if n not in _INTERACTION] == [
         "crm",

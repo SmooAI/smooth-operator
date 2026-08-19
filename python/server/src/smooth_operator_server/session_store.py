@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from threading import Lock
@@ -38,8 +38,16 @@ class StoredSession:
     #: The caller's email captured at create time, used as the OTP delivery contact
     #: for the ``end_user`` identity flow (the Python analog of the Rust session's
     #: ``metadata.contactEmail``). ``None`` when no email was supplied — the server
-    #: then can't offer OTP for this session.
+    #: then can't offer OTP for this session. Also (re)written by an ``identity_intake``
+    #: submit's host effect (:meth:`SessionStore.attach_session_identity`).
     contact_email: str | None = None
+    #: The caller's display name (the Rust session's ``metadata.userName``). Captured at
+    #: create time from the pre-chat form, and (re)written by an ``identity_intake`` submit.
+    user_name: str | None = None
+    #: The caller's phone (the Rust session's ``metadata.contactPhone``), the SMS OTP
+    #: delivery contact. ``None`` from the pre-chat path (which captures only an email);
+    #: an ``identity_intake`` submit stamps it, making the session SMS-OTP-verifiable.
+    contact_phone: str | None = None
     #: The AUTHENTICATED principal's email that owns this session's conversation — the
     #: ACL key (th-8fe998). Set from the connection's principal, NEVER from a client
     #: frame field. ``None`` means "no owner" — an anonymous/emailless principal, or a
@@ -201,6 +209,22 @@ class SessionStore(ABC):
         successful ``verify_otp``. A no-op for an unknown session."""
         ...
 
+    async def attach_session_identity(
+        self, session_id: str, *, name: str | None = None, email: str | None = None, phone: str | None = None
+    ) -> None:
+        """Stamp captured contacts onto the session — the host effect of a valid
+        ``identity_intake`` submit (the Python analog of the Rust
+        ``AppState::attach_session_identity``). Writes ``user_name`` / ``contact_email`` /
+        ``contact_phone`` — the SAME keys the pre-chat create path stashes and the OTP contact
+        seam (:meth:`OtpService.send_otp` via the dispatcher) reads, so a captured contact is
+        immediately OTP-verifiable. Only provided (non-``None``) fields are written (an intake
+        that collected just an email never clobbers a known name); a no-op for an unknown session.
+
+        This **base default is a no-op** — the reference in-memory store overrides it. A durable
+        (Postgres/Dynamo) store writes to its own metadata; that durable participant/CRM attach is
+        a host concern, exactly as it is in the Rust reference. th-identity-intake."""
+        return None
+
 
 class InMemorySessionStore(SessionStore):
     """In-process :class:`SessionStore` — the reference store (the C# analog of
@@ -267,6 +291,7 @@ class InMemorySessionStore(SessionStore):
                 user_participant_id=str(uuid.uuid4()),
                 agent_participant_id=str(uuid.uuid4()),
                 contact_email=(user_email.strip() or None) if isinstance(user_email, str) else None,
+                user_name=(user_name.strip() or None) if isinstance(user_name, str) else None,
                 owner_email=owner,
                 owner_org=self._orgs.get(conv_id, org_id) if resume else org_id,
             )
@@ -351,3 +376,20 @@ class InMemorySessionStore(SessionStore):
                 self._authenticated[session_id] = True
             else:
                 self._authenticated.pop(session_id, None)
+
+    async def attach_session_identity(
+        self, session_id: str, *, name: str | None = None, email: str | None = None, phone: str | None = None
+    ) -> None:
+        with self._gate:
+            session = self._sessions.get(session_id)
+            if session is None:  # no-op for an unknown session (mirrors the Rust map miss).
+                return
+            # Only overwrite fields that were provided — an intake that captured just an email
+            # must never clobber a name known from the pre-chat form. `StoredSession` is frozen,
+            # so replace it with an updated copy in place.
+            self._sessions[session_id] = replace(
+                session,
+                user_name=name if name is not None else session.user_name,
+                contact_email=email if email is not None else session.contact_email,
+                contact_phone=phone if phone is not None else session.contact_phone,
+            )

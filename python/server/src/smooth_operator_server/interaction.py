@@ -27,7 +27,10 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .session_store import SessionStore
 
 #: How long a parked interaction waits for the client's ``submit_interaction`` before the
 #: raise tool unblocks with a ``no_response`` payload. Matches the Rust server's
@@ -143,6 +146,15 @@ class InteractionKind(ABC):
         the model follows to collect the same information turn by turn, then submit
         through the ``submit_interaction`` tool."""
 
+    async def host_effect(self, store: "SessionStore", session_id: str, values: dict[str, Any]) -> None:
+        """The kind-routed **host effect** of an accepted submit — the kind-agnostic seam
+        the Rust server's ``attach_interaction_effect`` fills. Runs on a valid submit on BOTH
+        paths (the dispatcher's ``submit_interaction`` action AND the conversational-fallback
+        ``submit_interaction`` tool) with the canonical validated ``values``. The default is a
+        **no-op** (``choices`` has no side effect); ``identity_intake`` overrides it to stamp the
+        captured contacts onto the session. Kinds without an effect leave this untouched."""
+        return None
+
 
 class InteractionRegistry:
     """The catalog of interaction kinds a server hosts. The default catalog is the
@@ -167,10 +179,11 @@ class InteractionRegistry:
 
     @classmethod
     def default(cls) -> InteractionRegistry:
-        """The reference catalog: ``choices``."""
+        """The reference catalog: ``choices`` + ``identity_intake``."""
         from .choices import ChoicesKind
+        from .identity_intake import IdentityIntakeKind
 
-        return cls().with_kind(ChoicesKind())
+        return cls().with_kind(ChoicesKind()).with_kind(IdentityIntakeKind())
 
 
 @dataclass
