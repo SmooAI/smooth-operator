@@ -70,6 +70,7 @@ public sealed class TurnRunner
     private readonly ConfirmationRegistry? _confirmations;
     private readonly InteractionCatalog? _interactions;
     private readonly InteractionParkRegistry? _interactionPark;
+    private readonly SessionIdentityRegistry? _interactionEffects;
     private readonly IReadOnlyCollection<string> _capabilities;
     private readonly AgentConfig _agentConfig;
     private readonly IWorkflowJudge? _judge;
@@ -85,7 +86,7 @@ public sealed class TurnRunner
     /// </summary>
     public Task PreambleCompleted { get; private set; } = Task.CompletedTask;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null, SessionIdentityRegistry? interactionEffects = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -108,6 +109,9 @@ public sealed class TurnRunner
         // interaction tools are registered → behavior identical to before Rich Interactions.
         _interactions = interactions;
         _interactionPark = interactionPark;
+        // The session-contact overlay a kind's ApplyEffect stamps on a valid conversational-fallback
+        // submit (null ⇒ no effect is run; the rich-frame path runs its own via the FrameDispatcher).
+        _interactionEffects = interactionEffects;
         _capabilities = capabilities ?? Array.Empty<string>();
         // Per-agent config: instructions.prompt overrides the default persona; conversation_workflow
         // drives the guided-agency flow. Empty (the default) ⇒ the org/default persona, unchanged.
@@ -368,7 +372,10 @@ public sealed class TurnRunner
             }
             if (anyFallback)
             {
-                options.Tools.Add(new SubmitInteractionTool(_interactions, raised));
+                // Session-bound effect context so a conversational-fallback submit runs the kind's host
+                // effect (identity_intake → stamp the session contact) exactly like the rich-frame path.
+                var effect = _interactionEffects?.EffectContext(sessionId);
+                options.Tools.Add(new SubmitInteractionTool(_interactions, raised, effect));
             }
         }
 

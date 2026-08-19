@@ -80,6 +80,76 @@ public interface IInteractionKind
     /// <summary>The directive handed to the model when the channel can't render the card: how to ask
     /// the interaction conversationally and submit it via the <c>submit_interaction</c> tool.</summary>
     string FallbackDirective(JsonNode? spec, string reason);
+
+    /// <summary>
+    /// The kind's host-side <b>effect</b>, run after a VALID submit on EITHER path — the rich
+    /// <c>submit_interaction</c> frame (<c>FrameDispatcher</c>) and the conversational-fallback
+    /// <c>submit_interaction</c> tool. Kind-agnostic seam: the caller resolves the kind from the DI
+    /// catalog and calls this without knowing which kind it is; <c>choices</c> inherits the no-op default,
+    /// <c>identity_intake</c> overrides to stamp the session's captured contact. A new kind adds its
+    /// effect by overriding here — no central switch to edit. The C# analog of Rust's kind-routed
+    /// <c>attach_interaction_effect</c>.
+    /// </summary>
+    void ApplyEffect(IInteractionEffectContext context, JsonNode canonicalValues) { }
+}
+
+/// <summary>
+/// The session-scoped host surface an interaction kind's <see cref="IInteractionKind.ApplyEffect"/> acts
+/// through — the C# analog of the <c>AppState</c> handle Rust's <c>attach_interaction_effect</c> closes
+/// over. Grows one method per host effect a kind needs; today just the identity attach. Kept minimal and
+/// honest (no speculative generality) — the SEAM is kind-agnostic, the effects themselves are not.
+/// </summary>
+public interface IInteractionEffectContext
+{
+    /// <summary>The session the accepted interaction belongs to.</summary>
+    string SessionId { get; }
+
+    /// <summary>Stamp captured contact identity onto the session — the SAME contact the OTP seam reads,
+    /// so a captured email/phone is immediately OTP-reachable. Only non-null fields are written (never
+    /// clobbers a known field with a null). <c>identity_intake</c>'s effect.</summary>
+    void AttachSessionIdentity(string? name, string? email, string? phone);
+}
+
+/// <summary>Captured session contact identity — the typed C# analog of the Rust in-memory session's
+/// <c>metadata.userName</c> / <c>contactEmail</c> / <c>contactPhone</c> keys.</summary>
+public sealed record SessionIdentity(string? Name = null, string? Email = null, string? Phone = null)
+{
+    /// <summary>Overlay non-null fields from a newer capture onto this one (an intake that collected
+    /// only an email keeps a previously captured name).</summary>
+    public SessionIdentity Merge(string? name, string? email, string? phone) =>
+        new(name ?? Name, email ?? Email, phone ?? Phone);
+}
+
+/// <summary>
+/// The in-memory, session-keyed contact overlay stamped by <c>identity_intake</c>'s host effect and read
+/// by the OTP contact seam — the C# analog of the Rust reference's <c>AppState</c> session-metadata map
+/// (an in-process overlay, NOT the durable <see cref="ISessionStore"/>). Per-connection lifetime, like
+/// <c>InteractionParkRegistry</c> and the declared-capabilities map: a client re-declares on reconnect.
+/// </summary>
+public sealed class SessionIdentityRegistry
+{
+    private readonly ConcurrentDictionary<string, SessionIdentity> _map = new();
+
+    /// <summary>Merge captured contact for a session (non-null fields overwrite; nulls leave prior
+    /// values intact). Idempotent-ish: re-submitting the same values is a no-op.</summary>
+    public void Attach(string sessionId, string? name, string? email, string? phone) =>
+        _map.AddOrUpdate(
+            sessionId,
+            _ => new SessionIdentity(name, email, phone),
+            (_, prior) => prior.Merge(name, email, phone));
+
+    /// <summary>The captured contact for a session, or null when nothing has been stamped.</summary>
+    public SessionIdentity? Get(string sessionId) =>
+        _map.TryGetValue(sessionId, out var identity) ? identity : null;
+
+    /// <summary>A session-bound <see cref="IInteractionEffectContext"/> for a kind's effect hook.</summary>
+    public IInteractionEffectContext EffectContext(string sessionId) => new Context(sessionId, this);
+
+    private sealed record Context(string SessionId, SessionIdentityRegistry Registry) : IInteractionEffectContext
+    {
+        public void AttachSessionIdentity(string? name, string? email, string? phone) =>
+            Registry.Attach(SessionId, name, email, phone);
+    }
 }
 
 /// <summary>
@@ -97,8 +167,9 @@ public sealed class InteractionCatalog
     /// <summary>First kind whose <see cref="IInteractionKind.Kind"/> matches, else null.</summary>
     public IInteractionKind? Get(string kind) => _kinds.FirstOrDefault(k => k.Kind == kind);
 
-    /// <summary>The reference catalog: the <c>choices</c> kind. Additional kinds register here.</summary>
-    public static InteractionCatalog Default { get; } = new(new ChoicesKind());
+    /// <summary>The reference catalog: the <c>choices</c> + <c>identity_intake</c> kinds. Additional
+    /// kinds register here.</summary>
+    public static InteractionCatalog Default { get; } = new(new ChoicesKind(), new IdentityIntakeKind());
 }
 
 /// <summary>One parked interaction — the record a <c>submit_interaction</c> frame resolves.</summary>
@@ -296,11 +367,13 @@ internal sealed class SubmitInteractionTool : AIFunction
 {
     private readonly InteractionCatalog _catalog;
     private readonly ConcurrentDictionary<string, JsonNode> _raised;
+    private readonly IInteractionEffectContext? _effect;
 
-    public SubmitInteractionTool(InteractionCatalog catalog, ConcurrentDictionary<string, JsonNode> raised)
+    public SubmitInteractionTool(InteractionCatalog catalog, ConcurrentDictionary<string, JsonNode> raised, IInteractionEffectContext? effect = null)
     {
         _catalog = catalog;
         _raised = raised;
+        _effect = effect;
     }
 
     public override string Name => "submit_interaction";
@@ -344,6 +417,14 @@ internal sealed class SubmitInteractionTool : AIFunction
             var detail = string.Join("; ", result.Errors!.Select(e => $"{e.Field}: {e.Message}"));
             return new ValueTask<object?>(
                 $"validation failed — {detail}. Re-ask the visitor for the corrected value(s) and submit again.");
+        }
+
+        // Run the kind's host effect (identity_intake stamps the session contact; choices is a no-op)
+        // BEFORE returning the submitted result to the model — the SAME effect the rich frame path runs,
+        // so a contact captured conversationally is just as OTP-reachable as one captured via the card.
+        if (_effect is not null)
+        {
+            kind.ApplyEffect(_effect, result.Canonical!);
         }
 
         return new ValueTask<object?>(new JsonObject

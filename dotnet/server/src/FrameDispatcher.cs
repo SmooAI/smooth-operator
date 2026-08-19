@@ -39,6 +39,9 @@ public sealed class FrameDispatcher
     private readonly ConfirmationRegistry _confirmations;
     private readonly InteractionCatalog? _interactions;
     private readonly InteractionParkRegistry _interactionPark = new();
+    // The in-memory, session-keyed contact overlay stamped by an interaction kind's host effect
+    // (identity_intake) and read by the OTP contact seam. Per-connection, like the park + supports maps.
+    private readonly SessionIdentityRegistry _sessionIdentity = new();
     // Per-connection render capabilities declared at create_conversation_session (the `supports` array),
     // keyed by sessionId. The rich-vs-fallback interaction branch reads this. Captured per connection
     // (like the confirmation registry) rather than persisted on the session — a client re-declares its
@@ -798,7 +801,7 @@ public sealed class FrameDispatcher
         // Rich Interactions: hand the turn the hosted-kind catalog, the connection's park registry, and
         // THIS session's declared render capabilities (empty for a text-only session → fallback path).
         var capabilities = _sessionSupports.TryGetValue(session.SessionId, out var supports) ? supports : null;
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity);
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's
@@ -849,7 +852,13 @@ public sealed class FrameDispatcher
                 // and re-sends its message once the session is authenticated.
                 if (_otpService is not null && otpRecorder?.Refused is string refusedTool)
                 {
-                    var contact = new OtpContact(Email: userEmail);
+                    // Merge any contact captured this connection by an identity_intake host effect over
+                    // the create-session email — so a visitor who supplied their details via the intake
+                    // form/fallback becomes OTP-reachable (email AND, unlike the create path, phone→SMS).
+                    var captured = _sessionIdentity.Get(sessionIdStr);
+                    var contact = new OtpContact(
+                        Email: string.IsNullOrEmpty(captured?.Email) ? userEmail : captured!.Email,
+                        Phone: captured?.Phone);
                     if (!contact.IsEmpty)
                     {
                         await OfferOtpAsync(sessionIdStr, refusedTool, contact, requestIdStr, turnSink, turnCts.Token).ConfigureAwait(false);
@@ -1114,6 +1123,11 @@ public sealed class FrameDispatcher
             sink(ProtocolEvents.InteractionInvalid(requestId, pending.InteractionId, pending.Kind, validation.Errors!, "Some fields need attention."));
             return;
         }
+
+        // Run the kind's host effect (identity_intake → stamp the session contact; choices → no-op)
+        // BEFORE resuming the parked turn — mirrors the Rust reference attaching session identity ahead
+        // of resolve_interaction. Kind-agnostic: resolved from the DI catalog, no kind name here.
+        kind.ApplyEffect(_sessionIdentity.EffectContext(sessionId), validation.Canonical!);
 
         if (!_interactionPark.Resolve(sessionId, InteractionOutcome.Submitted(validation.Canonical!)))
         {
