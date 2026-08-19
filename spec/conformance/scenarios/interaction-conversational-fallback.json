@@ -1,0 +1,24 @@
+{
+    "name": "interaction-conversational-fallback",
+    "description": "The capability gate. A session that did NOT declare `identity_form` in `supports` (a text-only channel — SMS, voice) must NEVER receive `interaction_required`: the same `request_identity_intake` raise degrades to its conversational fallback, returning immediately to the model so the turn runs straight through to its reply with no park. This is the negative half of interaction-park-resume — same mock script, capability removed — and it pins that the gate is read per turn from the session's declared capabilities rather than the kind being unconditionally rich.",
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
+        { "kind": "text", "text": "Sure — what's the best email for you?" }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com" },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "send me a quote", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "request_identity_intake" } },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "request_identity_intake", "data.state.rawResponse.toolResult.isError": false } },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Sure — what's the best email for you?" },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["Sure — what's the best email for you?"] } }
+            ]
+        }
+    ]
+}

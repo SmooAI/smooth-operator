@@ -1,0 +1,35 @@
+{
+    "name": "interaction-declined",
+    "description": "`declined: true` resolves the park WITHOUT values. The visitor refusing a Rich Interaction is a first-class outcome, not an error and not a dead turn: the server acks 200, the raise tool returns a declined payload to the model, and the turn resumes and finishes normally. A server that required `values`, or that left the turn parked on a decline, fails here. Only `status` is asserted on the ack — the five servers put different fields in the decline ack's `data` (see the README's divergence note), so asserting more would pin one language's shape rather than the protocol's.",
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
+        { "kind": "text", "text": "No problem — I'll keep helping without that." }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com", "supports": ["identity_form"] },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "send me a quote", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "interaction_required",
+                    "assert": { "requestId": "r-msg", "data.data.kind": "identity_intake" },
+                    "capture": { "interactionId": "data.data.interactionId" }
+                },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "request_identity_intake" } }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "declined": true },
+            "expect": [
+                { "type": "immediate_response", "status": 200 },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "request_identity_intake", "data.state.rawResponse.toolResult.isError": false } },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "No problem — I'll keep helping without that." },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["No problem — I'll keep helping without that."] } }
+            ]
+        }
+    ]
+}

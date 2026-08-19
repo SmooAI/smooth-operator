@@ -1,0 +1,38 @@
+{
+    "name": "interaction-stale-id-rejected",
+    "description": "A `submit_interaction` carrying a stale or mismatched `interactionId` must be REJECTED with error/INTERACTION_MISMATCH and must leave the turn parked — the interactionId exists precisely so a stale submit can never resolve a newer park (spec/actions/submit-interaction.schema.json). The park's survival is proved without depending on resume ordering: a follow-up submit with the correct id gets its 200 ack, which a dropped park could not produce.",
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "request_identity_intake", "arguments": "{\"fields\": [{\"key\": \"email\", \"required\": true}], \"reason\": \"to send you the quote\"}" },
+        { "kind": "text", "text": "Got it — sending the quote now." }
+    ],
+    "steps": [
+        {
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com", "supports": ["identity_form"] },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
+        },
+        {
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "send me a quote", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "interaction_required",
+                    "assert": { "requestId": "r-msg", "data.data.kind": "identity_intake" },
+                    "capture": { "interactionId": "data.data.interactionId" }
+                },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "request_identity_intake" } }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "stale-interaction-id", "values": { "email": "alice@example.com" } },
+            "expect": [
+                { "type": "error", "assert": { "requestId": "r-msg", "error.code": "INTERACTION_MISMATCH" } }
+            ]
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "values": { "email": "alice@example.com" } },
+            "expect": [
+                { "type": "immediate_response", "status": 200 }
+            ]
+        }
+    ]
+}

@@ -76,6 +76,42 @@ Each server provides a small test that, for every `*.json` here:
 
 The **Python reference runner** is [`python/server/tests/test_scenario_parity.py`](../../../python/server/tests/test_scenario_parity.py) — port its ~80 lines into the TS/Go/C#/Rust server suites. When all five run this corpus green, the servers are at protocol parity.
 
+## Cancellation and Rich Interactions — the newest scenarios, and where the servers disagree
+
+Until pearl **th-eae69d** this corpus had no `cancel` scenario and no `interaction` scenario. That was the audit's headline finding: cancellation and Rich Interactions — the two newest features — were cross-checked only by fixture *shape* (does an `interaction_required` event match its schema), never by cross-language *behavior*. A port could be fully green on parity while implementing neither correctly, and six independent reviewers found the same divergences in four different languages because nothing in CI was positioned to catch them.
+
+Eight scenarios now cover them:
+
+| scenario | what it pins |
+|---|---|
+| `cancel-mid-turn` | a cancelled turn emits terminal `cancelled` (499, echoing the **turn's** requestId) in place of `eventual_response`, and frees the turn slot |
+| `cancel-no-active-turn-noop` | a `cancel` with no active turn emits **nothing** |
+| `interaction-park-resume` | `identity_intake` parks behind the `identity_form` capability; a matching `submit_interaction` resumes it |
+| `interaction-invalid-retryable` | invalid values → `interaction_invalid`, turn **stays parked**, twice, then a corrected submit resumes |
+| `interaction-stale-id-rejected` | a stale `interactionId` → `error`/`INTERACTION_MISMATCH`, turn stays parked |
+| `interaction-declined` | `declined: true` resolves the park without values |
+| `interaction-conversational-fallback` | a session that did NOT declare the capability gets the text fallback, never a park |
+| `interaction-choices-park-resume` | the second kind (`choices`) rides the same generic envelope |
+
+### Making cancellation deterministic
+
+A mock turn finishes faster than a `cancel` frame can race it, and the format has no "slow tool" directive (`server.tools` entries return a fixed string immediately). `cancel-mid-turn` therefore opens its in-flight window with a **write-confirmation park** (`server.confirmTools`) — the one pause this corpus can express. `cancel-no-active-turn-noop` asserts "nothing arrives" structurally, since no runner has a drain check: the cancel step expects zero events, so any stray event is consumed by the *next* step's first matcher and fails it.
+
+### Known divergences these scenarios expose
+
+Recorded here as facts, not as license to weaken the scenarios. **Do not "fix" a scenario to make a port pass.**
+
+- **Park event vs. the raise tool's `stream_chunk` — Rust is 1 of 5.** For a Rich Interaction, Rust emits `interaction_required` *before* the raise tool's `toolCall` chunk; Go, TypeScript, Python and .NET all emit the chunk first. The five scenarios that park assert **Rust's** order, because Rust is the reference and because it is the order this corpus already pins for the other park type (`hitl-write-confirmation` defers the gated tool's chunk until after the prompt) — the other four are internally inconsistent between their two park paths. Whether the spec should adopt chunk-first instead is a **protocol decision, not a test fix**; until it is made, four ports are red on these five scenarios.
+- **A cancelled turn keeps running in Go and .NET.** In both, the turn after a `cancel` produces no reply because the *cancelled* turn consumed an extra LLM response: the write-confirmation gate returns a deny instead of unwinding, the agent loop makes one more model call, and the output is merely gagged (Go: `if turnCtx.Err() != nil { return }`). Cancellation is a mute button there, not a stop button — a real cost and a real side-effect risk after a visitor hits Stop. Rust, TypeScript and Python abort the turn properly. Verified by re-running with one extra `mockLlmScript` entry: both pass, proving the entry is eaten by the cancelled turn.
+- **Ack payloads differ, so only `status` is asserted on a `submit_interaction` ack.** The five servers put different fields in `data` (Go omits `kind`/`values`; Python omits `kind`, and its decline ack omits `interactionId`/`declined`; .NET's decline ack omits `declined`). Asserting more would pin one language's shape rather than the protocol's.
+
 ## Adding a scenario
 
-Drop a `*.json` here; every server's runner picks it up automatically. Cover: multi-turn, tool-call + `confirm_tool_action` (HITL), citations, auth gating, error frames, and graceful-drain (cancel mid-turn → the turn still finishes).
+Drop a `*.json` here; every server's runner picks it up automatically — there is **no per-language skip, allowlist or xfail mechanism in any of the five runners**, and no way to add one in JSON (unknown keys are silently ignored everywhere). A new scenario lands on all five simultaneously; gating one would mean editing four runners.
+
+Two portability rules that bite:
+
+- **Never assert a fixed number of `stream_token` events** — the mocks chunk text differently per language. Always `repeat` + `accumulate` + `assertAccumulated`, and only on the top-level `token` field.
+- **Never assert `null`** to mean "field absent" — .NET's dot-path resolver returns `null` for a missing final segment while the other four fail, so such an assertion passes on exactly one server.
+
+Still uncovered: auth gating, and graceful-drain (disconnect mid-turn → the turn still finishes).
