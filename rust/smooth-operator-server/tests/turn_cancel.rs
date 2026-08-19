@@ -372,3 +372,121 @@ async fn disconnect_mid_turn_aborts_the_turn() {
         "disconnect must abort the turn before it completes"
     );
 }
+
+/// A mock that raises a Rich Interaction, parking the turn on the visitor's
+/// card. Cheaper than the slow tool for the interaction case — the park IS the
+/// product behaviour, not a stand-in for it.
+fn interaction_mock() -> MockLlmClient {
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "request_identity_intake".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk:
+                r#"{"fields":[{"key":"email","required":true}],"reason":"to send you the quote"}"#
+                    .into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ]);
+    mock
+}
+
+/// Cancelling a turn parked on a **Rich Interaction** must clear the park, over
+/// the real socket (th-6fbab2).
+///
+/// The suite's other cancel tests park on a `tokio::sleep` and assert only that
+/// the future was dropped, which every teardown bug survives. What a park adds
+/// is state OUTSIDE the future: `AppState.pending_interactions`. `cancel` is
+/// handled in `server.rs` and deliberately never reaches `handle_frame`, so this
+/// is the only place the interaction's cancel behaviour is observable — and the
+/// abort drops the turn future exactly where the park sits, skipping any
+/// teardown written after it.
+#[tokio::test]
+async fn cancel_while_parked_on_an_interaction_clears_the_registration() {
+    let state = build_state(keyless_config()).with_chat_provider(Arc::new(interaction_mock()));
+    let probe = state.clone();
+    let url = common::boot_state(state).await;
+    let mut client = common::connect(&url).await;
+
+    // Declare the render capability so the raise takes the RICH (parking) path.
+    common::send_json(
+        &mut client,
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "cs-1",
+            "agentId": uuid::Uuid::new_v4().to_string(),
+            "supports": ["identity_form"],
+        }),
+    )
+    .await;
+    let created = common::recv_json(&mut client).await;
+    assert_eq!(created["type"], "immediate_response", "got: {created}");
+    let session_id = created["data"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_string();
+
+    common::send_json(
+        &mut client,
+        &json!({
+            "action": "send_message",
+            "requestId": "turn-1",
+            "sessionId": session_id,
+            "message": "I'd like a quote",
+        }),
+    )
+    .await;
+
+    let mut seen = Vec::new();
+    let card = common::recv_until(
+        &mut client,
+        "interaction_required",
+        &mut seen,
+        Duration::from_secs(5),
+    )
+    .await;
+    let interaction_id = card["data"]["data"]["interactionId"]
+        .as_str()
+        .expect("interactionId")
+        .to_string();
+    assert!(
+        probe.pending_interaction(&session_id).is_some(),
+        "precondition: the turn is parked on the card"
+    );
+
+    common::send_json(
+        &mut client,
+        &json!({ "action": "cancel", "requestId": "turn-1" }),
+    )
+    .await;
+    let cancelled =
+        common::recv_until(&mut client, "cancelled", &mut seen, Duration::from_secs(5)).await;
+    assert_eq!(cancelled["requestId"], "turn-1", "got: {cancelled}");
+
+    wait_until("park cleared by the cancel", || {
+        probe.pending_interaction(&session_id).is_none()
+    })
+    .await;
+
+    // The card is still rendered client-side; submitting it now resolves nothing.
+    common::send_json(
+        &mut client,
+        &json!({
+            "action": "submit_interaction",
+            "requestId": "si-1",
+            "sessionId": session_id,
+            "interactionId": interaction_id,
+            "kind": "identity_intake",
+            "values": { "email": "ghost@example.com" },
+        }),
+    )
+    .await;
+    let err = common::recv_until(&mut client, "error", &mut seen, Duration::from_secs(5)).await;
+    assert_eq!(err["error"]["code"], "NO_PENDING_INTERACTION", "got: {err}");
+}

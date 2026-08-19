@@ -516,8 +516,7 @@ async fn text_channel_degrades_to_validated_conversational_collection() {
 
     // No form event on a text channel.
     assert!(
-        seen.iter()
-            .all(|ev| ev["type"] != "identity_intake_required"),
+        seen.iter().all(|ev| ev["type"] != "interaction_required"),
         "text channels must not receive the form event: {seen:?}"
     );
 
@@ -628,4 +627,133 @@ async fn submit_without_a_pending_interaction_is_a_clean_error() {
     .await;
     let (err, _) = await_event(&mut rx, "error").await;
     assert_eq!(err["error"]["code"], "NO_PENDING_INTERACTION");
+}
+
+/// th-6fbab2 — a turn cancelled while PARKED on an interaction must leave
+/// nothing behind.
+///
+/// `cancel` and a mid-turn client disconnect both resolve to `handle.abort()`
+/// in `server.rs`, which drops the turn future at its current `.await` — and a
+/// parked raise tool is sitting on exactly such an `.await`. The teardown used
+/// to be a statement *after* that await, so it was skipped precisely when a park
+/// was outstanding: the registration outlived the turn and the visitor's
+/// still-rendered card could be submitted against it indefinitely, stamping the
+/// session's contact metadata each time.
+///
+/// Note this can only be observed here, at the runner: `cancel` is handled in
+/// `server.rs` and deliberately never reaches `handle_frame`, so no test driving
+/// frames alone can see it.
+#[tokio::test]
+async fn cancelling_a_parked_turn_clears_the_registration_and_cannot_stamp_identity() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), config());
+    state.insert_session(test_session());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    let turn = spawn_turn(
+        state.clone(),
+        storage as Arc<dyn StorageAdapter>,
+        raising_mock(),
+        &["identity_form"],
+        tx.clone(),
+    );
+
+    let (pending, _) = await_event(&mut rx, "interaction_required").await;
+    let interaction_id = pending["data"]["data"]["interactionId"]
+        .as_str()
+        .expect("interactionId")
+        .to_string();
+    assert!(
+        state.pending_interaction(SESSION_ID).is_some(),
+        "precondition: the turn is parked"
+    );
+
+    // What `cancel` / a mid-turn disconnect does to the turn task.
+    turn.abort();
+    let _ = turn.await;
+
+    assert!(
+        state.pending_interaction(SESSION_ID).is_none(),
+        "a cancelled turn must not leave its park registered"
+    );
+
+    // The card is still on the visitor's screen; submitting it now must resolve
+    // nothing AND have no side effect on the session.
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_interaction",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "interactionId": interaction_id,
+            "kind": "identity_intake",
+            "values": { "email": "ghost@example.com" }
+        }),
+    )
+    .await;
+    let (err, _) = await_event(&mut rx, "error").await;
+    assert_eq!(err["error"]["code"], "NO_PENDING_INTERACTION");
+    assert!(
+        !session_metadata(&state).contains_key("contactEmail"),
+        "a submit against a cancelled turn's park must not stamp contact metadata"
+    );
+}
+
+/// th-6fbab2, second half — the identity attach is a side effect on the SESSION,
+/// so it must run only when the parked raise was actually resumed.
+///
+/// The guard above narrows the window but cannot close it: a turn can end
+/// between the handler's peek (which leaves the park in place for a resubmit)
+/// and the resolve. Registration present, responder dead — and the attach used
+/// to run BEFORE the resolve discovered that.
+#[tokio::test]
+async fn a_submit_that_resolves_nothing_does_not_stamp_session_identity() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage, config());
+    state.insert_session(test_session());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    // A park whose turn is already gone: the receiving half is dropped, so the
+    // responder's `send` fails.
+    let (responder, dead) = unbounded_channel();
+    drop(dead);
+    state.register_interaction(
+        SESSION_ID,
+        PendingInteraction {
+            interaction_id: "int-orphan".into(),
+            kind: "identity_intake".into(),
+            spec: json!({ "fields": [{ "key": "email", "required": true }] }),
+            responder,
+        },
+    );
+
+    submit_frame(
+        &state,
+        &tx,
+        json!({
+            "action": "submit_interaction",
+            "requestId": REQUEST_ID,
+            "sessionId": SESSION_ID,
+            "interactionId": "int-orphan",
+            "kind": "identity_intake",
+            "values": { "email": "ghost@example.com" }
+        }),
+    )
+    .await;
+
+    let (err, _) = await_event(&mut rx, "error").await;
+    assert_eq!(err["error"]["code"], "NO_PENDING_INTERACTION");
+    assert!(
+        !session_metadata(&state).contains_key("contactEmail"),
+        "the identity attach must not run for a submit that resumed nothing"
+    );
+}
+
+/// The session's metadata map (empty when unset).
+fn session_metadata(state: &AppState) -> std::collections::HashMap<String, Value> {
+    state
+        .get_session(SESSION_ID)
+        .and_then(|s| s.metadata)
+        .unwrap_or_default()
 }

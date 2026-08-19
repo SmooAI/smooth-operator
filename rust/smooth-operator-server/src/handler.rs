@@ -19,7 +19,7 @@ use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
 };
 use smooth_operator::identity_intake::IntakeValues;
-use smooth_operator::interaction::InteractionOutcome;
+use smooth_operator::interaction::{InteractionOutcome, InteractionResolution};
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::{LlmClient, LlmConfig};
 
@@ -2141,8 +2141,13 @@ async fn handle_submit_interaction(
             ));
         }
         Ok(canonical) => {
-            // Run the kind's host effect, then resume the parked raise.
-            attach_interaction_effect(state, session_id, &pending.kind, &canonical);
+            // Resume the parked raise FIRST, and run the kind's host effect only
+            // if that succeeded. The effect writes to the SESSION
+            // (identity_intake stamps `userName` / `contactEmail` /
+            // `contactPhone`), so running it before the responder is proven live
+            // let a submit against a park whose turn was cancelled or
+            // disconnected stamp contact metadata anyway — repeatably, since a
+            // failed resolve leaves nothing behind to notice (th-6fbab2).
             if resolve_interaction(
                 state,
                 session_id,
@@ -2152,6 +2157,7 @@ async fn handle_submit_interaction(
                 },
                 sink,
             ) {
+                attach_interaction_effect(state, session_id, &pending.kind, &canonical);
                 let _ = sink.send(protocol::immediate_response(
                     Some(request_id),
                     200,
@@ -2187,7 +2193,14 @@ fn resolve_interaction(
         ));
         return false;
     };
-    if pending.responder.send(outcome).is_err() {
+    // Tag the outcome with the interaction it answers: the turn's raises share
+    // one outcome channel, so an untagged resolution can be consumed by whatever
+    // park happens to be waiting (th-d121f5).
+    let resolution = InteractionResolution {
+        interaction_id: pending.interaction_id.clone(),
+        outcome,
+    };
+    if pending.responder.send(resolution).is_err() {
         let _ = sink.send(protocol::error(
             Some(request_id),
             "NO_PENDING_INTERACTION",

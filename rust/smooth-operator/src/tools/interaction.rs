@@ -4,10 +4,11 @@
 //! - [`RequestInteractionTool`] — ONE instance per registered
 //!   [`InteractionKind`], carrying that kind's precise LLM-facing schema. On a
 //!   session that declared the kind's render capability it **parks the turn**:
-//!   it sends the parsed [`InteractionRequest`] through its channel (the host's
-//!   bridge emits `interaction_required` and registers a responder) and awaits
-//!   the [`InteractionOutcome`]. Otherwise it returns immediately with the
-//!   kind's conversational-fallback directive.
+//!   it mints an interaction id, sends the parsed request through its channel as
+//!   an [`InteractionRaise`] (the host's bridge emits `interaction_required` and
+//!   registers a responder) and awaits the [`InteractionResolution`] carrying
+//!   THAT id. Otherwise it returns immediately with the kind's
+//!   conversational-fallback directive.
 //! - [`SubmitInteractionTool`] — the generic model-callable submit for the
 //!   conversational fallback (`submit_interaction { kind, values | declined }`).
 //!   Routes to the kind's server-side validator; invalid values return a
@@ -31,7 +32,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 
 use crate::interaction::{
-    InteractionKind, InteractionOutcome, InteractionRegistry, InteractionRequest,
+    InteractionKind, InteractionOutcome, InteractionRaise, InteractionRegistry,
+    InteractionResolution,
 };
 
 /// Wire name of the generic conversational submit tool (same verb as the
@@ -54,10 +56,10 @@ pub type RaisedSpecs = Arc<StdMutex<HashMap<String, Value>>>;
 /// tools own `request_tx` + `outcome_rx`; the host's bridge owns `request_rx` +
 /// `outcome_tx` (mirrors core's `HumanChannelPair`).
 pub struct InteractionChannelPair {
-    pub request_tx: UnboundedSender<InteractionRequest>,
-    pub request_rx: UnboundedReceiver<InteractionRequest>,
-    pub outcome_tx: UnboundedSender<InteractionOutcome>,
-    pub outcome_rx: Arc<Mutex<UnboundedReceiver<InteractionOutcome>>>,
+    pub request_tx: UnboundedSender<InteractionRaise>,
+    pub request_rx: UnboundedReceiver<InteractionRaise>,
+    pub outcome_tx: UnboundedSender<InteractionResolution>,
+    pub outcome_rx: Arc<Mutex<UnboundedReceiver<InteractionResolution>>>,
 }
 
 /// Create the interaction channel pair.
@@ -83,8 +85,8 @@ pub struct RequestInteractionTool {
     kind: Arc<dyn InteractionKind>,
     /// Whether this session's client declared the kind's render capability.
     rich: bool,
-    request_tx: UnboundedSender<InteractionRequest>,
-    outcome_rx: Arc<Mutex<UnboundedReceiver<InteractionOutcome>>>,
+    request_tx: UnboundedSender<InteractionRaise>,
+    outcome_rx: Arc<Mutex<UnboundedReceiver<InteractionResolution>>>,
     /// Fallback-path spec stash (see [`RaisedSpecs`]). Written on every
     /// conversational raise so the submit tool validates with required-ness.
     raised: RaisedSpecs,
@@ -99,8 +101,8 @@ impl RequestInteractionTool {
     pub fn new(
         kind: Arc<dyn InteractionKind>,
         rich: bool,
-        request_tx: UnboundedSender<InteractionRequest>,
-        outcome_rx: Arc<Mutex<UnboundedReceiver<InteractionOutcome>>>,
+        request_tx: UnboundedSender<InteractionRaise>,
+        outcome_rx: Arc<Mutex<UnboundedReceiver<InteractionResolution>>>,
         raised: RaisedSpecs,
     ) -> Self {
         Self {
@@ -151,30 +153,55 @@ impl Tool for RequestInteractionTool {
         // receiver) emits `interaction_required` + registers the outcome sender;
         // the WS handler validates the visitor's `submit_interaction` and feeds
         // the outcome back here.
-        if self.request_tx.send(request).is_err() {
+        let id = uuid::Uuid::new_v4().to_string();
+        if self
+            .request_tx
+            .send(InteractionRaise {
+                id: id.clone(),
+                request,
+            })
+            .is_err()
+        {
             return Err(anyhow!("interaction channel closed"));
         }
+
+        // The outcome channel is shared by every raise in the turn, so wait for
+        // OUR id: a resolution carrying any other id answers a park that already
+        // gave up (its timeout fired and the turn moved on), and consuming it
+        // here would answer this question with that one's values — across
+        // questions and even across kinds (th-d121f5). Drop it and keep waiting
+        // on the ORIGINAL deadline, so a stale card can't extend this park.
+        let deadline = tokio::time::Instant::now() + self.timeout;
         let mut rx = self.outcome_rx.lock().await;
-        match tokio::time::timeout(self.timeout, rx.recv()).await {
-            Ok(Some(InteractionOutcome::Submitted { values })) => Ok(json!({
-                "status": "submitted",
-                "values": values,
-            })
-            .to_string()),
-            Ok(Some(InteractionOutcome::Declined)) => Ok(json!({
-                "status": "declined",
-                "message": "The visitor declined. Continue helping them without this and do not \
-                            ask again this conversation.",
-            })
-            .to_string()),
-            // Channel closed or timed out: let the turn continue rather than fail
-            // it — the visitor simply didn't answer the card.
-            Ok(None) | Err(_) => Ok(json!({
-                "status": "no_response",
-                "message": "The visitor did not respond to the card. Continue without it; you \
-                            may offer again later if it becomes relevant.",
-            })
-            .to_string()),
+        loop {
+            let received =
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(resolution)) => resolution,
+                    // Channel closed or timed out: let the turn continue rather than
+                    // fail it — the visitor simply didn't answer the card.
+                    Ok(None) | Err(_) => return Ok(json!({
+                        "status": "no_response",
+                        "message": "The visitor did not respond to the card. Continue without it; \
+                                    you may offer again later if it becomes relevant.",
+                    })
+                    .to_string()),
+                };
+            if received.interaction_id != id {
+                continue;
+            }
+            return Ok(match received.outcome {
+                InteractionOutcome::Submitted { values } => json!({
+                    "status": "submitted",
+                    "values": values,
+                })
+                .to_string(),
+                InteractionOutcome::Declined => json!({
+                    "status": "declined",
+                    "message": "The visitor declined. Continue helping them without this and do \
+                                not ask again this conversation.",
+                })
+                .to_string(),
+            });
         }
     }
 
@@ -355,12 +382,15 @@ mod tests {
 
         // Host bridge: receive the raise, feed back validated values.
         let bridge = tokio::spawn(async move {
-            let req = request_rx.recv().await.expect("interaction raised");
-            assert_eq!(req.kind, "identity_intake");
-            assert_eq!(req.reason, "to follow up");
+            let raise = request_rx.recv().await.expect("interaction raised");
+            assert_eq!(raise.request.kind, "identity_intake");
+            assert_eq!(raise.request.reason, "to follow up");
             outcome_tx
-                .send(InteractionOutcome::Submitted {
-                    values: json!({ "email": "a@b.co" }),
+                .send(InteractionResolution {
+                    interaction_id: raise.id,
+                    outcome: InteractionOutcome::Submitted {
+                        values: json!({ "email": "a@b.co" }),
+                    },
                 })
                 .expect("send outcome");
         });
@@ -389,8 +419,11 @@ mod tests {
         let mut request_rx = pair.request_rx;
         let outcome_tx = pair.outcome_tx;
         tokio::spawn(async move {
-            let _ = request_rx.recv().await;
-            let _ = outcome_tx.send(InteractionOutcome::Declined);
+            let raise = request_rx.recv().await.expect("raised");
+            let _ = outcome_tx.send(InteractionResolution {
+                interaction_id: raise.id,
+                outcome: InteractionOutcome::Declined,
+            });
         });
         let out = tool
             .execute(json!({ "fields": ["email"], "reason": "r" }))
@@ -420,6 +453,133 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&out).unwrap()["status"],
             "no_response"
+        );
+    }
+
+    /// th-d121f5 — every raise in a turn shares ONE outcome channel, so a park
+    /// that only did `rx.recv()` took whatever arrived first. Raise #1 times out
+    /// and the turn moves on; the visitor then clicks its still-rendered card,
+    /// queueing an outcome nobody is waiting for. The NEXT raise — a different
+    /// question, here a different kind entirely — must not read that as its
+    /// answer.
+    #[tokio::test]
+    async fn a_dead_parks_outcome_is_never_consumed_by_the_next_raise() {
+        let InteractionChannelPair {
+            request_tx,
+            mut request_rx,
+            outcome_tx,
+            outcome_rx,
+        } = interaction_channel();
+
+        let choices = RequestInteractionTool::new(
+            Arc::new(crate::choices::ChoicesKind),
+            true,
+            request_tx.clone(),
+            Arc::clone(&outcome_rx),
+            raised(),
+        )
+        .with_timeout(Duration::from_millis(20));
+        let intake =
+            RequestInteractionTool::new(identity(), true, request_tx, outcome_rx, raised());
+
+        // Raise #1 parks and nobody answers in time.
+        let out = choices
+            .execute(json!({
+                "questions": [{ "key": "plan", "header": "Which plan?", "question": "Which plan fits?", "options": [{"label": "Starter"}, {"label": "Enterprise"}] }],
+                "reason": "to quote you"
+            }))
+            .await
+            .expect("degrades on timeout");
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["status"],
+            "no_response"
+        );
+        let stale = request_rx.recv().await.expect("raise #1");
+        assert_eq!(stale.request.kind, "choices");
+
+        // The visitor clicks the stale card — queued ahead of raise #2's answer.
+        outcome_tx
+            .send(InteractionResolution {
+                interaction_id: stale.id,
+                outcome: InteractionOutcome::Submitted {
+                    values: json!({ "plan": "Enterprise" }),
+                },
+            })
+            .expect("stale outcome queued");
+
+        // Raise #2 parks; its own answer follows.
+        let bridge = {
+            let outcome_tx = outcome_tx.clone();
+            tokio::spawn(async move {
+                let raise = request_rx.recv().await.expect("raise #2");
+                assert_eq!(raise.request.kind, "identity_intake");
+                outcome_tx
+                    .send(InteractionResolution {
+                        interaction_id: raise.id,
+                        outcome: InteractionOutcome::Submitted {
+                            values: json!({ "email": "a@b.co" }),
+                        },
+                    })
+                    .expect("send outcome");
+            })
+        };
+        let out = intake
+            .execute(json!({ "fields": ["email"], "reason": "to follow up" }))
+            .await
+            .expect("resumed");
+        bridge.await.expect("bridge");
+
+        let v: Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(v["status"], "submitted");
+        assert_eq!(
+            v["values"]["email"], "a@b.co",
+            "the intake park must resume with ITS answer, not the dead choices park's: {v}"
+        );
+        assert!(
+            v["values"]["plan"].is_null(),
+            "cross-kind bleed: the choices answer resolved an identity_intake raise: {v}"
+        );
+    }
+
+    /// A stale outcome is dropped, not treated as a fresh start: the park keeps
+    /// its ORIGINAL deadline, so a stream of stale clicks can't hold a turn open.
+    #[tokio::test]
+    async fn dropping_a_stale_outcome_does_not_extend_the_park() {
+        let pair = interaction_channel();
+        let tool = RequestInteractionTool::new(
+            identity(),
+            true,
+            pair.request_tx,
+            Arc::clone(&pair.outcome_rx),
+            raised(),
+        )
+        .with_timeout(Duration::from_millis(60));
+        let mut request_rx = pair.request_rx;
+        let outcome_tx = pair.outcome_tx;
+
+        tokio::spawn(async move {
+            let _ = request_rx.recv().await;
+            for _ in 0..5 {
+                let _ = outcome_tx.send(InteractionResolution {
+                    interaction_id: "somebody-elses-park".to_string(),
+                    outcome: InteractionOutcome::Declined,
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let started = tokio::time::Instant::now();
+        let out = tool
+            .execute(json!({ "fields": ["email"], "reason": "r" }))
+            .await
+            .expect("degrades");
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["status"],
+            "no_response"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the park must expire on its original deadline"
         );
     }
 
