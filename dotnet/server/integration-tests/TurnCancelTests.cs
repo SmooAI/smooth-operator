@@ -66,7 +66,7 @@ public class TurnCancelTests
             "parks the turn for cancellation tests");
     }
 
-    private static WebApplication BuildApp(MockChatClient chat, AITool? tool = null)
+    private static WebApplication BuildApp(MockChatClient chat, AITool? tool = null, IReadOnlyList<string>? confirmTools = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -74,6 +74,10 @@ public class TurnCancelTests
         if (tool is not null)
         {
             builder.Services.AddSingleton<IReadOnlyList<AITool>>(new[] { tool });
+        }
+        if (confirmTools is { Count: > 0 })
+        {
+            builder.Services.AddSingleton(new ConfirmTools(confirmTools));
         }
         builder.Services.AddSmoothOperatorServer();
 
@@ -188,6 +192,70 @@ public class TurnCancelTests
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
         await app.StopAsync();
+    }
+
+    /// <summary>
+    /// Cancel is a STOP button, not a mute button (th-f2ac48).
+    ///
+    /// <para>A turn parked at a write-confirmation is unparked as DENIED when it is cancelled (the park
+    /// awaits a bare task the CTS cannot complete, so <c>TryCancelActiveTurn</c> resolves it rather than
+    /// leave it hung). The engine folds that denial back to the model as a tool result and iterates —
+    /// so the cancelled turn used to call the model AGAIN, and act on the answer, while the gagged sink
+    /// hid every bit of it.</para>
+    ///
+    /// <para>Asserted on deterministic state, not timing: the model call COUNT, read once the host has
+    /// shut down. Shutdown is the settle point that makes it deterministic — a cancelled turn is
+    /// orphaned (<c>TryCancelActiveTurn</c> clears the turn slot, so <c>WaitForTurnsAsync</c> no longer
+    /// tracks it), and teardown's <c>RejectPendingConfirmations</c> is what finally unparks it. Without
+    /// the fix that unpark leads straight to a third model call.</para>
+    /// </summary>
+    [Fact]
+    public async Task ACancelledTurn_MakesNoFurtherModelCall_SoTheNextTurnKeepsItsResponse()
+    {
+        const string GatedTool = "delete_record";
+        const string SecondTurnReply = "the second turn got its own response";
+
+        // Turn 1 calls the confirm-gated tool and parks; the text is scripted for TURN 2, and a
+        // cancelled turn 1 must not consume it.
+        var chat = new MockChatClient()
+            .PushToolCall("call-1", GatedTool, new Dictionary<string, object?> { ["id"] = "42" })
+            .PushText(SecondTurnReply);
+        var tool = AIFunctionFactory.Create(() => "Record 42 deleted.", GatedTool, "Delete a record by id (a state-mutating write).");
+
+        await using var app = BuildApp(chat, tool, new[] { GatedTool });
+        await app.StartAsync();
+        using var socket = await ConnectAsync(app.GetTestServer());
+        var sessionId = await CreateSessionAsync(socket);
+
+        await SendAsync(socket, new JsonObject
+        {
+            ["action"] = "send_message", ["requestId"] = "turn-1", ["sessionId"] = sessionId, ["message"] = "delete record 42", ["stream"] = true,
+        });
+
+        // The park prompt is the proof the turn is genuinely in flight.
+        var seen = new List<JsonObject>();
+        await ReadUntilAsync(socket, "write_confirmation_required", seen);
+
+        await SendAsync(socket, new JsonObject { ["action"] = "cancel", ["requestId"] = "turn-1", ["sessionId"] = sessionId });
+        await ReadUntilAsync(socket, "cancelled", seen);
+
+        await SendAsync(socket, new JsonObject
+        {
+            ["action"] = "send_message", ["requestId"] = "turn-2", ["sessionId"] = sessionId, ["message"] = "never mind, say something", ["stream"] = true,
+        });
+        var settled = await ReadUntilAsync(socket, "eventual_response", seen);
+
+        Assert.Equal("turn-2", settled["requestId"]!.GetValue<string>());
+        var parts = settled["data"]!["data"]!["response"]!["responseParts"]!.AsArray();
+        Assert.Equal(SecondTurnReply, string.Concat(parts.Select(p => p!.GetValue<string>())));
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        await app.StopAsync();
+
+        // Exactly one model call per turn: the cancelled turn made its first call and stopped. Read
+        // after the host has shut down — teardown rejects any outstanding confirmation and drains the
+        // connection, so a turn that was still going would have made its extra call by now.
+        Assert.Equal(2, chat.Calls);
     }
 
     [Fact]

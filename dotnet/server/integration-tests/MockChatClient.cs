@@ -27,8 +27,14 @@ internal sealed class MockChatClient : IChatClient
         return this;
     }
 
-    private ChatResponse Next() =>
-        _responses.Count > 0 ? _responses.Dequeue() : new ChatResponse(new ChatMessage(ChatRole.Assistant, string.Empty));
+    /// <summary>How many model calls the server actually made (a cancelled turn must make none).</summary>
+    public int Calls;
+
+    private ChatResponse Next()
+    {
+        Interlocked.Increment(ref Calls);
+        return _responses.Count > 0 ? _responses.Dequeue() : new ChatResponse(new ChatMessage(ChatRole.Assistant, string.Empty));
+    }
 
     public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
         Task.FromResult(Next());

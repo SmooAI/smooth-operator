@@ -379,7 +379,7 @@ public sealed class TurnRunner
             }
         }
 
-        var agent = new SmoothAgent(_chatClient, options);
+        var agent = new SmoothAgent(new CancelAwareChatClient(_chatClient), options);
         var thread = agent.GetNewThread();
         foreach (var message in priorMessages)
         {
@@ -754,5 +754,52 @@ public sealed class TurnRunner
                 ["toolResult"] = new JsonObject { ["name"] = name, ["isError"] = isError, ["result"] = resultText },
             },
         };
+    }
+}
+
+/// <summary>
+/// Wraps the turn's chat client so a CANCELLED turn can never issue another model call — the
+/// difference between a stop button and a mute button.
+///
+/// <para>The engine's agent loop has no cancellation check of its own: it folds every tool failure
+/// back to the model as a result and iterates, including the denial the write-confirmation gate
+/// returns once the turn is cancelled (<c>TryCancelActiveTurn</c> resolves the park as denied so it
+/// cannot hang). The runner has already walked away by then and its sink is gagged, so the loop's
+/// remaining output is discarded — but the loop itself keeps running, calling the model again and
+/// acting on whatever it answers, on a turn the user stopped.</para>
+///
+/// <para>The live gateway client would fail that call on its own cancelled token, so this is not a
+/// standing spend leak — it is that the server was RELYING on the transport to stop a cancelled
+/// turn. Cancellation is cooperative here, so the loop is stopped at the one place it
+/// re-enters shared state: the model call. Throwing on a cancelled token unwinds
+/// <c>RunStreamingAsync</c> and the turn ends — the .NET analog of dropping the Rust turn future,
+/// which is preemptive and needs no such guard. The runner's caller already treats
+/// <see cref="OperationCanceledException"/> as a clean cancellation.</para>
+///
+/// <para>Per-turn and decorative only: <see cref="Dispose"/> does NOT dispose the wrapped client,
+/// which the server owns and reuses across turns.</para>
+/// </summary>
+internal sealed class CancelAwareChatClient : IChatClient
+{
+    private readonly IChatClient _inner;
+
+    public CancelAwareChatClient(IChatClient inner) => _inner = inner;
+
+    public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return _inner.GetResponseAsync(messages, options, cancellationToken);
+    }
+
+    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return _inner.GetStreamingResponseAsync(messages, options, cancellationToken);
+    }
+
+    public object? GetService(Type serviceType, object? serviceKey = null) => _inner.GetService(serviceType, serviceKey);
+
+    public void Dispose()
+    {
     }
 }

@@ -308,7 +308,7 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 		}
 	}
 
-	agent := core.NewSmoothAgent(r.client, opts)
+	agent := core.NewSmoothAgent(cancelAware(r.client), opts)
 	thread := core.NewThread()
 	prior, err := r.store.ListMessages(ctx, conversationID, maxPriorMessages)
 	if err != nil {
@@ -523,6 +523,55 @@ consume:
 	}
 
 	return TurnResult{Reply: reply.String(), MessageID: outbound.ID, Citations: citations, NextStepID: nextStepID, Usage: usage}, nil
+}
+
+// cancelAware wraps the engine's chat client so a CANCELLED turn can never issue
+// another model call — the difference between a stop button and a mute button.
+//
+// The engine's agent loop has no cancellation check of its own: it folds every tool
+// failure back to the model as a tool result and iterates, including the
+// `context canceled` a tool (or the write-confirmation gate) returns once the turn is
+// cancelled. The runner has already walked away by then — it returns at the first
+// ctx.Done() and drains the stream — so the loop's remaining output is discarded, but
+// the loop itself keeps running: another model call, and whatever that call asks for,
+// on a turn the user stopped.
+//
+// The live GatewayClient would fail that call on its own cancelled context, so this is
+// not a standing spend leak — it is that the server was RELYING on the transport to
+// stop a cancelled turn. Cancellation in Go is cooperative, so the loop is stopped here
+// instead, at the one place it re-enters shared state: the model call. Failing it on a
+// cancelled context aborts runStream (`model stream: context canceled`) and the turn
+// unwinds — the Go analog of dropping the Rust turn future, which is preemptive and
+// needs no such guard.
+//
+// A client that does not stream is returned unchanged, so the engine's
+// StreamingChatClient assertion still fails exactly as it did before.
+func cancelAware(client core.ChatClient) core.ChatClient {
+	streaming, ok := client.(core.StreamingChatClient)
+	if !ok {
+		return client
+	}
+	return cancelAwareClient{inner: streaming}
+}
+
+// cancelAwareClient is the wrapper cancelAware installs: every model call checks the
+// turn's context first and fails rather than reaching the gateway.
+type cancelAwareClient struct {
+	inner core.StreamingChatClient
+}
+
+func (c cancelAwareClient) Chat(ctx context.Context, req core.ChatRequest) (core.ChatResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return core.ChatResponse{}, err
+	}
+	return c.inner.Chat(ctx, req)
+}
+
+func (c cancelAwareClient) ChatStream(ctx context.Context, req core.ChatRequest) (<-chan core.ChatChunk, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.inner.ChatStream(ctx, req)
 }
 
 // drainStream discards the tail of an abandoned engine stream so its producer
