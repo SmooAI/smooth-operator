@@ -88,11 +88,20 @@ export class ConfirmationRegistry {
     }
 
     /**
-     * Drop any registered deferred for `sessionId` (turn ended), so a stale entry
+     * Drop the registered deferred for `sessionId` (turn ended), so a stale entry
      * can't mis-route a later confirmation. Idempotent.
+     *
+     * SETTLES it rejected on the way out rather than deleting it silently. A deleted
+     * deferred nobody resolves is a turn parked forever — there is no timeout on the
+     * confirmation path, so the only other thing that would ever settle it is
+     * {@link rejectAll} on disconnect. Fail closed, same verdict {@link rejectAll} uses
+     * (a write is never auto-approved), and the same contract the SEP `ui/confirm`
+     * bridge already documents ("the turn ends and it resolves false").
      */
     clear(sessionId: string): void {
+        const deferred = this.pending.get(sessionId);
         this.pending.delete(sessionId);
+        deferred?.resolve(false);
     }
 
     /**

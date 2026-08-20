@@ -783,18 +783,25 @@ export class FrameDispatcher {
                 sink(protocol.error(reqId, 'INTERNAL_ERROR', 'Internal error processing the request.'));
             } finally {
                 settled = true;
-                // Only clear the slot if it's still OURS: a cancel already took it (and a
-                // later `send_message` may have installed its own).
-                if (this.activeTurn?.controller === controller) this.activeTurn = undefined;
+                // Is the connection's turn slot still OURS? A cancel already took it, and a
+                // later `send_message` may have installed its own. Everything session-keyed
+                // below belongs to whoever holds the slot NOW: the registries key on
+                // sessionId, not on turn identity, and cancellation is cooperative, so this
+                // teardown can run arbitrarily late — after the successor turn has already
+                // parked on a confirmation or an interaction of its own. Clearing then would
+                // unpark somebody else's turn. Ours were already settled by
+                // `cancelActiveTurn` when it fired the abort.
+                const ours = this.activeTurn?.controller === controller;
+                if (ours) this.activeTurn = undefined;
                 // SEP — kill this turn's extension subprocesses and drop any `ui/confirm`
                 // responder it left parked (mirrors the Rust `(ext.clear)` + host drop).
                 if (extHost) {
-                    this.confirmations?.clear(sessionId);
+                    if (ours) this.confirmations?.clear(sessionId);
                     await extHost.shutdownAll();
                 }
                 // Drop any lingering parked interaction so a stale entry can't mis-route a
                 // later `submit_interaction` (mirrors the Rust `(cfg.clear)` at turn end).
-                this.interactionPark.clear(sessionId);
+                if (ours) this.interactionPark.clear(sessionId);
             }
         })();
         // Track it as the connection's single active turn — unless it already finished
