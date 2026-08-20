@@ -16,9 +16,20 @@ namespace SmooAI.SmoothOperator.Server.Postgres;
 /// The interface stays CONVERSATION-keyed (<c>GetWorkflowStepAsync(conversationId)</c> and friends)
 /// while Rust/Go key the same metadata by session. That is a deliberate hold: this host's persisted
 /// workflow step and OTP bit survive a resume today, and flipping to session-keyed would silently
-/// require re-verification after every resume — a product decision, not a schema one. The DATA lives
-/// in the shared place under the shared keys either way; a conversation-keyed write touches every
-/// session row of the conversation and a read takes the most recent.
+/// require re-verification after every resume — a product decision, not a schema one. A
+/// conversation-keyed write touches every session row of the conversation and a read takes the most
+/// recent.
+///
+/// KNOWN DIVERGENCE — the data does NOT live in the same place as the other ports, only under the
+/// same key names. This store writes <c>conversation_sessions.metadata</c>; the Rust/Go/Python/
+/// TypeScript stores write <c>conversations.metadata_json</c> (Rust:
+/// <c>rust/adapters/postgres/src/lib.rs:618</c>). So one database driven by BOTH a .NET server and
+/// one of the others would not share <c>currentStepId</c>, <c>otpVerified</c>, or
+/// <c>clientSupports</c> — each would read its own table and see the other's writes as absent.
+/// Nothing enforces this at build time and no test pins it: you deploy ONE server implementation,
+/// so the mixed-driver case is theoretical. Do not "fix" it by moving one key — that would split
+/// this store's three keys across two tables, which is strictly worse. Unifying all three at once
+/// is tracked as its own piece of work (th-13df6d follow-up).
 /// </remarks>
 public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
 {
