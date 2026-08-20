@@ -76,6 +76,10 @@ Each server provides a small test that, for every `*.json` here:
 
 The **Python reference runner** is [`python/server/tests/test_scenario_parity.py`](../../../python/server/tests/test_scenario_parity.py) — port its ~80 lines into the TS/Go/C#/Rust server suites. When all five run this corpus green, the servers are at protocol parity.
 
+> ⚠️ **The runners are NOT all in the obvious project.** .NET's lives in `dotnet/server/integration-tests`, **not** `dotnet/server/tests` — running the latter gives a clean several-hundred-test pass that says nothing at all about this corpus. Verify you are running the project that actually loads these files before believing a green result.
+
+**How to trust a green port — run the control.** A port that "passes" and a port whose runner never executed the scenario look identical from the outside, and that is the exact failure this corpus exists to catch. The cheap proof is to make it fail on purpose: add the language to a scenario's `knownDivergences`, re-run, and confirm the build fails with `remove <lang> from knownDivergences in <scenario> — it now passes`. That message can only be produced by a scenario that ran and passed. Then take the marker back out. Do this whenever a port goes green in a way that looks too easy.
+
 ## Cancellation and Rich Interactions — the newest scenarios, and where the servers disagree
 
 Until pearl **th-eae69d** this corpus had no `cancel` scenario and no `interaction` scenario. That was the audit's headline finding: cancellation and Rich Interactions — the two newest features — were cross-checked only by fixture *shape* (does an `interaction_required` event match its schema), never by cross-language *behavior*. A port could be fully green on parity while implementing neither correctly, and six independent reviewers found the same divergences in four different languages because nothing in CI was positioned to catch them.
@@ -123,6 +127,22 @@ Recorded here as facts, not as license to weaken the scenarios. **Do not "fix" a
 - **~~A second bug hid behind the first, in Go only~~ — FIXED (th-6fdd1c, core v1.13.2).** Fixing the order let `interaction-choices-park-resume` run past step 2 for the first time, and it then failed on Go for an unrelated reason: `splitIntoChunks` in `smooth-operator-core` Go sliced the mock reply by **bytes**, so the em-dash in "Pro it is — pulling that quote up." (36 bytes / 3 parts puts a boundary mid-rune) was split into invalid UTF-8 and each byte arrived as U+FFFD. `interaction-park-resume`'s reply is 33 bytes and its boundaries miss the rune, which is why only this one scenario tripped — with ASCII-only fixtures the bug is invisible. Both the Go chunker and the TypeScript one (UTF-16 code units: safe for the BMP, **not** for astral characters like emoji) now split on character boundaries; Python, Rust and .NET were checked and never had it. **The corpus now carries no `knownDivergences` marker at all** — every scenario passes on all five servers. That is the marker contract closing its own loop: it was re-pointed at the real remaining defect, and expired the moment that defect was fixed.
 - **~~A cancelled turn keeps running in Go and .NET~~ — FIXED (th-f2ac48, PR #514).** Recorded because it is what this scenario was built to catch, and because the fix is the corpus's first end-to-end proof of itself. Both ports used to leave the turn running after a `cancel`: the write-confirmation gate returned a deny instead of unwinding, the agent loop made one more model call, and the output was merely gagged (Go: `if turnCtx.Err() != nil { return }`). Cancellation was a mute button, not a stop button — real spend and real side-effect risk after a visitor hits Stop. Two independent proofs: re-running with one extra `mockLlmScript` entry made both pass (the entry was eaten by the cancelled turn), and `go test -race` reported a `DATA RACE` in core's `MockLlmProvider.ChatStream` where the cancelled turn's goroutine and the *next* turn's goroutine popped the same unguarded FIFO concurrently. That race was the one failure `knownDivergences` deliberately did **not** tolerate — it fires outside the runner's assertion path, and suppressing a data race is the opposite of what this corpus is for. The lesson if it recurs: do not "fix" it by guarding the mock's FIFO, which silences the evidence and leaves the bug.
 - **Ack payloads differ, so only `status` is asserted on a `submit_interaction` ack.** The five servers put different fields in `data` (Go omits `kind`/`values`; Python omits `kind`, and its decline ack omits `interactionId`/`declined`; .NET's decline ack omits `declined`). Asserting more would pin one language's shape rather than the protocol's.
+
+### Park ordering — how the five actually achieve it, and why you must not copy Rust
+
+Both park events (`write_confirmation_required` and `interaction_required`) must precede the parking tool's `toolCall` `stream_chunk`. All five servers now do this, but **not by the same mechanism**, and the difference is a trap.
+
+In every language the chunk is emitted from the **server's own stream loop** as it consumes engine events — never from inside the engine — so it is always interceptable. What differs is Rust: it has **no ordering code at all**. Its chunk is produced by a separate event-translator task (one extra queue hop), while both park bridges write to the sink directly, so the ordering falls out of task scheduling. That is a property of `tokio`'s scheduler, and it does **not** port to goroutines, JS microtasks or .NET `Task` continuations. Reading Rust and copying what it does literally gets you nothing to copy.
+
+The portable restatement — and what Go, TypeScript, Python and .NET all do — is the mechanism their **write-confirmation gate already used**:
+
+1. In the stream loop, skip the `toolCall` chunk when the tool name matches a parking tool.
+2. Re-emit that chunk from the park path, immediately **after** the park event.
+
+Two footguns, both of which silently drop a chunk rather than failing loudly:
+
+- **Match only the `request_<kind>` raise tools — never the generic `submit_interaction` tool.** It raises no park event, so nothing would ever re-emit its deferred chunk.
+- **Every non-park exit of the raise tool must re-emit immediately** — the parse-error return and the conversational-fallback return. Miss these and `interaction-conversational-fallback` breaks, since that path emits no park event to trail.
 
 ## Adding a scenario
 
