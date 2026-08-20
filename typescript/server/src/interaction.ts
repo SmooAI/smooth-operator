@@ -189,9 +189,21 @@ export class InteractionParkRegistry {
         return true;
     }
 
-    /** Drop any registered interaction for `sessionId` (turn ended). Idempotent. */
+    /**
+     * Drop the registered interaction for `sessionId` (turn ended). Idempotent.
+     *
+     * Settles it `no_response` on the way out, for the same reason the confirmation
+     * registry's `clear` settles: a deleted-but-awaited park leaves the raise tool
+     * hanging until {@link INTERACTION_TIMEOUT_MS} elapses. Same verdict
+     * {@link rejectAll} uses.
+     */
     clear(sessionId: string): void {
+        const p = this.pending.get(sessionId);
         this.pending.delete(sessionId);
+        if (p && !p.settled) {
+            p.settled = true;
+            p.resolveFn({ status: 'no_response' });
+        }
     }
 
     /**

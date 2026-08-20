@@ -1,0 +1,13 @@
+---
+'@smooai/smooth-operator': patch
+---
+
+ts-server: stop a cancelled turn's late teardown from hanging the turn that replaced it.
+
+Cancellation in the TypeScript server is cooperative: `cancelActiveTurn()` fires the abort and frees the connection's turn slot synchronously, but the cancelled turn itself runs on until its next stream event — which, if it is sitting in a slow tool, can be a long time. The client is free to start a new turn on that session immediately. When it did, and the new turn parked on a write-confirmation, the cancelled turn's eventual `finally` cleared the registration out from under it: the client's `confirm_tool_action` came back `NO_PENDING_CONFIRMATION` and the new turn **never resumed**. Nothing else settles a confirmation short of a disconnect, so the turn hung for the life of the connection. `interactionPark.clear` had the identical shape; there a parked card silently degraded to `no_response` after the 5-minute interaction timeout instead of hanging outright.
+
+The registries key on `sessionId`, not on turn identity, so all three teardown clears (the runner's confirmation clear, and the dispatcher's SEP-confirmation + interaction clears) are now turn-scoped, reusing the guard the dispatcher already applied to the active-turn slot itself: the runner skips its clear when its own `cancelSignal` fired, and the dispatcher clears only while it still holds the slot. A cancelled turn has nothing of its own left to drop anyway — `cancelActiveTurn` settles its confirmation and its parked interaction when it fires the abort. Rust never had this: `handle.abort()` drops the turn future, so its `(cfg.clear)` statements never run on the aborted path.
+
+`ConfirmationRegistry.clear()` and `InteractionParkRegistry.clear()` now **settle** the deferred they drop (rejected / `no_response`) instead of deleting it silently, so any future clear-site can only ever deny an awaiting turn, never strand it. That is the verdict `rejectAll()` already uses and the contract the SEP `ui/confirm` bridge already documented ("the turn ends and it resolves false") without delivering.
+
+Regression tests in `typescript/server/test/late-teardown.test.ts`, both failing without the fix — one at the `TurnRunner` level whose barrier is the cancelled turn's own rejection (no timing at all), one over a real socket driving the full reported sequence. They differ from the existing `cancel-unpark` test on the two points that matter: turn 1 is parked in a **slow tool** rather than at the confirmation, and turn 2 **registers a confirmation of its own** rather than being a plain text answer.

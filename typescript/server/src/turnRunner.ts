@@ -454,7 +454,18 @@ export class TurnRunner {
             // Turn over: drop any lingering pending confirmation so a stale entry can't
             // mis-route a later `confirm_tool_action` (mirrors the Rust `(cfg.clear)`
             // at turn end). No-op when HITL is off.
-            this.confirmations?.clear(confirmSession);
+            //
+            // NOT on the cancelled path. Cancellation here is COOPERATIVE, so a cancelled
+            // turn keeps running until its next stream event — and by then the client may
+            // already have started the NEXT turn on this session and parked it on a
+            // confirmation of its own. The registry keys on sessionId, not on turn
+            // identity, so clearing here would settle the SUCCESSOR's deferred and its
+            // `confirm_tool_action` would come back NO_PENDING_CONFIRMATION. There is
+            // nothing of OURS left to drop anyway: `cancelActiveTurn` already resolved
+            // this turn's confirmation when it fired the abort. The Rust reference cannot
+            // reach this at all — `handle.abort()` drops the turn future outright, so its
+            // `(cfg.clear)` never runs on the aborted path.
+            if (!cancelSignal?.aborted) this.confirmations?.clear(confirmSession);
         }
 
         // A cancel that landed while the stream was blocked (e.g. inside a tool call)
