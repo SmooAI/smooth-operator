@@ -100,6 +100,29 @@ public abstract class SessionStoreContractTests
     }
 
     [SkippableFact]
+    public async Task ClientSupports_DefaultsEmpty_ThenUpsertsAndScopesByConversation()
+    {
+        var store = await CreateStoreAsync();
+        var a = await store.CreateSessionAsync("", null, null);
+        var b = await store.CreateSessionAsync("", null, null);
+
+        // Fresh conversation → nothing declared, i.e. text-only.
+        Assert.Empty(await store.GetClientSupportsAsync(a.ConversationId));
+
+        await store.SetClientSupportsAsync(a.ConversationId, new[] { "choice_chips", "identity_form" });
+        Assert.Equal(new[] { "choice_chips", "identity_form" }, await store.GetClientSupportsAsync(a.ConversationId));
+
+        // Upsert REPLACES, including back to empty — the text-only opt-out has to be durable or the
+        // next reconnect that omits `supports` resurrects capabilities the client just gave up.
+        await store.SetClientSupportsAsync(a.ConversationId, Array.Empty<string>());
+        Assert.Empty(await store.GetClientSupportsAsync(a.ConversationId));
+
+        // Scoped per conversation.
+        await store.SetClientSupportsAsync(a.ConversationId, new[] { "choice_chips" });
+        Assert.Empty(await store.GetClientSupportsAsync(b.ConversationId));
+    }
+
+    [SkippableFact]
     public async Task SessionAuthenticated_DefaultsFalse_ThenUpsertsAndScopesByConversation()
     {
         var store = await CreateStoreAsync();

@@ -335,6 +335,28 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
     public Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default) =>
         MergeSessionMetadataAsync(conversationId, SessionMetadata.CurrentStepIdKey, stepId, cancellationToken);
 
+    public async Task<IReadOnlyList<string>> GetClientSupportsAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        // `->>` renders the stored JSON array as its text (`["choice_chips"]`), so parse it back.
+        // Missing / unparseable ⇒ empty, i.e. the text-only behavior every kind already falls back to.
+        var value = await ReadSessionMetadataAsync(conversationId, SessionMetadata.ClientSupportsKey, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(value))
+        {
+            return Array.Empty<string>();
+        }
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(value) ?? Array.Empty<string>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    public Task SetClientSupportsAsync(string conversationId, IReadOnlyList<string> supports, CancellationToken cancellationToken = default) =>
+        MergeSessionMetadataAsync(conversationId, SessionMetadata.ClientSupportsKey, supports.ToArray(), cancellationToken);
+
     public async Task<bool> GetSessionAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default)
     {
         var value = await ReadSessionMetadataAsync(conversationId, SessionMetadata.OtpVerifiedKey, cancellationToken).ConfigureAwait(false);
@@ -401,6 +423,11 @@ internal sealed class SessionMetadata
     internal const string ContactEmailKey = "contactEmail";
     internal const string OtpVerifiedKey = "otpVerified";
     internal const string CurrentStepIdKey = "currentStepId";
+
+    /// <summary>The conversation's last-declared render capabilities (a JSON array of strings). Named
+    /// to match the Rust reference's conversation-metadata key so a database driven by either server
+    /// reads the same record. th-13df6d.</summary>
+    internal const string ClientSupportsKey = "clientSupports";
 
     [System.Text.Json.Serialization.JsonPropertyName(ContactEmailKey)]
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]

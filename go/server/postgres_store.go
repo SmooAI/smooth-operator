@@ -271,8 +271,9 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 
 	resumed := false
 	owner := scope.Email
+	var supports []string
 	if conversationID != "" {
-		existingOwner, found, err := s.conversationOwner(ctx, conversationID, scope.OrgID)
+		existingOwner, existingSupports, found, err := s.conversationOwner(ctx, conversationID, scope.OrgID)
 		if err != nil {
 			return StoredSession{}, false, err
 		}
@@ -280,7 +281,9 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 		// conversationOwner already filtered by scope.OrgID, so the org half is
 		// satisfied by construction — pass it through rather than re-deriving it.
 		if found && scope.Allows(existingOwner, scope.OrgID) {
-			resumed, owner = true, existingOwner
+			// A reconnect that re-declares nothing inherits what the conversation last
+			// declared; a fresh conversation has none. th-13df6d.
+			resumed, owner, supports = true, existingOwner, existingSupports
 		}
 	}
 
@@ -304,6 +307,7 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 		// only matches rows whose organization_id equals it — so both branches stamp
 		// the same org.
 		OwnerOrg: scope.OrgID,
+		Supports: supports,
 	}
 
 	metadata, err := json.Marshal(sessionMetadata{ContactEmail: userEmail})
@@ -367,25 +371,54 @@ func (s *PostgresStore) ResumeSession(ctx context.Context, agentID, userName, us
 }
 
 // conversationOwner returns the owner email of an org's conversation ("" when
-// ownerless) and whether the conversation exists in that org at all. A conversation
-// in ANOTHER org reports found=false — indistinguishable from never having existed.
-func (s *PostgresStore) conversationOwner(ctx context.Context, conversationID, orgID string) (string, bool, error) {
-	var owner string
+// ownerless), the render capabilities it last declared (nil when none), and whether the
+// conversation exists in that org at all. A conversation in ANOTHER org reports
+// found=false — indistinguishable from never having existed.
+//
+// The capabilities ride this query rather than a second roundtrip: it already reads the
+// conversation row the resume path needs them from.
+func (s *PostgresStore) conversationOwner(ctx context.Context, conversationID, orgID string) (string, []string, bool, error) {
+	var (
+		owner    string
+		supports []byte
+	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT coalesce((SELECT p.email FROM conversation_participants p
 		                   WHERE p.conversation_id = c.id AND p.type = 'user'
-		                   ORDER BY p.created_at, p.id LIMIT 1), '')
+		                   ORDER BY p.created_at, p.id LIMIT 1), ''),
+		        coalesce(c.metadata_json -> '`+clientSupportsMetaKey+`', 'null'::jsonb)
 		   FROM conversations c
 		  WHERE c.id = $1 AND c.organization_id = $2`,
-		conversationID, orgID).Scan(&owner)
+		conversationID, orgID).Scan(&owner, &supports)
 	switch {
 	case err == nil:
-		return owner, true, nil
+		return owner, decodeClientSupports(supports), true, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		return "", false, nil
+		return "", nil, false, nil
 	default:
-		return "", false, fmt.Errorf("postgres: resolve conversation owner: %w", err)
+		return "", nil, false, fmt.Errorf("postgres: resolve conversation owner: %w", err)
 	}
+}
+
+// clientSupportsMetaKey is the conversations.metadata_json key holding the render
+// capabilities (`supports`) a client last declared for the conversation — the same key
+// and the same home as the Rust reference adapter's, so the two servers can share a
+// database and still agree on what a resuming client can render. th-13df6d.
+const clientSupportsMetaKey = "clientSupports"
+
+// decodeClientSupports reads the stored capability list. Anything unreadable (absent,
+// JSON null, a non-array someone else wrote) is nil — i.e. exactly the text-only
+// behavior, which is the safe direction: a card a client cannot render would park the
+// turn until it times out.
+func decodeClientSupports(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var supports []string
+	if err := json.Unmarshal(raw, &supports); err != nil {
+		return nil
+	}
+	return supports
 }
 
 // GetSession returns the session for sessionID, or (nil, nil) if unknown. The raw
@@ -402,19 +435,21 @@ func (s *PostgresStore) conversationOwner(ctx context.Context, conversationID, o
 // ownerless conversation, on the one backend that actually holds several orgs' data.
 func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*StoredSession, error) {
 	var session StoredSession
-	var metadata []byte
+	var metadata, supports []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT s.conversation_id, coalesce(s.agent_id, ''), s.agent_name, s.user_participant_id, s.agent_participant_id,
 		        s.organization_id,
 		        coalesce(s.metadata, '{}'::jsonb),
 		        coalesce((SELECT p.email FROM conversation_participants p
 		                   WHERE p.conversation_id = s.conversation_id AND p.type = 'user'
-		                   ORDER BY p.created_at, p.id LIMIT 1), '')
+		                   ORDER BY p.created_at, p.id LIMIT 1), ''),
+		        coalesce((SELECT c.metadata_json -> '`+clientSupportsMetaKey+`' FROM conversations c
+		                   WHERE c.id = s.conversation_id), 'null'::jsonb)
 		   FROM conversation_sessions s
 		  WHERE s.session_id = $1`,
 		sessionID).Scan(&session.ConversationID, &session.AgentID, &session.AgentName,
 		&session.UserParticipantID, &session.AgentParticipantID, &session.OwnerOrg,
-		&metadata, &session.OwnerEmail)
+		&metadata, &session.OwnerEmail, &supports)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -431,6 +466,9 @@ func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Stor
 	session.ContactPhone = meta.ContactPhone
 	session.OtpVerified = meta.OtpVerified
 	session.CurrentStepID = meta.CurrentStepID
+	// Conversation-scoped, so every session in the conversation reports the same set —
+	// including the one a reconnect just minted. th-13df6d.
+	session.Supports = decodeClientSupports(supports)
 	return &session, nil
 }
 
@@ -594,6 +632,36 @@ func (s *PostgresStore) AttachSessionContact(ctx context.Context, sessionID, use
 		return nil
 	}
 	return s.mergeSessionMetadata(ctx, sessionID, patch)
+}
+
+// SetConversationSupports replaces a conversation's declared render capabilities.
+// `||` is a shallow merge on this one key, so sibling metadata (the caller's own
+// `metadata`, anything the Rust server wrote) survives; an empty list DELETES the key
+// rather than storing `[]`, so a stale set can never be resurrected by a later
+// reconnect that omits `supports`. A no-op for an unknown conversation (no row matches).
+func (s *PostgresStore) SetConversationSupports(ctx context.Context, conversationID string, supports []string) error {
+	if len(supports) == 0 {
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE conversations
+			    SET metadata_json = coalesce(metadata_json, '{}'::jsonb) - $2
+			  WHERE id = $1`,
+			conversationID, clientSupportsMetaKey); err != nil {
+			return fmt.Errorf("postgres: clear conversation supports: %w", err)
+		}
+		return nil
+	}
+	encoded, err := json.Marshal(map[string]any{clientSupportsMetaKey: supports})
+	if err != nil {
+		return fmt.Errorf("postgres: encode conversation supports: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE conversations
+		    SET metadata_json = coalesce(metadata_json, '{}'::jsonb) || $2::jsonb
+		  WHERE id = $1`,
+		conversationID, string(encoded)); err != nil {
+		return fmt.Errorf("postgres: update conversation supports: %w", err)
+	}
+	return nil
 }
 
 // mergeSessionMetadata merges patch into a session's metadata JSON. `||` on jsonb is a

@@ -257,6 +257,12 @@ public class GetConversationMessagesTests
         public Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default) =>
             inner.SetWorkflowStepAsync(conversationId, stepId, cancellationToken);
 
+        public Task<IReadOnlyList<string>> GetClientSupportsAsync(string conversationId, CancellationToken cancellationToken = default) =>
+            inner.GetClientSupportsAsync(conversationId, cancellationToken);
+
+        public Task SetClientSupportsAsync(string conversationId, IReadOnlyList<string> supports, CancellationToken cancellationToken = default) =>
+            inner.SetClientSupportsAsync(conversationId, supports, cancellationToken);
+
         public Task<bool> GetSessionAuthenticatedAsync(string conversationId, CancellationToken cancellationToken = default) =>
             inner.GetSessionAuthenticatedAsync(conversationId, cancellationToken);
 

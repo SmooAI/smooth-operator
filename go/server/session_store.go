@@ -61,6 +61,17 @@ type StoredSession struct {
 	// dispatcher checks before ownership, so a session id alone cannot reach another
 	// org's conversation.
 	OwnerOrg string
+	// Supports is the client render-capability list (`supports`) last declared for this
+	// session's CONVERSATION — the gate on which Rich Interactions are offered as parked
+	// cards rather than degrading to their conversational fallback.
+	//
+	// Conversation-scoped, not session-scoped, and populated FROM the conversation on
+	// every load/resume: a reconnect IS a resume (the client re-opens the socket and
+	// re-issues create_conversation_session with the same conversationId, minting a NEW
+	// session id), so a per-session — or, as this was before, per-connection — copy is
+	// lost on every network blip and the whole framework silently goes text-only with
+	// nothing on the wire to notice. th-13df6d.
+	Supports []string
 }
 
 // ConversationScope is the visibility filter for conversation reads: WHO is asking, derived
@@ -202,6 +213,17 @@ type SessionStore interface {
 	// become OTP delivery channels on subsequent turns. A no-op for an unknown session. The Go
 	// analog of the Rust attach_session_identity.
 	AttachSessionContact(ctx context.Context, sessionID, userName, email, phone string) error
+	// SetConversationSupports persists the render capabilities a client DECLARED on
+	// create_conversation_session, keyed by CONVERSATION so the next reconnect — which
+	// resumes the conversation on a fresh session and typically re-declares nothing —
+	// still gets its Rich Interactions (th-13df6d). Every load of a session in this
+	// conversation reports it back as StoredSession.Supports.
+	//
+	// A REPLACE, not a merge: an explicit empty list is how a text-only channel resuming
+	// a rich conversation opts out, so it must clear the stored set rather than leave a
+	// stale one for a later omitting reconnect to resurrect. A no-op for an unknown
+	// conversation.
+	SetConversationSupports(ctx context.Context, conversationID string, supports []string) error
 }
 
 // InMemorySessionStore is an in-process SessionStore. The Go analog of the Rust
@@ -221,6 +243,10 @@ type InMemorySessionStore struct {
 	// owner and never rewritten, for the same reason: a resume must not re-home a
 	// conversation into the resumer's org.
 	org map[string]string
+	// supports maps conversation id → the render capabilities its client last declared.
+	// Conversation-scoped so a reconnect (a resume on a NEW session id) inherits them —
+	// see StoredSession.Supports. th-13df6d.
+	supports map[string][]string
 }
 
 // NewInMemorySessionStore returns an empty in-memory store.
@@ -231,6 +257,7 @@ func NewInMemorySessionStore() *InMemorySessionStore {
 		updatedAt: map[string]time.Time{},
 		org:       map[string]string{},
 		owner:     map[string]string{},
+		supports:  map[string][]string{},
 	}
 }
 
@@ -287,6 +314,9 @@ func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*use
 	if resumed {
 		session.OwnerEmail = s.owner[convID]
 		session.OwnerOrg = s.org[convID]
+		// A reconnect that re-declares nothing inherits what the conversation last
+		// declared; a fresh conversation has none. th-13df6d.
+		session.Supports = s.supports[convID]
 	}
 	s.sessions[session.SessionID] = session
 	if !resumed {
@@ -303,6 +333,10 @@ func (s *InMemorySessionStore) GetSession(_ context.Context, sessionID string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if session, ok := s.sessions[sessionID]; ok {
+		// Capabilities are conversation-scoped and read through on every load, so a
+		// declaration made on a LATER session of the same conversation is what this
+		// session's turns see (and the session map never holds a stale copy).
+		session.Supports = s.supports[session.ConversationID]
 		return &session, nil
 	}
 	return nil, nil
@@ -392,6 +426,25 @@ func (s *InMemorySessionStore) SetSessionAuthenticated(_ context.Context, sessio
 		session.OtpVerified = verified
 		s.sessions[sessionID] = session
 	}
+	return nil
+}
+
+// SetConversationSupports replaces a conversation's declared render capabilities. An empty
+// list clears them (the text-only opt-out), so a later reconnect that omits `supports`
+// cannot resurrect them. A no-op for an unknown conversation — which also keeps the map
+// from growing on ids nobody minted.
+func (s *InMemorySessionStore) SetConversationSupports(_ context.Context, conversationID string, supports []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, known := s.messages[conversationID]; !known {
+		return nil
+	}
+	if len(supports) == 0 {
+		delete(s.supports, conversationID)
+		return nil
+	}
+	// Copy: the caller's slice is frame-owned and must not alias the store's.
+	s.supports[conversationID] = append([]string(nil), supports...)
 	return nil
 }
 

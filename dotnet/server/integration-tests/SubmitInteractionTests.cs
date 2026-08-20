@@ -39,16 +39,23 @@ public class SubmitInteractionTests
         }
         """;
 
-    private static WebApplication BuildApp()
+    /// <summary><paramref name="turns"/> scripted send_message turns, each "call request_choices, then
+    /// answer": a rich turn consumes the tool call when it parks and the text when the submit resumes
+    /// it; a fallback turn consumes both back-to-back. Either way one turn = one pair, so a test that
+    /// settles each turn before starting the next stays in step with the queue.</summary>
+    private static WebApplication BuildApp(int turns = 1)
     {
         var chat = new MockChatClient();
         var args = JsonSerializer.Deserialize<JsonElement>(ChoicesArgsJson);
-        chat.PushToolCall("call-1", "request_choices", new Dictionary<string, object?>
+        for (var i = 0; i < turns; i++)
         {
-            ["questions"] = args.GetProperty("questions"),
-            ["reason"] = args.GetProperty("reason"),
-        });
-        chat.PushText("Great — routing you to the right team now.");
+            chat.PushToolCall($"call-{i + 1}", "request_choices", new Dictionary<string, object?>
+            {
+                ["questions"] = args.GetProperty("questions"),
+                ["reason"] = args.GetProperty("reason"),
+            });
+            chat.PushText("Great — routing you to the right team now.");
+        }
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -92,7 +99,14 @@ public class SubmitInteractionTests
         }
     }
 
-    private static async Task<string> CreateSessionAsync(WebSocket socket, string[]? supports = null)
+    private static async Task<string> CreateSessionAsync(WebSocket socket, string[]? supports = null) =>
+        (await CreateSessionDataAsync(socket, supports: supports))["sessionId"]!.GetValue<string>();
+
+    /// <summary>The create_conversation_session response's <c>data</c> (sessionId + conversationId).
+    /// A null <paramref name="supports"/> OMITS the key entirely; an empty array declares it explicitly
+    /// — the two are different frames and, on a resume, mean different things (inherit vs. opt out).
+    /// A non-null <paramref name="conversationId"/> makes this a resume, i.e. a reconnect.</summary>
+    private static async Task<JsonObject> CreateSessionDataAsync(WebSocket socket, string? conversationId = null, string[]? supports = null)
     {
         var frame = new JsonObject
         {
@@ -102,6 +116,10 @@ public class SubmitInteractionTests
             ["userName"] = "Alice",
             ["userEmail"] = "alice@example.com",
         };
+        if (conversationId is not null)
+        {
+            frame["conversationId"] = conversationId;
+        }
         if (supports is not null)
         {
             frame["supports"] = new JsonArray(supports.Select(s => (JsonNode)s).ToArray());
@@ -112,7 +130,7 @@ public class SubmitInteractionTests
             var ev = await NextEventAsync(socket);
             if (ev["type"]!.GetValue<string>() == "immediate_response")
             {
-                return ev["data"]!["sessionId"]!.GetValue<string>();
+                return ev["data"]!.AsObject();
             }
         }
     }
@@ -442,6 +460,116 @@ public class SubmitInteractionTests
         Assert.Equal("NO_PENDING_INTERACTION", err["error"]!["code"]!.GetValue<string>());
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        await app.StopAsync();
+    }
+
+    /// <summary>Send one message and settle the raise: the <c>interaction_required</c> event when the
+    /// kind took the RICH (card) path, or <c>null</c> when the turn ran straight to
+    /// <c>eventual_response</c> on the conversational fallback. Returns the tool results seen either
+    /// way, so a fallback can be asserted on its directive rather than merely on the absence of a card.</summary>
+    private static async Task<(JsonObject? Card, List<JsonObject> ToolResults)> RunRaiseTurnAsync(WebSocket socket, string sessionId, string requestId)
+    {
+        await SendAsync(socket, new JsonObject
+        {
+            ["action"] = "send_message",
+            ["requestId"] = requestId,
+            ["sessionId"] = sessionId,
+            ["message"] = "help me choose",
+        });
+
+        var toolResults = new List<JsonObject>();
+        while (true)
+        {
+            var ev = await NextEventAsync(socket);
+            var type = ev["type"]!.GetValue<string>();
+            if (type == "stream_chunk" && ev["data"]?["state"]?["rawResponse"]?["toolResult"]?.AsObject() is { } tr)
+            {
+                toolResults.Add(tr);
+            }
+            else if (type == "interaction_required")
+            {
+                return (ev, toolResults);
+            }
+            else if (type == "eventual_response")
+            {
+                return (null, toolResults);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A RECONNECT is a resume: the client re-opens the socket and re-issues
+    /// <c>create_conversation_session</c> with the same <c>conversationId</c>, which mints a NEW session
+    /// on a NEW <see cref="FrameDispatcher"/>. While the declared capabilities lived in that
+    /// dispatcher's per-connection map, every routine reconnect (network blip, mobile backgrounding,
+    /// deploy) silently turned the whole Rich Interactions framework off unless the client re-declared
+    /// <c>supports</c> every single time — no error, no event, nothing on the wire to notice. Each
+    /// connection below is a genuinely fresh dispatcher over the SAME singleton store. th-13df6d.
+    /// </summary>
+    [Fact]
+    public async Task Reconnect_ResumingAConversation_KeepsTheDeclaredCapabilities()
+    {
+        await using var app = BuildApp(turns: 3);
+        await app.StartAsync();
+        var server = app.GetTestServer();
+
+        // 1. First connection declares the capability, then drops (the blip).
+        string conversationId;
+        using (var first = await ConnectAsync(server))
+        {
+            var created = await CreateSessionDataAsync(first, supports: new[] { "choice_chips" });
+            conversationId = created["conversationId"]!.GetValue<string>();
+            await first.CloseAsync(WebSocketCloseStatus.NormalClosure, "blip", CancellationToken.None);
+        }
+
+        // 2. The reconnect: same conversation, `supports` OMITTED — exactly what a widget resuming from
+        //    its stored conversationId sends. This is where the feature used to go dark.
+        using (var reconnect = await ConnectAsync(server))
+        {
+            var data = await CreateSessionDataAsync(reconnect, conversationId: conversationId);
+            Assert.Equal(conversationId, data["conversationId"]!.GetValue<string>());
+            var sessionId = data["sessionId"]!.GetValue<string>();
+
+            var (card, _) = await RunRaiseTurnAsync(reconnect, sessionId, "r-reconnect");
+            Assert.True(card is not null, "a reconnect that omits 'supports' must inherit the conversation's declared capabilities");
+            Assert.Equal("choices", card!["data"]!["data"]!["kind"]!.GetValue<string>());
+
+            // Unpark so this turn is fully settled before the next one starts.
+            await SendAsync(reconnect, new JsonObject
+            {
+                ["action"] = "submit_interaction",
+                ["requestId"] = "r-reconnect",
+                ["sessionId"] = sessionId,
+                ["interactionId"] = card["data"]!["data"]!["interactionId"]!.GetValue<string>(),
+                ["values"] = JsonNode.Parse("""{ "answers": [ { "header": "Plan", "options": ["Pro"] }, { "header": "Topics", "options": ["Sales"] } ] }"""),
+            });
+            await ReadUntilAsync(reconnect, "eventual_response");
+            await reconnect.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        }
+
+        // 3. A resume that DECLARES wins, including an explicit `[]` — how a text-only channel (SMS,
+        //    voice) resuming a rich conversation opts out instead of being handed cards it can't render.
+        using (var textOnly = await ConnectAsync(server))
+        {
+            var data = await CreateSessionDataAsync(textOnly, conversationId: conversationId, supports: Array.Empty<string>());
+            var (card, toolResults) = await RunRaiseTurnAsync(textOnly, data["sessionId"]!.GetValue<string>(), "r-text-only");
+            Assert.True(card is null, "an explicit empty 'supports' declares text-only and must never inherit");
+            Assert.Contains(toolResults, tr =>
+                tr["name"]!.GetValue<string>() == "request_choices"
+                && tr["result"]!.GetValue<string>().Contains("cannot display choice chips", StringComparison.Ordinal));
+            await textOnly.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        }
+
+        // 4. ...and that opt-out is itself durable: the next reconnect that omits the key must inherit
+        //    the OPT-OUT, not resurrect the capability from a stale record.
+        using (var after = await ConnectAsync(server))
+        {
+            var data = await CreateSessionDataAsync(after, conversationId: conversationId);
+            var (card, _) = await RunRaiseTurnAsync(after, data["sessionId"]!.GetValue<string>(), "r-after-opt-out");
+            Assert.True(card is null, "the text-only declaration replaced the stored capabilities");
+            await after.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        }
+
         await app.StopAsync();
     }
 }

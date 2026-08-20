@@ -125,9 +125,18 @@ resume would inherit the rich set. Both directions are pinned by
 `reconnect_resuming_a_conversation_keeps_the_declared_capabilities`
 (`rust/smooth-operator-server/tests/interactions.rs`).
 
-Before this, capabilities lived only in `Session.metadata.supports` and a
-reconnect silently degraded every kind to its conversational fallback — no error,
-no event, nothing to notice (th-13df6d).
+All five implementations hold to this. Before the fix each kept the set somewhere
+a reconnect destroys: Rust in `Session.metadata.supports` (the per-pod session
+registry), Go / Python / .NET in a per-connection map on the dispatcher (also
+never pruned), TypeScript on the store-backed **session** record — which a resume
+mints fresh. Every one of them silently degraded each kind to its conversational
+fallback after a reconnect: no error, no event, nothing to notice (th-13df6d).
+
+Rust, Go, Python and TypeScript store it as `clientSupports` on
+`conversations.metadata_json`; the .NET store follows its own documented hold for
+`currentStepId` / `otpVerified` (session-row metadata) under the same key name, so
+a database driven by both Rust and .NET would not share this one value — the same
+pre-existing divergence those two keys already have.
 
 ## What changes where
 

@@ -84,11 +84,6 @@ class FrameDispatcher:
         #: this same connection, so (like confirmations) the registry is connection-local.
         self._interactions = interactions if interactions is not None else InteractionRegistry.default()
         self._interaction_pending = interaction_pending if interaction_pending is not None else PendingInteractions()
-        #: ``supports`` (client render capabilities) declared per session at
-        #: ``create_conversation_session``, connection-local: park/resume happen on this
-        #: connection, so this need not be persisted. Gates each kind's rich-vs-fallback
-        #: path per turn.
-        self._session_supports: dict[str, list[str]] = {}
         #: Per-agent config resolver (SMOODEV-590). Resolved per turn from the session's
         #: agent; the default (empty static resolver) returns None → the server-wide
         #: default prompt drives every turn.
@@ -331,13 +326,29 @@ class FrameDispatcher:
             org_id=self._access.principal.org,
         )
         await self._associate_session(session)
-        # Capture the session's declared render capabilities (``supports``), connection-
-        # local, to gate Rich Interactions per turn. Unknown values are kept as-is and
-        # simply never match a kind's capability (forward-compatible). A non-list is
-        # ignored (no capabilities → every kind degrades to its conversational fallback).
+        # Capture the declared render capabilities (``supports``) that gate Rich
+        # Interactions per turn. Unknown values are kept as-is and simply never match a
+        # kind's capability (forward-compatible).
+        #
+        # They are persisted on the CONVERSATION, not this connection: a RECONNECT is a
+        # resume — the client re-opens the socket and re-issues this action with the same
+        # ``conversationId``, minting a NEW session on a NEW dispatcher. Capabilities held
+        # per connection were therefore dropped on every network blip / backgrounding /
+        # deploy, and every interaction kind quietly fell back to conversational
+        # collection with nothing on the wire to notice (th-13df6d).
+        #
+        # A frame that DECLARES always wins and overwrites, including an explicit ``[]``:
+        # that is how a text-only channel resuming a rich conversation opts out, and the
+        # opt-out has to be durable too — hence a list, empty or not, is always written.
+        # A frame that OMITS the key writes nothing and so inherits whatever the
+        # conversation last declared (a non-list is treated as omitted, mirroring the Rust
+        # reference). A fresh conversation has nothing stored, so omitting still means
+        # text-only — unchanged behavior.
         raw_supports = frame.get("supports")
         if isinstance(raw_supports, list):
-            self._session_supports[session.session_id] = [s for s in raw_supports if isinstance(s, str)]
+            await self._store.set_client_supports(
+                session.conversation_id, [s for s in raw_supports if isinstance(s, str)]
+            )
         data = {
             "sessionId": session.session_id,
             "conversationId": session.conversation_id,
@@ -561,7 +572,9 @@ class FrameDispatcher:
             org_id=self._access.principal.org,
             interactions=self._interactions,
             interaction_pending=self._interaction_pending,
-            capabilities=self._session_supports.get(session_id),
+            # Read from the conversation, the one source of truth: this turn may be
+            # running on a reconnect whose frame never re-declared `supports` (th-13df6d).
+            capabilities=await self._store.get_client_supports(session.conversation_id),
         )
 
         # Run the turn as a background task, NOT awaited inline. A turn that calls a

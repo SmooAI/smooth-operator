@@ -435,8 +435,15 @@ export class FrameDispatcher {
         const ownerEmail = this.access.authEnabled ? this.access.principal.email : typeof frame.userEmail === 'string' ? frame.userEmail : undefined;
 
         // The client's declared render capabilities (`supports`) gate this session's
-        // Rich Interactions. Non-string entries are dropped (forward-compatible); an
-        // absent/empty list ⇒ a text-only channel (every kind falls back).
+        // Rich Interactions. Non-string entries are dropped (forward-compatible).
+        //
+        // `undefined` vs `[]` is LOAD-BEARING and must survive to the store: `undefined`
+        // means the frame omitted the key, and a resume that omits it inherits what the
+        // conversation last declared — without that a reconnect (which mints a new
+        // session id) silently downgraded every kind to its text fallback (th-13df6d).
+        // An explicit `[]` is a declaration of "I render nothing" and replaces the
+        // stored set. A non-array value is malformed, so it reads as omitted — the same
+        // forgiving parse the Rust reference does.
         const supports = Array.isArray(frame.supports) ? frame.supports.filter((s): s is string => typeof s === 'string') : undefined;
 
         const session = await this.store.createSession(

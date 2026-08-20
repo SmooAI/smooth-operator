@@ -882,3 +882,55 @@ func TestSessionWithNoAgentHasNoAgent(t *testing.T) {
 		t.Errorf("round-tripped agentId = %q, want empty", fetched.AgentID)
 	}
 }
+
+// The declared render capabilities ride the CONVERSATION, so the session a reconnect
+// mints inherits them — the durable half of th-13df6d. Also asserts the edge the
+// in-memory store gets for free but SQL does not: an empty list CLEARS the stored key
+// rather than leaving a stale set for the next omitting reconnect to resurrect.
+func TestPostgresStorePersistsConversationSupports(t *testing.T) {
+	store := newPostgresStore(t)
+	ctx := t.Context()
+	scope := pgScope(t, "alice@example.test")
+
+	session, err := store.CreateSession(ctx, "", "Alice", "alice@example.test", scope)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.SetConversationSupports(ctx, session.ConversationID, []string{"identity_form"}); err != nil {
+		t.Fatalf("SetConversationSupports: %v", err)
+	}
+
+	// A reconnect: a NEW session on the same conversation, through a fresh store.
+	reconnected, resumed, err := newPostgresStore(t).ResumeSession(ctx, "", "Alice", "alice@example.test", scope, session.ConversationID)
+	if err != nil || !resumed {
+		t.Fatalf("ResumeSession: resumed=%v err=%v", resumed, err)
+	}
+	if !capabilitySet(reconnected.Supports)["identity_form"] {
+		t.Fatalf("resumed session lost the conversation's capabilities: %v", reconnected.Supports)
+	}
+	// …and the turn's read path (GetSession) reports the same set.
+	fetched, err := store.GetSession(ctx, reconnected.SessionID)
+	if err != nil || fetched == nil {
+		t.Fatalf("GetSession: %v (session %v)", err, fetched)
+	}
+	if !capabilitySet(fetched.Supports)["identity_form"] {
+		t.Fatalf("GetSession reported capabilities %v, want identity_form", fetched.Supports)
+	}
+
+	// The text-only opt-out clears the key — a later resume must not resurrect it.
+	if err := store.SetConversationSupports(ctx, session.ConversationID, nil); err != nil {
+		t.Fatalf("SetConversationSupports(empty): %v", err)
+	}
+	afterOptOut, _, err := store.ResumeSession(ctx, "", "Alice", "alice@example.test", scope, session.ConversationID)
+	if err != nil {
+		t.Fatalf("ResumeSession after opt-out: %v", err)
+	}
+	if len(afterOptOut.Supports) != 0 {
+		t.Fatalf("the opt-out left a stale set: %v", afterOptOut.Supports)
+	}
+
+	// Unknown conversation: a no-op, never an error.
+	if err := store.SetConversationSupports(ctx, "unknown-conversation", []string{"identity_form"}); err != nil {
+		t.Fatalf("SetConversationSupports(unknown) must be a no-op, got %v", err)
+	}
+}

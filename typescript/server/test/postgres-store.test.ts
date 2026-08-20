@@ -519,6 +519,53 @@ describe('PostgresStore (needs Docker)', () => {
         }
     });
 
+    // ── render capabilities survive a reconnect (th-13df6d) ─────────────────
+    //
+    // A reconnect is a resume, and it mints a NEW session id — so `supports` kept on
+    // the session row was lost on every network blip and Rich Interactions silently
+    // degraded to their text fallback. The durable set rides conversation metadata,
+    // which for THIS store means a `jsonb_set` on `conversations.metadata_json` — a
+    // statement that fails by quietly writing nothing, so it needs a real database.
+    // The in-memory sibling of this contract is `test/supports-reconnect.test.ts`.
+    pgIt('a resume inherits the conversation’s declared capabilities, and an explicit [] replaces them', async () => {
+        const store = await newStore();
+        const orgId = org();
+        try {
+            const first = await store.createSession('agent', 'Alice', 'alice@example.test', undefined, orgId, ['identity_form']);
+            expect(first.supports).toEqual(['identity_form']);
+
+            // Reconnect: same conversation, `supports` OMITTED (undefined ≠ []).
+            const resumed = await store.createSession('agent', 'Alice', 'alice@example.test', first.conversationId, orgId);
+            expect(resumed.conversationId).toBe(first.conversationId);
+            expect(resumed.sessionId).not.toBe(first.sessionId);
+            expect(resumed.supports, 'an omitting reconnect inherits the conversation’s set').toEqual(['identity_form']);
+            // …and through a round trip, not just in the returned object.
+            expect((await store.getSession(resumed.sessionId))?.supports).toEqual(['identity_form']);
+
+            // Sibling metadata keys must survive the write — the Rust server shares this
+            // table and keeps its workflow step pointer in the same JSONB column.
+            const pool = new Pool({ connectionString });
+            try {
+                await pool.query(`UPDATE conversations SET metadata_json = metadata_json || '{"workflowCurrentStepId":"step-2"}'::jsonb WHERE id = $1`, [
+                    first.conversationId,
+                ]);
+                await store.createSession('agent', 'Alice', 'alice@example.test', first.conversationId, orgId, ['choice_chips']);
+                const row = await pool.query('SELECT metadata_json FROM conversations WHERE id = $1', [first.conversationId]);
+                expect(row.rows[0].metadata_json).toEqual({ workflowCurrentStepId: 'step-2', clientSupports: ['choice_chips'] });
+            } finally {
+                await pool.end();
+            }
+
+            // An explicit [] is the text-only opt-out, and it is itself durable: the next
+            // reconnect that omits the key must not resurrect the old capabilities.
+            const textOnly = await store.createSession('agent', 'Alice', 'alice@example.test', first.conversationId, orgId, []);
+            expect(textOnly.supports).toBeUndefined();
+            const afterOptOut = await store.createSession('agent', 'Alice', 'alice@example.test', first.conversationId, orgId);
+            expect(afterOptOut.supports, 'the text-only declaration replaced the durable record').toBeUndefined();
+        } finally {
+            await store.close();
+        }
+    });
 });
 
 describe('memory stays the default', () => {

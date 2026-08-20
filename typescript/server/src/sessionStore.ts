@@ -84,12 +84,17 @@ export interface StoredSession {
      */
     otpVerified?: boolean;
     /**
-     * The client render capabilities this session declared at create-session
-     * (`supports`) — the per-kind gate for Rich Interactions. A kind whose
-     * `capability` is present here parks the turn on a rich card
-     * (`interaction_required`); anything else degrades to the kind's conversational
-     * fallback. `undefined`/empty → a text-only channel (every kind falls back). The
-     * TS analog of the Rust reference server's `session_capabilities`.
+     * The client render capabilities in effect for this session (`supports`) — the
+     * per-kind gate for Rich Interactions. A kind whose `capability` is present here
+     * parks the turn on a rich card (`interaction_required`); anything else degrades
+     * to the kind's conversational fallback. `undefined`/empty → a text-only channel
+     * (every kind falls back). The TS analog of the Rust reference server's
+     * `session_capabilities`.
+     *
+     * A SNAPSHOT, not the source of truth: the durable set lives on the CONVERSATION
+     * (see {@link SessionStore.createSession}) and is copied here at create time. A
+     * reconnect mints a new session id, so a value that lived only here was lost
+     * every time the socket dropped (th-13df6d).
      */
     supports?: string[];
 }
@@ -133,6 +138,24 @@ export interface SessionStore {
      * new session binds to it (resume: reuses the id + its persisted message log,
      * so subsequent turns append and history replays). An absent or unknown id mints
      * a fresh conversation (unchanged behavior).
+     */
+    /**
+     * `supports` — the client's declared render capabilities (see
+     * {@link StoredSession.supports}). Implementations MUST persist it per
+     * CONVERSATION, not per session:
+     *
+     * - `undefined` (the frame OMITTED the key) on a resume → INHERIT the set the
+     *   conversation last declared. A reconnect is a resume, and re-declaring on
+     *   every reconnect is not something clients do, so anything session-scoped
+     *   silently degraded every Rich Interaction to its text fallback (th-13df6d).
+     * - a declared list — INCLUDING an explicit `[]` — always wins and REPLACES the
+     *   stored set, so a text-only channel resuming a rich conversation opts out for
+     *   good rather than having the old capabilities resurrected by the next
+     *   reconnect that omits the key.
+     * - `undefined` on a FRESH conversation → empty (unchanged behavior).
+     *
+     * The distinction between "key omitted" and "explicit `[]`" is load-bearing;
+     * `undefined` vs `[]` is how it crosses this interface. Do not collapse them.
      */
     createSession(agentId: string, userName?: string, userEmail?: string, conversationId?: string, orgId?: string, supports?: string[]): Promise<StoredSession>;
     getSession(sessionId: string): Promise<StoredSession | null>;
@@ -214,11 +237,25 @@ export class InMemorySessionStore implements SessionStore {
      */
     private readonly convOrg = new Map<string, string | undefined>();
 
+    /**
+     * conversation id → the render capabilities (`supports`) the conversation last
+     * declared. Conversation-scoped for the same reason the owner and org above are:
+     * a reconnect mints a NEW session, so a set kept only on the session was lost on
+     * every network blip / backgrounding / deploy and Rich Interactions went dark with
+     * nothing on the wire to notice (th-13df6d). Unlike those two this IS rewritten on
+     * a resume that declares — that is the text-only opt-out.
+     */
+    private readonly convSupports = new Map<string, string[]>();
+
     async createSession(agentId: string, _userName?: string, userEmail?: string, conversationId?: string, orgId?: string, supports?: string[]): Promise<StoredSession> {
         // Resume: bind to an existing conversation (reuse its id + persisted log) when
         // the caller passes a known conversationId. Unknown/absent → mint a fresh one.
         const resume = conversationId && this.messages.has(conversationId);
         const convId = resume ? conversationId : randomUUID();
+        // `undefined` means the frame OMITTED `supports`, and only then does a resume
+        // inherit what the conversation last declared. A declared list — `[]` included —
+        // wins, which is how a text-only client opts a rich conversation out.
+        const effectiveSupports = supports ?? (resume ? (this.convSupports.get(convId) ?? []) : []);
         const session: StoredSession = {
             sessionId: randomUUID(),
             conversationId: convId,
@@ -236,10 +273,14 @@ export class InMemorySessionStore implements SessionStore {
             // auth-gate flow (mirrors the Rust reference capturing contactEmail).
             ...(userEmail ? { contactEmail: userEmail } : {}),
             // The declared render capabilities gate this session's Rich Interactions.
-            // Empty/absent ⇒ a text-only channel (every kind falls back).
-            ...(supports && supports.length > 0 ? { supports } : {}),
+            // Empty ⇒ a text-only channel (every kind falls back).
+            ...(effectiveSupports.length > 0 ? { supports: effectiveSupports } : {}),
         };
         this.sessions.set(session.sessionId, session);
+        // Durable per conversation, so the NEXT reconnect — which will omit the key —
+        // inherits it. A declared list (including `[]`) overwrites, so the opt-out is
+        // itself durable; a fresh conversation records whatever it was created with.
+        this.convSupports.set(convId, effectiveSupports);
         // Only initialize the message log on a fresh conversation — a resume keeps its history.
         if (!resume) {
             this.messages.set(convId, []);

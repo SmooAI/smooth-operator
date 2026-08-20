@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -45,13 +44,14 @@ public sealed class FrameDispatcher
     private readonly InteractionCatalog? _interactions;
     private readonly InteractionParkRegistry _interactionPark = new();
     // The in-memory, session-keyed contact overlay stamped by an interaction kind's host effect
-    // (identity_intake) and read by the OTP contact seam. Per-connection, like the park + supports maps.
+    // (identity_intake) and read by the OTP contact seam. Per-connection, like the park registry.
     private readonly SessionIdentityRegistry _sessionIdentity = new();
-    // Per-connection render capabilities declared at create_conversation_session (the `supports` array),
-    // keyed by sessionId. The rich-vs-fallback interaction branch reads this. Captured per connection
-    // (like the confirmation registry) rather than persisted on the session — a client re-declares its
-    // capabilities on every connect, and create always precedes send on a connection.
-    private readonly ConcurrentDictionary<string, HashSet<string>> _sessionSupports = new();
+    // NOTE: the render capabilities declared at create_conversation_session (`supports`) used to live
+    // here in a per-connection, session-keyed map. They do NOT any more — a reconnect is a resume onto
+    // a NEW dispatcher whose map was empty, so every routine network blip silently turned Rich
+    // Interactions off until the client re-declared. They now ride the conversation-scoped session
+    // store (ISessionStore.Get/SetClientSupportsAsync), which also retired the map's unbounded growth
+    // (nothing ever pruned it). th-13df6d.
     private readonly IAgentConfigResolver? _agentConfigResolver;
     private readonly IWorkflowJudge? _judge;
     private readonly ISessionAuthenticator _authenticator;
@@ -389,11 +389,22 @@ public sealed class FrameDispatcher
             string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
 
-        // Capture the client's render capabilities (`supports`) for this session so a mid-turn Rich
-        // Interaction takes the rich (card) path only on a channel that can render it; an omitted /
-        // empty `supports` (text-only channels: SMS, voice) leaves the set empty → every kind degrades
-        // to its conversational fallback. Unknown values are kept but simply never match a kind.
-        _sessionSupports[session.SessionId] = ParseSupports(frame["supports"]);
+        // Record the client's render capabilities (`supports`) on the CONVERSATION so a mid-turn Rich
+        // Interaction takes the rich (card) path only on a channel that can render it; no capability
+        // (text-only channels: SMS, voice) → every kind degrades to its conversational fallback.
+        // Unknown values are kept but simply never match a kind.
+        //
+        // A frame that DECLARES the key always wins and replaces the stored set — including an explicit
+        // `[]`, which is how a text-only channel resuming a rich conversation opts out (and the opt-out
+        // has to be durable, or the next reconnect would resurrect the old set). A frame that OMITS the
+        // key is not a declaration: on a resume it INHERITS what the conversation last declared, which
+        // is what keeps Rich Interactions alive across a reconnect (see ISessionStore
+        // .GetClientSupportsAsync); on a fresh conversation there is nothing to inherit → empty,
+        // unchanged. th-13df6d.
+        if (ParseSupports(frame["supports"]) is { } declared)
+        {
+            await _store.SetClientSupportsAsync(session.ConversationId, declared, cancellationToken).ConfigureAwait(false);
+        }
 
         // A freshly created session never passes through ScopedSessionAsync, so associate here too.
         AssociateSession(session);
@@ -808,8 +819,11 @@ public sealed class FrameDispatcher
         //    above, and reused to back the built-in knowledge_search tool) — so a user only ever sees
         //    documents their groups grant (ACL enforced on the chat path).
         // Rich Interactions: hand the turn the hosted-kind catalog, the connection's park registry, and
-        // THIS session's declared render capabilities (empty for a text-only session → fallback path).
-        var capabilities = _sessionSupports.TryGetValue(session.SessionId, out var supports) ? supports : null;
+        // THIS conversation's declared render capabilities (empty for a text-only client → fallback
+        // path). Read from the store, not from this connection: the create frame that declared them may
+        // have arrived on a PREVIOUS connection (a reconnect resumes the conversation on a fresh
+        // dispatcher), and a per-connection map would read empty there. th-13df6d.
+        var capabilities = await _store.GetClientSupportsAsync(session.ConversationId, cancellationToken).ConfigureAwait(false);
         var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity)
         {
             ConfirmationTimeout = ConfirmationTimeout,
@@ -1155,22 +1169,31 @@ public sealed class FrameDispatcher
         }));
     }
 
-    /// <summary>Parse the create-session <c>supports</c> field (a string array of render capabilities)
-    /// into a set. Absent/non-array ⇒ empty (text-only ⇒ every interaction kind uses its fallback).</summary>
-    private static HashSet<string> ParseSupports(JsonNode? node)
+    /// <summary>Parse the create-session <c>supports</c> field (a string array of render capabilities).
+    /// <para>
+    /// Returns <c>null</c> when the key is ABSENT (or not an array) and an empty list for an explicit
+    /// <c>[]</c> — that distinction is load-bearing, not pedantry: an explicit <c>[]</c> is a text-only
+    /// client DECLARING it renders nothing and must replace whatever the conversation had, while an
+    /// omitted key is no declaration at all and inherits on a resume. Collapsing the two (as this did
+    /// while the set lived on the connection) is what makes a reconnect either lose the capabilities or
+    /// resurrect ones the client just opted out of. th-13df6d.
+    /// </para></summary>
+    private static IReadOnlyList<string>? ParseSupports(JsonNode? node)
     {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        if (node is JsonArray array)
+        if (node is not JsonArray array)
         {
-            foreach (var entry in array)
+            return null;
+        }
+        var capabilities = new List<string>();
+        foreach (var entry in array)
+        {
+            if (entry is JsonValue value && value.TryGetValue<string>(out var capability) && !string.IsNullOrEmpty(capability)
+                && !capabilities.Contains(capability, StringComparer.Ordinal))
             {
-                if (entry is JsonValue value && value.TryGetValue<string>(out var capability) && !string.IsNullOrEmpty(capability))
-                {
-                    set.Add(capability);
-                }
+                capabilities.Add(capability);
             }
         }
-        return set;
+        return capabilities;
     }
 
     /// <summary>

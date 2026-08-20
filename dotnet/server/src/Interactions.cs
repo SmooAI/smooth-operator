@@ -154,7 +154,10 @@ public sealed record SessionIdentity(string? Name = null, string? Email = null, 
 /// The in-memory, session-keyed contact overlay stamped by <c>identity_intake</c>'s host effect and read
 /// by the OTP contact seam — the C# analog of the Rust reference's <c>AppState</c> session-metadata map
 /// (an in-process overlay, NOT the durable <see cref="ISessionStore"/>). Per-connection lifetime, like
-/// <c>InteractionParkRegistry</c> and the declared-capabilities map: a client re-declares on reconnect.
+/// <c>InteractionParkRegistry</c> — an intake is captured and consumed within one connection's turn.
+/// (The declared render capabilities used to share this lifetime and no longer do: they outlive the
+/// connection on the store, because a reconnect resumes the conversation on a fresh dispatcher and the
+/// client does NOT re-declare. th-13df6d.)
 /// </summary>
 public sealed class SessionIdentityRegistry
 {

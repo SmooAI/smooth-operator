@@ -149,6 +149,27 @@ public interface ISessionStore
     /// advances the pointer at the end of a turn.</summary>
     Task SetWorkflowStepAsync(string conversationId, string stepId, CancellationToken cancellationToken = default);
 
+    /// <summary>The client render capabilities (<c>supports</c>) this conversation last declared —
+    /// the gate on the entire Rich Interactions framework (a kind whose capability is listed parks the
+    /// turn and emits a card; one that is missing degrades to the conversational fallback). Empty for a
+    /// conversation that never declared any, which is exactly the text-only behavior.
+    /// <para>
+    /// CONVERSATION-scoped, not session-scoped, on purpose: a reconnect IS a resume — the client
+    /// re-opens the socket and re-issues <c>create_conversation_session</c> with the same
+    /// <c>conversationId</c>, which mints a NEW session on a NEW dispatcher. Capabilities that lived on
+    /// the connection were therefore lost on every network blip / backgrounding / deploy unless the
+    /// client re-declared them, and Rich Interactions silently stopped being offered — no error, no
+    /// event, nothing on the wire to notice. th-13df6d.
+    /// </para></summary>
+    Task<IReadOnlyList<string>> GetClientSupportsAsync(string conversationId, CancellationToken cancellationToken = default);
+
+    /// <summary>Record the capabilities a <c>create_conversation_session</c> frame DECLARED for this
+    /// conversation (upsert). A declaration always REPLACES what was stored, including an explicit
+    /// empty list — that is how a text-only channel resuming a rich conversation opts out, and the
+    /// opt-out has to be durable too or the next reconnect resurrects the old set. A frame that OMITS
+    /// the key is not a declaration and must not call this.</summary>
+    Task SetClientSupportsAsync(string conversationId, IReadOnlyList<string> supports, CancellationToken cancellationToken = default);
+
     /// <summary>Whether this conversation's caller is identity-verified (the persisted
     /// <c>otpVerified</c> bit — the C# analog of the Rust session's <c>metadata.otpVerified</c>).
     /// <c>false</c> for a fresh or unknown conversation. Threaded into the <c>end_user</c> auth gate
@@ -185,6 +206,10 @@ public sealed class InMemorySessionStore : ISessionStore
     private readonly Dictionary<string, StoredSession> _sessions = new();
     private readonly Dictionary<string, List<StoredMessage>> _messages = new();
     private readonly Dictionary<string, string> _workflowSteps = new();
+
+    // Each conversation's last-declared render capabilities (`supports`). Conversation-keyed like the
+    // workflow step pointer, so a reconnect that omits the key still gets its cards. th-13df6d.
+    private readonly Dictionary<string, IReadOnlyList<string>> _clientSupports = new();
     private readonly HashSet<string> _authenticated = new();
 
     // Each conversation's last activity (creation, then every append) — the sort key + updatedAt
@@ -324,6 +349,24 @@ public sealed class InMemorySessionStore : ISessionStore
         lock (_gate)
         {
             _workflowSteps[conversationId] = stepId;
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<string>> GetClientSupportsAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_clientSupports.TryGetValue(conversationId, out var supports) ? supports : Array.Empty<string>());
+        }
+    }
+
+    public Task SetClientSupportsAsync(string conversationId, IReadOnlyList<string> supports, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            // Copy: the caller's list must not keep mutating the stored record.
+            _clientSupports[conversationId] = supports.ToArray();
         }
         return Task.CompletedTask;
     }

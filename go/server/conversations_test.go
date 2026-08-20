@@ -249,3 +249,73 @@ func TestCreateSessionRejectsBlankAgentID(t *testing.T) {
 		})
 	}
 }
+
+// A reconnect IS a resume: the client re-opens the socket and re-issues
+// create_conversation_session with the same conversationId, which mints a NEW session id
+// on a NEW dispatcher. `supports` — the render-capability list gating the whole Rich
+// Interactions framework — used to live in a per-connection map, so unless the client
+// re-declared it on every reconnect the server forgot it could render cards and every
+// kind silently degraded to its conversational fallback: no error, no event, nothing on
+// the wire to notice. It now rides the CONVERSATION, so an omitting reconnect inherits
+// it. th-13df6d.
+func TestReconnectKeepsDeclaredCapabilities(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+
+	// create_conversation_session on a FRESH dispatcher each time — that is what a
+	// reconnect is — returning what the next turn on that session would gate on.
+	reconnect := func(t *testing.T, frame map[string]any) map[string]bool {
+		t.Helper()
+		sink, events := capture()
+		dispatchJSON(t, bareDispatcher(store), frame, sink)
+		if len(*events) != 1 || (*events)[0]["type"] != "immediate_response" {
+			t.Fatalf("create_conversation_session: want immediate_response, got %+v", *events)
+		}
+		data := (*events)[0]["data"].(map[string]any)
+		if frame["conversationId"] != nil && data["conversationId"] != frame["conversationId"] {
+			t.Fatalf("reconnect resumed conversation %v, want %v", data["conversationId"], frame["conversationId"])
+		}
+		session, err := store.GetSession(ctx, data["sessionId"].(string))
+		if err != nil || session == nil {
+			t.Fatalf("GetSession(%v): %v", data["sessionId"], err)
+		}
+		// The exact expression handleSendMessage hands the turn runner.
+		return capabilitySet(session.Supports)
+	}
+
+	// First connection: declares the capability.
+	first := map[string]any{
+		"action": "create_conversation_session", "requestId": "r-conn-1",
+		"agentId": "agent", "supports": []string{"identity_form"},
+	}
+	sink, events := capture()
+	dispatchJSON(t, bareDispatcher(store), first, sink)
+	convID := (*events)[0]["data"].(map[string]any)["conversationId"].(string)
+
+	// Reconnect with `supports` OMITTED — exactly what a widget resuming from its
+	// stored conversationId sends. This is where the feature used to go dark.
+	if caps := reconnect(t, map[string]any{
+		"action": "create_conversation_session", "requestId": "r-conn-2",
+		"agentId": "agent", "conversationId": convID,
+	}); !caps["identity_form"] {
+		t.Fatalf("a reconnect omitting 'supports' lost the conversation's capabilities: %v", caps)
+	}
+
+	// A resume that DECLARES wins — including an explicit `[]`, which is how a
+	// text-only channel resuming a rich conversation opts out of cards it can't render.
+	if caps := reconnect(t, map[string]any{
+		"action": "create_conversation_session", "requestId": "r-conn-3",
+		"agentId": "agent", "conversationId": convID, "supports": []string{},
+	}); len(caps) != 0 {
+		t.Fatalf("an explicit empty 'supports' must declare text-only, got %v", caps)
+	}
+
+	// …and that opt-out is itself durable: the next omitting reconnect must not
+	// resurrect the capability from a stale record.
+	if caps := reconnect(t, map[string]any{
+		"action": "create_conversation_session", "requestId": "r-conn-4",
+		"agentId": "agent", "conversationId": convID,
+	}); len(caps) != 0 {
+		t.Fatalf("the text-only declaration did not replace the durable record, got %v", caps)
+	}
+}
