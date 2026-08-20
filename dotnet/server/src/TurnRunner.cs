@@ -86,6 +86,16 @@ public sealed class TurnRunner
     /// </summary>
     public Task PreambleCompleted { get; private set; } = Task.CompletedTask;
 
+    /// <summary>How long a parked write-confirmation waits for a <c>confirm_tool_action</c> before the
+    /// gate gives up and treats the tool as denied. Generous (5 min) because a human is in the loop —
+    /// the same constant, for the same reason, as the Rust reference's <c>CONFIRMATION_TIMEOUT</c> and
+    /// the interaction park's <see cref="RequestInteractionTool.ParkTimeout"/>.</summary>
+    public static readonly TimeSpan DefaultConfirmationTimeout = TimeSpan.FromSeconds(300);
+
+    /// <summary>The confirmation park's backstop (<see cref="DefaultConfirmationTimeout"/> unless a host
+    /// — or a test — narrows it).</summary>
+    public TimeSpan ConfirmationTimeout { get; init; } = DefaultConfirmationTimeout;
+
     public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null, SessionIdentityRegistry? interactionEffects = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -335,6 +345,7 @@ public sealed class TurnRunner
         {
             var registry = _confirmations;
             var session = sessionId;
+            var confirmTimeout = ConfirmationTimeout;
             options.RequiresApproval = call => _confirmTools.Any(p => call.Name.Contains(p, StringComparison.Ordinal));
             options.HumanGate = new DelegateHumanGate(async (HumanApprovalRequest req, CancellationToken ct) =>
             {
@@ -350,7 +361,7 @@ public sealed class TurnRunner
                 var pending = registry.Register(session);
                 sink(ProtocolEvents.WriteConfirmationRequired(requestId, req.ToolName, req.Prompt));
                 sink(ProtocolEvents.StreamChunk(requestId, req.ToolName, ToolCallStateFrom(req.ToolName, req.Arguments)));
-                var approved = await pending.ConfigureAwait(false);
+                var approved = await AwaitConfirmation(pending, registry, session, confirmTimeout, ct).ConfigureAwait(false);
                 return approved ? HumanApprovalResponse.Approve() : HumanApprovalResponse.Deny("user rejected the action");
             });
         }
@@ -710,6 +721,44 @@ public sealed class TurnRunner
         // Persist even when the pointer didn't move: a fresh conversation had no stored step, so this
         // records the resolved starting step (mirrors the TS node writing currentStepId every turn).
         await _store.SetWorkflowStepAsync(conversationId, resolvedStepId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Await a parked write-confirmation, backstopped by <see cref="ConfirmationTimeout"/> and the turn's
+    /// cancellation. Without a backstop a client that never answers — a closed tab that left the socket
+    /// open, so no teardown ever runs <see cref="ConfirmationRegistry.RejectAll"/> — pins the
+    /// connection's ONLY turn slot forever: every later <c>send_message</c> gets
+    /// <c>TURN_IN_PROGRESS</c> and drain hangs. The interaction park already had this backstop
+    /// (<see cref="RequestInteractionTool.ParkTimeout"/>); confirmations did not. th-acf8ea.
+    ///
+    /// <para>Times out DENIED — fail closed, exactly like the disconnect path; a write is never
+    /// auto-approved. A verdict that lands in the same instant as the deadline still wins.</para>
+    /// </summary>
+    private static async Task<bool> AwaitConfirmation(
+        Task<bool> pending,
+        ConfirmationRegistry registry,
+        string sessionId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var completed = await Task.WhenAny(pending, Task.Delay(timeout, cancellationToken)).ConfigureAwait(false);
+            if (completed == pending)
+            {
+                return await pending.ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Turn cancelled/torn down — the registration is (or will be) discarded elsewhere; deny.
+        }
+
+        // Take the registration out so a later confirm_tool_action can't resolve a park nobody awaits
+        // (it gets the same clean NO_PENDING_CONFIRMATION a duplicate confirm gets). A no-op when the
+        // client's verdict beat us here — in which case honor that verdict rather than the deadline.
+        registry.Resolve(sessionId, approved: false);
+        return pending.IsCompletedSuccessfully && pending.Result;
     }
 
     /// <summary>The stream_chunk toolCall state built from a gated tool's name + already-parsed

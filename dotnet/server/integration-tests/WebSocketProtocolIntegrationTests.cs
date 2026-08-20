@@ -403,6 +403,46 @@ public class WebSocketProtocolIntegrationTests
     }
 
     /// <summary>
+    /// A frame whose <c>action</c> / <c>requestId</c> is the wrong JSON TYPE is a protocol violation,
+    /// not a fatal one. <c>JsonNode.GetValue&lt;string&gt;()</c> throws on a type mismatch, and the
+    /// dispatcher reads both fields before its <c>try</c> — so the exception escaped the connection pump
+    /// (it is neither <c>OperationCanceledException</c> nor <c>WebSocketException</c>) and killed the
+    /// socket with no error event and no diagnostic. Parity with Rust, whose <c>as_str()</c> yields
+    /// <c>None</c> → a clean <c>VALIDATION_ERROR</c>: "protocol-level failures are surfaced as error
+    /// events, never as hard errors that drop the connection". th-acf8ea.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"action":123,"requestId":"x1"}""")]
+    [InlineData("""{"action":["send_message"],"requestId":"x1"}""")]
+    [InlineData("""{"action":"ping","requestId":42}""")]
+    public async Task MalformedFrameFieldType_ErrorsOrAnswers_WithoutDroppingConnection(string frame)
+    {
+        await using var app = BuildApp(new MockChatClient());
+        await app.StartAsync();
+        using var socket = await ConnectAsync(app.GetTestServer());
+
+        await SendAsync(socket, frame);
+        var first = await ReceiveAsync(socket).WaitAsync(TimeSpan.FromSeconds(20));
+        // A non-string action reads as absent → VALIDATION_ERROR; a non-string requestId on an otherwise
+        // valid frame simply correlates to null. Either way the frame is ANSWERED, not fatal.
+        Assert.Contains(first["type"]!.GetValue<string>(), new[] { "error", "pong" });
+        if (first["type"]!.GetValue<string>() == "error")
+        {
+            Assert.Equal("VALIDATION_ERROR", first["error"]!["code"]!.GetValue<string>());
+        }
+
+        // The load-bearing assertion: the socket is still alive and serving.
+        await SendAsync(socket, """{"action":"ping","requestId":"ping-2"}""");
+        var pong = await ReceiveAsync(socket).WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Equal("pong", pong["type"]!.GetValue<string>());
+        Assert.Equal("ping-2", pong["requestId"]!.GetValue<string>());
+        Assert.Equal(WebSocketState.Open, socket.State);
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        await app.StopAsync();
+    }
+
+    /// <summary>
     /// A connection attaches its outbound sink to the backplane and DETACHES on teardown. The detach
     /// is the load-bearing half: a leaked sink would have <c>POST /admin/publish</c> report
     /// <c>delivered: 1</c> into a channel whose socket is long gone.

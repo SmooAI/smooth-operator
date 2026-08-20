@@ -61,7 +61,7 @@ public sealed class IdentityIntakeKind : IInteractionKind
     public InteractionRequest ParseRequest(JsonObject args)
     {
         var fields = IdentityIntakeValidator.ParseFields(args["fields"]);
-        var reason = args["reason"]?.GetValue<string>()?.Trim() is { Length: > 0 } r ? r : "to help you better";
+        var reason = args["reason"].Str()?.Trim() is { Length: > 0 } r ? r : "to help you better";
         var spec = new JsonObject { ["fields"] = JsonSerializer.SerializeToNode(fields, IdentityIntakeValidator.SerializerOptions) };
         return new InteractionRequest(Kind, spec, reason);
     }
@@ -103,7 +103,7 @@ public sealed class IdentityIntakeKind : IInteractionKind
     public string FallbackDirective(JsonNode? spec, string reason)
     {
         var fieldList = spec?["fields"] is JsonArray fields
-            ? string.Join(", ", fields.Where(f => f?["key"] is not null).Select(f => f!["key"]!.GetValue<string>()))
+            ? string.Join(", ", fields.Where(f => f?["key"] is not null).Select(f => f!["key"].Str()))
             : string.Empty;
         return
             "This visitor's channel cannot display a form. Collect the requested details " +
@@ -128,9 +128,9 @@ public sealed class IdentityIntakeKind : IInteractionKind
             return;
         }
         context.AttachSessionIdentity(
-            name: obj["name"]?.GetValue<string>(),
-            email: obj["email"]?.GetValue<string>(),
-            phone: obj["phone"]?.GetValue<string>());
+            name: obj["name"].Str(),
+            email: obj["email"].Str(),
+            phone: obj["phone"].Str());
     }
 }
 
@@ -351,13 +351,13 @@ public static class IdentityIntakeValidator
                     fields.Add(new IntakeField { Key = ParseKey(s), Required = true });
                     break;
                 case JsonObject obj:
-                    var key = obj["key"]?.GetValue<string>()
+                    var key = obj["key"].Str()
                         ?? throw new InteractionParseException("each field object needs a string 'key'");
                     fields.Add(new IntakeField
                     {
                         Key = ParseKey(key),
-                        Required = obj["required"]?.GetValue<bool>() ?? true,
-                        Label = obj["label"]?.GetValue<string>(),
+                        Required = obj["required"].Bool() ?? true,
+                        Label = obj["label"].Str(),
                     });
                     break;
                 default:

@@ -103,11 +103,11 @@ internal sealed class ConfirmUiProvider : HostDelegate
 
     public override async Task<JsonNode> UiRequestAsync(string ext, JsonNode @params)
     {
-        var kind = @params["kind"]?.GetValue<string>() ?? string.Empty;
+        var kind = @params["kind"].Str() ?? string.Empty;
         switch (kind)
         {
             case "confirm":
-                var prompt = @params["prompt"]?.GetValue<string>() ?? "Confirm this action?";
+                var prompt = @params["prompt"].Str() ?? "Confirm this action?";
                 // Register a fresh responder for this session so the next inbound confirm_tool_action
                 // resumes THIS request, then emit the frame and park until the human answers. The
                 // registry keys by session; the turn's finally clears it. One confirm resolves one park.

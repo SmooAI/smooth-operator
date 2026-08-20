@@ -117,6 +117,20 @@ public class SubmitInteractionTests
         }
     }
 
+    /// <summary>Read events until one of <paramref name="types"/> arrives — so a test can assert on
+    /// WHICH of two possible outcomes settled instead of blocking on the one it hopes for.</summary>
+    private static async Task<JsonObject> ReadUntilAnyAsync(WebSocket socket, params string[] types)
+    {
+        while (true)
+        {
+            var ev = await NextEventAsync(socket);
+            if (types.Contains(ev["type"]!.GetValue<string>()))
+            {
+                return ev;
+            }
+        }
+    }
+
     /// <summary>Read events until the given type, returning that event; collects any tool results seen.</summary>
     private static async Task<JsonObject> ReadUntilAsync(WebSocket socket, string type, List<JsonObject>? toolResults = null)
     {
@@ -244,6 +258,71 @@ public class SubmitInteractionTests
         });
 
         var final = await ReadUntilAsync(socket, "eventual_response");
+        Assert.Equal(200, final["status"]!.GetValue<int>());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        await app.StopAsync();
+    }
+
+    /// <summary>
+    /// Malformed <c>values</c> must be a RETRYABLE <c>interaction_invalid</c>, never a terminal
+    /// <c>INTERNAL_ERROR</c>. An explicit JSON <c>null</c> SETS a <c>[JsonPropertyName]</c>-annotated
+    /// <c>List&lt;T&gt;</c>/<c>string</c> property (it does not leave its <c>= new()</c> initializer
+    /// alone), so these three shapes dereferenced null inside <c>ChoicesKind.Validate</c> — OUTSIDE its
+    /// <c>catch (JsonException)</c>. That landed in the dispatcher's generic handler as an
+    /// <c>INTERNAL_ERROR</c> with no <c>Resolve</c>: the turn stayed parked for the FULL park timeout
+    /// with the client never told what to fix. Rust returns a retryable <c>interaction_invalid</c>
+    /// (<c>choices.rs</c>). th-acf8ea.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "answers": null }""")]
+    [InlineData("""{ "answers": [ { "header": null, "options": ["Pro"] } ] }""")]
+    [InlineData("""{ "answers": [ { "header": "Plan", "options": null } ] }""")]
+    [InlineData("""{ "answers": [ { "header": "Plan", "options": [null] } ] }""")]
+    public async Task RichPath_NullValuesShape_IsRetryableInvalid_NotInternalError(string valuesJson)
+    {
+        await using var app = BuildApp();
+        await app.StartAsync();
+        using var socket = await ConnectAsync(app.GetTestServer());
+        var sessionId = await CreateSessionAsync(socket, supports: new[] { "choice_chips" });
+
+        await SendAsync(socket, new JsonObject
+        {
+            ["action"] = "send_message",
+            ["requestId"] = "r-msg",
+            ["sessionId"] = sessionId,
+            ["message"] = "help me choose",
+        });
+
+        var required = await ReadUntilAsync(socket, "interaction_required");
+        var interactionId = required["data"]!["data"]!["interactionId"]!.GetValue<string>();
+
+        await SendAsync(socket, new JsonObject
+        {
+            ["action"] = "submit_interaction",
+            ["requestId"] = "r-msg",
+            ["sessionId"] = sessionId,
+            ["interactionId"] = interactionId,
+            ["values"] = JsonNode.Parse(valuesJson),
+        });
+
+        // Read until the submit settles EITHER way, so the buggy INTERNAL_ERROR fails the assert
+        // instead of hanging until the park's own 300s backstop.
+        var settled = await ReadUntilAnyAsync(socket, "interaction_invalid", "error").WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal("interaction_invalid", settled["type"]!.GetValue<string>());
+        Assert.NotEmpty(settled["data"]!["data"]!["errors"]!.AsArray());
+
+        // Retryable means the park SURVIVED: the same interactionId still resolves the turn.
+        await SendAsync(socket, new JsonObject
+        {
+            ["action"] = "submit_interaction",
+            ["requestId"] = "r-msg",
+            ["sessionId"] = sessionId,
+            ["interactionId"] = interactionId,
+            ["values"] = JsonNode.Parse("""{ "answers": [ { "header": "Plan", "options": ["Pro"] }, { "header": "Topics", "options": ["Sales"] } ] }"""),
+        });
+
+        var final = await ReadUntilAsync(socket, "eventual_response").WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Equal(200, final["status"]!.GetValue<int>());
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);

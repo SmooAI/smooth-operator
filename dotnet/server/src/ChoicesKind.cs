@@ -75,7 +75,7 @@ public sealed class ChoicesKind : IInteractionKind
     public InteractionRequest ParseRequest(JsonObject args)
     {
         var questions = ChoicesValidator.ParseQuestions(args["questions"]);
-        var reason = args["reason"]?.GetValue<string>()?.Trim() is { Length: > 0 } r ? r : "to help you better";
+        var reason = args["reason"].Str()?.Trim() is { Length: > 0 } r ? r : "to help you better";
         var spec = new JsonObject { ["questions"] = JsonSerializer.SerializeToNode(questions, ChoicesValidator.SerializerOptions) };
         return new InteractionRequest(Kind, spec, reason);
     }
@@ -110,14 +110,14 @@ public sealed class ChoicesKind : IInteractionKind
         {
             foreach (var q in questions)
             {
-                if (q?["question"]?.GetValue<string>() is not { } question)
+                if (q?["question"].Str() is not { } question)
                 {
                     continue;
                 }
-                var header = q["header"]?.GetValue<string>() ?? question;
-                var multi = q["multiSelect"]?.GetValue<bool>() ?? false;
+                var header = q["header"].Str() ?? question;
+                var multi = q["multiSelect"].Bool() ?? false;
                 var labels = q["options"] is JsonArray opts
-                    ? string.Join(", ", opts.Where(o => o?["label"] is not null).Select(o => o!["label"]!.GetValue<string>()))
+                    ? string.Join(", ", opts.Where(o => o?["label"] is not null).Select(o => o!["label"].Str()))
                     : string.Empty;
                 lines.Add($"- [{header}] {question} Options: {labels}{(multi ? " (choose one or more)" : string.Empty)}.");
             }
@@ -155,8 +155,15 @@ public sealed class ChoiceQuestion
 /// <summary>The visitor's answer to one question, submitted via <c>submit_interaction</c>.</summary>
 public sealed class ChoiceAnswer
 {
-    [JsonPropertyName("header")] public string Header { get; set; } = string.Empty;
-    [JsonPropertyName("options")] public List<string> Options { get; set; } = new();
+    // An explicit JSON `null` SETS the property (it does not leave the initializer alone), so
+    // {"header":null} / {"options":null} would hand every reader a null through a non-nullable type and
+    // NRE inside Validate — an INTERNAL_ERROR that leaves the turn parked. Absorb it at the property so
+    // every reader is safe, not just the one the bug report named. th-acf8ea.
+    private string? _header;
+    private List<string>? _options;
+
+    [JsonPropertyName("header")] public string Header { get => _header ?? string.Empty; set => _header = value; }
+    [JsonPropertyName("options")] public List<string> Options { get => _options ??= new(); set => _options = value; }
 
     // Blank ⇒ omitted (the free-text "Other" escape hatch), matching serde's skip_serializing_if.
     [JsonPropertyName("other")]
@@ -170,7 +177,11 @@ public sealed class ChoiceAnswer
 /// <summary>Validated, normalized choice answers — the payload the parked turn resumes with.</summary>
 public sealed class ChoiceValues
 {
-    [JsonPropertyName("answers")] public List<ChoiceAnswer> Answers { get; set; } = new();
+    // {"answers":null} sets this to null (see ChoiceAnswer) — absorbed here so Validate's enumeration
+    // can't NRE. th-acf8ea.
+    private List<ChoiceAnswer>? _answers;
+
+    [JsonPropertyName("answers")] public List<ChoiceAnswer> Answers { get => _answers ??= new(); set => _answers = value; }
 }
 
 /// <summary>
@@ -215,7 +226,9 @@ public static class ChoicesValidator
         var normalized = values.Answers.Select(a => new ChoiceAnswer
         {
             Header = a.Header.Trim(),
-            Options = a.Options.Select(o => o.Trim()).Where(o => o.Length > 0).ToList(),
+            // `[null]` deserializes to a null element (the List<string> element type is not enforced by
+            // System.Text.Json), so filter before trimming. th-acf8ea.
+            Options = a.Options.Where(o => o is not null).Select(o => o.Trim()).Where(o => o.Length > 0).ToList(),
             Other = a.Other?.Trim() is { Length: > 0 } t ? t : null,
         }).ToList();
 
@@ -307,11 +320,11 @@ public static class ChoicesValidator
                 throw new InteractionParseException("each question must be an object");
             }
 
-            var question = obj["question"]?.GetValue<string>()?.Trim() is { Length: > 0 } q
+            var question = obj["question"].Str()?.Trim() is { Length: > 0 } q
                 ? q
                 : throw new InteractionParseException("each question needs a non-empty 'question'");
 
-            var header = obj["header"]?.GetValue<string>()?.Trim() is { Length: > 0 } h
+            var header = obj["header"].Str()?.Trim() is { Length: > 0 } h
                 ? h
                 : throw new InteractionParseException("each question needs a non-empty 'header'");
             if (header.Length > ChoicesKind.HeaderMaxChars)
@@ -341,8 +354,8 @@ public static class ChoicesValidator
                     JsonValue v when v.TryGetValue<string>(out var s) => new ChoiceOption { Label = s.Trim(), Description = string.Empty },
                     JsonObject o => new ChoiceOption
                     {
-                        Label = (o["label"]?.GetValue<string>() ?? string.Empty).Trim(),
-                        Description = (o["description"]?.GetValue<string>() ?? string.Empty).Trim(),
+                        Label = (o["label"].Str() ?? string.Empty).Trim(),
+                        Description = (o["description"].Str() ?? string.Empty).Trim(),
                     },
                     _ => throw new InteractionParseException($"invalid option entry in '{header}'"),
                 };
@@ -358,7 +371,7 @@ public static class ChoicesValidator
                 Question = question,
                 Header = header,
                 Options = options,
-                MultiSelect = obj["multiSelect"]?.GetValue<bool>() ?? false,
+                MultiSelect = obj["multiSelect"].Bool() ?? false,
             });
         }
         return questions;

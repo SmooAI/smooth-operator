@@ -71,7 +71,7 @@ public sealed record AgentConfig(
             var node = JsonNode.Parse(json);
             var prompt = node switch
             {
-                JsonObject obj => obj["prompt"]?.GetValue<string>(),
+                JsonObject obj => obj["prompt"].Str(),
                 JsonValue val when val.TryGetValue<string>(out var s) => s,
                 _ => null,
             };
@@ -103,7 +103,7 @@ public sealed record AgentConfig(
                 return null;
             }
 
-            var goal = obj["goal"]?.GetValue<string>();
+            var goal = obj["goal"].Str();
             if (string.IsNullOrWhiteSpace(goal))
             {
                 return null;
@@ -121,14 +121,14 @@ public sealed record AgentConfig(
                 {
                     return null;
                 }
-                var id = stepObj["id"]?.GetValue<string>();
-                var intent = stepObj["intent"]?.GetValue<string>();
-                var criteria = stepObj["criteria"]?.GetValue<string>();
+                var id = stepObj["id"].Str();
+                var intent = stepObj["intent"].Str();
+                var criteria = stepObj["criteria"].Str();
                 if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(intent) || string.IsNullOrWhiteSpace(criteria))
                 {
                     return null;
                 }
-                var next = stepObj["next"]?.GetValue<string>();
+                var next = stepObj["next"].Str();
                 steps.Add(new ConversationWorkflowStep(id, intent, criteria, string.IsNullOrWhiteSpace(next) ? null : next));
             }
 
@@ -171,14 +171,14 @@ public sealed record AgentConfig(
                 {
                     continue;
                 }
-                var toolId = entry["toolId"]?.GetValue<string>();
+                var toolId = entry["toolId"].Str();
                 // snake_case only — camelCase ids silently fail to bind at runtime (SMOODEV-981).
                 if (string.IsNullOrWhiteSpace(toolId) || !IsSnakeCase(toolId))
                 {
                     continue;
                 }
                 var enabled = entry["enabled"] is JsonValue e && e.TryGetValue<bool>(out var b) ? b : true;
-                var authLevel = entry["authLevel"]?.GetValue<string>() ?? "none";
+                var authLevel = entry["authLevel"].Str() ?? "none";
                 tools.Add(new EnabledTool(toolId, enabled, string.IsNullOrWhiteSpace(authLevel) ? "none" : authLevel, entry["config"] as JsonObject));
             }
             // Non-empty enabledTools → keep the restriction active even if every entry was dropped.
