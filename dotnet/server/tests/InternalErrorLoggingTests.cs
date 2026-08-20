@@ -50,28 +50,48 @@ public class InternalErrorLoggingTests
     public async Task DispatcherFailure_EmitsInternalError_AndLogsTheException()
     {
         var logger = new CapturingLogger();
-        var dispatcher = new FrameDispatcher(new InMemorySessionStore(), new MockChatClient(), logger: logger);
+        var dispatcher = BuildDispatcherWithThrowingResolver(logger);
         var events = new List<JsonObject>();
 
-        // A non-string conversationId makes the handler's GetValue<string>() throw inside the
-        // dispatcher's outer guard — any handler bug takes this path.
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1","conversationId":42}""", events.Add);
+        await DriveFailingSendAsync(dispatcher, events);
 
         Assert.Equal("INTERNAL_ERROR", events[^1]["error"]!["code"]!.GetValue<string>());
         var logged = Assert.Single(logger.Entries, e => e.Level == LogLevel.Error);
-        Assert.Contains("create_conversation_session", logged.Message);
+        Assert.Contains("send_message", logged.Message);
         Assert.NotNull(logged.Exception);
     }
 
     [Fact]
     public async Task NoLogger_StillEmitsInternalError()
     {
-        var dispatcher = new FrameDispatcher(new InMemorySessionStore(), new MockChatClient()); // no logger wired
+        var dispatcher = BuildDispatcherWithThrowingResolver(logger: null); // no logger wired
         var events = new List<JsonObject>();
 
-        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1","conversationId":42}""", events.Add);
+        await DriveFailingSendAsync(dispatcher, events);
 
         Assert.Equal("INTERNAL_ERROR", events[^1]["error"]!["code"]!.GetValue<string>());
+    }
+
+    /// <summary>A dispatcher whose per-agent config lookup throws — a handler bug that surfaces
+    /// SYNCHRONOUSLY inside <c>DispatchAsync</c>'s guard (before the turn is spawned), which is the path
+    /// under test. It stands in for the old trigger, a non-string <c>conversationId</c>: type-mismatched
+    /// frame fields are now a clean <c>VALIDATION_ERROR</c> rather than an exception (th-acf8ea), and a
+    /// test that keeps asserting INTERNAL_ERROR on one would be asserting the defect.</summary>
+    private static FrameDispatcher BuildDispatcherWithThrowingResolver(ILogger? logger) =>
+        new(new InMemorySessionStore(), new MockChatClient(), agentConfigResolver: new ThrowingAgentConfigResolver(), logger: logger);
+
+    private static async Task DriveFailingSendAsync(FrameDispatcher dispatcher, List<JsonObject> events)
+    {
+        await dispatcher.DispatchAsync("""{"action":"create_conversation_session","agentId":"11111111-1111-1111-1111-111111111111","requestId":"r1"}""", events.Add);
+        var sessionId = events[0]["data"]!["sessionId"]!.GetValue<string>();
+        await dispatcher.DispatchAsync($$"""{"action":"send_message","requestId":"r2","sessionId":"{{sessionId}}","message":"hi"}""", events.Add);
+        await dispatcher.WaitForTurnsAsync();
+    }
+
+    private sealed class ThrowingAgentConfigResolver : IAgentConfigResolver
+    {
+        public Task<AgentConfig?> ResolveAsync(string agentId, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("agent config store exploded");
     }
 
     private sealed class ThrowingChatClient(string message) : IChatClient

@@ -93,6 +93,36 @@ public interface IInteractionKind
     void ApplyEffect(IInteractionEffectContext context, JsonNode canonicalValues) { }
 }
 
+/// <summary>Call-site guards for <see cref="IInteractionKind"/>.</summary>
+public static class InteractionKindExtensions
+{
+    /// <summary>
+    /// <see cref="IInteractionKind.Validate"/>, with any unexpected exception converted into a
+    /// <b>retryable</b> field error.
+    ///
+    /// <para>A validator sees client-supplied <c>values</c>, and a shape its DTOs don't model (an
+    /// explicit <c>null</c> where a list is declared, say) surfaces as an NRE rather than the
+    /// <see cref="JsonException"/> the kind catches. Uncaught, it lands in the dispatcher's generic
+    /// handler as a terminal <c>INTERNAL_ERROR</c> with no <c>Resolve</c> — so the turn stays parked
+    /// for the FULL park timeout and the client is never told what to fix. Rust returns a retryable
+    /// <c>interaction_invalid</c> for malformed values (<c>choices.rs</c>); this keeps every kind on
+    /// that contract, including kinds added later. th-acf8ea.</para>
+    /// </summary>
+    public static InteractionValidation ValidateSafely(this IInteractionKind kind, JsonNode? spec, JsonNode? values)
+    {
+        try
+        {
+            return kind.Validate(spec, values);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Generic wording: the exception detail stays server-side, and "malformed values" is the
+            // only actionable thing the client can act on anyway.
+            return InteractionValidation.Invalid(new[] { new InteractionFieldError("values", "invalid values shape") });
+        }
+    }
+}
+
 /// <summary>
 /// The session-scoped host surface an interaction kind's <see cref="IInteractionKind.ApplyEffect"/> acts
 /// through — the C# analog of the <c>AppState</c> handle Rust's <c>attach_interaction_effect</c> closes
@@ -389,7 +419,7 @@ internal sealed class SubmitInteractionTool : AIFunction
     protected override ValueTask<object?> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken)
     {
         var args = Interactions.ArgsToObject(arguments);
-        var kindId = args["kind"]?.GetValue<string>();
+        var kindId = args["kind"].Str();
         if (string.IsNullOrEmpty(kindId))
         {
             return new ValueTask<object?>("submit_interaction requires a 'kind'.");
@@ -411,7 +441,7 @@ internal sealed class SubmitInteractionTool : AIFunction
         }
 
         var spec = _raised.TryGetValue(kindId, out var raised) ? raised : null;
-        var result = kind.Validate(spec, args["values"]);
+        var result = kind.ValidateSafely(spec, args["values"]);
         if (!result.Ok)
         {
             var detail = string.Join("; ", result.Errors!.Select(e => $"{e.Field}: {e.Message}"));

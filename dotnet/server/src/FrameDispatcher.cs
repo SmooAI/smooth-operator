@@ -32,6 +32,11 @@ public sealed class FrameDispatcher
     /// <summary>Backplane association hook, set by the WebSocket host. Null when no backplane is
     /// registered, which simply means session/agent targets are never routable.</summary>
     public Action<Target>? Associate { get; set; }
+
+    /// <summary>How long a turn parked at a write-confirmation waits for a <c>confirm_tool_action</c>
+    /// before the gate denies the tool and frees the connection's turn slot. Forwarded to every turn;
+    /// narrowed only by tests. See <see cref="TurnRunner.DefaultConfirmationTimeout"/>.</summary>
+    public TimeSpan ConfirmationTimeout { get; init; } = TurnRunner.DefaultConfirmationTimeout;
     private readonly string? _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<IToolHook> _toolHooks;
@@ -248,8 +253,12 @@ public sealed class FrameDispatcher
             return;
         }
 
-        var action = frame["action"]?.GetValue<string>();
-        var requestId = frame["requestId"]?.GetValue<string>();
+        // Read OUTSIDE the try below, so these two MUST NOT throw: GetValue<string>() raises on a type
+        // mismatch, and that escapes both the catch here and the connection pump's — {"action":123}
+        // would kill the socket with no error event. Str() yields null for wrong-typed (→ the `null`
+        // arm's VALIDATION_ERROR), mirroring Rust's `as_str()`. th-acf8ea.
+        var action = frame["action"].Str();
+        var requestId = frame["requestId"].Str();
 
         try
         {
@@ -335,7 +344,7 @@ public sealed class FrameDispatcher
         // (reuse id + persisted history); absent/unknown → a fresh conversation (unchanged). The
         // response echoes session.ConversationId either way, so a resuming client sees the same id
         // it passed. Mirrors the Rust reference's resume branch. th-d5b446.
-        var conversationId = frame["conversationId"]?.GetValue<string>();
+        var conversationId = frame["conversationId"].Str();
         var scope = _access.ConversationScope;
 
         // SECURITY (th-966fab): on an auth-enabled server, resuming a conversation you do not own is
@@ -358,7 +367,7 @@ public sealed class FrameDispatcher
         // principal. The frame's `userEmail` is only honoured when no auth is configured at all
         // (single-tenant local/dev) — trusting client-supplied identity on an authenticated server is
         // the spoofing vector this closes.
-        var ownerEmail = scope.IsUnscoped ? frame["userEmail"]?.GetValue<string>() : scope.UserEmail;
+        var ownerEmail = scope.IsUnscoped ? frame["userEmail"].Str() : scope.UserEmail;
 
         // agentId is REQUIRED by the Request schema and the generated client type is non-optional, so
         // absent-or-blank is a malformed request, not an agentless session. Rejected BEFORE the store
@@ -366,7 +375,7 @@ public sealed class FrameDispatcher
         // first pass silently stored NULL — both skipped the validation that belongs at this boundary.
         // The column stays nullable for rows that predate this check; it is just no longer reachable
         // from the create path. th-68897a.
-        var agentId = frame["agentId"]?.GetValue<string>()?.Trim();
+        var agentId = frame["agentId"].Str()?.Trim();
         if (string.IsNullOrEmpty(agentId))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "missing 'agentId'"));
@@ -375,7 +384,7 @@ public sealed class FrameDispatcher
 
         var session = await _store.ResumeSessionAsync(
             agentId,
-            frame["userName"]?.GetValue<string>(),
+            frame["userName"].Str(),
             ownerEmail,
             string.IsNullOrEmpty(conversationId) ? null : conversationId,
             cancellationToken).ConfigureAwait(false);
@@ -479,7 +488,7 @@ public sealed class FrameDispatcher
 
     private async Task HandleGetSessionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
-        var session = await ScopedSessionAsync(frame["sessionId"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
+        var session = await ScopedSessionAsync(frame["sessionId"].Str(), cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
@@ -596,7 +605,7 @@ public sealed class FrameDispatcher
     /// </summary>
     private async Task HandleGetConversationMessagesAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
-        var sessionId = frame["sessionId"]?.GetValue<string>();
+        var sessionId = frame["sessionId"].Str();
         if (string.IsNullOrEmpty(sessionId))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "get_conversation_messages requires a 'sessionId'"));
@@ -620,7 +629,7 @@ public sealed class FrameDispatcher
             limit = Math.Clamp(l, 1, MaxMessageLimit);
         }
 
-        var cursor = frame["cursor"]?.GetValue<string>();
+        var cursor = frame["cursor"].Str();
 
         List<StoredMessage> candidates;
         if (string.IsNullOrEmpty(cursor))
@@ -700,14 +709,14 @@ public sealed class FrameDispatcher
         // replays ITS history as turn context and streams the reply back to YOU — a read of someone
         // else's conversation dressed up as a write, which defeats the read scoping. Refused before
         // the turn starts, so nothing is appended to the victim's log.
-        var session = await ScopedSessionAsync(frame["sessionId"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
+        var session = await ScopedSessionAsync(frame["sessionId"].Str(), cancellationToken).ConfigureAwait(false);
         if (session is null)
         {
             sink(ProtocolEvents.Error(requestId, "SESSION_NOT_FOUND", "Session not found"));
             return;
         }
 
-        var message = frame["message"]?.GetValue<string>() ?? string.Empty;
+        var message = frame["message"].Str() ?? string.Empty;
 
         // Optional multimodal attachments. Fail-soft, per the spec: absent ⇒ a text-only turn; a
         // malformed entry is dropped rather than rejecting the turn. `images` become vision content parts
@@ -722,7 +731,7 @@ public sealed class FrameDispatcher
         // Fail-CLOSED, unlike `images`: an unresolvable skill aborts the turn rather than quietly answering
         // without it. A caller that asked for a code-review recipe and got a freeform answer has no way to tell.
         string? skillSection = null;
-        var skillName = frame["skill"]?.GetValue<string>()?.Trim();
+        var skillName = frame["skill"].Str()?.Trim();
         if (!string.IsNullOrEmpty(skillName))
         {
             skillSection = await Skills.ResolveSectionAsync(_skillResolver, skillName).ConfigureAwait(false);
@@ -801,7 +810,10 @@ public sealed class FrameDispatcher
         // Rich Interactions: hand the turn the hosted-kind catalog, the connection's park registry, and
         // THIS session's declared render capabilities (empty for a text-only session → fallback path).
         var capabilities = _sessionSupports.TryGetValue(session.SessionId, out var supports) ? supports : null;
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity);
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity)
+        {
+            ConfirmationTimeout = ConfirmationTimeout,
+        };
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a
         // confirmation-gated tool PARKS awaiting a later confirm_tool_action frame; the connection's
@@ -935,12 +947,12 @@ public sealed class FrameDispatcher
                 {
                     continue;
                 }
-                var url = obj["url"]?.GetValue<string>();
+                var url = obj["url"].Str();
                 if (string.IsNullOrWhiteSpace(url))
                 {
                     continue;
                 }
-                images.Add(new UserImage(url, obj["detail"]?.GetValue<string>()));
+                images.Add(new UserImage(url, obj["detail"].Str()));
             }
             catch
             {
@@ -969,13 +981,13 @@ public sealed class FrameDispatcher
                 {
                     continue;
                 }
-                var name = obj["name"]?.GetValue<string>();
-                var url = obj["url"]?.GetValue<string>();
+                var name = obj["name"].Str();
+                var url = obj["url"].Str();
                 if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(url))
                 {
                     continue;
                 }
-                files.Add(new UserFile(name, obj["mimeType"]?.GetValue<string>(), url));
+                files.Add(new UserFile(name, obj["mimeType"].Str(), url));
             }
             catch
             {
@@ -998,7 +1010,7 @@ public sealed class FrameDispatcher
     /// </summary>
     private async Task HandleConfirmToolActionAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
-        var sessionId = frame["sessionId"]?.GetValue<string>();
+        var sessionId = frame["sessionId"].Str();
         if (string.IsNullOrEmpty(sessionId))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "confirm_tool_action requires a 'sessionId'"));
@@ -1050,14 +1062,14 @@ public sealed class FrameDispatcher
             return;
         }
 
-        var sessionId = frame["sessionId"]?.GetValue<string>();
+        var sessionId = frame["sessionId"].Str();
         if (string.IsNullOrEmpty(sessionId))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "submit_interaction requires a 'sessionId'"));
             return;
         }
 
-        var interactionId = frame["interactionId"]?.GetValue<string>();
+        var interactionId = frame["interactionId"].Str();
         if (string.IsNullOrEmpty(interactionId))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "submit_interaction requires an 'interactionId'"));
@@ -1080,7 +1092,7 @@ public sealed class FrameDispatcher
             sink(ProtocolEvents.Error(requestId, "INTERACTION_MISMATCH", "interactionId does not match the pending interaction"));
             return;
         }
-        var kindId = frame["kind"]?.GetValue<string>();
+        var kindId = frame["kind"].Str();
         if (!string.IsNullOrEmpty(kindId) && kindId != pending.Kind)
         {
             sink(ProtocolEvents.Error(requestId, "INTERACTION_MISMATCH", "kind does not match the pending interaction"));
@@ -1116,7 +1128,7 @@ public sealed class FrameDispatcher
             return;
         }
 
-        var validation = kind.Validate(pending.Spec, values);
+        var validation = kind.ValidateSafely(pending.Spec, values);
         if (!validation.Ok)
         {
             // Retryable: the turn stays parked (no Resolve). Re-render the card with the field errors.
@@ -1209,14 +1221,14 @@ public sealed class FrameDispatcher
             return;
         }
 
-        var sessionId = frame["sessionId"]?.GetValue<string>();
+        var sessionId = frame["sessionId"].Str();
         if (string.IsNullOrEmpty(sessionId))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "verify_otp requires a 'sessionId'"));
             return;
         }
 
-        var code = frame["code"]?.GetValue<string>();
+        var code = frame["code"].Str();
         if (string.IsNullOrEmpty(code))
         {
             sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "verify_otp requires a 'code'"));

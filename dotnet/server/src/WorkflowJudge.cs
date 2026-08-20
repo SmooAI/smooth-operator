@@ -126,7 +126,7 @@ public sealed class LlmWorkflowJudge : IWorkflowJudge
             {
                 if (JsonNode.Parse(text[start..(end + 1)]) is JsonObject obj)
                 {
-                    var verdict = obj["verdict"]?.GetValue<string>();
+                    var verdict = obj["verdict"].Str();
                     return verdict?.Trim().ToLowerInvariant() switch
                     {
                         "yes" => WorkflowVerdict.Yes,
