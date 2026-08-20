@@ -8,10 +8,8 @@ github.com/BurntSushi/toml v1.4.0 h1:kuoIxZQy2WRRk1pttg9asf+WVv6tWQuBNVmK8+nqPr0
 github.com/BurntSushi/toml v1.4.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/SmooAI/smooth-operator-core/go v1.7.17-0.20260817051723-566d5dcb033b h1:BiH6ZwtKZMDNLv9yCIzhXNT6q1mYorpiaOYzVOcPPAU=
-github.com/SmooAI/smooth-operator-core/go v1.7.17-0.20260817051723-566d5dcb033b/go.mod h1:JoJNR4TrGcCGBDBHi4n7Oy6OSz3yYicZyWuadEs7x9c=
-github.com/SmooAI/smooth-operator-core/go v1.8.9 h1:9qf9mRZGSuO9ZxkEVpAQ1R7dl9T517qKAJW9n5NM1zw=
-github.com/SmooAI/smooth-operator-core/go v1.8.9/go.mod h1:JoJNR4TrGcCGBDBHi4n7Oy6OSz3yYicZyWuadEs7x9c=
+github.com/SmooAI/smooth-operator-core/go v1.13.2 h1:fZaeZBB807i6DVCZFQKBQervXO/sM0MlHxEi0FRUZ/Y=
+github.com/SmooAI/smooth-operator-core/go v1.13.2/go.mod h1:JoJNR4TrGcCGBDBHi4n7Oy6OSz3yYicZyWuadEs7x9c=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=

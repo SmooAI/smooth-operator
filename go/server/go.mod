@@ -3,7 +3,7 @@ module github.com/SmooAI/smooth-operator/go/server
 go 1.26
 
 require (
-	github.com/SmooAI/smooth-operator-core/go v1.8.9
+	github.com/SmooAI/smooth-operator-core/go v1.13.2
 	github.com/SmooAI/smooth-operator/go v0.0.0-00010101000000-000000000000
 	github.com/coder/websocket v1.8.14
 	github.com/google/uuid v1.6.0
