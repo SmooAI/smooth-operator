@@ -301,13 +301,18 @@ export class PostgresStore implements SessionStore, AdminStore {
             // read it above and must leave it exactly as it was. `jsonb_set` rather than a
             // read-modify-write so sibling metadata keys (the Rust server's workflow step
             // pointer, the caller's own `metadata`) survive without a lost-update race.
+            //
+            // Deliberately does NOT touch `updated_at`: that column is the sidebar's
+            // recency sort and is bumped when a MESSAGE lands (see appendMessage). A bare
+            // reconnect appends nothing, so bumping it here would float every backgrounded
+            // tab to the top of the list. The Go, Python and Rust stores leave it alone for
+            // the same reason — this is a parity-relevant choice, not an omission.
             if (supports !== undefined) {
                 await client.query(
                     `UPDATE conversations
-                        SET metadata_json = jsonb_set(COALESCE(metadata_json, '{}'::jsonb), $2, $3::jsonb, true),
-                            updated_at = $4
+                        SET metadata_json = jsonb_set(COALESCE(metadata_json, '{}'::jsonb), $2, $3::jsonb, true)
                       WHERE id = $1`,
-                    [convId, `{${CLIENT_SUPPORTS_META_KEY}}`, JSON.stringify(effectiveSupports), now],
+                    [convId, `{${CLIENT_SUPPORTS_META_KEY}}`, JSON.stringify(effectiveSupports)],
                 );
             }
             const metadata: SessionMetadata = {
