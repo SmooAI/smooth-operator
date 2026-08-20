@@ -220,6 +220,12 @@ public sealed class TurnRunner
     private bool IsGated(string toolName) =>
         _confirmations is not null && _confirmTools.Any(pattern => toolName.Contains(pattern, StringComparison.Ordinal));
 
+    /// <summary>True when <paramref name="toolName"/> is one of this turn's <c>request_&lt;kind&gt;</c>
+    /// raise tools. Their toolCall chunk is deferred out of the stream loop and re-emitted by the tool
+    /// itself — after <c>interaction_required</c> on the park path.</summary>
+    private bool IsInteractionRaise(string toolName) =>
+        _interactions is not null && _interactions.Kinds.Any(kind => kind.ToolName == toolName);
+
     public Task<TurnResult> RunAsync(string conversationId, string requestId, string userMessage, Action<JsonObject> sink, CancellationToken cancellationToken = default) =>
         RunAsync(conversationId, requestId, userMessage, sink, sessionId: conversationId, cancellationToken);
 
@@ -496,10 +502,10 @@ public sealed class TurnRunner
                             // `gen_ai.tool` child span (nests under the turn span), mirroring the Rust
                             // runner emitting one gen_ai.tool span per tool call with redacted args.
                             EmitToolSpan(call, conversationId);
-                            // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from the
-                            // gate AFTER write_confirmation_required, so the wire order matches the
-                            // canonical (Rust) server. Non-gated tools emit their chunk inline as before.
-                            if (IsGated(call.Name))
+                            // DEFER a parking tool's toolCall chunk: it is emitted from the park path
+                            // AFTER write_confirmation_required / interaction_required, so the wire
+                            // order matches the canonical (Rust) server. Ungated tools emit inline.
+                            if (IsGated(call.Name) || IsInteractionRaise(call.Name))
                             {
                                 break;
                             }

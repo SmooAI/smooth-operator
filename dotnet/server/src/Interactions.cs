@@ -286,15 +286,28 @@ internal sealed class RequestInteractionTool : AIFunction
 
     protected override async ValueTask<object?> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken)
     {
+        var args = Interactions.ArgsToObject(arguments);
+        // The stream loop DEFERRED this tool's toolCall chunk (see TurnRunner.IsInteractionRaise) so
+        // the park path can emit it AFTER interaction_required — the canonical (Rust) order, and the
+        // same order the write-confirmation park already uses. Every non-park exit emits it here.
+        void EmitCall() => _sink(ProtocolEvents.StreamChunk(_requestId, Name, new JsonObject
+        {
+            ["rawResponse"] = new JsonObject
+            {
+                ["toolCall"] = new JsonObject { ["name"] = Name, ["arguments"] = args.DeepClone() },
+            },
+        }));
+
         InteractionRequest request;
         try
         {
-            request = _kind.ParseRequest(Interactions.ArgsToObject(arguments));
+            request = _kind.ParseRequest(args);
         }
         catch (InteractionParseException ex)
         {
             // Contract violation (count/length/uniqueness) — hand the reason back so the model can fix
             // and re-call, exactly like Rust returning the parse error as the tool result.
+            EmitCall();
             return ex.Message;
         }
 
@@ -303,6 +316,7 @@ internal sealed class RequestInteractionTool : AIFunction
             // Text-only channel: no card. Stash the spec for a format-only submit, and return the
             // conversational directive telling the model to ask + submit via submit_interaction.
             _raised[request.Kind] = request.Spec;
+            EmitCall();
             return new JsonObject
             {
                 ["mode"] = "conversational",
@@ -318,6 +332,7 @@ internal sealed class RequestInteractionTool : AIFunction
         var interactionId = Guid.NewGuid().ToString();
         var parked = _park.Register(_sessionId, interactionId, request.Kind, request.Spec);
         _sink(ProtocolEvents.InteractionRequired(_requestId, interactionId, request.Kind, request.Spec.DeepClone(), request.Reason));
+        EmitCall();
 
         var outcome = await AwaitOutcome(parked, cancellationToken).ConfigureAwait(false);
         return outcome.Status switch
