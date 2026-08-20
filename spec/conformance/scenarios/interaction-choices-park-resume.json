@@ -1,124 +1,44 @@
 {
-  "name": "interaction-choices-park-resume",
-  "description": "The second Rich Interaction kind, `choices` (the AskUserQuestion-shaped multiple-choice ask), through the SAME generic envelope: `request_choices` parks behind the `choice_chips` capability, the server emits `interaction_required` with the normalized questions/options spec, and one `submit_interaction` resumes it. Adding a kind must require no new protocol action and no client release \u2014 this scenario is what proves that claim holds identically in every server, and that the kind catalog is not identity_intake-shaped by accident.",
-  "mockLlmScript": [
-    {
-      "kind": "toolCall",
-      "name": "request_choices",
-      "arguments": "{\"questions\": [{\"question\": \"Which plan fits best?\", \"header\": \"Plan\", \"options\": [{\"label\": \"Starter\"}, {\"label\": \"Pro\"}]}], \"reason\": \"to route you to the right quote\"}"
-    },
-    {
-      "kind": "text",
-      "text": "Pro it is \u2014 pulling that quote up."
-    }
-  ],
-  "steps": [
-    {
-      "send": {
-        "action": "create_conversation_session",
-        "requestId": "r-create",
-        "agentId": "11111111-1111-1111-1111-111111111111",
-        "userName": "Alice",
-        "userEmail": "alice@example.com",
-        "supports": [
-          "choice_chips"
-        ]
-      },
-      "expect": [
+    "name": "interaction-choices-park-resume",
+    "description": "The second Rich Interaction kind, `choices` (the AskUserQuestion-shaped multiple-choice ask), through the SAME generic envelope: `request_choices` parks behind the `choice_chips` capability, the server emits `interaction_required` with the normalized questions/options spec, and one `submit_interaction` resumes it. Adding a kind must require no new protocol action and no client release — this scenario is what proves that claim holds identically in every server, and that the kind catalog is not identity_intake-shaped by accident.",
+    "knownDivergences": ["go"],
+    "knownDivergencesReason": "th-ef78d0 — the park ORDERING is fixed in all four ports; Go alone still fails this scenario, and on a DIFFERENT bug that only became reachable once the ordering was corrected: `splitIntoChunks` in smooth-operator-core Go (`go/core/llm_provider.go`) slices the mock reply by BYTES, so the em-dash in \"Pro it is — pulling that quote up.\" (36 bytes / 3 parts puts a boundary mid-rune) is split into invalid UTF-8 and each byte surfaces as U+FFFD. `interaction-park-resume`'s reply is 33 bytes and its boundaries miss the rune, which is why only this scenario trips. Fix is one line upstream (slice `[]rune`) plus a core release — not a protocol divergence, and NOT a reason to weaken this scenario.",
+    "mockLlmScript": [
+        { "kind": "toolCall", "name": "request_choices", "arguments": "{\"questions\": [{\"question\": \"Which plan fits best?\", \"header\": \"Plan\", \"options\": [{\"label\": \"Starter\"}, {\"label\": \"Pro\"}]}], \"reason\": \"to route you to the right quote\"}" },
+        { "kind": "text", "text": "Pro it is — pulling that quote up." }
+    ],
+    "steps": [
         {
-          "type": "immediate_response",
-          "status": 200,
-          "capture": {
-            "sessionId": "data.sessionId"
-          }
-        }
-      ]
-    },
-    {
-      "send": {
-        "action": "send_message",
-        "requestId": "r-msg",
-        "sessionId": "{{sessionId}}",
-        "message": "i want a quote",
-        "stream": true
-      },
-      "expect": [
-        {
-          "type": "immediate_response",
-          "status": 202
+            "send": { "action": "create_conversation_session", "requestId": "r-create", "agentId": "11111111-1111-1111-1111-111111111111", "userName": "Alice", "userEmail": "alice@example.com", "supports": ["choice_chips"] },
+            "expect": [ { "type": "immediate_response", "status": 200, "capture": { "sessionId": "data.sessionId" } } ]
         },
         {
-          "type": "interaction_required",
-          "assert": {
-            "requestId": "r-msg",
-            "data.data.kind": "choices",
-            "data.data.reason": "to route you to the right quote",
-            "data.data.spec.questions.0.header": "Plan",
-            "data.data.spec.questions.0.question": "Which plan fits best?",
-            "data.data.spec.questions.0.options.1.label": "Pro"
-          },
-          "capture": {
-            "interactionId": "data.data.interactionId"
-          }
-        },
-        {
-          "type": "stream_chunk",
-          "assert": {
-            "data.state.rawResponse.toolCall.name": "request_choices"
-          }
-        }
-      ]
-    },
-    {
-      "send": {
-        "action": "submit_interaction",
-        "requestId": "r-msg",
-        "sessionId": "{{sessionId}}",
-        "interactionId": "{{interactionId}}",
-        "kind": "choices",
-        "values": {
-          "answers": [
-            {
-              "header": "Plan",
-              "options": [
-                "Pro"
-              ]
-            }
-          ]
-        }
-      },
-      "expect": [
-        {
-          "type": "immediate_response",
-          "status": 200
-        },
-        {
-          "type": "stream_chunk",
-          "assert": {
-            "data.state.rawResponse.toolResult.name": "request_choices",
-            "data.state.rawResponse.toolResult.isError": false
-          }
-        },
-        {
-          "type": "stream_token",
-          "repeat": true,
-          "accumulate": "token",
-          "assertAccumulated": "Pro it is \u2014 pulling that quote up."
-        },
-        {
-          "type": "eventual_response",
-          "status": 200,
-          "assert": {
-            "data.data.response.responseParts": [
-              "Pro it is \u2014 pulling that quote up."
+            "send": { "action": "send_message", "requestId": "r-msg", "sessionId": "{{sessionId}}", "message": "i want a quote", "stream": true },
+            "expect": [
+                { "type": "immediate_response", "status": 202 },
+                {
+                    "type": "interaction_required",
+                    "assert": {
+                        "requestId": "r-msg",
+                        "data.data.kind": "choices",
+                        "data.data.reason": "to route you to the right quote",
+                        "data.data.spec.questions.0.header": "Plan",
+                        "data.data.spec.questions.0.question": "Which plan fits best?",
+                        "data.data.spec.questions.0.options.1.label": "Pro"
+                    },
+                    "capture": { "interactionId": "data.data.interactionId" }
+                },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolCall.name": "request_choices" } }
             ]
-          }
+        },
+        {
+            "send": { "action": "submit_interaction", "requestId": "r-msg", "sessionId": "{{sessionId}}", "interactionId": "{{interactionId}}", "kind": "choices", "values": { "answers": [{ "header": "Plan", "options": ["Pro"] }] } },
+            "expect": [
+                { "type": "immediate_response", "status": 200 },
+                { "type": "stream_chunk", "assert": { "data.state.rawResponse.toolResult.name": "request_choices", "data.state.rawResponse.toolResult.isError": false } },
+                { "type": "stream_token", "repeat": true, "accumulate": "token", "assertAccumulated": "Pro it is — pulling that quote up." },
+                { "type": "eventual_response", "status": 200, "assert": { "data.data.response.responseParts": ["Pro it is — pulling that quote up."] } }
+            ]
         }
-      ]
-    }
-  ],
-  "knownDivergences": [
-    "go"
-  ],
-  "knownDivergencesReason": "th-CORE-runeslice \u2014 NOT an ordering divergence. Go's interaction_required ordering is FIXED (th-ef78d0); fixing it let this scenario run far enough to expose a second, previously-masked bug in smooth-operator-core: splitIntoChunks (go/core/llm_provider.go) slices the reply by BYTES, not runes. This scenario's reply contains an em-dash, and 36 bytes / 3 parts puts a chunk boundary mid-rune, so the pieces are invalid UTF-8 and each stray byte surfaces as U+FFFD. interaction-park-resume's reply is 33 bytes and its boundaries miss the rune, which is why only this scenario trips. Fix is one line upstream (slice []rune) in smooth-operator-core plus a Go module release. Do NOT weaken this scenario to make it pass."
+    ]
 }
