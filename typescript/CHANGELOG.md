@@ -1,5 +1,19 @@
 # @smooai/smooth-operator
 
+## 1.56.4
+
+### Patch Changes
+
+- cd6d3da: dotnet-server: stop three client-reachable inputs from killing a connection, faulting a turn, or pinning a turn slot forever.
+
+  **A malformed frame killed the WebSocket.** `FrameDispatcher.DispatchAsync` read `action` and `requestId` with `JsonNode.GetValue<string>()` _outside_ its `try`, and that method throws `InvalidOperationException` on a type mismatch ("An element of type 'Number' cannot be converted to a 'System.String'"). It is neither `OperationCanceledException` nor `WebSocketException`, so it escaped both catches in the connection pump and propagated out of the endpoint delegate: a client sending `{"action":123}` dropped the socket with no error event and no diagnostic. The reads now yield `null` for missing OR wrong-typed, mirroring the Rust reference's `as_str()` → `None` → a clean `VALIDATION_ERROR`, and honouring the stated contract that "protocol-level failures are surfaced as `error` events, never as hard errors that drop the connection". The same reader replaces every other unguarded `GetValue<T>()` over untrusted JSON (frame handlers, interaction kinds, model-produced tool args, agent config) — those were inside the guard, so they merely degraded a `VALIDATION_ERROR` into a generic `INTERNAL_ERROR`.
+
+  **`submit_interaction` with a null inside `values` faulted the turn and left it parked.** An explicit JSON `null` _sets_ a `[JsonPropertyName]`-annotated `List<T>`/`string` property rather than leaving its `= new()` initializer alone, so `{"values":{"answers":null}}` — and `answers[].header` / `answers[].options` — dereferenced null inside `ChoicesKind.Validate`, outside its `catch (JsonException)`. That reached the dispatcher's generic handler as a terminal `INTERNAL_ERROR` with no `Resolve`, so the turn stayed parked for the full 300s timeout and the client was never told what to fix. The choice DTOs now absorb an explicit null at the property (fixing every reader, not just the one path), and both `Validate` call sites run through a guard that turns any unexpected validator exception into a **retryable** `interaction_invalid` — the contract Rust's `choices.rs` already kept, now held for kinds added later too.
+
+  **A parked write-confirmation had no timeout.** The gate awaited a bare `TaskCompletionSource<bool>`, and `ConfirmationRegistry` never times out. A client that closes the tab without closing the socket never triggers teardown, so `RejectAll` never runs and the parked turn holds the connection's single turn slot indefinitely: every later `send_message` returns `TURN_IN_PROGRESS` and the graceful drain hangs. The gate now backstops the park at 300s — the same constant, for the same reason, as the Rust reference's `CONFIRMATION_TIMEOUT` and the interaction park that already had one — and times out **denied**, matching the fail-closed disconnect path. A verdict arriving in the same instant as the deadline still wins.
+
+  Regression tests, each failing without its fix: `MalformedFrameFieldType_ErrorsOrAnswers_WithoutDroppingConnection` (drives a real WebSocket and asserts the socket still serves a ping afterwards), `RichPath_NullValuesShape_IsRetryableInvalid_NotInternalError` (four null shapes, each asserting the park survived and a valid resubmit still resumes the turn), and `UnansweredConfirmation_TimesOut_DeniesTheTool_AndFreesTheTurnSlot` plus its `ConfirmationAnsweredInTime_StillApproves` control. The timeout test injects a short backstop and asserts on settled outcome — turn finished, registration gone, slot accepts a new message — never on elapsed wall-clock.
+
 ## 1.56.3
 
 ### Patch Changes
