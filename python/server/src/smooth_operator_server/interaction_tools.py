@@ -59,11 +59,26 @@ def _request_tool(
     schema = kind.tool_schema()
 
     async def _run(args: dict[str, Any]) -> str:
-        request = kind.parse_request(args)  # ValueError → surfaced to the model
+        # The stream loop DEFERRED this tool's toolCall chunk (see
+        # ``TurnRunner._is_interaction_raise``) so the park path can emit it AFTER
+        # ``interaction_required`` — the reference order, and the same order the
+        # write-confirmation park already uses. Every non-park exit emits it here.
+        # (the state shape is inlined rather than imported from `turn_runner`, which
+        # imports this module — `_tool_call_state_from`'s one-line dict, not a cycle.)
+        def emit_call() -> None:
+            state = {"rawResponse": {"toolCall": {"name": schema["name"], "arguments": args}}}
+            sink(protocol.stream_chunk(request_id, schema["name"], state))
+
+        try:
+            request = kind.parse_request(args)  # ValueError → surfaced to the model
+        except Exception:
+            emit_call()
+            raise
         if not rich:
             # Fallback: no card can render — hand the model the conversational directive
             # and stash the spec so the submit tool validates with full required-ness.
             raised_specs[request.kind] = request.spec
+            emit_call()
             return json.dumps(
                 {
                     "mode": "conversational",
@@ -77,6 +92,7 @@ def _request_tool(
         interaction_id = str(uuid.uuid4())
         future = pending.register(session_id, interaction_id, request.kind, request.spec)
         sink(protocol.interaction_required(request_id, interaction_id, request.kind, request.spec, request.reason))
+        emit_call()
         try:
             outcome = await asyncio.wait_for(future, INTERACTION_TIMEOUT)
         except (asyncio.TimeoutError, asyncio.CancelledError):

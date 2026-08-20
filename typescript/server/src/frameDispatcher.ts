@@ -721,6 +721,10 @@ export class FrameDispatcher {
             toolHooks: this.toolHooks,
             confirmTools: this.confirmTools,
             confirmations: this.confirmations,
+            // Raise tools only — NOT the generic `submit_interaction` tool that
+            // `buildInteractionTools` may also add; that one emits no park event, so
+            // deferring its chunk would drop it.
+            interactionRaiseTools: this.interactions.all().map((k) => k.toolSchema().name),
             sessionId,
             workflow: agentConfig?.conversationWorkflow,
             currentStepId: session.currentStepId,

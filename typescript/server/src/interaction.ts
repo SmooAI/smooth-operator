@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto';
 import type { Tool } from '@smooai/smooth-operator-core';
 
 import * as protocol from './protocol.js';
-import type { Sink } from './turnRunner.js';
+import { toolCallStateFrom, type Sink } from './turnRunner.js';
 
 /** Wire name of the generic conversational submit tool (same verb as the resume action). */
 export const SUBMIT_INTERACTION_TOOL = 'submit_interaction';
@@ -251,13 +251,26 @@ export function requestInteractionTool(opts: {
         description: schema.description,
         parameters: schema.parameters,
         async execute(args: Record<string, unknown>): Promise<string> {
+            // The stream loop DEFERRED this tool's toolCall chunk (see
+            // `TurnRunner.isInteractionRaise`) so the park path can emit it AFTER
+            // `interaction_required` — the reference order, and the same order the
+            // write-confirmation park already uses. Every non-park exit emits it here.
+            const emitCall = (): void => sink(protocol.streamChunk(requestId, schema.name, toolCallStateFrom(schema.name, args)));
+
             // A malformed raise throws; the engine surfaces it to the model as a tool
             // error (never crashes the turn), so the model can correct and retry.
-            const request = kind.parseRequest(args);
+            let request: ReturnType<typeof kind.parseRequest>;
+            try {
+                request = kind.parseRequest(args);
+            } catch (err) {
+                emitCall();
+                throw err;
+            }
 
             if (!rich) {
                 // Text-only channel: degrade to the kind's conversational directive.
                 raisedSpecs.set(request.kind, request.spec);
+                emitCall();
                 return JSON.stringify({
                     mode: 'conversational',
                     kind: request.kind,
@@ -272,6 +285,7 @@ export function requestInteractionTool(opts: {
             const interactionId = randomUUID();
             const outcome = park.park(sessionId, { interactionId, kind: request.kind, spec: request.spec });
             sink(protocol.interactionRequired(requestId, interactionId, request.kind, request.spec, request.reason));
+            emitCall();
 
             const resolved = await withTimeout(outcome, timeoutMs, () => park.clear(sessionId));
             switch (resolved.status) {
