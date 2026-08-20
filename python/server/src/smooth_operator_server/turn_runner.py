@@ -304,6 +304,14 @@ class TurnRunner:
             return False
         return any(pattern in tool_name for pattern in self._confirm_tools)
 
+    def _is_interaction_raise(self, tool_name: str) -> bool:
+        """True when ``tool_name`` is one of this turn's ``request_<kind>`` raise tools.
+        Their toolCall chunk is deferred out of the stream loop and re-emitted by the
+        tool itself — after ``interaction_required`` on the park path."""
+        if self._interactions is None:
+            return False
+        return any(kind.tool_schema()["name"] == tool_name for kind in self._interactions.kinds())
+
     async def run(
         self,
         conversation_id: str,
@@ -530,11 +538,11 @@ class TurnRunner:
                         # child span). Emitted for gated tools too — the span is
                         # independent of the deferred wire chunk below.
                         _emit_tool_span(event, conversation_id, self._org_id)
-                        # DEFER a confirmation-gated tool's toolCall chunk: it is emitted
-                        # from the gate AFTER `write_confirmation_required`, so the wire
-                        # order matches the reference (Rust) server. Non-gated tools emit
-                        # their chunk inline as before.
-                        if self._is_gated(event.name):
+                        # DEFER a parking tool's toolCall chunk: it is emitted from the
+                        # park path AFTER `write_confirmation_required` /
+                        # `interaction_required`, so the wire order matches the reference
+                        # (Rust) server. Ungated tools emit their chunk inline as before.
+                        if self._is_gated(event.name) or self._is_interaction_raise(event.name):
                             continue
                         sink(protocol.stream_chunk(request_id, event.name, _tool_call_state(event)))
                     elif isinstance(event, ToolResultEvent):

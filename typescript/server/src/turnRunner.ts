@@ -185,6 +185,13 @@ export interface TurnRunnerOptions {
     confirmTools?: string[];
     /** The session-keyed pending-confirmation registry the gate parks on (shared with the dispatcher). */
     confirmations?: ConfirmationRegistry;
+    /**
+     * Names of the Rich Interaction raise tools (`request_<kind>`) registered for this
+     * turn. Their `toolCall` chunk is DEFERRED out of the stream loop and re-emitted by
+     * the tool itself — after `interaction_required` on the park path — so the wire order
+     * matches the reference (Rust) server and this server's own write-confirmation park.
+     */
+    interactionRaiseTools?: string[];
     /** The session id a parked confirmation is keyed by (so a `confirm_tool_action` frame routes here). */
     sessionId?: string;
     /**
@@ -243,6 +250,7 @@ export class TurnRunner {
     private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
     private readonly confirmations?: ConfirmationRegistry;
+    private readonly interactionRaiseTools: string[];
     private readonly sessionId?: string;
     private readonly workflow?: ConversationWorkflow;
     private readonly currentStepId?: string;
@@ -268,6 +276,7 @@ export class TurnRunner {
         this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
         this.confirmations = options.confirmations;
+        this.interactionRaiseTools = options.interactionRaiseTools ?? [];
         this.sessionId = options.sessionId;
         this.workflow = options.workflow;
         this.currentStepId = options.currentStepId;
@@ -283,6 +292,11 @@ export class TurnRunner {
     private isGated(name: string): boolean {
         if (!this.confirmations) return false;
         return this.confirmTools.some((pattern) => name.includes(pattern));
+    }
+
+    /** True when `name` is one of this turn's `request_<kind>` raise tools, which emit their own chunk. */
+    private isInteractionRaise(name: string): boolean {
+        return this.interactionRaiseTools.includes(name);
     }
 
     /**
@@ -426,10 +440,10 @@ export class TurnRunner {
                 // BEFORE the gated `continue` below, so a confirmation-gated tool is
                 // traced too (parity with the Rust runner collecting all tool records).
                 if (event.type === 'tool_call') recordToolSpan(turnSpan, event.name, event.arguments, conversationId, this.orgId);
-                // DEFER a confirmation-gated tool's toolCall chunk: it is emitted from
-                // the gate AFTER `write_confirmation_required`, so the wire order matches
-                // the reference (Rust) server. Non-gated tools emit their chunk inline.
-                if (event.type === 'tool_call' && this.isGated(event.name)) continue;
+                // DEFER a parking tool's toolCall chunk: it is emitted from the park path
+                // AFTER `write_confirmation_required` / `interaction_required`, so the wire
+                // order matches the reference (Rust) server. Ungated tools emit inline.
+                if (event.type === 'tool_call' && (this.isGated(event.name) || this.isInteractionRaise(event.name))) continue;
                 // Mark the answer as started BEFORE emitting, so a preamble that resolves
                 // in this same tick is dropped rather than landing after the reply.
                 if (event.type === 'text') answerStarted.started = true;
@@ -527,10 +541,10 @@ function toolCallState(name: string, args: string): Record<string, unknown> {
 /**
  * The `stream_chunk` toolCall state built from an already-parsed `arguments` object
  * (the shape the engine's {@link HumanApprovalRequest} carries). Used to emit a gated
- * tool's deferred toolCall chunk from the HumanGate — the TS analog of the Python
- * `_tool_call_state_from`.
+ * tool's deferred toolCall chunk from the HumanGate, and an interaction raise tool's
+ * from the park path — the TS analog of the Python `_tool_call_state_from`.
  */
-function toolCallStateFrom(name: string, args: Record<string, unknown>): Record<string, unknown> {
+export function toolCallStateFrom(name: string, args: Record<string, unknown>): Record<string, unknown> {
     return { rawResponse: { toolCall: { name, arguments: args } } };
 }
 

@@ -784,14 +784,20 @@ func (r *TurnRunner) raiseTool(kind InteractionKind, rich bool, sessionID, reque
 		Desc:     schema.Description,
 		Params:   schema.Parameters,
 		Fn: func(ctx context.Context, args map[string]any) (string, error) {
-			// Emit the deferred toolCall chunk here (the stream loop skipped it), so it
-			// deterministically precedes interaction_required / the fallback result.
-			if argsJSON, err := json.Marshal(args); err == nil {
-				sink(streamChunk(requestID, schema.Name, toolCallState(schema.Name, string(argsJSON))))
+			// The stream loop skipped this tool's toolCall chunk; emit it here. On the
+			// rich path it must follow interaction_required (the reference order — a
+			// client that renders tool calls would otherwise show "calling
+			// request_identity_intake…" before the card). On every non-park path there
+			// is no park event, so it goes out immediately.
+			emitCall := func() {
+				if argsJSON, err := json.Marshal(args); err == nil {
+					sink(streamChunk(requestID, schema.Name, toolCallState(schema.Name, string(argsJSON))))
+				}
 			}
 
 			req, err := kind.ParseRequest(args)
 			if err != nil {
+				emitCall()
 				return "", err
 			}
 
@@ -800,6 +806,7 @@ func (r *TurnRunner) raiseTool(kind InteractionKind, rich bool, sessionID, reque
 				// model collects the answer turn by turn and submits via submit_interaction.
 				// Stash the raised spec so that same-turn submit validates required-ness.
 				r.stashRaisedSpec(req.Kind, req.Spec)
+				emitCall()
 				return marshalInteractionResult(map[string]any{
 					"mode":         "conversational",
 					"kind":         req.Kind,
@@ -814,6 +821,7 @@ func (r *TurnRunner) raiseTool(kind InteractionKind, rich bool, sessionID, reque
 			interactionID := uuid.NewString()
 			outcome := r.interactions.Register(sessionID, interactionID, req.Kind, req.Spec)
 			sink(interactionRequired(requestID, interactionID, req.Kind, req.Spec, req.Reason))
+			emitCall()
 
 			select {
 			case oc := <-outcome:

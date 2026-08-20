@@ -61,6 +61,19 @@ async def _recv(ws):
             return event
 
 
+async def _recv_park(ws):
+    """The park event plus the raise tool's deferred toolCall chunk that follows it.
+
+    The reference order is ``interaction_required`` FIRST, then the raise tool's
+    ``stream_chunk`` — same as this server's write-confirmation park.
+    """
+    event = await _recv(ws)
+    assert event["type"] == "interaction_required", event
+    chunk = await _recv(ws)
+    assert chunk["type"] == "stream_chunk", chunk
+    return event
+
+
 async def _send_message(ws) -> None:
     await ws.send(
         json.dumps(
@@ -87,11 +100,8 @@ async def test_rich_path_parks_resumes_and_stamps_contacts() -> None:
             ack = await _recv(ws)
             assert ack["type"] == "immediate_response" and ack["status"] == 202
 
-            # Park: an interaction_required arrives (a toolCall chunk may precede it).
-            event = await _recv(ws)
-            if event["type"] == "stream_chunk":
-                event = await _recv(ws)
-            assert event["type"] == "interaction_required"
+            # Park: interaction_required, then the raise tool's deferred toolCall chunk.
+            event = await _recv_park(ws)
             inner = event["data"]["data"]
             assert inner["kind"] == "identity_intake"
             assert inner["spec"]["fields"][1]["key"] == "email"
@@ -160,10 +170,7 @@ async def test_invalid_submit_stays_parked_and_does_not_stamp() -> None:
             _SID = await _create_session(ws, supports=["identity_form"])
             await _send_message(ws)
             assert (await _recv(ws))["status"] == 202
-            event = await _recv(ws)
-            if event["type"] == "stream_chunk":
-                event = await _recv(ws)
-            assert event["type"] == "interaction_required"
+            event = await _recv_park(ws)
             interaction_id = event["data"]["data"]["interactionId"]
 
             # A bad email → interaction_invalid, turn stays parked, nothing stamped.

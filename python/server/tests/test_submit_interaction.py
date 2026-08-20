@@ -65,6 +65,19 @@ async def _recv(ws):
             return event
 
 
+async def _recv_park(ws):
+    """The park event plus the raise tool's deferred toolCall chunk that follows it.
+
+    The reference order is ``interaction_required`` FIRST, then the raise tool's
+    ``stream_chunk`` — same as this server's write-confirmation park.
+    """
+    event = await _recv(ws)
+    assert event["type"] == "interaction_required", event
+    chunk = await _recv(ws)
+    assert chunk["type"] == "stream_chunk", chunk
+    return event
+
+
 async def _send_message(ws) -> None:
     await ws.send(
         json.dumps({"action": "send_message", "requestId": "r-msg", "sessionId": _SID, "message": "help me pick"})
@@ -89,11 +102,8 @@ async def test_rich_path_parks_emits_interaction_required_and_resumes() -> None:
             ack = await _recv(ws)
             assert ack["type"] == "immediate_response" and ack["status"] == 202
 
-            # Park: an interaction_required arrives (a toolCall chunk may precede it).
-            event = await _recv(ws)
-            if event["type"] == "stream_chunk":
-                event = await _recv(ws)
-            assert event["type"] == "interaction_required"
+            # Park: interaction_required, then the raise tool's deferred toolCall chunk.
+            event = await _recv_park(ws)
             assert event["requestId"] == "r-msg"
             inner = event["data"]["data"]
             assert inner["kind"] == "choices"
@@ -155,10 +165,7 @@ async def test_invalid_submit_stays_parked_then_resubmit_resumes() -> None:
             _SID = await _create_session(ws, supports=["choice_chips"])
             await _send_message(ws)
             assert (await _recv(ws))["status"] == 202
-            event = await _recv(ws)
-            if event["type"] == "stream_chunk":
-                event = await _recv(ws)
-            assert event["type"] == "interaction_required"
+            event = await _recv_park(ws)
             interaction_id = event["data"]["data"]["interactionId"]
 
             # A bad pick (not an offered option) → interaction_invalid, turn stays parked.

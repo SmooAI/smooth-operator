@@ -91,14 +91,15 @@ func TestIdentityIntakeRichPathStampsSessionIdentity(t *testing.T) {
 	if ack := expectType(t, transport, "immediate_response"); mustStatus(t, ack) != 202 {
 		t.Fatalf("expected 202 ack, got %v", ack["status"])
 	}
-	call := expectType(t, transport, "stream_chunk")
-	if name, _ := dot(t, call, "data.state.rawResponse.toolCall.name"); name != "request_identity_intake" {
-		t.Fatalf("expected request_identity_intake toolCall, got %v", name)
-	}
-
+	// The park event precedes the raise tool's toolCall chunk (the reference order).
 	req := expectType(t, transport, "interaction_required")
 	if kind, _ := dot(t, req, "data.data.kind"); kind != "identity_intake" {
 		t.Fatalf("interaction_required kind = %v, want identity_intake (event=%s)", kind, mustJSON(req))
+	}
+
+	call := expectType(t, transport, "stream_chunk")
+	if name, _ := dot(t, call, "data.state.rawResponse.toolCall.name"); name != "request_identity_intake" {
+		t.Fatalf("expected request_identity_intake toolCall, got %v", name)
 	}
 	iid, _ := mustDotString(t, req, "data.data.interactionId")
 	if key, _ := dot(t, req, "data.data.spec.fields.1.key"); key != "email" {

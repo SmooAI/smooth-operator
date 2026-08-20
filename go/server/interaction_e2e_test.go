@@ -87,13 +87,9 @@ func TestSubmitInteractionRichPathResumes(t *testing.T) {
 		t.Fatalf("expected 202 ack, got %v", ack["status"])
 	}
 
-	// The raise tool's toolCall chunk is emitted (deterministically) before the park.
-	call := expectType(t, transport, "stream_chunk")
-	if name, _ := dot(t, call, "data.state.rawResponse.toolCall.name"); name != "request_choices" {
-		t.Fatalf("expected request_choices toolCall chunk, got %v (event=%s)", name, mustJSON(call))
-	}
-
 	// The turn PARKS: interaction_required carries the kind, the spec, and an interactionId.
+	// It precedes the raise tool's toolCall chunk (the reference order, and the same order
+	// this server already uses for the write-confirmation park).
 	req := expectType(t, transport, "interaction_required")
 	if rid, _ := req["requestId"].(string); rid != "r-msg" {
 		t.Fatalf("interaction_required requestId = %q, want r-msg", rid)
@@ -109,6 +105,12 @@ func TestSubmitInteractionRichPathResumes(t *testing.T) {
 	}
 	if header, _ := dot(t, req, "data.data.spec.questions.0.header"); header != "Plan" {
 		t.Fatalf("interaction_required spec question header = %v, want Plan (event=%s)", header, mustJSON(req))
+	}
+
+	// Only now does the raise tool's toolCall chunk land.
+	call := expectType(t, transport, "stream_chunk")
+	if name, _ := dot(t, call, "data.state.rawResponse.toolCall.name"); name != "request_choices" {
+		t.Fatalf("expected request_choices toolCall chunk, got %v (event=%s)", name, mustJSON(call))
 	}
 
 	// Submit a valid pick → the server acks and the parked raise resumes. The ack and the
@@ -150,8 +152,8 @@ func TestSubmitInteractionInvalidStaysParked(t *testing.T) {
 		"action": "send_message", "requestId": "r-msg", "sessionId": sessionID, "message": "sign me up",
 	})
 	expectType(t, transport, "immediate_response") // 202
-	expectType(t, transport, "stream_chunk")       // request_choices toolCall
 	req := expectType(t, transport, "interaction_required")
+	expectType(t, transport, "stream_chunk") // request_choices toolCall, after the park
 	iid, _ := mustDotString(t, req, "data.data.interactionId")
 
 	// Invalid pick (Platinum isn't offered) → interaction_invalid, turn STAYS parked.
