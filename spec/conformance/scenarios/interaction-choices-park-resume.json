@@ -1,8 +1,6 @@
 {
     "name": "interaction-choices-park-resume",
     "description": "The second Rich Interaction kind, `choices` (the AskUserQuestion-shaped multiple-choice ask), through the SAME generic envelope: `request_choices` parks behind the `choice_chips` capability, the server emits `interaction_required` with the normalized questions/options spec, and one `submit_interaction` resumes it. Adding a kind must require no new protocol action and no client release — this scenario is what proves that claim holds identically in every server, and that the kind catalog is not identity_intake-shaped by accident.",
-    "knownDivergences": ["go"],
-    "knownDivergencesReason": "th-ef78d0 — the park ORDERING is fixed in all four ports; Go alone still fails this scenario, and on a DIFFERENT bug that only became reachable once the ordering was corrected: `splitIntoChunks` in smooth-operator-core Go (`go/core/llm_provider.go`) slices the mock reply by BYTES, so the em-dash in \"Pro it is — pulling that quote up.\" (36 bytes / 3 parts puts a boundary mid-rune) is split into invalid UTF-8 and each byte surfaces as U+FFFD. `interaction-park-resume`'s reply is 33 bytes and its boundaries miss the rune, which is why only this scenario trips. Fix is one line upstream (slice `[]rune`) plus a core release — not a protocol divergence, and NOT a reason to weaken this scenario.",
     "mockLlmScript": [
         { "kind": "toolCall", "name": "request_choices", "arguments": "{\"questions\": [{\"question\": \"Which plan fits best?\", \"header\": \"Plan\", \"options\": [{\"label\": \"Starter\"}, {\"label\": \"Pro\"}]}], \"reason\": \"to route you to the right quote\"}" },
         { "kind": "text", "text": "Pro it is — pulling that quote up." }

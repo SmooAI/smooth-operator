@@ -32,7 +32,7 @@
         "@opentelemetry/exporter-trace-otlp-proto": "^0.205.0",
         "@opentelemetry/resources": "^2.0.0",
         "@opentelemetry/sdk-trace-base": "^2.0.0",
-        "@smooai/smooth-operator-core": "^1.8.4",
+        "@smooai/smooth-operator-core": "^1.13.2",
         "pg": "^8.23.0",
         "ws": "^8.18.0"
     },
