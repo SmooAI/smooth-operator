@@ -46,7 +46,7 @@ gated LLM-as-judge eval. Python's analogue is exact:
 - **Eval** (`tests/test_evals.py`): runs the native `SmoothAgent` on the shared
   scenarios against the live gateway, judges each reply, asserts aggregate
   mean ≥ 4.0. Gated on `SMOOTH_AGENT_E2E=1` + `SMOOAI_GATEWAY_KEY` (fetched from
-  `@smooai/config` via the `th config` runner), so it skips cleanly in CI.
+  `@smooai/config` via the `smoo config` runner), so it skips cleanly in CI.
 
 **Phase-0 result:** the Python engine scores **5/5 on all shared scenarios**
 (including prompt-injection) under an adversarial sonnet judge — at parity with
@@ -64,7 +64,7 @@ denial back to the model instead of executing.
 ## Running the evals
 
 ```sh
-SMOOAI_GATEWAY_KEY=$(th config get liteLLMVirtualKeyAiServer --environment=production \
+SMOOAI_GATEWAY_KEY=$(smoo config get liteLLMVirtualKeyAiServer --environment=production \
   --org-id <infra-org> --json | jq -r .value) \
   SMOOTH_AGENT_E2E=1 SMOOTH_AGENT_JUDGE_MODEL=claude-sonnet-4-5 \
   uv run pytest python/core/tests/test_evals.py -s

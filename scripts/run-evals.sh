@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the smooth-operator LLM-as-judge eval suite against the live gateway, with
-# the gateway virtual key fetched from @smooai/config via `th config`.
+# the gateway virtual key fetched from @smooai/config via `smoo config`.
 #
 # This replaces the old "read the key out of opencode auth.json" step: the key is
 # the single source of truth in @smooai/config, fetched at run time and never
@@ -11,7 +11,7 @@
 #   scripts/run-evals.sh --test llm_judge -- --nocapture   # pass extra args to cargo test
 #
 # Env overrides:
-#   SMOOAI_GATEWAY_KEY_NAME   th config key holding the sk- virtual key
+#   SMOOAI_GATEWAY_KEY_NAME   smoo config key holding the sk- virtual key
 #                             (default: smooaiLlmKey — the smooai org's own LLM
 #                             virtual key, mirror of org_llm_keys; secret tier)
 #   SMOOAI_EVAL_GATEWAY_ENV   config environment the gateway key lives in
@@ -19,7 +19,7 @@
 #                             SMOOAI_CONFIG_ENV — that's your local working env
 #                             (often `development`, where the key is just a
 #                             placeholder), unrelated to where the prod key lives.
-#   SMOOAI_CONFIG_ORG_ID      org whose config holds the key. `th config` reads
+#   SMOOAI_CONFIG_ORG_ID      org whose config holds the key. `smoo config` reads
 #                             the org from this env (set by direnv in the smooai
 #                             monorepo); without it, th resolves a different/default
 #                             org and returns the wrong value. Export it (or source

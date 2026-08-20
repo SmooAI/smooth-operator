@@ -56,7 +56,7 @@ back to the model instead of executing.
 ## Running the evals
 
 ```sh
-SMOOAI_GATEWAY_KEY=$(th config get liteLLMVirtualKeyAiServer --environment=production \
+SMOOAI_GATEWAY_KEY=$(smoo config get liteLLMVirtualKeyAiServer --environment=production \
   --org-id <infra-org> --json | jq -r .value) \
   SMOOTH_AGENT_E2E=1 SMOOTH_AGENT_JUDGE_MODEL=claude-sonnet-4-5 \
   pnpm --filter @smooai/smooth-operator-core test
