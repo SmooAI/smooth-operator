@@ -116,5 +116,9 @@
         }
       ]
     }
-  ]
+  ],
+  "knownDivergences": [
+    "go"
+  ],
+  "knownDivergencesReason": "th-CORE-runeslice \u2014 NOT an ordering divergence. Go's interaction_required ordering is FIXED (th-ef78d0); fixing it let this scenario run far enough to expose a second, previously-masked bug in smooth-operator-core: splitIntoChunks (go/core/llm_provider.go) slices the reply by BYTES, not runes. This scenario's reply contains an em-dash, and 36 bytes / 3 parts puts a chunk boundary mid-rune, so the pieces are invalid UTF-8 and each stray byte surfaces as U+FFFD. interaction-park-resume's reply is 33 bytes and its boundaries miss the rune, which is why only this scenario trips. Fix is one line upstream (slice []rune) in smooth-operator-core plus a Go module release. Do NOT weaken this scenario to make it pass."
 }
