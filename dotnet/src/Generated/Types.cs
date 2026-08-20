@@ -180,7 +180,7 @@ namespace SmooAI.SmoothOperator.Generated
         public string? BrowserFingerprint { get; set; } = default!;
 
         /// <summary>
-        /// Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
+        /// Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`, kind `choices` → capability `choice_chips`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) declare `[]` and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible). Durability: the declared list is persisted on the CONVERSATION, so a reconnect that resumes an existing `conversationId` and OMITS this key inherits the set the conversation last declared — a reconnect is not a downgrade to text-only. Any list the frame does declare (including `[]`) replaces the inherited one, so a text-only client resuming a rich conversation opts out explicitly.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("supports")]
         public System.Collections.Generic.ICollection<string>? Supports { get; set; } = default!;
@@ -222,7 +222,7 @@ namespace SmooAI.SmoothOperator.Generated
         /// ID of the agent handling this session.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("agentId")]
-        public System.Guid AgentId { get; set; } = default!;
+        public System.Guid? AgentId { get; set; } = default!;
 
         /// <summary>
         /// Display name of the agent.
@@ -1154,10 +1154,10 @@ namespace SmooAI.SmoothOperator.Generated
         public System.Guid OrganizationId { get; set; } = default!;
 
         /// <summary>
-        /// The agent handling this session.
+        /// The agent handling this session. OPTIONAL in storage: create_conversation_session REJECTS an absent or blank agentId, so a session created through the protocol always has one. It stays optional here for rows that predate that validation — it used to be filled with a fresh UUID, pointing every agentless session at an agent that had never existed (th-68897a). Absence is represented by omitting the field, never by a fabricated id.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("agentId")]
-        public System.Guid AgentId { get; set; } = default!;
+        public System.Guid? AgentId { get; set; } = default!;
 
         /// <summary>
         /// Human-readable display name of the agent.

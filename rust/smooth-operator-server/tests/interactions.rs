@@ -757,3 +757,114 @@ fn session_metadata(state: &AppState) -> std::collections::HashMap<String, Value
         .and_then(|s| s.metadata)
         .unwrap_or_default()
 }
+
+/// A reconnect is a resume: the client re-opens the socket and re-issues
+/// `create_conversation_session` with the same `conversationId`, which mints a
+/// NEW session id. Capabilities that lived only on the per-pod session registry
+/// were therefore lost unless the client re-declared them every time — and Rich
+/// Interactions then silently stopped being offered, with no error on the wire
+/// (th-13df6d). They now ride durable conversation metadata, so a reconnect that
+/// omits `supports` inherits what the conversation last declared.
+#[tokio::test]
+async fn reconnect_resuming_a_conversation_keeps_the_declared_capabilities() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage, config());
+    let (tx, mut rx) = unbounded_channel::<Value>();
+
+    let create = |body: Value| {
+        let state = state.clone();
+        let tx = tx.clone();
+        async move {
+            handler::handle_frame(
+                &state,
+                &AccessContext::anonymous(),
+                "conn",
+                None,
+                None,
+                &handler::UserScope::Unscoped,
+                &body.to_string(),
+                &tx,
+            )
+            .await;
+        }
+    };
+
+    // First connection: declares the capability.
+    create(json!({
+        "action": "create_conversation_session",
+        "requestId": "req-conn-1",
+        "agentId": "11111111-1111-1111-1111-111111111111",
+        "supports": ["identity_form"]
+    }))
+    .await;
+    let (first, _) = await_event(&mut rx, "immediate_response").await;
+    let conversation_id = first["data"]["conversationId"]
+        .as_str()
+        .expect("conversationId")
+        .to_string();
+    assert!(state
+        .session_capabilities(first["data"]["sessionId"].as_str().expect("sessionId"))
+        .contains("identity_form"));
+
+    // Reconnect: same conversation, `supports` omitted (the client re-declares
+    // nothing — exactly what a widget resuming from its stored conversationId
+    // does). Without the durable record this is where the feature went dark.
+    create(json!({
+        "action": "create_conversation_session",
+        "requestId": "req-conn-2",
+        "agentId": "11111111-1111-1111-1111-111111111111",
+        "conversationId": conversation_id
+    }))
+    .await;
+    let (resumed, _) = await_event(&mut rx, "immediate_response").await;
+    assert_eq!(
+        resumed["data"]["conversationId"].as_str(),
+        Some(conversation_id.as_str()),
+        "the reconnect resumed the same conversation"
+    );
+    assert!(
+        state
+            .session_capabilities(resumed["data"]["sessionId"].as_str().expect("sessionId"))
+            .contains("identity_form"),
+        "a reconnect that omits 'supports' inherits the conversation's declared capabilities"
+    );
+
+    // A resume that DECLARES wins over the inherited set, in both directions —
+    // so a text-only client resuming a rich conversation opts out with `[]`
+    // rather than being handed cards it cannot render.
+    create(json!({
+        "action": "create_conversation_session",
+        "requestId": "req-conn-3",
+        "agentId": "11111111-1111-1111-1111-111111111111",
+        "conversationId": conversation_id,
+        "supports": []
+    }))
+    .await;
+    let (text_only, _) = await_event(&mut rx, "immediate_response").await;
+    let text_only_session = text_only["data"]["sessionId"].as_str().expect("sessionId");
+    assert!(
+        state.session_capabilities(text_only_session).is_empty(),
+        "an explicit empty 'supports' declares text-only and never inherits"
+    );
+
+    // ...and that explicit opt-out is itself durable: the NEXT reconnect that
+    // omits `supports` must not resurrect the capability from a stale record.
+    create(json!({
+        "action": "create_conversation_session",
+        "requestId": "req-conn-4",
+        "agentId": "11111111-1111-1111-1111-111111111111",
+        "conversationId": conversation_id
+    }))
+    .await;
+    let (after_opt_out, _) = await_event(&mut rx, "immediate_response").await;
+    assert!(
+        state
+            .session_capabilities(
+                after_opt_out["data"]["sessionId"]
+                    .as_str()
+                    .expect("sessionId")
+            )
+            .is_empty(),
+        "the text-only declaration replaced the durable record"
+    );
+}

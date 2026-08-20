@@ -86,7 +86,7 @@ export interface CreateConversationSessionRequest {
      */
     browserFingerprint?: string;
     /**
-     * Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`, kind `choices` → capability `choice_chips`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible).
+     * Client render capabilities for this session — a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` → capability `identity_form`, kind `choices` → capability `choice_chips`); future kinds add their own values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) declare `[]` and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible). Durability: the declared list is persisted on the CONVERSATION, so a reconnect that resumes an existing `conversationId` and OMITS this key inherits the set the conversation last declared — a reconnect is not a downgrade to text-only. Any list the frame does declare (including `[]`) replaces the inherited one, so a text-only client resuming a rich conversation opts out explicitly.
      */
     supports?: string[];
     /**

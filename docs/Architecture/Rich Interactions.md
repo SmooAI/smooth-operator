@@ -103,9 +103,31 @@ Intake = **collect** (who are you?), OTP = **verify** (prove it). Shared machine
 | Channel | `supports` | identity_intake behavior |
 | --- | --- | --- |
 | Chat widget (web) | `["identity_form"]` (registry-derived) | parked inline form card; server-validated; decline button |
-| SMS | — | conversational fallback: field-by-field ask, `submit_interaction` tool validates each value |
-| Voice | — | same fallback (spoken turn-by-turn) |
+| SMS | `[]` | conversational fallback: field-by-field ask, `submit_interaction` tool validates each value |
+| Voice | `[]` | same fallback (spoken turn-by-turn) |
 | Future rich client | declares the kinds its cards cover | rich per declared kind, fallback for the rest |
+
+### Capabilities survive a reconnect
+
+A reconnect is a **resume**: the client re-opens the socket and re-issues
+`create_conversation_session` with the same `conversationId`, which mints a NEW
+session id. So the declared list cannot live on the session — it is persisted on
+the **conversation** (`metadata.clientSupports`, written by
+`handle_create_session`), the same durability the workflow step pointer moved to
+for the same reason (th-c12df5: the session registry is per-pod and resets on
+reconnect/pod hop). A resume that **omits** `supports` inherits the conversation's
+last declared set, so Rich Interactions keep working across a network blip, a
+backgrounded mobile app, or a deploy.
+
+A frame that **does** declare wins, in both directions — which is why a text-only
+channel sends an explicit `[]` rather than omitting the key: omitting it on a
+resume would inherit the rich set. Both directions are pinned by
+`reconnect_resuming_a_conversation_keeps_the_declared_capabilities`
+(`rust/smooth-operator-server/tests/interactions.rs`).
+
+Before this, capabilities lived only in `Session.metadata.supports` and a
+reconnect silently degraded every kind to its conversational fallback — no error,
+no event, nothing to notice (th-13df6d).
 
 ## What changes where
 
