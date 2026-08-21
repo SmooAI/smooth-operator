@@ -42,6 +42,18 @@ pub struct SessionUpdate {
     pub message_count: Option<u64>,
     pub last_activity_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Replace the session's metadata blob (th-ca579c).
+    ///
+    /// Without this there was no way to write session metadata back through the
+    /// adapter, so everything the server kept there — `otpVerified` above all —
+    /// lived only in the serving pod's memory and died on a pod hop or a roll.
+    /// A caller who verified their identity on one pod was unverified on the
+    /// next, and no code path could have fixed that from outside this struct.
+    ///
+    /// Whole-blob replace, not a merge: the caller reads, edits, and writes back,
+    /// which keeps the adapter contract dumb and makes the read-modify-write
+    /// window explicit at the call site rather than hidden in every adapter.
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// A page of messages, newest-or-oldest-first per the adapter's contract,

@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use smooth_operator_core::HumanResponse;
 use tokio::sync::mpsc::UnboundedSender;
 
-use smooth_operator::adapter::StorageAdapter;
+use smooth_operator::adapter::{SessionUpdate, StorageAdapter};
 use smooth_operator::agent_config::{AgentConfigResolver, StaticAgentConfigResolver};
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::backplane::{Backplane, InMemoryBackplane};
@@ -488,10 +488,53 @@ impl AppState {
         }
     }
 
-    /// Look up a session by id.
+    /// Look up a session in the LOCAL registry only.
+    ///
+    /// Prefer [`load_session`](Self::load_session) on any request path: this map
+    /// is a per-pod cache, so a hit means "some connection on THIS pod touched
+    /// this session", not "this session exists".
     #[must_use]
     pub fn get_session(&self, session_id: &str) -> Option<Session> {
         self.sessions.read().ok()?.get(session_id).cloned()
+    }
+
+    /// Look up a session, falling back to durable storage and priming the local
+    /// registry on a miss (th-ca579c).
+    ///
+    /// The local map is per-pod. The widget's returning-visitor resume POSTs
+    /// `/internal/resume-by-fingerprint`, which primes the session on whichever
+    /// pod served that HTTP request, and then opens a WebSocket — which the load
+    /// balancer sends to an arbitrary pod. With >1 replica and no session
+    /// affinity the two rarely match, so the first `send_message` hit an empty
+    /// map and the visitor was told `session '<id>' not found` in the chat
+    /// bubble. At 2 replicas that is roughly half of returning visitors; the HPA
+    /// goes to 6.
+    ///
+    /// Storage is the source of truth, so any pod can serve any session. Priming
+    /// afterwards keeps the existing SYNCHRONOUS readers
+    /// ([`session_authenticated`](Self::session_authenticated),
+    /// [`session_contact`](Self::session_contact),
+    /// [`session_supports`](Self::session_supports)) working untouched: every
+    /// frame that needs them passes the ownership check first, and that check is
+    /// what calls this.
+    pub async fn load_session(&self, session_id: &str) -> Option<Session> {
+        if let Some(session) = self.get_session(session_id) {
+            return Some(session);
+        }
+        match self.storage.get_session(session_id).await {
+            Ok(Some(session)) => {
+                self.insert_session(session.clone());
+                Some(session)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                // A storage failure is NOT "no such session". Saying so would
+                // turn a blip into an existence claim, and the caller renders
+                // that to a human as a not-found error.
+                tracing::warn!(error = %e, session_id, "session lookup failed against storage");
+                None
+            }
+        }
     }
 
     /// The conversation-workflow step this session is currently on, read from the
@@ -562,13 +605,50 @@ impl AppState {
     /// `metadata.otpVerified`. Called after a successful `verify_otp`. No-op for
     /// an unknown session. Coexists with the workflow step pointer (both live in
     /// the session's metadata map).
-    pub fn set_session_authenticated(&self, session_id: &str, verified: bool) {
-        if let Ok(mut map) = self.sessions.write() {
-            if let Some(session) = map.get_mut(session_id) {
-                let mut meta = session.metadata.take().unwrap_or_default();
-                meta.insert("otpVerified".to_string(), serde_json::Value::from(verified));
-                session.metadata = Some(meta);
-            }
+    /// Mark this session identity-verified (or clear it), in the local registry
+    /// AND in durable storage (th-ca579c).
+    ///
+    /// Persisting matters more here than for anything else in the metadata blob:
+    /// this is the OTP gate's answer. Local-only, a caller who proved their
+    /// identity on one pod was silently unverified on the next frame if the load
+    /// balancer moved them, and unverified again after any pod roll — while the
+    /// gate itself was working exactly as designed.
+    ///
+    /// The write is local-first so the current turn sees it immediately, then
+    /// through to storage. A storage failure is logged, not raised: the turn in
+    /// flight has already verified the human, and failing it here would refuse
+    /// service to someone who just proved who they are. The cost is that the
+    /// verification may not survive a pod hop, which is exactly the pre-fix
+    /// behaviour — a degradation, not a regression.
+    pub async fn set_session_authenticated(&self, session_id: &str, verified: bool) {
+        let updated = {
+            let Ok(mut map) = self.sessions.write() else {
+                return;
+            };
+            let Some(session) = map.get_mut(session_id) else {
+                return;
+            };
+            let mut meta = session.metadata.take().unwrap_or_default();
+            meta.insert("otpVerified".to_string(), serde_json::Value::from(verified));
+            session.metadata = Some(meta.clone());
+            meta
+        };
+        if let Err(e) = self
+            .storage
+            .update_session(
+                session_id,
+                SessionUpdate {
+                    metadata: Some(updated),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                session_id,
+                "persisting otpVerified failed — verification will not survive a pod hop"
+            );
         }
     }
 
@@ -902,8 +982,90 @@ mod tests {
         assert_eq!(state.session_current_step("s2"), None);
     }
 
-    #[test]
-    fn session_authenticated_round_trips_and_defaults_false() {
+    /// th-ca579c — the production bug, as a test.
+    ///
+    /// Two pods share storage and share NOTHING else. A session created through
+    /// pod A's registry must be servable by pod B, which has never seen it. This
+    /// is exactly what the smoo.ai widget hit: `/internal/resume-by-fingerprint`
+    /// primed pod A, the WebSocket landed on pod B, and the visitor was told
+    /// `session '<id>' not found` in the chat bubble.
+    #[tokio::test]
+    async fn a_second_pod_can_serve_a_session_it_never_saw() {
+        let storage = Arc::new(InMemoryStorageAdapter::new());
+        let pod_a = AppState::new(storage.clone(), config_with_env_key(None));
+        let pod_b = AppState::new(storage.clone(), config_with_env_key(None));
+
+        // Pod A creates it. Only storage is shared.
+        let session = storage
+            .create_session(test_session("s-shared"))
+            .await
+            .expect("create");
+        pod_a.insert_session(session);
+
+        // The local-only accessor still shows the split — that is the premise,
+        // not an incidental detail. If this ever passes, the two pods are
+        // sharing memory and the rest of this test proves nothing.
+        assert!(
+            pod_b.get_session("s-shared").is_none(),
+            "premise broken: pod B must not have it locally"
+        );
+
+        let loaded = pod_b.load_session("s-shared").await;
+        assert!(
+            loaded.is_some(),
+            "pod B must hydrate the session from storage"
+        );
+        assert_eq!(loaded.unwrap().session_id, "s-shared");
+
+        // ...and it primes, so the synchronous readers on this pod work for the
+        // rest of the frame.
+        assert!(
+            pod_b.get_session("s-shared").is_some(),
+            "hydration must prime the local registry"
+        );
+    }
+
+    /// A session that genuinely does not exist still resolves to `None` — the
+    /// hydration path must not invent one.
+    #[tokio::test]
+    async fn hydration_does_not_conjure_an_unknown_session() {
+        let state = state_with(config_with_env_key(None));
+        assert!(state.load_session("s-nope").await.is_none());
+    }
+
+    /// th-ca579c — identity verification survives a pod hop.
+    ///
+    /// `otpVerified` used to live only in the serving pod's map, so a caller who
+    /// completed OTP on pod A was silently unverified on pod B and after every
+    /// roll. The gate was working; the answer was not durable.
+    #[tokio::test]
+    async fn otp_verification_survives_a_pod_hop() {
+        let storage = Arc::new(InMemoryStorageAdapter::new());
+        let pod_a = AppState::new(storage.clone(), config_with_env_key(None));
+        let pod_b = AppState::new(storage.clone(), config_with_env_key(None));
+
+        let session = storage
+            .create_session(test_session("s-otp"))
+            .await
+            .expect("create");
+        pod_a.insert_session(session);
+
+        pod_a.set_session_authenticated("s-otp", true).await;
+        assert!(pod_a.session_authenticated("s-otp"));
+
+        // Pod B hydrates fresh from storage and must agree.
+        assert!(
+            pod_b.load_session("s-otp").await.is_some(),
+            "pod B must see the session"
+        );
+        assert!(
+            pod_b.session_authenticated("s-otp"),
+            "a verified caller must stay verified when the load balancer moves them"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_authenticated_round_trips_and_defaults_false() {
         let state = state_with(config_with_env_key(None));
         state.insert_session(test_session("s1"));
 
@@ -912,14 +1074,14 @@ mod tests {
         // Unknown session: not verified (no panic).
         assert!(!state.session_authenticated("missing"));
 
-        state.set_session_authenticated("s1", true);
+        state.set_session_authenticated("s1", true).await;
         assert!(state.session_authenticated("s1"));
 
-        state.set_session_authenticated("s1", false);
+        state.set_session_authenticated("s1", false).await;
         assert!(!state.session_authenticated("s1"));
 
         // Verified bit coexists with the workflow step pointer.
-        state.set_session_authenticated("s1", true);
+        state.set_session_authenticated("s1", true).await;
         state.set_session_current_step("s1", Some("collect"));
         assert!(state.session_authenticated("s1"));
         assert_eq!(

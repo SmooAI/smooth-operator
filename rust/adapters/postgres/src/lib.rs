@@ -901,6 +901,14 @@ impl StorageAdapter for PostgresAdapter {
         // last_activity_at / ended_at are set only when Some (mirrors in-memory).
         let set_last_activity = update.last_activity_at.is_some();
         let set_ended = update.ended_at.is_some();
+        // th-ca579c: metadata is a whole-blob replace, gated on `is_some()` the
+        // same way as the timestamps — a `None` must leave the stored blob alone,
+        // NOT null it. COALESCE would not do: the caller may legitimately write
+        // an empty object, and COALESCE cannot tell that from "don't touch".
+        let set_metadata = update.metadata.is_some();
+        let metadata = update
+            .metadata
+            .map(|m| serde_json::to_value(m).unwrap_or_else(|_| serde_json::json!({})));
         let row = client
             .query_one(
                 "UPDATE conversation_sessions SET
@@ -909,6 +917,7 @@ impl StorageAdapter for PostgresAdapter {
                     message_count = COALESCE($4, message_count),
                     last_activity_at = CASE WHEN $5 THEN $6 ELSE last_activity_at END,
                     ended_at = CASE WHEN $7 THEN $8 ELSE ended_at END,
+                    metadata = CASE WHEN $10 THEN $11 ELSE metadata END,
                     updated_at = $9
                  WHERE session_id = $1
                  RETURNING *",
@@ -922,6 +931,8 @@ impl StorageAdapter for PostgresAdapter {
                     &set_ended,
                     &update.ended_at,
                     &now,
+                    &set_metadata,
+                    &metadata,
                 ],
             )
             .await
