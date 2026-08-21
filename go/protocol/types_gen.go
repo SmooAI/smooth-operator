@@ -118,6 +118,35 @@ type Checkpoint struct {
 // name, bead ID).
 type CheckpointMetadata map[string]string
 
+// The canonical validated payload the parked turn resumes with (identical on the
+// chip and conversational paths).
+type ChoicesPayload struct {
+	// Guidance for the agent when `status` is `declined` / `no_response`.
+	Message *string `json:"message,omitempty,omitzero"`
+
+	// How the interaction resolved.
+	Status PayloadStatus `json:"status"`
+
+	// Present when `status` is `submitted`: the validated, normalized answers.
+	Values *PayloadValues `json:"values,omitempty,omitzero"`
+}
+
+// The `spec` carried on `interaction_required` for kind `choices`: the questions
+// to ask.
+type ChoicesSpec struct {
+	// The questions to ask, in display order (1–4).
+	Questions []SpecQuestionsElem `json:"questions"`
+}
+
+// The `values` a client submits via `submit_interaction` for kind `choices`.
+// Validated server-side: every question answered, each selected label is one of
+// that question's options, single-select takes exactly one pick. The free-text
+// `other` is always accepted (the AskUserQuestion 'Other' escape hatch).
+type ChoicesValues struct {
+	// One entry per question, keyed by the question's `header`.
+	Answers []ValuesAnswersElem `json:"answers"`
+}
+
 // A source the agent used to ground its answer. Each citation points back at one
 // retrieved knowledge-base document — the chunk the model read, plus enough
 // metadata to render an attribution link. Citations are collected by the runtime
@@ -330,10 +359,16 @@ type CreateConversationSessionRequest struct {
 	// Client render capabilities for this session — a per-kind list gating the Rich
 	// Interactions the server may emit mid-turn (`interaction_required`). Each
 	// interaction kind declares the capability that gates it (e.g. kind
-	// `identity_intake` → capability `identity_form`); future kinds add their own
-	// values (`date_picker`, `file_upload`, …). Text-only channels (SMS, voice) omit
-	// this and the server degrades each kind to its conversational fallback. Unknown
-	// values are ignored (forward-compatible).
+	// `identity_intake` → capability `identity_form`, kind `choices` → capability
+	// `choice_chips`); future kinds add their own values (`date_picker`,
+	// `file_upload`, …). Text-only channels (SMS, voice) declare `[]` and the server
+	// degrades each kind to its conversational fallback. Unknown values are ignored
+	// (forward-compatible). Durability: the declared list is persisted on the
+	// CONVERSATION, so a reconnect that resumes an existing `conversationId` and
+	// OMITS this key inherits the set the conversation last declared — a reconnect is
+	// not a downgrade to text-only. Any list the frame does declare (including `[]`)
+	// replaces the inherited one, so a text-only client resuming a rich conversation
+	// opts out explicitly.
 	Supports []string `json:"supports,omitempty,omitzero"`
 
 	// Optional email address for the user participant.
@@ -347,7 +382,7 @@ type CreateConversationSessionRequest struct {
 // creation.
 type CreateConversationSessionResponse struct {
 	// ID of the agent handling this session.
-	AgentID string `json:"agentId"`
+	AgentID *string `json:"agentId,omitempty,omitzero"`
 
 	// Display name of the agent.
 	AgentName string `json:"agentName"`
@@ -743,7 +778,7 @@ type IdentityIntakePayload struct {
 	Status PayloadStatus `json:"status"`
 
 	// Present when `status` is `submitted`: the validated, normalized values.
-	Values *PayloadValues `json:"values,omitempty,omitzero"`
+	Values *PayloadValues_1 `json:"values,omitempty,omitzero"`
 }
 
 // The `spec` carried on `interaction_required` for kind `identity_intake`: which
@@ -1332,8 +1367,25 @@ const PayloadStatusDeclined PayloadStatus = "declined"
 const PayloadStatusNoResponse PayloadStatus = "no_response"
 const PayloadStatusSubmitted PayloadStatus = "submitted"
 
-// Present when `status` is `submitted`: the validated, normalized values.
+// Present when `status` is `submitted`: the validated, normalized answers.
 type PayloadValues struct {
+	// Answers corresponds to the JSON schema field "answers".
+	Answers []PayloadValuesAnswersElem `json:"answers"`
+}
+
+type PayloadValuesAnswersElem struct {
+	// Header corresponds to the JSON schema field "header".
+	Header string `json:"header"`
+
+	// Options corresponds to the JSON schema field "options".
+	Options []string `json:"options,omitempty,omitzero"`
+
+	// Other corresponds to the JSON schema field "other".
+	Other *string `json:"other,omitempty,omitzero"`
+}
+
+// Present when `status` is `submitted`: the validated, normalized values.
+type PayloadValues_1 struct {
 	// Email corresponds to the JSON schema field "email".
 	Email *string `json:"email,omitempty,omitzero"`
 
@@ -1548,8 +1600,13 @@ type SendMessageResponse struct {
 // smooth-operator thread identifier (stored as `langgraph_thread_id` in the DB for
 // historical reasons; renamed to `threadId` in the protocol).
 type Session struct {
-	// The agent handling this session.
-	AgentID string `json:"agentId"`
+	// The agent handling this session. OPTIONAL in storage:
+	// create_conversation_session REJECTS an absent or blank agentId, so a session
+	// created through the protocol always has one. It stays optional here for rows
+	// that predate that validation — it used to be filled with a fresh UUID, pointing
+	// every agentless session at an agent that had never existed (th-68897a). Absence
+	// is represented by omitting the field, never by a fabricated id.
+	AgentID *string `json:"agentId,omitempty,omitzero"`
 
 	// Human-readable display name of the agent.
 	AgentName string `json:"agentName"`
@@ -1631,6 +1688,30 @@ type SpecFieldsElemKey string
 const SpecFieldsElemKeyEmail SpecFieldsElemKey = "email"
 const SpecFieldsElemKeyName SpecFieldsElemKey = "name"
 const SpecFieldsElemKeyPhone SpecFieldsElemKey = "phone"
+
+type SpecQuestionsElem struct {
+	// A short label (≤12 chars), unique within the raise. The answer key and the
+	// chip/tab caption.
+	Header string `json:"header"`
+
+	// Whether the visitor may select more than one option (default false).
+	MultiSelect bool `json:"multiSelect,omitempty,omitzero"`
+
+	// The enumerated options. A free-text `other` answer is always available in
+	// addition to these.
+	Options []SpecQuestionsElemOptionsElem `json:"options"`
+
+	// The question prompt shown to the visitor.
+	Question string `json:"question"`
+}
+
+type SpecQuestionsElemOptionsElem struct {
+	// A short human-readable gloss for the option.
+	Description *string `json:"description,omitempty,omitzero"`
+
+	// The option label — the value the visitor submits.
+	Label string `json:"label"`
+}
 
 // Event: `stream_chunk`. Emitted each time a node in the smooth-operator workflow
 // completes. Carries the node name and a filtered state snapshot. Clients use this
@@ -1840,6 +1921,19 @@ type SubmitInteractionRequest struct {
 // normal streaming sequence. Invalid values emit `interaction_invalid` (the turn
 // stays parked). This schema is provided for documentation completeness only.
 type SubmitInteractionResponse map[string]interface{}
+
+type ValuesAnswersElem struct {
+	// Which question this answers — matches the spec question's `header`.
+	Header string `json:"header"`
+
+	// The selected option label(s). One for single-select; empty when the visitor
+	// only used `other`.
+	Options []string `json:"options,omitempty,omitzero"`
+
+	// A free-text answer outside the enumerated options (the 'Other' escape hatch).
+	// Blank ⇒ omitted.
+	Other *string `json:"other,omitempty,omitzero"`
+}
 
 // Fields sent by the client to submit an OTP code.
 type VerifyOTPRequest struct {

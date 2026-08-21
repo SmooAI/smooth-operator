@@ -72,13 +72,11 @@ type FrameDispatcher struct {
 	// submit_interaction frame resolves (the Rich Interactions analog of confirmations).
 	// Shared with the turn runner's raise tools. Created on demand in the constructor.
 	interactions *InteractionRegistry
-	// supports maps sessionId → the render capabilities its client declared at
-	// create_conversation_session (`supports`). A kind's rich card path is offered only
-	// when its capability is present; otherwise the turn degrades to the conversational
-	// fallback. Per-connection (like confirmations): the create + send + submit frames
-	// for a session all ride the same connection. th-choices.
-	supports   map[string]map[string]bool
-	supportsMu sync.Mutex
+	// The client's declared render capabilities (`supports`) are NOT held here. They used
+	// to be, in a per-connection sessionId→caps map, which lost them on every reconnect
+	// (a reconnect resumes the conversation on a NEW session id) and never pruned. They
+	// now live on the conversation in the store and arrive on StoredSession.Supports —
+	// see capabilitySet. th-13df6d.
 
 	// turns tracks in-flight spawned send_message turns so the connection loop can wait
 	// for them to finish (and flush their eventual_response) on teardown — the
@@ -127,7 +125,6 @@ func NewFrameDispatcher(store SessionStore, client core.ChatClient, access Acces
 		confirmations:      confirmations,
 		interactionKinds:   DefaultInteractionKinds(),
 		interactions:       NewInteractionRegistry(),
-		supports:           map[string]map[string]bool{},
 		agentConfigs:       agentConfigs,
 		judgeModel:         judgeModel,
 		authRequiringTools: authRequiringTools,
@@ -193,11 +190,17 @@ type inboundFrame struct {
 	AgentID   string `json:"agentId"`
 	UserName  string `json:"userName"`
 	UserEmail string `json:"userEmail"`
-	// create_conversation_session — the client's render capabilities for this session
+	// create_conversation_session — the client's render capabilities for this conversation
 	// (per spec/actions/create-conversation-session.schema.json). A per-kind list gating
-	// the Rich Interactions the server may emit mid-turn; absent ⇒ text-only, every kind
-	// degrades to its conversational fallback. Unknown values are ignored (forward-compat).
-	Supports []string `json:"supports"`
+	// the Rich Interactions the server may emit mid-turn; a kind whose capability is
+	// missing degrades to its conversational fallback. Unknown values are kept
+	// (forward-compat: a future kind may gate on them).
+	//
+	// A POINTER because omitted and `[]` mean different things and json.Unmarshal
+	// collapses both to a nil []string: nil here ⇒ the key was absent, which INHERITS
+	// the resumed conversation's stored set (a reconnect re-declares nothing); a
+	// non-nil empty slice ⇒ an explicit "I render nothing", which replaces it. th-13df6d.
+	Supports *[]string `json:"supports"`
 	// create_conversation_session — optional: resume an existing conversation (bind the new
 	// session to it) when known; absent/unknown → a fresh conversation (unchanged). th-d5b446.
 	ConversationID string `json:"conversationId"`
@@ -342,9 +345,23 @@ func (d *FrameDispatcher) handleCreateSession(ctx context.Context, frame inbound
 	}
 	// A freshly created session never passes through scopedSession, so associate here too.
 	d.associateSession(&session)
-	// Record the client's declared render capabilities for this session so a later turn
-	// offers a kind's rich card only when its capability is present (else the fallback).
-	d.setSupports(session.SessionID, frame.Supports)
+	// Record the client's declared render capabilities on the CONVERSATION, so a later
+	// turn offers a kind's rich card only when its capability is present (else the
+	// fallback) — and so does a turn on the session the NEXT reconnect mints. A frame
+	// that omits the key declares nothing and writes nothing: it inherits whatever the
+	// conversation last declared (already on session.Supports from the resume). A frame
+	// that DOES declare wins, including an explicit `[]` — that is the text-only opt-out,
+	// and it must replace the stored set rather than leave it for the reconnect after it.
+	//
+	// Best-effort, like the workflow step pointer: a storage error is logged, not fatal.
+	// This session already has its capabilities from the frame; the blast radius is a
+	// LATER reconnect that omits `supports` degrading to text-only.
+	if frame.Supports != nil {
+		if err := d.store.SetConversationSupports(ctx, session.ConversationID, *frame.Supports); err != nil {
+			slog.Warn("failed to persist declared client capabilities; a later reconnect that omits 'supports' will degrade to text-only",
+				"conversationId", session.ConversationID, "error", err)
+		}
+	}
 	data := map[string]any{
 		"sessionId":          session.SessionID,
 		"conversationId":     session.ConversationID,
@@ -735,7 +752,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// kind (rich park when the capability is declared, else conversational fallback).
 		runner.interactionKinds = d.interactionKinds
 		runner.interactions = d.interactions
-		runner.capabilities = d.capabilities(frame.SessionID)
+		runner.capabilities = capabilitySet(session.Supports)
 		// Span attribution: the owning org (grouped by smooai.org_id on the turn span).
 		runner.orgID = d.access.Principal.Org
 		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
@@ -816,30 +833,17 @@ func (d *FrameDispatcher) handleConfirmToolAction(frame inboundFrame, sink Event
 	}))
 }
 
-// setSupports records a session's declared render capabilities (from
-// create_conversation_session). An absent/empty list means text-only. Idempotent.
-func (d *FrameDispatcher) setSupports(sessionID string, supports []string) {
+// capabilitySet turns a conversation's stored `supports` list into the set the turn
+// runner gates rich cards on. Empty/nil ⇒ text-only: every kind degrades to its
+// conversational fallback.
+func capabilitySet(supports []string) map[string]bool {
 	caps := make(map[string]bool, len(supports))
 	for _, c := range supports {
 		if c != "" {
 			caps[c] = true
 		}
 	}
-	d.supportsMu.Lock()
-	d.supports[sessionID] = caps
-	d.supportsMu.Unlock()
-}
-
-// capabilities returns the render capabilities a session declared at create time (an
-// empty set when it declared none or is unknown on this connection → every kind
-// degrades to its conversational fallback).
-func (d *FrameDispatcher) capabilities(sessionID string) map[string]bool {
-	d.supportsMu.Lock()
-	defer d.supportsMu.Unlock()
-	if caps, ok := d.supports[sessionID]; ok {
-		return caps
-	}
-	return map[string]bool{}
+	return caps
 }
 
 // handleSubmitInteraction resumes a turn parked on a Rich Interaction.

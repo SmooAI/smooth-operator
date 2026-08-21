@@ -195,6 +195,35 @@ class SessionStore(ABC):
         ``state.currentStepId`` carried across turns)."""
         ...
 
+    async def get_client_supports(self, conversation_id: str) -> list[str]:
+        """The client render capabilities (``supports``) this conversation last declared.
+
+        Conversation-scoped, exactly like the workflow-step pointer above and for the
+        same reason (th-c12df5): a RECONNECT is a resume — the client re-opens the
+        socket and re-issues ``create_conversation_session`` with the same
+        ``conversationId``, which mints a NEW session on a NEW connection. Capabilities
+        kept per session/connection are therefore lost on every network blip, and Rich
+        Interactions silently stop being offered with nothing on the wire to notice
+        (th-13df6d).
+
+        Empty for an unknown conversation, or one that declared nothing — which is
+        exactly the text-only behavior (every interaction kind degrades to its
+        conversational fallback).
+
+        Like :meth:`attach_session_identity` this **base default is a no-op** (returns
+        empty) rather than an ``@abstractmethod``, so a downstream :class:`SessionStore`
+        keeps compiling; it simply keeps today's behavior — a reconnect that omits
+        ``supports`` degrades to text-only. Both bundled stores override it."""
+        return []
+
+    async def set_client_supports(self, conversation_id: str, supports: list[str]) -> None:
+        """Persist the capability list a ``create_conversation_session`` frame DECLARED,
+        replacing whatever the conversation held. An empty list is a declaration, not an
+        absence: it is how a text-only channel resuming a rich conversation opts out, so
+        it must clear the stored set rather than leave a stale one a later reconnect
+        would resurrect. No-op default, as above."""
+        return None
+
     @abstractmethod
     async def is_session_authenticated(self, session_id: str) -> bool:
         """Whether the caller has completed OTP identity verification for this session
@@ -247,6 +276,10 @@ class InMemorySessionStore(SessionStore):
         self._orgs: dict[str, str | None] = {}
         #: Per-conversation workflow-step pointer (absent = fresh start / no workflow).
         self._current_step: dict[str, str] = {}
+        #: Per-conversation client render capabilities last declared in ``supports``
+        #: (absent = none → text-only). Lives beside the step pointer because it has the
+        #: same lifetime: a reconnect resumes the conversation, not the session.
+        self._client_supports: dict[str, list[str]] = {}
         #: Per-session OTP-verified bit (absent/False = unverified). Set by a
         #: successful ``verify_otp``; read by the ``end_user`` auth gate.
         self._authenticated: dict[str, bool] = {}
@@ -361,6 +394,20 @@ class InMemorySessionStore(SessionStore):
                 self._current_step.pop(conversation_id, None)
             else:
                 self._current_step[conversation_id] = step_id
+
+    async def get_client_supports(self, conversation_id: str) -> list[str]:
+        with self._gate:
+            return list(self._client_supports.get(conversation_id, ()))
+
+    async def set_client_supports(self, conversation_id: str, supports: list[str]) -> None:
+        with self._gate:
+            # An explicit `[]` REPLACES the stored set (the text-only opt-out), so drop
+            # the entry rather than keeping an empty one — same shape as clearing the
+            # step pointer above, and the read is `[]` either way.
+            if supports:
+                self._client_supports[conversation_id] = list(supports)
+            else:
+                self._client_supports.pop(conversation_id, None)
 
     async def is_session_authenticated(self, session_id: str) -> bool:
         with self._gate:

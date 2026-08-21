@@ -274,8 +274,12 @@ async def test_isolates_organizations(store) -> None:
     assert cross_org.conversation_id != in_a.conversation_id
 
 
-async def test_persists_workflow_step_and_otp_bit(store, postgres_dsn: str) -> None:
-    """Both survive a reconnect, and both are no-ops for an unknown id."""
+async def test_persists_workflow_step_otp_bit_and_client_supports(store, postgres_dsn: str) -> None:
+    """All three survive a reconnect, and all three are no-ops for an unknown id.
+
+    ``clientSupports`` is the client render-capability list (``supports``): a reconnect
+    resumes the conversation on a NEW session, so the capabilities have to outlive the
+    session exactly like the workflow-step pointer beside them (th-13df6d)."""
     from smooth_operator_server.postgres_store import PostgresStore
 
     session = await store.create_session(
@@ -283,11 +287,13 @@ async def test_persists_workflow_step_and_otp_bit(store, postgres_dsn: str) -> N
     )
     await store.set_current_step_id(session.conversation_id, "collect-email")
     await store.set_session_authenticated(session.session_id, True)
+    await store.set_client_supports(session.conversation_id, ["identity_form", "choice_chips"])
 
     reopened = await PostgresStore.create(postgres_dsn)
     try:
         assert await reopened.get_current_step_id(session.conversation_id) == "collect-email"
         assert await reopened.is_session_authenticated(session.session_id) is True
+        assert await reopened.get_client_supports(session.conversation_id) == ["identity_form", "choice_chips"]
         # The OTP write must not have clobbered the contact email beside it.
         fetched = await reopened.get_session(session.session_id)
         assert fetched is not None and fetched.contact_email == "alice@example.test"
@@ -295,14 +301,24 @@ async def test_persists_workflow_step_and_otp_bit(store, postgres_dsn: str) -> N
         # Clearing the step removes only that key.
         await reopened.set_current_step_id(session.conversation_id, None)
         assert await reopened.get_current_step_id(session.conversation_id) is None
+        assert await reopened.get_client_supports(session.conversation_id) == ["identity_form", "choice_chips"]
 
         await reopened.set_session_authenticated(session.session_id, False)
         assert await reopened.is_session_authenticated(session.session_id) is False
 
+        # An explicit `[]` is the text-only opt-out: it REPLACES the stored set (a later
+        # reconnect that omits `supports` must not resurrect it), and disturbs nothing else.
+        await reopened.set_current_step_id(session.conversation_id, "collect-email")
+        await reopened.set_client_supports(session.conversation_id, [])
+        assert await reopened.get_client_supports(session.conversation_id) == []
+        assert await reopened.get_current_step_id(session.conversation_id) == "collect-email"
+
         # No-ops for unknown ids, never errors.
         await reopened.set_current_step_id("unknown-conversation", "whatever")
         await reopened.set_session_authenticated("unknown-session", True)
+        await reopened.set_client_supports("unknown-conversation", ["identity_form"])
         assert await reopened.is_session_authenticated("unknown-session") is False
+        assert await reopened.get_client_supports("unknown-conversation") == []
     finally:
         await reopened.close()
 

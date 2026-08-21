@@ -166,6 +166,17 @@ CREATE INDEX IF NOT EXISTS idx_indexing_runs_org_started
 const AGENT_NAME = 'smooth-agent';
 
 /**
+ * `conversations.metadata_json` key holding the render capabilities (`supports`) the
+ * conversation last declared. Conversation-scoped, not session-scoped: a reconnect
+ * mints a NEW session id, so a set kept on the session row was lost on every network
+ * blip and every Rich Interaction quietly degraded to its text fallback (th-13df6d).
+ *
+ * The literal string is shared with the Rust adapter's `CLIENT_SUPPORTS_META_KEY` —
+ * these servers write the SAME `conversations` table, so the key must not drift.
+ */
+const CLIENT_SUPPORTS_META_KEY = 'clientSupports';
+
+/**
  * The JSON held in `conversation_sessions.metadata`: the per-session bits
  * {@link StoredSession} carries that have no dedicated column in the shared schema.
  * Mirrors the Rust reference server's session metadata (where its `otpVerified` lives).
@@ -177,7 +188,11 @@ interface SessionMetadata {
     userName?: string;
     otpVerified?: boolean;
     currentStepId?: string;
-    /** The session's declared render capabilities (`supports`) — the Rich Interactions gate. */
+    /**
+     * The render capabilities (`supports`) in effect for this session — the Rich
+     * Interactions gate. A SNAPSHOT of the conversation's durable set (see
+     * {@link CLIENT_SUPPORTS_META_KEY}), copied here at create time.
+     */
     supports?: string[];
 }
 
@@ -230,7 +245,12 @@ export class PostgresStore implements SessionStore, AdminStore {
             }
         }
 
+        // `undefined` means the frame OMITTED `supports`, and only then does a resume
+        // inherit the set the conversation last declared. A declared list — `[]`
+        // included — wins and replaces it, which is how a text-only channel resuming a
+        // rich conversation opts out for good (th-13df6d).
         const convId = resumeId ?? randomUUID();
+        const effectiveSupports = supports ?? (resumeId ? await this.conversationSupports(resumeId) : []);
         const session: StoredSession = {
             sessionId: randomUUID(),
             conversationId: convId,
@@ -247,7 +267,7 @@ export class PostgresStore implements SessionStore, AdminStore {
             // The caller's email doubles as the OTP delivery contact.
             ...(owner ? { contactEmail: owner } : {}),
             // The declared render capabilities gate this session's Rich Interactions.
-            ...(supports && supports.length > 0 ? { supports } : {}),
+            ...(effectiveSupports.length > 0 ? { supports: effectiveSupports } : {}),
         };
 
         const now = new Date().toISOString();
@@ -277,9 +297,27 @@ export class PostgresStore implements SessionStore, AdminStore {
                     [session.agentParticipantId, convId, orgId, AGENT_NAME, now],
                 );
             }
+            // Only a frame that DECLARED rewrites the durable record; an omitting resume
+            // read it above and must leave it exactly as it was. `jsonb_set` rather than a
+            // read-modify-write so sibling metadata keys (the Rust server's workflow step
+            // pointer, the caller's own `metadata`) survive without a lost-update race.
+            //
+            // Deliberately does NOT touch `updated_at`: that column is the sidebar's
+            // recency sort and is bumped when a MESSAGE lands (see appendMessage). A bare
+            // reconnect appends nothing, so bumping it here would float every backgrounded
+            // tab to the top of the list. The Go, Python and Rust stores leave it alone for
+            // the same reason — this is a parity-relevant choice, not an omission.
+            if (supports !== undefined) {
+                await client.query(
+                    `UPDATE conversations
+                        SET metadata_json = jsonb_set(COALESCE(metadata_json, '{}'::jsonb), $2, $3::jsonb, true)
+                      WHERE id = $1`,
+                    [convId, `{${CLIENT_SUPPORTS_META_KEY}}`, JSON.stringify(effectiveSupports)],
+                );
+            }
             const metadata: SessionMetadata = {
                 ...(owner ? { contactEmail: owner } : {}),
-                ...(supports && supports.length > 0 ? { supports } : {}),
+                ...(effectiveSupports.length > 0 ? { supports: effectiveSupports } : {}),
             };
             await client.query(
                 `INSERT INTO conversation_sessions
@@ -296,6 +334,17 @@ export class PostgresStore implements SessionStore, AdminStore {
             client.release();
         }
         return session;
+    }
+
+    /**
+     * The render capabilities a conversation last declared, off its durable metadata.
+     * Missing / malformed → empty, i.e. exactly the text-only behavior (every
+     * interaction kind degrades to its conversational fallback).
+     */
+    private async conversationSupports(conversationId: string): Promise<string[]> {
+        const { rows } = await this.pool.query(`SELECT COALESCE(metadata_json, '{}'::jsonb) AS metadata_json FROM conversations WHERE id = $1`, [conversationId]);
+        const declared = (rows[0]?.metadata_json as Record<string, unknown> | undefined)?.[CLIENT_SUPPORTS_META_KEY];
+        return Array.isArray(declared) ? declared.filter((c): c is string => typeof c === 'string') : [];
     }
 
     /**

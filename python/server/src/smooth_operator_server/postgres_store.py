@@ -497,6 +497,38 @@ class PostgresStore(SessionStore):
             json.dumps({"currentStepId": step_id}),
         )
 
+    async def get_client_supports(self, conversation_id: str) -> list[str]:
+        """The client render capabilities (``supports``) the conversation last declared —
+        durable, so a reconnect that omits the key still gets its Rich Interactions
+        (th-13df6d). Missing / malformed → empty, i.e. text-only."""
+        raw = await self._pool.fetchval(
+            "SELECT metadata_json->'clientSupports' FROM conversations WHERE id = $1",
+            conversation_id,
+        )
+        value = json.loads(raw) if isinstance(raw, str) else raw
+        return [s for s in value if isinstance(s, str)] if isinstance(value, list) else []
+
+    async def set_client_supports(self, conversation_id: str, supports: list[str]) -> None:
+        """Persist (or clear) the declared capabilities, next to the workflow-step
+        pointer and with the same shallow-merge / single-key-delete shape so sibling
+        metadata survives. An empty list is the text-only opt-out: it must REMOVE the
+        key, or a later reconnect that omits ``supports`` would resurrect the old set."""
+        if not supports:
+            await self._pool.execute(
+                """UPDATE conversations
+                      SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) - 'clientSupports'
+                    WHERE id = $1""",
+                conversation_id,
+            )
+            return
+        await self._pool.execute(
+            """UPDATE conversations
+                  SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $2::jsonb
+                WHERE id = $1""",
+            conversation_id,
+            json.dumps({"clientSupports": list(supports)}),
+        )
+
     async def is_session_authenticated(self, session_id: str) -> bool:
         """Whether the caller completed OTP verification for this session. ``False`` for
         an unknown or unverified session."""

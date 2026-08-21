@@ -458,6 +458,45 @@ async fn handle_create_session(
         )
         .await;
 
+    // Client render capabilities (`supports`, per
+    // create-conversation-session.schema.json) — the per-kind list gating which
+    // Rich Interactions this session gets as parked cards (e.g. `identity_form`
+    // for kind `identity_intake`); kinds without their capability degrade to
+    // the conversational fallback. Unknown values are kept (forward-compatible:
+    // a future kind may gate on them). `None` = the frame omitted the key
+    // entirely, which is what the inherit-on-resume rule below keys on; an
+    // explicit `[]` is a declaration of "I render nothing" and never inherits.
+    let declared: Option<Vec<String>> =
+        parsed
+            .get("supports")
+            .and_then(Value::as_array)
+            .map(|caps| {
+                caps.iter()
+                    .filter_map(|c| c.as_str().map(str::to_string))
+                    .collect()
+            });
+
+    // A RECONNECT is a resume: the client re-opens the socket and re-issues
+    // `create_conversation_session` with the same `conversationId`, which mints a
+    // NEW session id. Capabilities that live only on the session therefore have
+    // to be re-declared on every reconnect or Rich Interactions silently stop
+    // being offered — the shipped feature degrades with no error anyone sees
+    // (th-13df6d). So the declared set is persisted on the CONVERSATION, the same
+    // durability the workflow step pointer moved to for the same reason
+    // (th-c12df5: the session registry is per-pod and resets on reconnect/pod
+    // hop), and a resume that omits `supports` inherits it.
+    //
+    // A resume that declares (including `[]`) always wins, so a text-only client
+    // resuming a rich conversation opts out by sending `"supports": []`. The
+    // fallback direction is bounded either way: an offered card a client can't
+    // render times out (`INTERACTION_TIMEOUT`) into the same conversational
+    // fallback the capability gate would have chosen.
+    let supports: Vec<String> = match (&declared, &resume) {
+        (Some(caps), _) => caps.clone(),
+        (None, Some(c)) => conversation_supports(c.metadata_json.as_ref()),
+        (None, None) => Vec::new(),
+    };
+
     // Only mint a conversation on a fresh session — a resume reuses the existing
     // one (and its persisted history), so `create_conversation` is skipped.
     let conversation = resume.is_none().then(|| Conversation {
@@ -466,7 +505,7 @@ async fn handle_create_session(
         name: format!("Session {session_id}"),
         organization_id: org_id.clone(),
         idempotency_key: session_id.clone(),
-        metadata_json: parsed.get("metadata").cloned(),
+        metadata_json: with_client_supports(parsed.get("metadata").cloned(), &supports),
         analytics_json: None,
         created_at: now,
         updated_at: now,
@@ -507,22 +546,6 @@ async fn handle_create_session(
         created_at: now,
         updated_at: now,
     };
-
-    // Client render capabilities (`supports`, per
-    // create-conversation-session.schema.json) — the per-kind list gating which
-    // Rich Interactions this session gets as parked cards (e.g. `identity_form`
-    // for kind `identity_intake`); kinds without their capability degrade to
-    // the conversational fallback. Unknown values are kept (forward-compatible:
-    // a future kind may gate on them).
-    let supports: Vec<String> = parsed
-        .get("supports")
-        .and_then(Value::as_array)
-        .map(|caps| {
-            caps.iter()
-                .filter_map(|c| c.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
 
     // Stash the caller's OTP contact on the session so the end_user auth-gate
     // flow can offer verification without a storage roundtrip (mirrors how the
@@ -568,6 +591,8 @@ async fn handle_create_session(
     let request_id_owned = request_id.map(str::to_string);
     let session_for_registry = session.clone();
     let state_clone = state.clone();
+    let conversation_id_owned = conversation_id.clone();
+    let redeclared = declared.is_some();
 
     let data = json!({
         "sessionId": session_id,
@@ -589,6 +614,12 @@ async fn handle_create_session(
                 ));
                 return;
             }
+        } else if redeclared {
+            // A resume that re-declared `supports`: refresh the durable set so the
+            // NEXT reconnect — which may omit the key — inherits what this client
+            // actually renders. (A fresh conversation carries it in the metadata
+            // it was created with, so this write is the resume path only.)
+            persist_client_supports(storage.as_ref(), &conversation_id_owned, &supports).await;
         }
         if let Err(e) = storage.add_participant(user_participant).await {
             let _ = sink_clone.send(protocol::error(
@@ -1133,6 +1164,91 @@ fn sanitize_title(raw: &str) -> String {
 /// so the judge/cap could never advance it (th-c12df5 / th-d57a1d).
 const WF_STEP_META_KEY: &str = "workflowCurrentStepId";
 const WF_ATTEMPTS_META_KEY: &str = "workflowStepAttempts";
+
+/// Conversation-metadata key holding the client render capabilities (`supports`)
+/// last declared for this conversation. Durable, unlike the session registry, so
+/// a reconnect that resumes the conversation without re-declaring still gets its
+/// Rich Interactions (th-13df6d).
+const CLIENT_SUPPORTS_META_KEY: &str = "clientSupports";
+
+/// Read the durable capability list off a conversation's metadata. Missing /
+/// unreadable → empty, i.e. exactly the text-only behavior (every interaction
+/// kind degrades to its conversational fallback).
+fn conversation_supports(metadata: Option<&Value>) -> Vec<String> {
+    metadata
+        .and_then(|m| m.get(CLIENT_SUPPORTS_META_KEY))
+        .and_then(Value::as_array)
+        .map(|caps| {
+            caps.iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fold the declared capabilities into the metadata a fresh conversation is
+/// created with, so the very first session already leaves the durable record a
+/// later reconnect reads. An empty list writes nothing (keeps the metadata of a
+/// text-only conversation byte-for-byte what it was).
+fn with_client_supports(metadata: Option<Value>, supports: &[String]) -> Option<Value> {
+    if supports.is_empty() {
+        return metadata;
+    }
+    let mut obj = match metadata {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert(
+        CLIENT_SUPPORTS_META_KEY.to_string(),
+        Value::from(supports.to_vec()),
+    );
+    Some(Value::Object(obj))
+}
+
+/// Persist the declared capability list onto conversation metadata,
+/// read-modify-write so sibling metadata keys (the workflow step pointer, the
+/// caller's own `metadata`) survive. Best-effort, like
+/// [`persist_workflow_step`]: a storage error is logged, not fatal — this
+/// session already has its capabilities from the frame, and the worst case is
+/// that a LATER reconnect which omits `supports` falls back to text-only.
+async fn persist_client_supports(
+    storage: &dyn StorageAdapter,
+    conversation_id: &str,
+    supports: &[String],
+) {
+    let existing = match storage.get_conversation(conversation_id).await {
+        Ok(Some(c)) => c.metadata_json,
+        _ => None,
+    };
+    let mut obj = match existing {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    if supports.is_empty() {
+        obj.remove(CLIENT_SUPPORTS_META_KEY);
+    } else {
+        obj.insert(
+            CLIENT_SUPPORTS_META_KEY.to_string(),
+            Value::from(supports.to_vec()),
+        );
+    }
+    if let Err(e) = storage
+        .update_conversation(
+            conversation_id,
+            ConversationUpdate {
+                metadata_json: Some(Value::Object(obj)),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            conversation_id,
+            "failed to persist declared client capabilities; a later reconnect that omits 'supports' will degrade to text-only"
+        );
+    }
+}
 
 /// Read the durable `(current_step_id, attempts)` off the conversation's
 /// metadata. Missing / unreadable → `(None, 0)`, so the runner resolves to the

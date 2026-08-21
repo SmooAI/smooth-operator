@@ -42,7 +42,7 @@
         "supports": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Client render capabilities for this session \u2014 a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` \u2192 capability `identity_form`, kind `choices` \u2192 capability `choice_chips`); future kinds add their own values (`date_picker`, `file_upload`, \u2026). Text-only channels (SMS, voice) omit this and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible)."
+          "description": "Client render capabilities for this session \u2014 a per-kind list gating the Rich Interactions the server may emit mid-turn (`interaction_required`). Each interaction kind declares the capability that gates it (e.g. kind `identity_intake` \u2192 capability `identity_form`, kind `choices` \u2192 capability `choice_chips`); future kinds add their own values (`date_picker`, `file_upload`, \u2026). Text-only channels (SMS, voice) declare `[]` and the server degrades each kind to its conversational fallback. Unknown values are ignored (forward-compatible). Durability: the declared list is persisted on the CONVERSATION, so a reconnect that resumes an existing `conversationId` and OMITS this key inherits the set the conversation last declared \u2014 a reconnect is not a downgrade to text-only. Any list the frame does declare (including `[]`) replaces the inherited one, so a text-only client resuming a rich conversation opts out explicitly."
         },
         "metadata": {
           "type": "object",
