@@ -154,6 +154,7 @@ fn spawn_turn(
                 system_prompt: None,
                 org_id: None,
                 gateway_key: None,
+                user_token: None,
                 workflow: None,
                 judge: None,
                 greeting_section: None,
