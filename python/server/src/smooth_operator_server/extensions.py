@@ -114,8 +114,14 @@ class ConfirmUiProvider(HostDelegate):
             self._sink(protocol.write_confirmation_required(self._request_id, ext, prompt))
             try:
                 approved = await asyncio.wait_for(future, UI_CONFIRM_TIMEOUT)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                # Our own timeout / turn teardown reads as a dismissed dialog.
+            except asyncio.CancelledError:
+                # The TURN was cancelled. Returning normally here would un-cancel the
+                # task (asyncio only treats a task as cancelled if CancelledError
+                # propagates out of it), letting the turn resume and produce output
+                # after the client was sent the terminal `cancelled`. Re-raise.
+                raise
+            except asyncio.TimeoutError:
+                # OUR timeout: nobody answered the dialog — read as a dismissal.
                 return {"cancelled": True}
             return {"confirmed": True} if approved else {"confirmed": False}
         # Render-only kinds: accept and drop — there's no chat frame for them.

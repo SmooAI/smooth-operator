@@ -20,6 +20,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
 from smooth_operator_core import MockLlmProvider
 
 from smooth_operator_server.agent_config import AgentConfig, EnabledTool, StaticAgentConfigResolver, filter_tools
@@ -199,3 +200,27 @@ async def test_unsupported_interactive_kinds_cancel() -> None:
     provider = _provider(lambda _e: None, ConfirmationRegistry())
     for kind in ("select", "input"):
         assert await provider.ui_request("x", {"kind": kind, "prompt": "?"}) == {"cancelled": True}
+
+
+async def test_confirm_park_propagates_cancellation() -> None:
+    """Cancelling the turn must cancel the park, not resolve it as a dismissal.
+
+    ``ui/confirm`` used to catch ``CancelledError`` alongside its own timeout and
+    return ``{"cancelled": True}``. asyncio only treats a task as cancelled if the
+    ``CancelledError`` propagates OUT of it, so that returned an ordinary value to the
+    extension and left the turn RUNNING — free to keep working after the client had
+    been sent the terminal ``cancelled``. The two are different events: our timeout is
+    a dismissed dialog, a turn cancellation is not.
+    """
+    frames: list[dict] = []
+    registry = ConfirmationRegistry()
+    provider = _provider(frames.append, registry)
+
+    task = asyncio.ensure_future(provider.ui_request("todo", {"kind": "confirm", "prompt": "Delete file?"}))
+    await asyncio.sleep(0)  # let the provider emit the frame and park
+    assert frames[0]["type"] == "write_confirmation_required"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled(), f"the park swallowed the cancellation and returned {task.result()!r}"

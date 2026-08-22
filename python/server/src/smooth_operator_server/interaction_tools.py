@@ -95,9 +95,19 @@ def _request_tool(
         emit_call()
         try:
             outcome = await asyncio.wait_for(future, INTERACTION_TIMEOUT)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            # Our own timeout / turn teardown reads as no answer to the card. Drop any
-            # lingering park so a late submit can't resolve a dead future.
+        except asyncio.CancelledError:
+            # The TURN was cancelled — not our own timeout. Catching this and returning
+            # normally un-cancels the task: asyncio only treats a task as cancelled if
+            # the CancelledError propagates out of it, so swallowing it here let the
+            # agent loop resume, persist a reply, and emit an eventual_response AFTER
+            # the client had already been sent the terminal `cancelled`. Drop the park,
+            # then re-raise so the cancellation stays a cancellation.
+            pending.clear(session_id)
+            raise
+        except asyncio.TimeoutError:
+            # OUR timeout: the visitor never answered the card. Not a cancellation —
+            # the turn continues without the details. Drop any lingering park so a late
+            # submit can't resolve a dead future.
             pending.clear(session_id)
             outcome = InteractionOutcome.no_response()
         return json.dumps(outcome.to_payload())

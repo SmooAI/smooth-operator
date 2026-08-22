@@ -50,6 +50,10 @@ public sealed class SmoothAgentOptions
     /// <summary>Per-request timeout for non-streaming actions. Default 30s.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>Bounds a streaming turn (see <see cref="SmoothAgentClientOptions.TurnTimeout"/>).
+    /// Default 120s; <see cref="Timeout.InfiniteTimeSpan"/> disables.</summary>
+    public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromSeconds(120);
+
     /// <summary>Override the default request-id generator.</summary>
     public Func<string>? GenerateRequestId { get; set; }
 
@@ -61,6 +65,7 @@ public sealed class SmoothAgentOptions
         Url = Url,
         Transport = Transport,
         RequestTimeout = RequestTimeout,
+        TurnTimeout = TurnTimeout,
         GenerateRequestId = GenerateRequestId,
         JsonOptions = JsonOptions,
     };

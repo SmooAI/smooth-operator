@@ -7,6 +7,7 @@
 //! streaming actions (`send_message`) can emit many events while still being
 //! driven from one place.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -139,14 +140,35 @@ async fn scoped_session(state: &AppState, session_id: &str, scope: &UserScope) -
         .then_some(session)
 }
 
+/// A spawned agent turn: its task handle, plus the flag the cancel path raises to
+/// make `cancelled` genuinely terminal.
+///
+/// `JoinHandle::abort()` alone is not enough. It only takes effect when the task
+/// next yields to the runtime, so a turn already past its final `.await` runs its
+/// whole tail — dispatching an OTP, emitting `eventual_response` — AFTER the client
+/// has been told the turn was cancelled. That race put both a `cancelled` (499) and
+/// an `eventual_response` (200) on the wire for one requestId, and could put a real
+/// verification code in front of a real person after they hit Stop.
+///
+/// The flag is raised BEFORE the abort and before the `cancelled` event goes out, and
+/// the turn tail re-reads it immediately before each side effect. A late abort is then
+/// harmless: the tail sees the flag and produces nothing.
+pub struct SpawnedTurn {
+    /// The turn's task handle — aborted by the cancel path and the disconnect path.
+    pub handle: tokio::task::JoinHandle<()>,
+    /// Raised before `cancelled` is emitted; read by the turn tail before every
+    /// side effect it would otherwise perform.
+    pub cancelled: Arc<AtomicBool>,
+}
+
 /// Parse and dispatch a single inbound text frame. Any produced events are sent
 /// through `sink`. Protocol-level failures are surfaced as `error` events, never
 /// as hard errors that drop the connection.
 ///
-/// Returns the [`JoinHandle`](tokio::task::JoinHandle) of the spawned agent turn
-/// for a `send_message` frame (so the connection loop can track the single active
-/// turn and abort it on a `cancel` frame or disconnect); `None` for every other
-/// action. The turn is spawned — not awaited inline — because a
+/// Returns the [`SpawnedTurn`] for a `send_message` frame (so the connection loop
+/// can track the single active turn, abort it on a `cancel` frame or disconnect,
+/// and raise its cancelled flag so the turn's tail stays silent); `None` for every
+/// other action. The turn is spawned — not awaited inline — because a
 /// confirmation-gated turn parks awaiting a later `confirm_tool_action` frame the
 /// same reader must be free to receive.
 ///
@@ -163,7 +185,7 @@ pub async fn handle_frame(
     scope: &UserScope,
     raw: &str,
     sink: &UnboundedSender<Value>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<SpawnedTurn> {
     let parsed: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
@@ -1329,7 +1351,7 @@ async fn handle_send_message(
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<SpawnedTurn> {
     // requestId is load-bearing for streaming correlation; require it.
     let Some(request_id) = request_id else {
         let _ = sink.send(protocol::error(
@@ -1721,6 +1743,12 @@ async fn handle_send_message(
     let request_id_owned = request_id.to_string();
     let conversation_id = session.conversation_id.clone();
 
+    // See `SpawnedTurn`: raised by the cancel path before `cancelled` goes out, and
+    // read by this turn's tail before every side effect. `abort()` is asynchronous,
+    // so this flag — not the abort — is what makes `cancelled` terminal.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let turn_cancelled = cancelled.clone();
+
     let turn_handle = tokio::spawn(async move {
         // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW
         // is set; `None` otherwise, zero overhead). The delegate is bound to THIS
@@ -1809,6 +1837,14 @@ async fn handle_send_message(
         )
         .await;
 
+        // A cancel that raced this turn's completion has already put the terminal
+        // `cancelled` on the wire. Everything below — the workflow pointer, the OTP
+        // dispatch, `eventual_response`, the auto-title — is a side effect of a turn
+        // the client was told did not happen, so produce none of it.
+        if turn_cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+
         match result {
             Ok(turn) => {
                 // Persist the workflow step pointer the judge landed on, so the
@@ -1848,7 +1884,10 @@ async fn handle_send_message(
                 {
                     if let Some(tool) = gate.otp_refused_tool() {
                         let contact = state_for_turn.session_contact(&session_id_owned);
-                        if !contact.is_empty() {
+                        // Re-read adjacent to the send: `persist_workflow_step` above
+                        // awaits, so a cancel can land between the arm's check and here,
+                        // and this branch puts a real code in front of a real person.
+                        if !contact.is_empty() && !turn_cancelled.load(Ordering::SeqCst) {
                             offer_otp(
                                 otp.as_ref(),
                                 &session_id_owned,
@@ -1860,6 +1899,12 @@ async fn handle_send_message(
                             .await;
                         }
                     }
+                }
+                // Re-read adjacent to the emit: `offer_otp` above awaits, so a cancel
+                // can land between the previous check and this send — which is exactly
+                // how one requestId ended up with both a 499 and a 200.
+                if turn_cancelled.load(Ordering::SeqCst) {
+                    return;
                 }
                 let response =
                     runner::general_agent_response(&turn.reply, &turn.suggested_next_actions);
@@ -1887,6 +1932,9 @@ async fn handle_send_message(
                 });
             }
             Err(e) => {
+                if turn_cancelled.load(Ordering::SeqCst) {
+                    return;
+                }
                 let _ = sink_owned.send(protocol::error(
                     Some(&request_id_owned),
                     "AGENT_ERROR",
@@ -1895,7 +1943,10 @@ async fn handle_send_message(
             }
         }
     });
-    Some(turn_handle)
+    Some(SpawnedTurn {
+        handle: turn_handle,
+        cancelled,
+    })
 }
 
 /// `confirm_tool_action` — resume a turn parked on a write-tool confirmation.

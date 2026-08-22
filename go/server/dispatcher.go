@@ -709,6 +709,20 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	d.current = turn
 	d.turnMu.Unlock()
 
+	// EVERY frame this turn produces goes through this one gate, so `cancelled` is
+	// genuinely terminal. A per-emit ctx check is not enough: the runner's event loop
+	// checks ctx, but a Rich Interaction raise tool and the write-confirmation gate call
+	// sink() straight from inside the tool, on the engine's goroutine, with no check at
+	// all — so an interaction_required or a toolCall chunk could land AFTER the client
+	// was told the turn was cancelled. Gating the sink itself is the choke point no emit
+	// path can walk past, and mirrors the .NET dispatcher's turnSink.
+	turnSink := func(event map[string]any) {
+		if turnCtx.Err() != nil {
+			return
+		}
+		sink(event)
+	}
+
 	d.turns.Add(1)
 	go func() {
 		defer d.turns.Done()
@@ -742,7 +756,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("turn panicked", "requestId", requestID, "panic", r, "stack", string(debug.Stack()))
-				sink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
+				turnSink(errorEvent(requestID, "INTERNAL_ERROR", "Internal error processing the request."))
 			}
 		}()
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
@@ -755,7 +769,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		runner.capabilities = capabilitySet(session.Supports)
 		// Span attribution: the owning org (grouped by smooai.org_id on the turn span).
 		runner.orgID = d.access.Principal.Org
-		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, sink)
+		result, err := runner.Run(turnCtx, frame.SessionID, session.ConversationID, requestID, frame.Message, turnSink)
 		// Cancelled turn: the `cancelled` event is the turn's ONE terminal event (emitted
 		// by handleCancel), so emit nothing further here — no eventual_response, and no
 		// INTERNAL_ERROR for the context cancellation that unwound the turn. The partial
@@ -767,7 +781,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		if err != nil {
 			// A turn failed (no engine configured, or a model/DB error). Emit a clean
 			// error and keep the connection alive. Detail stays server-side.
-			d.internalError(sink, requestID, "send_message", err)
+			d.internalError(turnSink, requestID, "send_message", err)
 			return
 		}
 		// SMOODEV-590 — persist the workflow pointer the judge advanced to, so the next
@@ -782,10 +796,15 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		// OTP flow (prompt → dispatch → ack) BEFORE the terminal response — mirroring the Rust
 		// reference ordering. The reference server does not park/auto-resume; the client
 		// verifies via verify_otp and re-sends its message once the session is authenticated.
+		//
+		// The turn's ctx, NOT the connection's: this branch sends a real verification
+		// code to a real person, and the turnCtx.Err() check above happens before the
+		// awaits in between — so it must be re-checked here, and the send itself has to
+		// be cancellable. offerOtp re-checks immediately before dispatching.
 		if tool := refusal.refusedTool(); tool != "" && d.otpService != nil {
 			contact := OtpContact{Email: session.ContactEmail, Phone: session.ContactPhone}
 			if !contact.IsEmpty() {
-				d.offerOtp(ctx, session.SessionID, tool, contact, requestID, sink)
+				d.offerOtp(turnCtx, session.SessionID, tool, contact, requestID, turnSink)
 			}
 		}
 		// 3. Terminal eventual_response. Drain the turn's directive sink (a host tool may
@@ -793,7 +812,7 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		//    omitted (back-compat). Mirrors the Rust runner draining directive_sink onto
 		//    eventual_response (runner.rs / protocol.rs).
 		directive, hasDirective := turnState.Directive()
-		sink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations, result.Usage, directive, hasDirective))
+		turnSink(eventualResponse(requestID, 200, result.MessageID, generalResponse(result.Reply), false, result.Citations, result.Usage, directive, hasDirective))
 	}()
 }
 
@@ -963,6 +982,12 @@ func (d *FrameDispatcher) offerOtp(ctx context.Context, sessionID, tool string, 
 		contact.AvailableChannels(),
 		"end_user",
 	))
+	// Adjacent to the side effect, not before the awaits that precede it: a cancel
+	// landing here still means a real SMS/email to a real person, so this is the last
+	// check before the code goes out.
+	if ctx.Err() != nil {
+		return
+	}
 	delivery, err := d.otpService.SendOtp(ctx, sessionID, contact)
 	if err != nil {
 		sink(errorEvent(requestID, "OTP_SEND_FAILED", "failed to send verification code"))
