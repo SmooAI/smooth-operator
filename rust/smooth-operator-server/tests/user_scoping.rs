@@ -490,8 +490,8 @@ async fn drive_all(state: &AppState, scope: &UserScope, frame: &Value) -> Vec<Va
         &tx,
     )
     .await;
-    if let Some(handle) = handle {
-        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    if let Some(turn) = handle {
+        let _ = tokio::time::timeout(Duration::from_secs(5), turn.handle).await;
     }
     drop(tx);
     let mut events = Vec::new();

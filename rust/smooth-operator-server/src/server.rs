@@ -778,9 +778,42 @@ async fn connection_loop(
         )
         .await;
 
+    // The requestId of the turn most recently cancelled on this connection, if any.
+    // The writer below drops anything else carrying that id, which is what makes
+    // `cancelled` terminal for FRAMES no matter which code path produced them.
+    //
+    // A per-emit-site check cannot do this job. Frames leave a turn from the runner's
+    // stream loop, from inside a Rich Interaction raise tool, from the write-confirmation
+    // gate, and from the turn tail — and `abort()` only stops a task at its next yield,
+    // so any of them can still run after the cancel. The writer is the ONE place every
+    // frame passes through, and it needs no plumbing: the reader loop that handles
+    // `cancel` is right here.
+    //
+    // Only ONE turn runs per connection and requestIds are per-turn, so a single slot is
+    // both sufficient and bounded.
+    let cancelled_request: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     // Writer: drain the sink and write each event as a JSON text frame.
+    let writer_cancelled = cancelled_request.clone();
     let writer = tokio::spawn(async move {
         while let Some(event) = sink_rx.recv().await {
+            // Drop anything a cancelled turn produced after the fact. The `cancelled`
+            // event itself is exempt: it carries the same requestId, and it is queued
+            // just before the slot is armed, so it would otherwise gag itself.
+            if event.get("type").and_then(serde_json::Value::as_str) != Some("cancelled") {
+                let req = event.get("requestId").and_then(serde_json::Value::as_str);
+                if let Some(req) = req {
+                    if writer_cancelled
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_deref()
+                        == Some(req)
+                    {
+                        continue;
+                    }
+                }
+            }
             let text = match serde_json::to_string(&event) {
                 Ok(t) => t,
                 Err(_) => continue,
@@ -799,7 +832,7 @@ async fn connection_loop(
     // future at its next `.await` (abandoning the in-flight LLM/tool call). Only
     // ONE turn runs at a time: a second `send_message` while one is in flight is
     // rejected, never run concurrently.
-    let mut current_turn: Option<(Option<String>, tokio::task::JoinHandle<()>)> = None;
+    let mut current_turn: Option<(Option<String>, crate::handler::SpawnedTurn)> = None;
 
     // Reader: dispatch inbound frames. Handlers emit events via `sink_tx`.
     //
@@ -834,6 +867,7 @@ async fn connection_loop(
                             text.as_str(),
                             &sink_tx,
                             current_turn,
+                            &cancelled_request,
                         )
                         .await;
                     }
@@ -847,8 +881,13 @@ async fn connection_loop(
                     // Client disconnected mid-turn: abort the in-flight turn so it
                     // stops generating (no client remains to receive its output).
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
-                        if let Some((_, handle)) = current_turn.take() {
-                            handle.abort();
+                        if let Some((_, turn)) = current_turn.take() {
+                            // Raise the flag before aborting for the same reason the
+                            // `cancel` path does: the abort may land too late to stop a
+                            // turn already past its last `.await`, and there is no client
+                            // left to receive anything it would emit.
+                            turn.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                            turn.handle.abort();
                         }
                         break;
                     }
@@ -904,11 +943,15 @@ async fn handle_text_frame(
     user_scope: &handler::UserScope,
     text: &str,
     sink_tx: &tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
-    mut current_turn: Option<(Option<String>, tokio::task::JoinHandle<()>)>,
-) -> Option<(Option<String>, tokio::task::JoinHandle<()>)> {
+    mut current_turn: Option<(Option<String>, crate::handler::SpawnedTurn)>,
+    cancelled_request: &Arc<std::sync::Mutex<Option<String>>>,
+) -> Option<(Option<String>, crate::handler::SpawnedTurn)> {
     // Forget a handle whose turn already finished, so the single-active-turn
     // guard below only trips on a genuinely in-flight turn.
-    if current_turn.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+    if current_turn
+        .as_ref()
+        .is_some_and(|(_, t)| t.handle.is_finished())
+    {
         current_turn = None;
     }
 
@@ -916,14 +959,31 @@ async fn handle_text_frame(
 
     match action.as_deref() {
         Some("cancel") => {
-            if let Some((turn_req_id, handle)) = current_turn.take() {
+            if let Some((turn_req_id, turn)) = current_turn.take() {
+                // Raise the flag FIRST, before the abort and before `cancelled` goes
+                // out. `abort()` only takes effect at the task's next yield, so a turn
+                // already past its last `.await` runs its tail regardless — and would
+                // dispatch an OTP and emit `eventual_response` after the client was
+                // told the turn was cancelled. The tail re-reads this flag immediately
+                // before each of those, so ordering it first is what makes `cancelled`
+                // terminal rather than advisory.
+                turn.cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 // `abort()` drops the turn future at its next `.await`, abandoning
                 // the in-flight LLM/tool call. Echo the cancelled turn's requestId
                 // (falling back to the cancel frame's own) so the client correlates
                 // the reset.
-                handle.abort();
+                turn.handle.abort();
                 let echo = turn_req_id.or(request_id);
+                // Queue `cancelled` BEFORE arming the writer gate: the gate exempts the
+                // event by type, but ordering it this way keeps the intent obvious — the
+                // terminal event goes out, everything after it for that id does not.
                 let _ = sink_tx.send(crate::protocol::cancelled(echo.as_deref()));
+                if let Some(echo) = echo {
+                    *cancelled_request
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(echo);
+                }
             }
             // else: no active turn → harmless no-op (emit nothing).
             None
@@ -949,7 +1009,7 @@ async fn handle_text_frame(
             )
             .await;
             match spawned {
-                Some(handle) => Some((request_id, handle)),
+                Some(turn) => Some((request_id, turn)),
                 None => current_turn,
             }
         }
