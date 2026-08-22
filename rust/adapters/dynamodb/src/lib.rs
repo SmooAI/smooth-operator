@@ -871,6 +871,10 @@ impl StorageAdapter for DynamoDbAdapter {
         if update.last_activity_at.is_some() {
             session.last_activity_at = update.last_activity_at;
         }
+        // th-ca579c: whole-blob replace, matching the adapter contract.
+        if let Some(metadata) = update.metadata {
+            session.metadata = Some(metadata);
+        }
         if update.ended_at.is_some() {
             session.ended_at = update.ended_at;
         }

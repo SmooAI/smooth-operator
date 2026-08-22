@@ -130,7 +130,10 @@ async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &
 /// guessed another user's session id could drive a turn in it (and read the
 /// replayed history back through their own stream). th-1b7ed0.
 async fn scoped_session(state: &AppState, session_id: &str, scope: &UserScope) -> Option<Session> {
-    let session = state.get_session(session_id)?;
+    // th-ca579c: hydrate from storage on a local miss. `get_session` here would
+    // report "not found" for a session this pod simply has not seen — which with
+    // 2+ replicas is most returning visitors.
+    let session = state.load_session(session_id).await?;
     may_read_conversation(state, &session.conversation_id, scope)
         .await
         .then_some(session)
@@ -2401,7 +2404,7 @@ async fn handle_verify_otp(
 
     match otp.verify_otp(session_id, code).await {
         smooth_operator::otp::OtpVerifyOutcome::Verified => {
-            state.set_session_authenticated(session_id, true);
+            state.set_session_authenticated(session_id, true).await;
             let _ = sink.send(protocol::otp_verified(
                 request_id,
                 "Identity verified successfully.",
