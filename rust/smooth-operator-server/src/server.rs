@@ -1009,7 +1009,17 @@ async fn handle_text_frame(
             )
             .await;
             match spawned {
-                Some(turn) => Some((request_id, turn)),
+                Some(turn) => {
+                    // Disarm the writer gate for the NEW turn. requestIds are supposed to
+                    // be unique per turn, but they are client-supplied — a client that
+                    // reuses one after a cancel would otherwise have every frame of a
+                    // perfectly good turn silently dropped. A new turn is exactly the
+                    // point at which the previous cancellation stops being relevant.
+                    *cancelled_request
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    Some((request_id, turn))
+                }
                 None => current_turn,
             }
         }

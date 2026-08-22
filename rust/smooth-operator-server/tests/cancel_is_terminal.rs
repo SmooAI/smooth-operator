@@ -135,6 +135,17 @@ fn blocking_tool_mock() -> MockLlmClient {
             finish_reason: "stop".into(),
         },
     ]);
+    // A spare, identical answer. Whether the aborted turn gets as far as its own second
+    // model call is timing-dependent, so the reuse test below must not care which of
+    // these two it pops.
+    mock.push_stream(vec![
+        StreamEvent::Delta {
+            content: "I should never have been sent.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
     mock
 }
 
@@ -232,4 +243,73 @@ async fn nothing_is_emitted_after_cancelled() {
             ev["type"]
         );
     }
+}
+
+/// The writer gate is armed with a requestId, and requestIds are CLIENT-supplied. A
+/// client that reuses one for a later turn must not have that turn silently muted — so
+/// starting a new turn disarms the gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_turn_reusing_a_cancelled_request_id_is_not_muted() {
+    let started = Arc::new(AtomicBool::new(false));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let provider = Arc::new(BlockingToolProvider {
+        started: started.clone(),
+        release: Mutex::new(Some(release_rx)),
+    });
+
+    let state = build_state(keyless_config())
+        .with_chat_provider(Arc::new(blocking_tool_mock()))
+        .with_tools(provider);
+    let url = common::boot_state(state).await;
+    let mut client = common::connect(&url).await;
+    let session_id = create_session(&mut client).await;
+
+    common::send_json(
+        &mut client,
+        &json!({
+            "action": "send_message",
+            "requestId": "reused-id",
+            "sessionId": session_id,
+            "message": "please do the blocking thing",
+        }),
+    )
+    .await;
+    wait_until("turn parked in the blocking tool", || {
+        started.load(Ordering::SeqCst)
+    })
+    .await;
+
+    common::send_json(
+        &mut client,
+        &json!({ "action": "cancel", "requestId": "reused-id" }),
+    )
+    .await;
+    let mut seen: Vec<Value> = Vec::new();
+    let cancelled =
+        common::recv_until(&mut client, "cancelled", &mut seen, Duration::from_secs(5)).await;
+    assert_eq!(cancelled["requestId"], "reused-id", "got: {cancelled}");
+    let _ = release_tx.send(());
+
+    // A brand-new turn on the SAME requestId. Its frames must reach the client.
+    common::send_json(
+        &mut client,
+        &json!({
+            "action": "send_message",
+            "requestId": "reused-id",
+            "sessionId": session_id,
+            "message": "hello again",
+        }),
+    )
+    .await;
+
+    let mut seen2: Vec<Value> = Vec::new();
+    let done = common::recv_until(
+        &mut client,
+        "eventual_response",
+        &mut seen2,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(done["requestId"], "reused-id", "got: {done}");
+    assert_eq!(done["status"], 200, "got: {done}");
 }
