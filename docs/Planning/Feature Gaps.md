@@ -62,9 +62,9 @@ Mature knowledge platforms have a `regression/` layer + nightly LLM-provider-cha
 Mature platforms ship extensive web + Playwright suites. Our new `SmooAI/chat-widget` has none yet.
 - **TDD**: a Playwright spec first — load the widget against a locally-booted `smooth-operator-server`, send a message, assert streamed assistant tokens render + a grounded answer appears. Wire it into the widget repo's CI.
 
-### G6. Deployment-integration tests in CI
-Mature knowledge platforms run compose + k8s + helm tests in CI; we only `helm lint`/`helm template`.
-- **TDD**: a `kind`-based CI job — `helm install` the chart into an ephemeral cluster with a pgvector Postgres, port-forward, run the protocol smoke (`ping`→`pong`, `create_conversation_session`) against the live pod. (Red until the image builds + chart serves — which the `SMOOTH_AGENT_BIND=0.0.0.0` fix already unblocked.)
+### G6. Deployment-integration tests in CI — ✅ shipped
+- ✅ **Done.** `.github/workflows/pr-kind-deploy-smoke.yml` runs the planned `kind` job on every PR: `helm install` into an ephemeral cluster, then the protocol smoke against the live pod. It is a required-looking check on current PRs (observed green on #526, 2026-08-22).
+- This entry read "we only `helm lint`/`helm template`" for some time after the job shipped. A gap doc that is stale in the CLOSED direction is worse than one that is merely incomplete: it argues for work that already exists. When you close a gap here, edit this file in the same PR.
 
 ### G7. Multi-tenancy
 Mature knowledge platforms support multi-tenant schemas. Our org scoping is row-level only.
@@ -90,7 +90,7 @@ Formalize the platform.s `mock_connector` + `external_dependency_unit` vs `unit`
 1. **G3 access-control leak test** (highest severity) → ACL filter on all adapters.
 2. **G1 `MockConnector` + ingestion-pipeline contract test** → connector trait + web/file/github connectors.
 3. **G4 retrieval-quality eval** (deterministic recall@k) alongside the LLM-judge evals.
-4. **G5 widget Playwright e2e**, **G6 kind deploy smoke**, then **G2/G8/G7/G9**.
+4. **G5 widget Playwright e2e**, then **G2/G7/G9**. (G6 and G8 are done; G3 is done.)
 
 Tracked against the [[Roadmap]]; these become Phase 4 (tools/ingestion), Phase 6 (deploy CI), and a new **Phase 10 — connectors & quality regression**.
 
