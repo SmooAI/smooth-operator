@@ -163,10 +163,16 @@ async fn may_read_conversation(
 
 /// The **only** way a handler may turn a client-supplied `sessionId` into a
 /// session. It loads the session and then hides it unless the connection's
-/// authenticated principal owns its conversation — returning `None`, exactly
+/// authenticated principal owns its conversation — returning `Ok(None)`, exactly
 /// what an unknown session id returns, so every caller emits the identical
 /// not-found event and no caller can distinguish "not yours" from "never
 /// existed".
+///
+/// `Err` is the third outcome and is NOT an existence claim: storage could not
+/// answer. Callers emit `STORAGE_ERROR` (retryable) for it instead of
+/// not-found — telling a visitor their live session does not exist because
+/// Postgres hiccuped is a lie the UI has no way to walk back. It leaks nothing:
+/// a storage failure is independent of whether the id is real or ours.
 ///
 /// Every sessionId-taking handler routes through here rather than calling
 /// [`AppState::get_session`] directly: the check lives once, at the chokepoint,
@@ -180,19 +186,36 @@ async fn scoped_session(
     session_id: &str,
     auth_org: Option<&str>,
     scope: &UserScope,
-) -> Option<Session> {
+) -> anyhow::Result<Option<Session>> {
     // th-ca579c: hydrate from storage on a local miss. `get_session` here would
     // report "not found" for a session this pod simply has not seen — which with
     // 2+ replicas is most returning visitors.
-    let session = state.load_session(session_id).await?;
+    let Some(session) = state.load_session(session_id).await? else {
+        return Ok(None);
+    };
     // The session carries its own org, so the tenant check needs no extra read
     // and covers every session-id-taking handler at this one chokepoint.
     if !same_org(auth_org, &session.organization_id) {
-        return None;
+        return Ok(None);
     }
-    may_read_conversation(state, &session.conversation_id, auth_org, scope)
-        .await
-        .then_some(session)
+    Ok(
+        may_read_conversation(state, &session.conversation_id, auth_org, scope)
+            .await
+            .then_some(session),
+    )
+}
+
+/// The `error` event for a session read that storage could not answer. Distinct
+/// from the not-found event on purpose: this one says "try again", and the code
+/// (`STORAGE_ERROR`, already used by the rename path) is what a client keys on
+/// to retry rather than to clear its session.
+fn session_storage_error(request_id: Option<&str>, session_id: &str, e: &anyhow::Error) -> Value {
+    tracing::warn!(error = %e, session_id, "session lookup unavailable");
+    protocol::error(
+        request_id,
+        "STORAGE_ERROR",
+        "session lookup is temporarily unavailable, please try again",
+    )
 }
 
 /// A spawned agent turn: its task handle, plus the flag the cancel path raises to
@@ -757,7 +780,7 @@ async fn handle_get_session(
     };
 
     match scoped_session(state, session_id, auth_org, scope).await {
-        Some(s) => {
+        Ok(Some(s)) => {
             let data = json!({
                 "sessionId": s.session_id,
                 "conversationId": s.conversation_id,
@@ -776,12 +799,15 @@ async fn handle_get_session(
                 request_id, 200, "Session", data,
             ));
         }
-        None => {
+        Ok(None) => {
             let _ = sink.send(protocol::error(
                 request_id,
                 "SESSION_NOT_FOUND",
                 &format!("session '{session_id}' not found"),
             ));
+        }
+        Err(e) => {
+            let _ = sink.send(session_storage_error(request_id, session_id, &e));
         }
     }
 }
@@ -814,13 +840,20 @@ async fn handle_get_conversation_messages(
     // same message, same shape. A distinct "forbidden" would be an existence
     // oracle: it would tell a caller which session ids are real, which is all
     // an attacker needs to enumerate other users' conversations.
-    let Some(session) = scoped_session(state, session_id, auth_org, scope).await else {
-        let _ = sink.send(protocol::error(
-            request_id,
-            "SESSION_NOT_FOUND",
-            &format!("session '{session_id}' not found"),
-        ));
-        return;
+    let session = match scoped_session(state, session_id, auth_org, scope).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            let _ = sink.send(protocol::error(
+                request_id,
+                "SESSION_NOT_FOUND",
+                &format!("session '{session_id}' not found"),
+            ));
+            return;
+        }
+        Err(e) => {
+            let _ = sink.send(session_storage_error(request_id, session_id, &e));
+            return;
+        }
     };
 
     const DEFAULT_LIMIT: usize = 50;
@@ -1495,13 +1528,20 @@ async fn handle_send_message(
     // sending into another user's session would replay their history as context
     // and stream the reply back to the sender, so an unscoped write here is also
     // a read of their conversation.
-    let Some(session) = scoped_session(state, session_id, auth_org, scope).await else {
-        let _ = sink.send(protocol::error(
-            Some(request_id),
-            "SESSION_NOT_FOUND",
-            &format!("session '{session_id}' not found"),
-        ));
-        return None;
+    let session = match scoped_session(state, session_id, auth_org, scope).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            let _ = sink.send(protocol::error(
+                Some(request_id),
+                "SESSION_NOT_FOUND",
+                &format!("session '{session_id}' not found"),
+            ));
+            return None;
+        }
+        Err(e) => {
+            let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+            return None;
+        }
     };
 
     // A test-injected provider (the scenario-parity corpus's `MockLlmClient`)
@@ -2055,9 +2095,15 @@ async fn handle_confirm_tool_action(
     // Approving a write parked in ANOTHER user's turn is the same class of hole
     // as writing into their session. A session we may not read is reported with
     // the identical event an id with no pending confirmation produces.
-    let owned = scoped_session(state, session_id, auth_org, scope)
-        .await
-        .is_some();
+    let owned = match scoped_session(state, session_id, auth_org, scope).await {
+        Ok(session) => session.is_some(),
+        Err(e) => {
+            // Not "no such pending confirmation" — we could not find out. The
+            // parked turn is still waiting; a retry can still approve it.
+            let _ = sink.send(session_storage_error(request_id, session_id, &e));
+            return;
+        }
+    };
     let Some(responder) = owned.then(|| state.take_confirmation(session_id)).flatten() else {
         let _ = sink.send(protocol::error(
             request_id,
@@ -2281,9 +2327,15 @@ async fn handle_submit_interaction(
     // read reports the identical event an id with no pending park produces (the
     // submitted values would otherwise land in another user's turn, and its
     // identity-attach effect on their session).
-    let owned = scoped_session(state, session_id, auth_org, scope)
-        .await
-        .is_some();
+    let owned = match scoped_session(state, session_id, auth_org, scope).await {
+        Ok(session) => session.is_some(),
+        Err(e) => {
+            // The park is untouched (this path only peeks), so a retry after the
+            // blip still resolves the same interaction.
+            let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+            return;
+        }
+    };
     let Some(pending) = owned
         .then(|| state.pending_interaction(session_id))
         .flatten()
@@ -2500,16 +2552,22 @@ async fn handle_verify_otp(
 
     // The session must exist AND be ours (a code can't verify — or brute-force —
     // a session we don't track, nor one belonging to another user).
-    if scoped_session(state, session_id, auth_org, scope)
-        .await
-        .is_none()
-    {
-        let _ = sink.send(protocol::error(
-            Some(request_id),
-            "SESSION_NOT_FOUND",
-            &format!("session '{session_id}' not found"),
-        ));
-        return;
+    match scoped_session(state, session_id, auth_org, scope).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = sink.send(protocol::error(
+                Some(request_id),
+                "SESSION_NOT_FOUND",
+                &format!("session '{session_id}' not found"),
+            ));
+            return;
+        }
+        Err(e) => {
+            // Fail closed on the gate — no code is checked — but say why, so the
+            // caller retries instead of abandoning a verification in progress.
+            let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+            return;
+        }
     }
 
     // No host OTP service → verification is impossible. Fail closed on the
