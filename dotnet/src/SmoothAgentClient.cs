@@ -46,6 +46,22 @@ public sealed class RequestTimeoutException : Exception
         => RequestId = requestId;
 }
 
+/// <summary>
+/// A streaming turn that received no terminal <c>eventual_response</c> / <c>error</c> /
+/// <c>cancelled</c> within the configured <see cref="SmoothAgentClientOptions.TurnTimeout"/>.
+/// <see cref="MessageTurn.Completion"/> faults with this and the async iteration throws it, so
+/// a stuck server can never hang the caller. The sibling of TypeScript's
+/// <c>TurnTimeoutError</c>, Go's <c>TurnTimeoutError</c> and Python's <c>TurnTimeoutError</c>.
+/// </summary>
+public sealed class TurnTimeoutException : Exception
+{
+    public string RequestId { get; }
+
+    public TurnTimeoutException(string requestId, TimeSpan timeout)
+        : base($"Turn {requestId} timed out after {timeout.TotalMilliseconds}ms without a terminal response")
+        => RequestId = requestId;
+}
+
 public sealed class SmoothAgentClientOptions
 {
     /// <summary>WebSocket URL, e.g. <c>wss://realtime.prod.smooth-agent.dev</c>.</summary>
@@ -69,6 +85,17 @@ public sealed class SmoothAgentClientOptions
     /// <summary>Per-request timeout for non-streaming actions. Default 30s. Use <see cref="Timeout.InfiniteTimeSpan"/> to disable.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Bounds a streaming <c>send_message</c> turn: if the server accepts the message but never
+    /// emits a terminal <c>eventual_response</c> / <c>error</c> / <c>cancelled</c> within this
+    /// window, the turn faults with a <see cref="TurnTimeoutException"/> instead of hanging
+    /// forever and leaking its entry in the client's turn table. Default 120s, matching
+    /// TypeScript's <c>turnTimeout</c>, Go's <c>DefaultTurnTimeout</c> and Python's
+    /// <c>turn_timeout</c>. Use <see cref="Timeout.InfiniteTimeSpan"/> (or any non-positive
+    /// value) to disable.
+    /// </summary>
+    public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromSeconds(120);
+
     /// <summary>Serializer options for (de)serializing frames. Defaults to camelCase-friendly defaults.</summary>
     public JsonSerializerOptions? JsonOptions { get; set; }
 }
@@ -89,13 +116,27 @@ public sealed class MessageTurn : IAsyncEnumerable<ServerEvent>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Action _onClose;
     private readonly Action? _onCancel;
+    private readonly Timer? _timeoutTimer;
     private int _done;
 
-    internal MessageTurn(string requestId, Action onClose, Action? onCancel = null)
+    internal MessageTurn(string requestId, Action onClose, Action? onCancel = null, TimeSpan turnTimeout = default)
     {
         RequestId = requestId;
         _onClose = onClose;
         _onCancel = onCancel;
+        // Bound the turn: a server that accepts the message but never emits a terminal
+        // event must not hang the caller forever, nor leak its entry in _turns. A
+        // non-positive span (including Timeout.InfiniteTimeSpan, which is -1ms) disables
+        // it. One-shot and stopped on settle, mirroring TypeScript's setTimeout and Go's
+        // time.AfterFunc.
+        if (turnTimeout > TimeSpan.Zero)
+        {
+            _timeoutTimer = new Timer(
+                _ => Finish(null, new TurnTimeoutException(requestId, turnTimeout)),
+                state: null,
+                dueTime: turnTimeout,
+                period: Timeout.InfiniteTimeSpan);
+        }
     }
 
     /// <summary>
@@ -171,6 +212,7 @@ public sealed class MessageTurn : IAsyncEnumerable<ServerEvent>
     {
         if (Interlocked.Exchange(ref _done, 1) != 0) return;
 
+        _timeoutTimer?.Dispose();
         _channel.Writer.TryComplete();
         _onClose();
 
@@ -184,6 +226,7 @@ public sealed class MessageTurn : IAsyncEnumerable<ServerEvent>
     {
         if (Interlocked.Exchange(ref _done, 1) != 0) return;
 
+        _timeoutTimer?.Dispose();
         Cancelled = true;
         CancelledEvent = ev;
         _channel.Writer.TryComplete();
@@ -210,6 +253,7 @@ public sealed class SmoothAgentClient : IAsyncDisposable
     private readonly ITransport _transport;
     private readonly Func<string> _generateRequestId;
     private readonly TimeSpan _requestTimeout;
+    private readonly TimeSpan _turnTimeout;
     private readonly JsonSerializerOptions _json;
 
     /// <summary>requestId → single-response waiter (create_session, get_session, ping, …).</summary>
@@ -223,6 +267,7 @@ public sealed class SmoothAgentClient : IAsyncDisposable
     {
         _transport = options.Transport ?? new WebSocketTransport(WithToken(options.Url, options.Token));
         _requestTimeout = options.RequestTimeout;
+        _turnTimeout = options.TurnTimeout;
         _generateRequestId = options.GenerateRequestId ?? (() => $"req-{Guid.NewGuid():N}");
         _json = options.JsonOptions ?? new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
@@ -318,19 +363,31 @@ public sealed class SmoothAgentClient : IAsyncDisposable
         var turn = new MessageTurn(
             requestId,
             () => _turns.TryRemove(requestId, out _),
-            onCancel: () => Cancel(requestId, request.SessionId));
+            onCancel: () => Cancel(requestId, request.SessionId),
+            turnTimeout: _turnTimeout);
         _turns[requestId] = turn;
 
+        // Fire-and-forget, but OBSERVED: SendAsync is async, so a send failure faults the
+        // task rather than throwing synchronously here. A try/catch around the discard
+        // would never run — the turn would sit in _turns forever with no error, which is
+        // the leak this method used to have.
+        _ = SendTurnFrameAsync(turn, requestId, Serialize(request));
+        return turn;
+    }
+
+    /// <summary>Awaits the turn's outbound frame so a send failure aborts the turn instead of
+    /// becoming an unobserved faulted task.</summary>
+    private async Task SendTurnFrameAsync(MessageTurn turn, string requestId, string frame)
+    {
         try
         {
-            _ = _transport.SendAsync(Serialize(request));
+            await _transport.SendAsync(frame).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _turns.TryRemove(requestId, out _);
             turn.Abort(ex);
         }
-        return turn;
     }
 
     /// <summary>

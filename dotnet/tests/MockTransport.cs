@@ -18,12 +18,28 @@ internal sealed class MockTransport : ITransport
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// When set, <see cref="SendAsync"/> fails ASYNCHRONOUSLY with this exception — it faults
+    /// the returned task instead of throwing at the call site. That is how the real
+    /// WebSocketTransport behaves (its SendAsync is <c>async</c>), and it is the case a
+    /// try/catch wrapped around a discarded <c>_ = SendAsync(...)</c> silently misses.
+    /// </summary>
+    public Exception? AsyncSendFailure { get; set; }
+
     public Task SendAsync(string data, CancellationToken cancellationToken = default)
     {
+        if (AsyncSendFailure is not null)
+            return FailAsync(AsyncSendFailure);
         if (State != TransportState.Open)
             throw new InvalidOperationException($"not open: {State}");
         Sent.Add(data);
         return Task.CompletedTask;
+    }
+
+    private static async Task FailAsync(Exception ex)
+    {
+        await Task.Yield();
+        throw ex;
     }
 
     public Task CloseAsync(int code = 1000, string? reason = null, CancellationToken cancellationToken = default)

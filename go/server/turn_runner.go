@@ -505,6 +505,15 @@ consume:
 	}
 
 	// 5. Persist the outbound reply.
+	//
+	// Checked immediately before the write, not just in the event loop above: a store
+	// is free to ignore the context (the in-memory one takes it as `_`), so passing a
+	// cancelled ctx does NOT stop the write. Cancelling a turn is supposed to discard
+	// its partial assistant reply — a persisted reply for a turn the client was told
+	// was cancelled shows up in history on the next load.
+	if err := ctx.Err(); err != nil {
+		return TurnResult{}, err
+	}
 	outbound, err := r.store.AppendMessage(ctx, conversationID, Outbound, reply.String())
 	if err != nil {
 		return TurnResult{}, err
