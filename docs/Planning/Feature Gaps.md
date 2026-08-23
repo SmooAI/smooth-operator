@@ -95,10 +95,10 @@ Formalize the platform.s `mock_connector` + `external_dependency_unit` vs `unit`
 5. **Gated, never skipped silently.** External/LLM tests `skip` (not pass) without creds and log why; nightly CI supplies creds.
 
 ## 5. Suggested next TDD increments (priority order)
-1. **G3 access-control leak test** (highest severity) → ACL filter on all adapters.
+1. ~~**G3 access-control leak test** (highest severity) → ACL filter on all adapters.~~ ✅ shipped, including the live-path hole — see §G3.
 2. ~~**G1 `MockConnector` + ingestion-pipeline contract test** → connector trait + web/file/github connectors.~~ ✅ shipped — next in this line is the `pull` streaming/pagination decision, then Confluence + Jira.
 3. **G4 retrieval-quality eval** (deterministic recall@k) alongside the LLM-judge evals.
-4. **G5 widget Playwright e2e**, then **G2/G7/G9**. (G6 and G8 are done; G3 is done.)
+4. **G5 widget Playwright e2e**, then **G7** (multi-tenancy), plus the specific remainders of **G2** — format extraction (PDF/DOCX/rich HTML → text) ahead of the chunker; the chunker itself is done — and **G9** — a `schedule:` job that actually runs the gated `external` tier; the mock and the credential-free tier are done. (G1, G3, G6 and G8 are done.)
 
 Tracked against the [[Roadmap]]; these become Phase 4 (tools/ingestion), Phase 6 (deploy CI), and a new **Phase 10 — connectors & quality regression**.
 
