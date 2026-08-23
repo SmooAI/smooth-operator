@@ -89,7 +89,7 @@ Two findings worth carrying forward:
 The backend is `InMemoryKnowledge`, which ranks **lexically**. The
 `DeterministicEmbedder` on the ingest path really runs (batch shape and vector
 dimension are validated) but its vectors do not influence ranking, so **an
-embedder swap is not scored by this eval**. Scoring dense retrieval means running
+embedder swap is not scored by this eval** (pearl `th-15a147`). Scoring dense retrieval means running
 this same corpus and query set against the pgvector adapter under testcontainers
 — the corpus, labels, and metrics are backend-agnostic and move over unchanged.
 Until that exists, a green run here is not evidence that dense retrieval is fine.

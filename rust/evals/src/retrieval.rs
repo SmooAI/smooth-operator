@@ -16,7 +16,7 @@
 //! **lexically**. The [`DeterministicEmbedder`] on the ingest path is really
 //! run — batch shape and vector dimension are validated — but its vectors do
 //! not influence the ranking, so **an embedder swap is not scored by this
-//! eval**. Scoring dense retrieval means running this same corpus and query set
+//! eval** (tracked as pearl `th-15a147`). Scoring dense retrieval means running this same corpus and query set
 //! against the pgvector adapter under testcontainers; the corpus, labels, and
 //! metrics are backend-agnostic and would move over unchanged. Until then, do
 //! not read a green run here as "dense retrieval is fine".
