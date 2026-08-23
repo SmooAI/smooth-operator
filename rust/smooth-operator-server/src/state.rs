@@ -517,22 +517,24 @@ impl AppState {
     /// [`session_supports`](Self::session_supports)) working untouched: every
     /// frame that needs them passes the ownership check first, and that check is
     /// what calls this.
-    pub async fn load_session(&self, session_id: &str) -> Option<Session> {
+    /// `Ok(None)` is an existence claim — this session does not exist. `Err` is
+    /// NOT: a storage failure means the question could not be answered, and the
+    /// caller must surface it as retryable rather than telling a human their
+    /// session is gone. The two used to collapse into `None`, so a Postgres blip
+    /// put `session '<id>' not found` in a live visitor's chat bubble.
+    pub async fn load_session(&self, session_id: &str) -> anyhow::Result<Option<Session>> {
         if let Some(session) = self.get_session(session_id) {
-            return Some(session);
+            return Ok(Some(session));
         }
         match self.storage.get_session(session_id).await {
             Ok(Some(session)) => {
                 self.insert_session(session.clone());
-                Some(session)
+                Ok(Some(session))
             }
-            Ok(None) => None,
+            Ok(None) => Ok(None),
             Err(e) => {
-                // A storage failure is NOT "no such session". Saying so would
-                // turn a blip into an existence claim, and the caller renders
-                // that to a human as a not-found error.
                 tracing::warn!(error = %e, session_id, "session lookup failed against storage");
-                None
+                Err(e)
             }
         }
     }
@@ -1010,7 +1012,7 @@ mod tests {
             "premise broken: pod B must not have it locally"
         );
 
-        let loaded = pod_b.load_session("s-shared").await;
+        let loaded = pod_b.load_session("s-shared").await.expect("storage ok");
         assert!(
             loaded.is_some(),
             "pod B must hydrate the session from storage"
@@ -1030,7 +1032,11 @@ mod tests {
     #[tokio::test]
     async fn hydration_does_not_conjure_an_unknown_session() {
         let state = state_with(config_with_env_key(None));
-        assert!(state.load_session("s-nope").await.is_none());
+        assert!(state
+            .load_session("s-nope")
+            .await
+            .expect("storage ok")
+            .is_none());
     }
 
     /// th-ca579c — identity verification survives a pod hop.
@@ -1055,7 +1061,7 @@ mod tests {
 
         // Pod B hydrates fresh from storage and must agree.
         assert!(
-            pod_b.load_session("s-otp").await.is_some(),
+            pod_b.load_session("s-otp").await.expect("storage ok").is_some(),
             "pod B must see the session"
         );
         assert!(
