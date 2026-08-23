@@ -1061,7 +1061,11 @@ mod tests {
 
         // Pod B hydrates fresh from storage and must agree.
         assert!(
-            pod_b.load_session("s-otp").await.expect("storage ok").is_some(),
+            pod_b
+                .load_session("s-otp")
+                .await
+                .expect("storage ok")
+                .is_some(),
             "pod B must see the session"
         );
         assert!(

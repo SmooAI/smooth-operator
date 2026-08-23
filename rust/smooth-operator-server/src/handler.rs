@@ -198,9 +198,11 @@ async fn scoped_session(
     if !same_org(auth_org, &session.organization_id) {
         return Ok(None);
     }
-    Ok(may_read_conversation(state, &session.conversation_id, auth_org, scope)
-        .await
-        .then_some(session))
+    Ok(
+        may_read_conversation(state, &session.conversation_id, auth_org, scope)
+            .await
+            .then_some(session),
+    )
 }
 
 /// The `error` event for a session read that storage could not answer. Distinct

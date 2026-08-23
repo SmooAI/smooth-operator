@@ -228,27 +228,28 @@ async fn a_storage_blip_is_never_reported_as_not_found() {
     let state = AppState::new(Arc::new(adapter), base_config());
     fail.store(true, Ordering::SeqCst);
 
+    // Every action is checked before failing, so one run reports every handler
+    // that regressed — not just the first.
+    let mut regressed = Vec::new();
     for (frame, notfound_code) in session_frames() {
         let ev = drive(&state, &frame).await;
-        let code = ev["error"]["code"].as_str().unwrap_or_default();
-        let message = ev["error"]["message"].as_str().unwrap_or_default();
-
-        assert_eq!(
-            code, "STORAGE_ERROR",
-            "{} must report a retryable storage failure, got: {ev}",
-            frame["action"]
-        );
-        assert_ne!(
-            code, notfound_code,
-            "{} must not claim the session/park is absent on a storage blip",
-            frame["action"]
-        );
-        assert!(
-            !message.to_lowercase().contains("not found"),
-            "{} rendered an existence claim to the user: {message}",
-            frame["action"]
-        );
+        let code = ev["error"]["code"].as_str().unwrap_or_default().to_string();
+        let message = ev["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if code != "STORAGE_ERROR"
+            || code == notfound_code
+            || message.to_lowercase().contains("not found")
+        {
+            regressed.push(format!("{}: {ev}", frame["action"]));
+        }
     }
+    assert!(
+        regressed.is_empty(),
+        "these actions turned a storage blip into an existence claim:\n{}",
+        regressed.join("\n")
+    );
 }
 
 /// The other half — and the reason this needs two tests. A genuinely unknown id
@@ -260,15 +261,18 @@ async fn an_unknown_session_is_still_not_found_when_storage_is_healthy() {
     let state = AppState::new(Arc::new(adapter), base_config());
     assert!(!fail.load(Ordering::SeqCst), "storage must be healthy here");
 
+    let mut wrong = Vec::new();
     for (frame, notfound_code) in session_frames() {
         let ev = drive(&state, &frame).await;
-        assert_eq!(
-            ev["error"]["code"].as_str().unwrap_or_default(),
-            notfound_code,
-            "{} must still report not-found for an id that does not exist, got: {ev}",
-            frame["action"]
-        );
+        if ev["error"]["code"].as_str().unwrap_or_default() != notfound_code {
+            wrong.push(format!("{} (want {notfound_code}): {ev}", frame["action"]));
+        }
     }
+    assert!(
+        wrong.is_empty(),
+        "these actions stopped reporting a genuinely unknown id as not-found:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// A session that IS in storage still resolves through the blip-aware path — the
