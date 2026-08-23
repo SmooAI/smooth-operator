@@ -7,11 +7,21 @@
 //!
 //! ## Strategy
 //!
-//! 1. Split content into paragraphs on blank lines (`\n\n`).
-//! 2. Greedily pack paragraphs into a chunk up to [`Chunker::max_chars`].
-//! 3. A single paragraph larger than the cap is hard-split on word boundaries.
+//! 1. Normalize CRLF, then split content into paragraphs on blank lines.
+//! 2. Greedily pack paragraphs into a chunk, **breaking before a markdown
+//!    heading** so one chunk never straddles two sections.
+//! 3. An oversized paragraph spills on word boundaries; a single "word" longer
+//!    than the budget (a URL, or any script that does not use spaces — Chinese,
+//!    Japanese, Thai) spills on *character* boundaries. Characters, never bytes:
+//!    slicing an em-dash or an emoji in half is a panic in Rust and mojibake in
+//!    a port.
 //! 4. Successive chunks overlap by [`Chunker::overlap_chars`] of trailing text
 //!    (carried as whole words) so a fact spanning a boundary stays retrievable.
+//!
+//! [`Chunker::max_chars`] is a **hard cap on the emitted chunk**, overlap
+//! included: it is the contract with the embedding model's input limit, and a
+//! chunk that exceeds it is silently truncated by the API rather than rejected.
+//! Overlap is therefore spent out of the packing budget, not added on top of it.
 //!
 //! Each [`Chunk`] gets a **stable id** — `"{doc_id}#{index}"` — and inherits the
 //! source document's title/metadata/acl, so retrieval can attribute and (later)
@@ -79,6 +89,17 @@ impl Chunker {
         self.overlap_chars
     }
 
+    /// Characters available for *packed content*, leaving room for the overlap
+    /// the next chunk will prepend (plus its joining space). This is what keeps
+    /// `max_chars` a hard cap on the emitted chunk rather than on its content.
+    fn pack_budget(&self) -> usize {
+        if self.overlap_chars == 0 {
+            self.max_chars
+        } else {
+            self.max_chars.saturating_sub(self.overlap_chars + 1).max(1)
+        }
+    }
+
     /// Chunk a [`RawDocument`], returning its ordered [`Chunk`]s.
     ///
     /// An empty / whitespace-only document yields no chunks.
@@ -113,17 +134,23 @@ impl Chunker {
 
     /// Split raw content into chunk-sized texts (no metadata; pure string work).
     fn split_text(&self, content: &str) -> Vec<String> {
-        // 1. Paragraph units (blank-line separated), oversized ones hard-split.
+        // CRLF-authored files and many HTTP responses separate paragraphs with
+        // "\r\n\r\n", which contains no "\n\n" at all — without this, every
+        // Windows-authored document arrives as one giant paragraph.
+        let content = content.replace("\r\n", "\n");
+        let budget = self.pack_budget();
+
+        // 1. Paragraph units (blank-line separated), oversized ones spilled.
         let mut units: Vec<String> = Vec::new();
         for para in content.split("\n\n") {
             let trimmed = para.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if trimmed.chars().count() <= self.max_chars {
+            if trimmed.chars().count() <= budget {
                 units.push(trimmed.to_string());
             } else {
-                units.extend(self.hard_split_words(trimmed));
+                units.extend(self.spill(trimmed, budget));
             }
         }
 
@@ -133,7 +160,12 @@ impl Chunker {
         for unit in units {
             if current.is_empty() {
                 current = unit;
-            } else if current.chars().count() + 2 + unit.chars().count() <= self.max_chars {
+            } else if is_heading(&unit) {
+                // A chunk spanning two sections attributes section A's text to
+                // section B's heading at retrieval time. Break before headings.
+                chunks.push(std::mem::take(&mut current));
+                current = unit;
+            } else if current.chars().count() + 2 + unit.chars().count() <= budget {
                 current.push_str("\n\n");
                 current.push_str(&unit);
             } else {
@@ -148,19 +180,23 @@ impl Chunker {
         self.apply_overlap(chunks)
     }
 
-    /// Hard-split a single oversized paragraph at word boundaries.
-    fn hard_split_words(&self, para: &str) -> Vec<String> {
+    /// Spill one oversized paragraph into budget-sized pieces, preferring word
+    /// boundaries and falling back to character boundaries for a single token
+    /// that is itself too long.
+    fn spill(&self, para: &str, budget: usize) -> Vec<String> {
         let mut out = Vec::new();
         let mut current = String::new();
         for word in para.split_whitespace() {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.chars().count() + 1 + word.chars().count() > self.max_chars {
-                out.push(std::mem::take(&mut current));
-                current.push_str(word);
-            } else {
-                current.push(' ');
-                current.push_str(word);
+            for piece in split_oversized_word(word, budget) {
+                if current.is_empty() {
+                    current = piece;
+                } else if current.chars().count() + 1 + piece.chars().count() > budget {
+                    out.push(std::mem::take(&mut current));
+                    current = piece;
+                } else {
+                    current.push(' ');
+                    current.push_str(&piece);
+                }
             }
         }
         if !current.is_empty() {
@@ -170,7 +206,8 @@ impl Chunker {
     }
 
     /// Prepend the trailing `overlap_chars` (rounded to whole words) of each
-    /// chunk onto the next, so a boundary-spanning fact appears in both.
+    /// chunk onto the next, so a boundary-spanning fact appears in both — never
+    /// pushing the result past `max_chars`.
     fn apply_overlap(&self, chunks: Vec<String>) -> Vec<String> {
         if self.overlap_chars == 0 || chunks.len() < 2 {
             return chunks;
@@ -181,7 +218,12 @@ impl Chunker {
                 out.push(chunk.clone());
                 continue;
             }
-            let tail = self.trailing_words(&chunks[i - 1]);
+            // Whatever room is left under the cap, never more than the overlap.
+            let room = self
+                .max_chars
+                .saturating_sub(chunk.chars().count() + 1)
+                .min(self.overlap_chars);
+            let tail = trailing_words(&chunks[i - 1], room);
             if tail.is_empty() {
                 out.push(chunk.clone());
             } else {
@@ -190,25 +232,51 @@ impl Chunker {
         }
         out
     }
+}
 
-    /// The last whole words of `s` totaling at most `overlap_chars` characters.
-    fn trailing_words(&self, s: &str) -> String {
-        let words: Vec<&str> = s.split_whitespace().collect();
-        let mut take = 0usize;
-        let mut len = 0usize;
-        for word in words.iter().rev() {
-            let add = word.chars().count() + usize::from(take > 0);
-            if len + add > self.overlap_chars {
-                break;
-            }
-            len += add;
-            take += 1;
-        }
-        if take == 0 {
-            return String::new();
-        }
-        words[words.len() - take..].join(" ")
+/// A markdown ATX heading line (`# `, `## `, …) — a hard chunk boundary.
+fn is_heading(unit: &str) -> bool {
+    unit.starts_with('#')
+}
+
+/// Split one word into pieces of at most `budget` **characters**.
+///
+/// A word that fits is returned whole. One that does not — a long URL, a
+/// minified blob, or a run of Chinese/Japanese/Thai, none of which contain a
+/// space to break on — is cut on character boundaries. `chars()` is what makes
+/// that safe: slicing the same string by bytes would cut a multi-byte codepoint
+/// in half.
+fn split_oversized_word(word: &str, budget: usize) -> Vec<String> {
+    if word.chars().count() <= budget {
+        return vec![word.to_string()];
     }
+    let chars: Vec<char> = word.chars().collect();
+    chars
+        .chunks(budget.max(1))
+        .map(|piece| piece.iter().collect())
+        .collect()
+}
+
+/// The last whole words of `s` totaling at most `limit` characters.
+fn trailing_words(s: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let mut take = 0usize;
+    let mut len = 0usize;
+    for word in words.iter().rev() {
+        let add = word.chars().count() + usize::from(take > 0);
+        if len + add > limit {
+            break;
+        }
+        len += add;
+        take += 1;
+    }
+    if take == 0 {
+        return String::new();
+    }
+    words[words.len() - take..].join(" ")
 }
 
 impl Default for Chunker {
