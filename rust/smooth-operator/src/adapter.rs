@@ -231,16 +231,18 @@ pub trait StorageAdapter: Send + Sync {
     /// ## Default — **fail closed for ACL'd content**
     ///
     /// The default implementation wraps [`knowledge`](Self::knowledge) in an
-    /// [`AclKnowledgeStore`](crate::access_control::AclKnowledgeStore) reader.
-    /// Because that wrapper's ACL side table starts empty (the documents were
-    /// ingested through a different store instance), every document it sees is
-    /// treated as org-public — which is the *raw* `knowledge()` behavior and is
-    /// therefore **not** a regression, but also offers no within-org protection.
-    /// Backends that can persist + read back a document's ACL (the in-memory
-    /// adapter via a shared store; Postgres / DynamoDB via a stored ACL column)
-    /// **override** this method to enforce the ACL durably, so restricted docs
-    /// are dropped for unentitled requesters even across the ingest→serve
-    /// process boundary.
+    /// [`AclKnowledgeStore`](crate::access_control::AclKnowledgeStore) reader,
+    /// which enforces **both** boundaries from its side table: the tenant
+    /// boundary (the document's recorded org vs `access.organization_id` —
+    /// feature gap G7) and the within-org user/group ACL. Documents ingested
+    /// through a *different* store instance are absent from that side table, so
+    /// they are dropped for a requester carrying an org and treated as org-public
+    /// for one carrying none.
+    ///
+    /// Backends that can persist + read back a document's org and ACL (the
+    /// in-memory adapter via a shared store; Postgres / DynamoDB via a stored
+    /// column / partition key) **override** this method to enforce both durably,
+    /// so the filter survives the ingest→serve process boundary.
     fn knowledge_for_access(&self, access: &AccessContext) -> Arc<dyn KnowledgeBase> {
         crate::access_control::AclKnowledgeStore::new(self.knowledge()).reader(access.clone())
     }

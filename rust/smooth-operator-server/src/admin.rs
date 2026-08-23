@@ -792,7 +792,17 @@ async fn index_connector(
     // created with this same embedder's dim by the storage-backend wiring
     // (`build_state_from_env_async`), so document and query vectors agree.
     let embedder = build_embedder(&EmbedderConfig::from_server_config(&state.config));
-    let knowledge = state.storage.knowledge();
+    // Ingest through the ORG-BOUND knowledge seam, never the raw `knowledge()`
+    // handle. `knowledge()` performs no org scoping (see the trait docs), so on a
+    // multi-tenant backend every org's connector documents landed in the same
+    // unscoped bucket — Postgres wrote `organization_id = NULL`, which the
+    // org-filtered retrieval path (`WHERE organization_id = $1`) can never match,
+    // and DynamoDB wrote the adapter's construction-time partition. Same shape as
+    // the G3 finding: the seam existed and one caller went around it.
+    let knowledge = state.storage.knowledge_for_access(
+        &smooth_operator::access_control::AccessContext::default()
+            .with_organization_id(principal.org_id.clone()),
+    );
 
     let run = service
         .run_once(

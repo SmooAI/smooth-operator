@@ -36,6 +36,12 @@ use smooth_operator_server::runner::{self, TurnRequest, TurnResult};
 /// stamps for a private repo (`github:owner/repo`).
 const PRIVATE_GROUP: &str = "github:acme/secret";
 
+/// The org the forwarded identities below claim. Knowledge is seeded *as* this
+/// org because a turn's `AccessContext` carries the principal's org, and the
+/// knowledge reader now enforces the tenant boundary before the ACL (feature gap
+/// G7) — so an unstamped document belongs to no tenant and is invisible to one.
+const ORG: &str = "acme";
+
 fn mock_llm() -> LlmConfig {
     LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o")
 }
@@ -65,7 +71,9 @@ fn resolve_access(verifier: &dyn AuthVerifier, forwarded: Option<&str>) -> Acces
 /// [`PRIVATE_GROUP`]. Mirrors `acl_chat_leak::seeded_storage`.
 fn seeded_storage() -> Arc<InMemoryStorageAdapter> {
     let storage = Arc::new(InMemoryStorageAdapter::new());
-    let kb = storage.knowledge();
+    // Ingest through the ORG-BOUND seam, exactly as `server::seed_knowledge` and
+    // the admin connector-index path do: it stamps the owning tenant on each doc.
+    let kb = storage.knowledge_for_access(&AccessContext::default().with_organization_id(ORG));
 
     let mut public = Document::new(
         "The alpha office hours are open to the whole organization.",

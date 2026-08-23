@@ -74,9 +74,55 @@ Mature platforms ship extensive web + Playwright suites.
 - ✅ **Done.** `.github/workflows/pr-kind-deploy-smoke.yml` runs the planned `kind` job on every PR: `helm install` into an ephemeral cluster, then the protocol smoke against the live pod. It is a required-looking check on current PRs (observed green on #526, 2026-08-22).
 - This entry read "we only `helm lint`/`helm template`" for some time after the job shipped. A gap doc that is stale in the CLOSED direction is worse than one that is merely incomplete: it argues for work that already exists. When you close a gap here, edit this file in the same PR.
 
-### G7. Multi-tenancy
+### G7. Multi-tenancy — ✅ isolation is now a test, and closing two live leaks
 Mature knowledge platforms support multi-tenant schemas. Our org scoping is row-level only.
 - **TDD**: `tests/multitenancy.rs` first — two orgs, assert full isolation across conversations/knowledge/checkpoints on both adapters. (Likely already passes for OLTP via `organizationId`; the test makes it a guarantee and covers the knowledge/S3-Vectors index-per-org path.)
+- ✅ **Done — and the "likely already passes" framing above was wrong twice.** One
+  **shared** suite (`rust/adapters/multitenancy_suite.rs`, `#[path]`-included by
+  each adapter's `tests/multitenancy.rs`) runs the same body against **in-memory,
+  Postgres and DynamoDB**, with a positive control on every isolation assertion so
+  a backend that returns nothing can't pass vacuously. A second suite
+  (`smooth-operator-server/tests/multitenancy.rs`) drives the real
+  `handler::handle_frame` from an attacker authenticated to another org.
+
+  **Now guaranteed by a test, on all three backends:**
+  - conversation listings are org-partitioned, by-org and by-org-and-user — asserted with the **same user email owning one conversation in each org**, so the isolation cannot be incidentally coming from a differing owner;
+  - the **idempotency claim is per-org** (`(organization_id, idempotency_key)`): two orgs using the same key get two distinct conversations, where an org-blind claim would have handed org B **org A's conversation row**;
+  - message pages, participants and sessions ride their own org's conversation, and a session update in one org does not touch the other's row;
+  - knowledge retrieval bound to org B never returns org A's document — *including* documents ingested through the org-blind `knowledge()` handle, which must land in the tenant their `org_id` metadata names;
+  - checkpoints saved under one agent id are invisible under another.
+
+  **What it found (both fixed in the same PR, each proven by reverting the fix and re-running):**
+  1. 🚨 **Cross-tenant session access on every by-id path.** Org was resolved per
+     connection only to *stamp* new sessions; `may_read_conversation` checked the
+     **owner email** and never the org, and its deliberate ownerless-is-open rule
+     is exactly the widget's default state. An attacker authenticated to org B who
+     learned an org-A session id could read the session, replay its history through
+     a turn, retitle the conversation, and resume it — minting a session bound to
+     the victim's org, which flows into the turn's `ToolProviderContext`. The
+     **Lambda transport had no check at all**. Fixed at the `scoped_session` /
+     `may_read_conversation` chokepoints (and the Lambda's `get_session` /
+     `send_message`), denying indistinguishably from not-found.
+  2. 🚨 **Knowledge was not tenant-isolated where the backend isn't
+     org-partitioned.** `AclKnowledgeStore` filtered by user/group only, assuming
+     the wrapped store had already done the org filter — true for Postgres/DynamoDB,
+     false for the in-memory adapter and any adapter using the
+     `knowledge_for_access` trait default. Compounding it, `POST
+     /admin/connectors/{id}/index` ingested through the org-blind `knowledge()`
+     handle for every tenant (same shape as G3: the seam existed, one caller went
+     around it), so on Postgres every connector document was written with
+     `organization_id = NULL` — invisible to every org-scoped read. The ACL store now
+     records each document's org and enforces the tenant boundary before the ACL;
+     DynamoDB honours `AccessContext::organization_id` for its query partition
+     (Postgres already did); both backends prefer the document's own `org_id` at
+     ingest; and the admin run goes through the org-bound seam.
+
+  **Still NOT guaranteed — merely true today (residuals, deliberately not dressed up):**
+  - `StorageAdapter`'s by-id reads (`get_conversation`, `get_message`, `get_session`, `list_participants_by_conversation`) take **no org** and are not org-checked at the adapter. Enforcement lives at the caller; a new caller can still forget.
+  - A connection with **no** verified org (anonymous / tokenless — the widget's normal state) is not org-checked at all. Fail-closing it would deny the widget its own session; a deployment needing hard isolation must require auth (`strict_auth`).
+  - A conversation with **no participants yet** (the create→first-frame race) has no derivable org, so the conversation-id path falls through to the ownership check. The session-id path is unaffected — a `Session` always carries its org.
+  - `CheckpointStore` has **no org dimension** at all: isolation rests entirely on agent-id uniqueness (the server mints a fresh UUID per `Agent`, and never reads checkpoints back). A host that reuses a stable agent id across tenants would commingle conversation state.
+  - **S3 Vectors is UNVERIFIED.** The index-per-org path is behind the `s3-vectors` feature and needs real AWS; the suite exercises the brute-force DynamoDB backend only.
 
 ### G8. Model-server parity (embedding/rerank) — ✅ rerank stage shipped
 Mature knowledge platforms have a dedicated, tested model server (embeddings + rerank + intent). We have a pluggable `Embedder` + RRF; the rerank stage is now implemented as a pluggable seam mirroring the `Embedder` pattern.

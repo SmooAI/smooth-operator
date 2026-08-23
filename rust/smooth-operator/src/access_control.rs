@@ -29,6 +29,18 @@
 //! Postgres, or DynamoDB knowledge base identically (the post-filter happens in
 //! our layer, after the backend's own org-scoped query).
 //!
+//! ## Two boundaries, outer first
+//!
+//! The reader enforces the **tenant** boundary before the within-org ACL. A
+//! requester whose [`AccessContext`] carries an `organization_id` sees only
+//! documents the store recorded as that org's — recorded from the document's
+//! [`ORG_METADATA_KEY`] metadata at ingest, or from the org the ingesting handle
+//! was bound to. A requester with no org resolved (single-tenant / anonymous)
+//! gets no tenant filter, exactly as before. This matters because the wrapped
+//! inner store is not necessarily org-partitioned: it is for Postgres and
+//! DynamoDB, and is NOT for the in-memory adapter or any adapter relying on the
+//! `knowledge_for_access` trait default (feature gap G7).
+//!
 //! ## No-ACL default semantics — **no-acl ⇒ org-public**
 //!
 //! A document ingested **without** an ACL (the legacy / existing-seed path) has
@@ -182,11 +194,13 @@ impl DocAcl {
 /// to scope RAG to that tenant's documents — its
 /// [`StorageAdapter::knowledge_for_access`](crate::adapter::StorageAdapter::knowledge_for_access)
 /// reads `access.organization_id` to pick the right tenant before any
-/// user/group filtering. So the org rides on the `AccessContext` purely to be
-/// **available** to a host adapter; the built-in ACL path ignores it (org
-/// isolation already happened upstream — every knowledge row carries an
-/// `organizationId` the backend filters on). `None` ⇒ "no org resolved", which a
-/// single-tenant adapter treats exactly as today.
+/// user/group filtering. The built-in [`AclKnowledgeStore`] reader enforces it
+/// too (feature gap G7): a requester with a resolved org sees only documents the
+/// store recorded as that org's, so a backend whose own storage is *not*
+/// org-partitioned (the in-memory adapter, and any third-party adapter using the
+/// `knowledge_for_access` trait default) is tenant-isolated by construction
+/// rather than by assumption. `None` ⇒ "no org resolved" ⇒ no tenant filter,
+/// which a single-tenant adapter treats exactly as before.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccessContext {
     /// The requester's user id, if authenticated as a user. `None` for an
@@ -269,14 +283,36 @@ impl AccessContext {
     }
 }
 
-/// Side table mapping a stored `document_id` to its [`DocAcl`]. Shared (`Arc`)
-/// between the ingest handle that populates it and every per-request reader that
-/// consults it. Documents absent from the table are org-public (no-ACL default).
-type AclTable = Arc<RwLock<HashMap<String, DocAcl>>>;
+/// The document-metadata key naming the organization a document belongs to.
+/// Stamped on every chunk by the ingestion pipeline
+/// (`smooai-smooth-operator-ingestion`), and read back here so a store shared by
+/// more than one tenant can enforce the org boundary at retrieval.
+pub const ORG_METADATA_KEY: &str = "org_id";
+
+/// What the side table remembers about one stored document: which org owns it
+/// (for the tenant boundary) and its within-org [`DocAcl`] (for the user/group
+/// boundary). Either may be absent — see [`AclReader`] for how each absence is
+/// resolved.
+#[derive(Debug, Clone, Default)]
+struct DocEntry {
+    /// The owning organization, from the document's
+    /// [`ORG_METADATA_KEY`] metadata at ingest, falling back to the org the
+    /// ingesting handle was bound to. `None` ⇒ no org was ever recorded.
+    org: Option<String>,
+    /// The within-org allow-list. `None` ⇒ no ACL recorded ⇒ org-public.
+    acl: Option<DocAcl>,
+}
+
+/// Side table mapping a stored `document_id` to its recorded org + [`DocAcl`].
+/// Shared (`Arc`) between the ingest handle that populates it and every
+/// per-request reader that consults it. Documents absent from the table have
+/// neither an org nor an ACL recorded.
+type AclTable = Arc<RwLock<HashMap<String, DocEntry>>>;
 
 /// An ACL-aware knowledge store: wraps any inner
-/// [`KnowledgeBase`](smooth_operator_core::KnowledgeBase) and records document ACLs
-/// at ingest so retrieval can be filtered per requester.
+/// [`KnowledgeBase`](smooth_operator_core::KnowledgeBase) and records each
+/// document's owning org + ACL at ingest so retrieval can be filtered per
+/// requester (tenant boundary first, then the within-org allow-list).
 ///
 /// Construction does **not** itself implement `KnowledgeBase` for reading,
 /// because reads must be bound to a requester. Instead:
@@ -339,9 +375,39 @@ impl AclKnowledgeStore {
             .acls
             .write()
             .map_err(|e| anyhow::anyhow!("acl table lock poisoned: {e}"))?;
-        table.insert(document_id.into(), acl);
+        table.entry(document_id.into()).or_default().acl = Some(acl);
         Ok(())
     }
+}
+
+/// Record a document's org + ACL into the shared side table at ingest.
+///
+/// `bound_org` is the org the ingesting handle is bound to (an [`AclReader`]'s
+/// requester org); it is the fallback when the document carries no
+/// [`ORG_METADATA_KEY`] of its own — mirroring the Postgres backend, whose
+/// ingest stamps the access-bound org onto the row.
+fn record_document(acls: &AclTable, doc: &Document, bound_org: Option<&str>) -> anyhow::Result<()> {
+    let org = doc
+        .metadata
+        .get(ORG_METADATA_KEY)
+        .map(String::as_str)
+        .or(bound_org)
+        .map(str::to_string);
+    let acl = DocAcl::from_metadata(&doc.metadata);
+    if org.is_none() && acl.is_none() {
+        return Ok(());
+    }
+    let mut table = acls
+        .write()
+        .map_err(|e| anyhow::anyhow!("acl table lock poisoned: {e}"))?;
+    let entry = table.entry(doc.id.clone()).or_default();
+    if org.is_some() {
+        entry.org = org;
+    }
+    if acl.is_some() {
+        entry.acl = acl;
+    }
+    Ok(())
 }
 
 /// Records ACLs at ingest, forwarding documents to the inner backend.
@@ -352,15 +418,11 @@ struct AclIngestHandle {
 
 impl KnowledgeBase for AclIngestHandle {
     fn ingest(&self, doc: Document) -> anyhow::Result<()> {
-        // Record the ACL (if the document carries one) keyed by document id, so
-        // a later query result with that document_id can be access-checked.
-        if let Some(acl) = DocAcl::from_metadata(&doc.metadata) {
-            let mut table = self
-                .acls
-                .write()
-                .map_err(|e| anyhow::anyhow!("acl table lock poisoned: {e}"))?;
-            table.insert(doc.id.clone(), acl);
-        }
+        // Record the owning org + the ACL (whichever the document carries) keyed
+        // by document id, so a later query result with that document_id can be
+        // access-checked. This handle is bound to no requester, so there is no
+        // fallback org — an unstamped document records none.
+        record_document(&self.acls, &doc, None)?;
         self.inner.ingest(doc)
     }
 
@@ -380,15 +442,12 @@ struct AclReader {
 
 impl KnowledgeBase for AclReader {
     fn ingest(&self, doc: Document) -> anyhow::Result<()> {
-        // A reader can still ingest (recording ACLs), so the same handle is
-        // usable end to end in tests — but production ingest uses ingest_handle.
-        if let Some(acl) = DocAcl::from_metadata(&doc.metadata) {
-            let mut table = self
-                .acls
-                .write()
-                .map_err(|e| anyhow::anyhow!("acl table lock poisoned: {e}"))?;
-            table.insert(doc.id.clone(), acl);
-        }
+        // A reader can still ingest, so the same handle is usable end to end —
+        // and this is the seam the org-scoped ingest paths use (the reference
+        // server's knowledge seeding, the admin connector index run). A document
+        // that carries no org of its own inherits the requester's, exactly as
+        // the Postgres backend stamps its access-bound org onto the row.
+        record_document(&self.acls, &doc, self.ctx.organization_id.as_deref())?;
         self.inner.ingest(doc)
     }
 
@@ -405,11 +464,28 @@ impl KnowledgeBase for AclReader {
 
         let mut out = Vec::with_capacity(limit.min(candidates.len()));
         for result in candidates {
-            // No recorded ACL ⇒ org-public (backward-compatible default).
-            let allowed = match table.get(&result.document_id) {
-                Some(acl) => self.ctx.can_access(acl),
+            let entry = table.get(&result.document_id);
+            // Tenant boundary first — it is the outer one. A requester with a
+            // resolved org sees ONLY documents recorded as that org's; a
+            // document with no recorded org is not known to belong to the
+            // tenant, so it is dropped rather than assumed shared. This
+            // deliberately mirrors the Postgres backend's SQL pre-filter
+            // (`WHERE organization_id = $1`, which NULL rows also fail), so the
+            // shared multi-tenancy conformance suite holds identically on every
+            // backend. A requester with NO org (single-tenant / anonymous) keeps
+            // the pre-existing unfiltered behavior.
+            let same_tenant = match &self.ctx.organization_id {
+                Some(requester_org) => entry
+                    .and_then(|e| e.org.as_deref())
+                    .is_some_and(|doc_org| doc_org == requester_org),
                 None => true,
             };
+            // Then the within-org ACL. No recorded ACL ⇒ org-public.
+            let allowed = same_tenant
+                && match entry.and_then(|e| e.acl.as_ref()) {
+                    Some(acl) => self.ctx.can_access(acl),
+                    None => true,
+                };
             if allowed {
                 out.push(result);
                 if out.len() == limit {

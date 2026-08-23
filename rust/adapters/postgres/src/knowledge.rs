@@ -131,6 +131,17 @@ impl PgKnowledgeBase {
         // Stable per-chunk id: the document is stored as a single chunk keyed by
         // its document id, so re-ingesting the same doc upserts in place.
         let row_id = doc.id.clone();
+        // Which tenant owns this row. The document's own `org_id` metadata (the
+        // ingestion pipeline stamps it on every chunk) wins over the handle's
+        // org, so a multi-tenant caller holding the org-blind `knowledge()`
+        // handle still lands the row in the right tenant instead of writing
+        // `organization_id = NULL` — which the org-filtered read
+        // (`WHERE organization_id = $1`) can then never match.
+        let ingest_org = doc
+            .metadata
+            .get(smooth_operator::access_control::ORG_METADATA_KEY)
+            .cloned()
+            .or_else(|| self.organization_id.clone());
 
         let client = self.pool.get().await?;
         client
@@ -149,7 +160,7 @@ impl PgKnowledgeBase {
                 &[
                     &row_id,
                     &doc.id,
-                    &self.organization_id,
+                    &ingest_org,
                     &doc.source,
                     &doc.content,
                     &literal,
