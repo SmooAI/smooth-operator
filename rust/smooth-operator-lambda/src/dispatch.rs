@@ -84,7 +84,7 @@ pub async fn handle_frame(
             create_session(storage, config, auth, poster, &parsed, request_id).await?;
         }
         Some("get_session") => {
-            get_session(storage, poster, &parsed, request_id).await?;
+            get_session(storage, auth, poster, &parsed, request_id).await?;
         }
         Some("send_message") => {
             send_message(storage, config, auth, poster, &parsed, request_id).await?;
@@ -316,6 +316,7 @@ async fn create_session(
 /// `get_session` — read the session snapshot straight from DynamoDB.
 async fn get_session(
     storage: &Arc<dyn StorageAdapter>,
+    auth: &Arc<dyn AuthVerifier>,
     poster: &ConnectionPoster,
     parsed: &Value,
     request_id: Option<&str>,
@@ -332,6 +333,17 @@ async fn get_session(
     };
 
     match storage.get_session(session_id).await {
+        Ok(Some(s)) if !same_org(frame_org(auth, parsed).as_deref(), &s.organization_id) => {
+            // Another tenant's session — answer exactly as for an unknown id so
+            // the caller cannot distinguish "not yours" from "never existed".
+            poster
+                .post(&protocol::error(
+                    request_id,
+                    "SESSION_NOT_FOUND",
+                    &format!("session '{session_id}' not found"),
+                ))
+                .await?;
+        }
         Ok(Some(s)) => {
             let data = json!({
                 "sessionId": s.session_id,
@@ -395,6 +407,25 @@ async fn get_session(
 /// that fails to verify — so the caller falls back to the configured org and the
 /// no-auth/dev behavior is unchanged. Verification failures are logged (never the
 /// token).
+/// The org a frame is authenticated to, when it carries a verifying token.
+/// `None` for no token / an unconfigured verifier / a token that fails to
+/// verify — which keeps the no-auth and dev paths unchanged.
+fn frame_org(auth: &Arc<dyn AuthVerifier>, parsed: &Value) -> Option<String> {
+    resolve_frame_principal(auth, parsed).map(|p| p.org_id)
+}
+
+/// Whether a frame authenticated to `auth_org` may touch a row owned by
+/// `row_org`. `None` (unauthenticated) keeps the pre-existing behavior; an
+/// authenticated frame is pinned to its principal's tenant.
+///
+/// Without this the lambda transport had **no** check at all on `sessionId`:
+/// `get_session` and `send_message` acted on whatever `get_session` returned, so
+/// any caller who knew or guessed a session id could read another org's session
+/// snapshot and drive turns in its conversation. Feature gap G7.
+fn same_org(auth_org: Option<&str>, row_org: &str) -> bool {
+    auth_org.is_none_or(|o| o == row_org)
+}
+
 fn resolve_frame_principal(
     auth: &Arc<dyn AuthVerifier>,
     parsed: &Value,
@@ -485,6 +516,17 @@ async fn send_message(
     };
 
     let session = match storage.get_session(session_id).await {
+        Ok(Some(s)) if !same_org(frame_org(auth, parsed).as_deref(), &s.organization_id) => {
+            // Another tenant's session — indistinguishable from an unknown id.
+            poster
+                .post(&protocol::error(
+                    Some(request_id),
+                    "SESSION_NOT_FOUND",
+                    &format!("session '{session_id}' not found"),
+                ))
+                .await?;
+            return Ok(());
+        }
         Ok(Some(s)) => s,
         Ok(None) => {
             poster

@@ -53,8 +53,10 @@ pub struct DynamoKnowledgeBase {
     table: String,
     embedder: Arc<dyn Embedder>,
     handle: Handle,
-    /// Org partition for ingest/query. The engine is single-org per agent, so a
-    /// fixed org keeps the brute-force scan scoped to one partition.
+    /// Construction-time org partition — the single-tenant default, and the
+    /// fallback when neither the document nor the requester names an org. A
+    /// multi-tenant host overrides it per turn: see [`Self::ingest_org`] and
+    /// [`Self::query_org`].
     organization_id: String,
     backend: KnowledgeBackend,
     /// Optional document-level access control (feature gap G3). When set, the
@@ -110,6 +112,37 @@ impl DynamoKnowledgeBase {
         }
     }
 
+    /// The org partition `doc` is written to: the document's own `org_id`
+    /// metadata (the ingestion pipeline stamps it on every chunk) when present,
+    /// else the access-bound org, else the construction-time org.
+    ///
+    /// Without this, every tenant's documents landed in the construction-time
+    /// partition — one adapter instance could not ingest for more than one org,
+    /// and a multi-tenant host that threaded the turn's org on the
+    /// `AccessContext` (as Postgres already honoured) silently wrote the wrong
+    /// tenant's partition.
+    fn ingest_org<'a>(&'a self, doc: &'a Document) -> &'a str {
+        doc.metadata
+            .get(smooth_operator::access_control::ORG_METADATA_KEY)
+            .map(String::as_str)
+            .or_else(|| {
+                self.access
+                    .as_ref()
+                    .and_then(|a| a.organization_id.as_deref())
+            })
+            .unwrap_or(&self.organization_id)
+    }
+
+    /// The org partition a query reads from: the requester's org when the
+    /// handle is access-bound (multi-tenant host), else the construction-time
+    /// org (single-tenant). Mirrors `PgKnowledgeBase::with_access`.
+    fn query_org(&self) -> &str {
+        self.access
+            .as_ref()
+            .and_then(|a| a.organization_id.as_deref())
+            .unwrap_or(&self.organization_id)
+    }
+
     fn run_blocking<F, T>(&self, fut: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>> + Send + 'static,
@@ -156,14 +189,12 @@ impl DynamoKnowledgeBase {
                 .map(|f| AttributeValue::N(f.to_string()))
                 .collect(),
         );
+        let ingest_org = self.ingest_org(&doc).to_string();
         let mut put = self
             .client
             .put_item()
             .table_name(&self.table)
-            .item(
-                attr::PK,
-                AttributeValue::S(keys::knowledge_pk(&self.organization_id)),
-            )
+            .item(attr::PK, AttributeValue::S(keys::knowledge_pk(&ingest_org)))
             .item(attr::SK, AttributeValue::S(keys::knowledge_sk(&doc.id)))
             .item(attr::ENTITY, AttributeValue::S("knowledge".to_string()))
             .item("documentId", AttributeValue::S(doc.id.clone()))
@@ -181,9 +212,7 @@ impl DynamoKnowledgeBase {
         // S3 Vectors path additionally writes the embedding to its index.
         #[cfg(feature = "s3-vectors")]
         if let Some(store) = &self.s3vectors {
-            store
-                .upsert(&self.organization_id, &doc, &embedding)
-                .await?;
+            store.upsert(&ingest_org, &doc, &embedding).await?;
         }
 
         Ok(())
@@ -206,7 +235,7 @@ impl DynamoKnowledgeBase {
                     .s3vectors
                     .as_ref()
                     .ok_or_else(|| anyhow!("s3 vectors store not initialized"))?;
-                store.query(&self.organization_id, &query_vec, limit).await
+                store.query(self.query_org(), &query_vec, limit).await
             }
         }
     }
@@ -237,7 +266,7 @@ impl DynamoKnowledgeBase {
                 .expression_attribute_names("#sk", attr::SK)
                 .expression_attribute_values(
                     ":pk",
-                    AttributeValue::S(keys::knowledge_pk(&self.organization_id)),
+                    AttributeValue::S(keys::knowledge_pk(self.query_org())),
                 )
                 .expression_attribute_values(
                     ":skp",

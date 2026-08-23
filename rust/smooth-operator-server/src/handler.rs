@@ -73,9 +73,32 @@ impl UserScope {
     }
 }
 
+/// Whether a connection authenticated to `auth_org` may touch a row owned by
+/// `row_org`.
+///
+/// `auth_org == None` — an anonymous / tokenless connection, the embeddable
+/// widget's normal state — keeps the pre-existing behavior: there is no org to
+/// compare against, and the widget must still reach the session it just created.
+/// A connection that DID present a verified principal, however, is pinned to
+/// that principal's org: it may not read, drive, or mutate another tenant's
+/// conversation even if it learns the id. Before this, org was resolved only to
+/// *stamp* new sessions — every by-id path (`get_session`, `send_message`,
+/// `confirm_tool_action`, `submit_interaction`, `verify_otp`,
+/// `rename_conversation`, and conversation resume) was checked for per-user
+/// ownership and never for tenant, so an ownerless conversation (the widget
+/// default — no `user` participant carrying an email) was reachable by any
+/// authenticated user in any org. Feature gap G7.
+fn same_org(auth_org: Option<&str>, row_org: &str) -> bool {
+    auth_org.is_none_or(|o| o == row_org)
+}
+
 /// Whether this connection may read `conversation_id`.
 ///
-/// `Unscoped` sees everything (auth not configured). Otherwise the conversation
+/// Two boundaries, outer first. **Tenant**: a connection carrying a verified org
+/// may only reach that org's conversations — see [`same_org`] — and that applies
+/// to `Unscoped` too, since a single-user flavor still must not reach another
+/// tenant. **Ownership**: `Unscoped` (auth not configured) then sees
+/// everything. Otherwise the conversation
 /// is owner-checked **only if it has an owner** — a `user` participant carrying
 /// a non-blank email. A conversation with no such participant (created by an
 /// anonymous or emailless principal, or predating ownership) stays readable by
@@ -86,8 +109,15 @@ impl UserScope {
 ///
 /// A storage error is a denial — an owner check that can't be completed must not
 /// pass.
-async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &UserScope) -> bool {
-    if matches!(scope, UserScope::Unscoped) {
+async fn may_read_conversation(
+    state: &AppState,
+    conversation_id: &str,
+    auth_org: Option<&str>,
+    scope: &UserScope,
+) -> bool {
+    // Nothing to check on either axis — skip the participant read entirely, as
+    // this function did for `Unscoped` before the tenant check existed.
+    if auth_org.is_none() && matches!(scope, UserScope::Unscoped) {
         return true;
     }
     match state
@@ -96,6 +126,21 @@ async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &
         .await
     {
         Ok(participants) => {
+            // Tenant boundary first — it outranks the per-user one, and applies
+            // even to `Unscoped` (a single-user flavor still must not reach
+            // another tenant). The conversation's org is read off its
+            // participants, which all carry it, so this costs no extra query.
+            // A conversation with no participants yet (the create→first-frame
+            // race) has no derivable org and is left to the ownership check
+            // below, exactly as before.
+            if let Some(row_org) = participants.first().map(|p| p.organization_id.as_str()) {
+                if !same_org(auth_org, row_org) {
+                    return false;
+                }
+            }
+            if matches!(scope, UserScope::Unscoped) {
+                return true;
+            }
             let owned = participants.iter().any(|p| {
                 p.participant_type == smooth_operator::domain::ParticipantType::User
                     && p.email.as_deref().is_some_and(|e| !e.trim().is_empty())
@@ -130,12 +175,22 @@ async fn may_read_conversation(state: &AppState, conversation_id: &str, scope: &
 /// each used to load a session by raw id, so any authenticated user who knew or
 /// guessed another user's session id could drive a turn in it (and read the
 /// replayed history back through their own stream). th-1b7ed0.
-async fn scoped_session(state: &AppState, session_id: &str, scope: &UserScope) -> Option<Session> {
+async fn scoped_session(
+    state: &AppState,
+    session_id: &str,
+    auth_org: Option<&str>,
+    scope: &UserScope,
+) -> Option<Session> {
     // th-ca579c: hydrate from storage on a local miss. `get_session` here would
     // report "not found" for a session this pod simply has not seen — which with
     // 2+ replicas is most returning visitors.
     let session = state.load_session(session_id).await?;
-    may_read_conversation(state, &session.conversation_id, scope)
+    // The session carries its own org, so the tenant check needs no extra read
+    // and covers every session-id-taking handler at this one chokepoint.
+    if !same_org(auth_org, &session.organization_id) {
+        return None;
+    }
+    may_read_conversation(state, &session.conversation_id, auth_org, scope)
         .await
         .then_some(session)
 }
@@ -214,11 +269,12 @@ pub async fn handle_frame(
             None
         }
         Some("get_session") => {
-            handle_get_session(state, scope, &parsed, request_id, sink).await;
+            handle_get_session(state, auth_org, scope, &parsed, request_id, sink).await;
             None
         }
         Some("get_conversation_messages") => {
-            handle_get_conversation_messages(state, scope, &parsed, request_id, sink).await;
+            handle_get_conversation_messages(state, auth_org, scope, &parsed, request_id, sink)
+                .await;
             None
         }
         Some("list_conversations") => {
@@ -226,24 +282,24 @@ pub async fn handle_frame(
             None
         }
         Some("rename_conversation") => {
-            handle_rename_conversation(state, scope, &parsed, request_id, sink).await;
+            handle_rename_conversation(state, auth_org, scope, &parsed, request_id, sink).await;
             None
         }
         // The only action that spawns a turn — its handle flows back to the reader
         // loop so a later `cancel` (or a disconnect) can abort it.
         Some("send_message") => {
-            handle_send_message(state, access, scope, &parsed, request_id, sink).await
+            handle_send_message(state, auth_org, access, scope, &parsed, request_id, sink).await
         }
         Some("confirm_tool_action") => {
-            handle_confirm_tool_action(state, scope, &parsed, request_id, sink).await;
+            handle_confirm_tool_action(state, auth_org, scope, &parsed, request_id, sink).await;
             None
         }
         Some("verify_otp") => {
-            handle_verify_otp(state, scope, &parsed, request_id, sink).await;
+            handle_verify_otp(state, auth_org, scope, &parsed, request_id, sink).await;
             None
         }
         Some("submit_interaction") => {
-            handle_submit_interaction(state, scope, &parsed, request_id, sink).await;
+            handle_submit_interaction(state, auth_org, scope, &parsed, request_id, sink).await;
             None
         }
         Some(other) => {
@@ -430,7 +486,9 @@ async fn handle_create_session(
     // conversation ids are real, letting a caller enumerate other users'
     // conversations by their ids alone.
     let resume = match parsed.get("conversationId").and_then(Value::as_str) {
-        Some(cid) if !cid.is_empty() && may_read_conversation(state, cid, scope).await => {
+        Some(cid)
+            if !cid.is_empty() && may_read_conversation(state, cid, auth_org, scope).await =>
+        {
             state.storage.get_conversation(cid).await.ok().flatten()
         }
         _ => None,
@@ -683,6 +741,7 @@ async fn handle_create_session(
 /// `get_session` — return the session snapshot (per `get-session.schema.json`).
 async fn handle_get_session(
     state: &AppState,
+    auth_org: Option<&str>,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
@@ -697,7 +756,7 @@ async fn handle_get_session(
         return;
     };
 
-    match scoped_session(state, session_id, scope).await {
+    match scoped_session(state, session_id, auth_org, scope).await {
         Some(s) => {
             let data = json!({
                 "sessionId": s.session_id,
@@ -736,6 +795,7 @@ async fn handle_get_session(
 /// page's `nextCursor`. Newest-first (the common "recent history" read).
 async fn handle_get_conversation_messages(
     state: &AppState,
+    auth_org: Option<&str>,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
@@ -754,7 +814,7 @@ async fn handle_get_conversation_messages(
     // same message, same shape. A distinct "forbidden" would be an existence
     // oracle: it would tell a caller which session ids are real, which is all
     // an attacker needs to enumerate other users' conversations.
-    let Some(session) = scoped_session(state, session_id, scope).await else {
+    let Some(session) = scoped_session(state, session_id, auth_org, scope).await else {
         let _ = sink.send(protocol::error(
             request_id,
             "SESSION_NOT_FOUND",
@@ -860,7 +920,7 @@ async fn handle_list_conversations(
     const MSG_CAP: usize = 200;
     let mut rows: Vec<(i64, Value)> = Vec::new();
     for conv in conversations {
-        if !may_read_conversation(state, &conv.id, scope).await {
+        if !may_read_conversation(state, &conv.id, auth_org, scope).await {
             continue;
         }
         let mut query = smooth_operator::adapter::MessageQuery::new(&conv.id, MSG_CAP);
@@ -955,6 +1015,7 @@ const TITLE_MAX: usize = 60;
 /// (200) carrying `{ conversationId, title }`.
 async fn handle_rename_conversation(
     state: &AppState,
+    auth_org: Option<&str>,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
@@ -989,7 +1050,7 @@ async fn handle_rename_conversation(
     // retitle another user's conversation. Not-ours is reported exactly as
     // never-existed.
     match state.storage.get_conversation(conversation_id).await {
-        Ok(Some(_)) if may_read_conversation(state, conversation_id, scope).await => {}
+        Ok(Some(_)) if may_read_conversation(state, conversation_id, auth_org, scope).await => {}
         Ok(_) => {
             let _ = sink.send(protocol::error(
                 request_id,
@@ -1346,6 +1407,7 @@ async fn persist_workflow_step(
 /// failure (an `error` event was already emitted) — no turn was spawned.
 async fn handle_send_message(
     state: &AppState,
+    auth_org: Option<&str>,
     access: &AccessContext,
     scope: &UserScope,
     parsed: &Value,
@@ -1433,7 +1495,7 @@ async fn handle_send_message(
     // sending into another user's session would replay their history as context
     // and stream the reply back to the sender, so an unscoped write here is also
     // a read of their conversation.
-    let Some(session) = scoped_session(state, session_id, scope).await else {
+    let Some(session) = scoped_session(state, session_id, auth_org, scope).await else {
         let _ = sink.send(protocol::error(
             Some(request_id),
             "SESSION_NOT_FOUND",
@@ -1964,6 +2026,7 @@ async fn handle_send_message(
 /// duplicate confirm a no-op (`NO_PENDING_CONFIRMATION`).
 async fn handle_confirm_tool_action(
     state: &AppState,
+    auth_org: Option<&str>,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
@@ -1992,7 +2055,9 @@ async fn handle_confirm_tool_action(
     // Approving a write parked in ANOTHER user's turn is the same class of hole
     // as writing into their session. A session we may not read is reported with
     // the identical event an id with no pending confirmation produces.
-    let owned = scoped_session(state, session_id, scope).await.is_some();
+    let owned = scoped_session(state, session_id, auth_org, scope)
+        .await
+        .is_some();
     let Some(responder) = owned.then(|| state.take_confirmation(session_id)).flatten() else {
         let _ = sink.send(protocol::error(
             request_id,
@@ -2185,6 +2250,7 @@ fn attach_interaction_effect(state: &AppState, session_id: &str, kind: &str, val
 /// duplicate submit a no-op (`NO_PENDING_INTERACTION`).
 async fn handle_submit_interaction(
     state: &AppState,
+    auth_org: Option<&str>,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
@@ -2215,7 +2281,9 @@ async fn handle_submit_interaction(
     // read reports the identical event an id with no pending park produces (the
     // submitted values would otherwise land in another user's turn, and its
     // identity-attach effect on their session).
-    let owned = scoped_session(state, session_id, scope).await.is_some();
+    let owned = scoped_session(state, session_id, auth_org, scope)
+        .await
+        .is_some();
     let Some(pending) = owned
         .then(|| state.pending_interaction(session_id))
         .flatten()
@@ -2395,6 +2463,7 @@ fn resolve_interaction(
 /// (`NOT_FOUND`, 0 attempts).
 async fn handle_verify_otp(
     state: &AppState,
+    auth_org: Option<&str>,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
@@ -2431,7 +2500,10 @@ async fn handle_verify_otp(
 
     // The session must exist AND be ours (a code can't verify — or brute-force —
     // a session we don't track, nor one belonging to another user).
-    if scoped_session(state, session_id, scope).await.is_none() {
+    if scoped_session(state, session_id, auth_org, scope)
+        .await
+        .is_none()
+    {
         let _ = sink.send(protocol::error(
             Some(request_id),
             "SESSION_NOT_FOUND",

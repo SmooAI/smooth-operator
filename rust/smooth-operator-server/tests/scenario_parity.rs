@@ -198,7 +198,14 @@ fn build_state_with_knowledge(config: ServerConfig, docs: &[Document]) -> AppSta
         return build_state(config);
     }
     let storage = Arc::new(InMemoryStorageAdapter::new());
-    let kb = storage.knowledge();
+    // Seed through the ORG-BOUND seam (as `server::seed_knowledge` does), stamping
+    // the org a no-auth turn resolves to. The knowledge reader enforces the tenant
+    // boundary before the ACL (feature gap G7), so a doc belonging to no tenant is
+    // invisible to a turn that has one.
+    let kb = storage.knowledge_for_access(
+        &smooth_operator::access_control::AccessContext::default()
+            .with_organization_id(smooth_operator_server::server::SEED_ORG_ID),
+    );
     for doc in docs {
         kb.ingest(doc.clone()).expect("ingest server.knowledge doc");
     }
