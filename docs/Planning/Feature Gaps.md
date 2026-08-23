@@ -41,13 +41,19 @@ What we **lack**: ingestion/connectors, a document-processing pipeline, access-c
 
 Ordered by leverage. Each item: **write the test first (red), then implement (green)**.
 
-### G1. Knowledge ingestion + connectors (biggest gap)
+### G1. Knowledge ingestion + connectors — ✅ seam, mock, and 3 connectors shipped; the SaaS long tail remains
 Mature platforms ship 50+ connectors (confluence, jira, github, gmail, google_drive, notion, salesforce, sharepoint, slack, zendesk, web, …) + a `mock_connector` for testing. We have only manual/seeded knowledge.
 - **TDD**: define a `Connector` trait (`async fn pull(&self, since) -> Stream<Document>`). Write `tests/connector_contract.rs` against a **`MockConnector`** first (asserts the ingest→chunk→embed→store pipeline lands documents in the `StorageAdapter` knowledge slice + they're retrievable). Then implement the trait + 2–3 real connectors (web, file, github) each with an `external_dependency`-gated test mirroring that split.
+- ✅ **Done — `rust/ingestion` (`smooai-smooth-operator-ingestion`).** The seam is `Connector { fn name(); async fn pull(&self, since: Option<Timestamp>) -> Result<Vec<RawDocument>> }` (`src/connector.rs`), driven by `ingest(connector, chunker, embedder, knowledge, options)` (`src/pipeline.rs`): pull → chunk → embed → `KnowledgeBase::ingest`, idempotent on `(document id, content hash)` via an `IngestLedger` so a re-run stores nothing new. Shipped connectors: **file**, **web**, **github** (`src/connectors/`), plus the credential-free `MockConnector`. Background / incremental re-indexing (per-connector cursor + per-run status) is `src/indexing.rs`. The contract test is **`tests/ingestion_contract.rs`** (not `connector_contract.rs` as sketched above); the GitHub connector runs fully offline against a `wiremock` server (`tests/github_connector.rs`). See [[Ingestion]] + [[Connectors]].
+- ✅ **ACLs survive ingestion, connector-agnostically.** A connector's `RawDocument::acl` propagates through the chunker and is written as a structured `DocAcl` (under `DocAcl::ACL_METADATA_KEY`) that an `AclKnowledgeStore` records at ingest and enforces at read — the ingest half of the G3 chain. `tests/ingestion_contract.rs::ingested_acls_gate_retrieval_for_every_connector` fences it at the **pipeline** seam (a doc ingested for `group-eng` is unreadable by `group-fin` and by anonymous, while a no-ACL doc stays org-public), so the guarantee no longer rides on the GitHub-specific test alone and cannot be deleted with any one connector. Every negative assertion is paired with the entitled-principal positive control, so an empty run cannot satisfy it vacuously.
+- ⚠️ **Deviation from the sketch above: `pull` returns `Vec<RawDocument>`, not `Stream<Document>`.** A `Vec` materializes the whole source per pull. That is fine for the three shipped connectors and wrong for a large Confluence space or Jira project — which is precisely what the next connectors are. Re-shaping `pull` into a stream (or a paged `pull_page(cursor)`) is a **breaking change to the trait**, so it should land *before* the SaaS connectors, not after them.
+- **Remains**: the SaaS long tail — confluence, jira, notion, slack, zendesk, google_drive, salesforce, sharepoint. Confluence and Jira are the hardest shape (deep pagination, incremental `since`, per-document permissions) and should be designed against first; their per-document permissions must map onto `RawDocument::acl` the way `GithubConnectorConfig::acl_groups` already does, or ingesting them reopens G3.
 
-### G2. Document processing / chunking pipeline
+### G2. Document processing / chunking pipeline — ✅ chunker shipped; format extraction remains
 Mature knowledge platforms have a tested chunking + metadata-extraction pipeline. Our knowledge store assumes pre-chunked text.
 - **TDD**: `tests/chunking.rs` first — feed a long doc + assert chunk count, overlap, boundary rules, metadata propagation, and that oversized items spill correctly. Then implement the chunker the connectors feed.
+- ✅ **Done — `rust/ingestion/src/chunker.rs`.** Paragraph-packing split under a character cap, word-boundary hard split for an oversized paragraph, configurable overlap (clamped below the cap so it always terminates), stable indexed chunk ids, and title/metadata/ACL propagation onto every chunk. Unit-tested for each rule this plan names: chunk count, packing, cap split, oversized spill, overlap carry, overlap clamp, metadata propagation, and id stability.
+- **Remains**: **format extraction** (PDF / DOCX / rich HTML → text) ahead of the chunker. The pipeline still takes text a connector already extracted — the web connector strips HTML, and the GitHub connector simply *skips* binary extensions rather than reading them. Any connector over a document store (Drive, SharePoint, Confluence attachments) needs this first.
 
 ### G3. Access control / permissions (document-level) — ✅ enforced on the live chat path
 Mature knowledge platforms sync per-connector permissions and filters retrieval by user entitlement. We filter by `organizationId` only.
@@ -74,9 +80,11 @@ Mature knowledge platforms support multi-tenant schemas. Our org scoping is row-
 Mature knowledge platforms have a dedicated, tested model server (embeddings + rerank + intent). We have a pluggable `Embedder` + RRF; the rerank stage is now implemented as a pluggable seam mirroring the `Embedder` pattern.
 - **TDD (done)**: the `Reranker` trait (`smooth_operator::rerank`) ships `NoopReranker` (identity default) + `LexicalReranker` (deterministic, network-free) + the production **`GatewayReranker`** (adapter crate, alongside `GatewayEmbedder`): a Cohere/Voyage-style `/v1/rerank` cross-encoder over the SmooAI gateway, key from `SMOOAI_GATEWAY_*`. It reorders candidates by returned relevance, truncates to `top_k`, and falls back to input order on any API error (never panics, never drops the turn). A `RerankBackend` seam lets unit tests inject a stub so reorder/truncate/error-fallback are exercised offline (mirrors `GithubSearchBackend`). The server's `build_reranker` selector (mirrors `build_embedder`) picks gateway-when-keyed / lexical / noop from `SMOOTH_AGENT_RERANK`, defaulting **off** so existing behavior is unchanged. Wired into the retrieval path via `KnowledgeSearchTool::with_reranker(...)` (over-fetch → rerank → truncate) in both the reference server and the lambda. A live test is gated on `SMOOTH_AGENT_E2E=1` + a real `/v1/rerank` route (`#[ignore]`).
 
-### G9. Connector mock + external-dependency split (test infra)
+### G9. Connector mock + external-dependency split (test infra) — ✅ mock shipped; the tier split is convention, with no nightly running it
 Formalize the platform.s `mock_connector` + `external_dependency_unit` vs `unit` split so connectors are testable credential-free in CI and fully nightly.
 - **TDD**: ship the `MockConnector` (G1) and a CI convention: `unit` (no creds, every PR) vs `external` (gated, nightly), matching our `SMOOTH_AGENT_E2E` gate.
+- ✅ **Done (the mock + the credential-free tier).** `MockConnector` (`src/connector.rs`) is the fixture behind the ingestion contract test. Every ingestion test in CI is credential-free and runs on **every PR**: GitHub goes through `wiremock`, embeddings through `DeterministicEmbedder`, files through `tempfile`. The one test that touches the network (`connectors::web` live fetch) is `#[ignore]` **and** gated on `SMOOTH_AGENT_E2E=1`, and skips loudly rather than passing silently.
+- **Remains**: the **nightly half of the split**. `.github/workflows/rust.yml` has no `schedule:` trigger, so the gated `external` tier is currently a convention that nothing ever executes — a live-API break (auth change, response-schema change, rate limit) in the web or GitHub connector is invisible until a user hits it. Wiring a scheduled job that supplies creds and runs the `#[ignore]`d tests is what actually closes G9.
 
 ## 4. TDD working agreement (applies to all of the above and beyond)
 
@@ -88,7 +96,7 @@ Formalize the platform.s `mock_connector` + `external_dependency_unit` vs `unit`
 
 ## 5. Suggested next TDD increments (priority order)
 1. **G3 access-control leak test** (highest severity) → ACL filter on all adapters.
-2. **G1 `MockConnector` + ingestion-pipeline contract test** → connector trait + web/file/github connectors.
+2. ~~**G1 `MockConnector` + ingestion-pipeline contract test** → connector trait + web/file/github connectors.~~ ✅ shipped — next in this line is the `pull` streaming/pagination decision, then Confluence + Jira.
 3. **G4 retrieval-quality eval** (deterministic recall@k) alongside the LLM-judge evals.
 4. **G5 widget Playwright e2e**, then **G2/G7/G9**. (G6 and G8 are done; G3 is done.)
 
