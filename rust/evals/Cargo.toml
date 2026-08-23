@@ -19,6 +19,9 @@ smooth-operator = { workspace = true }
 smooai-smooth-operator-core = { workspace = true }
 # In-memory StorageAdapter — the harness seeds each scenario's KB here.
 smooai-smooth-operator-adapter-memory = { path = "../adapters/in-memory" }
+# The real ingest→chunk→embed→store pipeline the deterministic retrieval eval
+# seeds its corpus through — the eval scores production code, not a stand-in.
+smooai-smooth-operator-ingestion = { path = "../ingestion" }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }
