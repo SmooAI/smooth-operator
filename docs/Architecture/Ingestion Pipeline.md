@@ -144,11 +144,26 @@ Chunker::new(max_chars, overlap_chars)   // or Chunker::default() (500 / 64)
 
 Strategy:
 
-1. split content into paragraphs on blank lines (`\n\n`),
-2. greedily pack paragraphs into a chunk up to `max_chars`,
-3. a single paragraph larger than the cap is hard-split on word boundaries,
+1. normalize CRLF, then split content into paragraphs on blank lines,
+2. greedily pack paragraphs into a chunk, **breaking before a markdown heading**
+   so no chunk straddles two sections,
+3. an oversized paragraph spills on word boundaries; a single token longer than
+   the budget — a URL, or any script that does not use spaces (Chinese,
+   Japanese, Thai) — spills on **character** boundaries,
 4. successive chunks overlap by `overlap_chars` of trailing whole words so a
    fact spanning a boundary stays retrievable.
+
+`max_chars` is a **hard cap on the emitted chunk, overlap included** — it is the
+contract with the embedding model's input limit, and a chunk over it is silently
+truncated by the API rather than rejected. Overlap is therefore spent out of the
+packing budget rather than added on top of a chunk that already fills it.
+
+Everything is denominated in **characters, never bytes**. Slicing to a byte
+offset to hit a character cap cuts an em-dash or an emoji in half: a panic in
+Rust, silent mojibake in a port. `tests/chunking.rs` guards this on unspaced
+mixed-width text, which is the only input that reaches the character-split path
+at all — a guard built from space-separated words passes against a byte-slicing
+implementation and protects nothing.
 
 `overlap_chars` is clamped below `max_chars` so chunking always makes forward
 progress. Each `Chunk` gets a **stable id** `"{doc_id}#{index}"` and inherits the
@@ -216,7 +231,7 @@ keyed and unkeyed paths can never silently mix dimensions.
 
 | Tier        | What                                                  | When           |
 | ----------- | ---------------------------------------------------- | -------------- |
-| `unit`      | chunker, embedder, file connector, web strip/guard, GitHub path/issue/ACL filters + `tests/github_connector.rs` (mock GitHub API → prose/code/issue RawDocuments + ingest→retrieve), `tests/ingestion_contract.rs` (chunk→embed→store→retrieve + idempotency) | every PR, no creds |
+| `unit`      | chunker, embedder, file connector, web strip/guard, GitHub path/issue/ACL filters + `tests/github_connector.rs` (mock GitHub API → prose/code/issue RawDocuments + ingest→retrieve), `tests/ingestion_contract.rs` (chunk→embed→store→retrieve + idempotency), `tests/chunking.rs` (the chunking contract: cap-with-overlap, boundary rules, CRLF, unspaced/multi-byte spill, metadata propagation) | every PR, no creds |
 | `external`  | `WebConnector::live_fetch_example`, `GithubConnector` live pull | gated on `SMOOTH_AGENT_E2E=1`, nightly |
 
 The headline acceptance is `rust/ingestion/tests/ingestion_contract.rs`: it wires
@@ -238,6 +253,7 @@ SMOOTH_AGENT_E2E=1 cargo test -p smooai-smooth-operator-ingestion \
 
 - `rust/ingestion/src/connector.rs` — `Connector` trait, `RawDocument`, `MockConnector`
 - `rust/ingestion/src/chunker.rs` — `Chunker`, `Chunk` (G2)
+- `rust/ingestion/tests/chunking.rs` — the chunking contract (G2)
 - `rust/ingestion/src/embedder.rs` — `Embedder`, `DeterministicEmbedder`
 - `rust/ingestion/src/pipeline.rs` — `ingest`, `IngestOptions`, `IngestLedger`, `IngestReport`
 - `rust/ingestion/src/connectors/file.rs` — `FileConnector`
