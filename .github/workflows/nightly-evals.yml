@@ -1,0 +1,164 @@
+# Nightly LLM-judged eval regression across models (feature gap G4).
+#
+# The deterministic half of the eval layer — `rust/evals/tests/retrieval_quality.rs`,
+# recall@k / MRR over a frozen corpus — needs no credentials and already runs on
+# every PR inside `rust.yml`. It is NOT duplicated here: it cannot drift between
+# nightly runs, only between commits, and the PR job already covers that.
+#
+# This workflow is for the half that can't gate a PR: the judged scenarios, which
+# need a live gateway, cost money, and have real run-to-run variance. It sweeps a
+# matrix of agent models over the same frozen scenario set so provider/model drift
+# on ANY model shows up, not just on the default one, and appends each night's
+# scorecard to a cached history file so a slow slide reads as a trend.
+#
+# ## Two failure modes this workflow refuses to have
+#
+# 1. **Silently not running.** A gated suite that prints "ok. 0 passed" is a suite
+#    that did not run. The `judged` job sets `SMOOTH_AGENT_EVALS_REQUIRED=1`, which
+#    makes the eval suite FAIL rather than skip when credentials are missing, and a
+#    preflight step fails first with an actionable message. There is no path where
+#    a missing key produces a green night.
+# 2. **Being fooled by log output.** Nothing here greps, tallies, or `^`-anchors a
+#    test log. The gate is the `cargo test` exit code. `CARGO_TERM_COLOR: never`
+#    is set anyway, so nothing downstream can be confused by ANSI escapes.
+name: Nightly evals
+
+on:
+    schedule:
+        # 07:17 UTC — off the hour, so it doesn't queue behind the cron stampede.
+        - cron: '17 7 * * *'
+    workflow_dispatch:
+
+env:
+    CARGO_TERM_COLOR: never
+
+jobs:
+    judged:
+        name: Judged evals (${{ matrix.agent_model }})
+        runs-on: ubuntu-latest
+        timeout-minutes: 45
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # The default/production model, graded by a stronger, different
+                    # family — the most trustworthy grade we can get.
+                    - agent_model: claude-haiku-4-5
+                      judge_model: claude-sonnet-4-5
+                    # Sonnet grading Sonnet is same-family judging and reads lenient;
+                    # it is here to catch drift in the stronger model over time, and
+                    # its absolute score should not be compared against the row above.
+                    - agent_model: claude-sonnet-4-5
+                      judge_model: claude-sonnet-4-5
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Require the gateway key
+              env:
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_KEY }}
+              run: |
+                  if [ -z "${SMOOAI_GATEWAY_KEY}" ]; then
+                      echo "::error title=Nightly evals cannot run::The SMOOAI_GATEWAY_KEY repository secret is unset or empty. The judged evals need a live gateway key; without it this job would skip every scenario and report success, which is the exact failure this workflow exists to prevent. Add the secret (the smooai org LLM virtual key, same value scripts/run-evals.sh fetches from @smooai/config) and re-run."
+                      exit 1
+                  fi
+                  echo "gateway key present"
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust
+
+            - name: Judged regression suite
+              working-directory: rust
+              env:
+                  SMOOTH_AGENT_E2E: '1'
+                  # Turns "skipped for want of credentials" into a hard failure.
+                  SMOOTH_AGENT_EVALS_REQUIRED: '1'
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_KEY }}
+                  SMOOTH_AGENT_EVAL_MODEL: ${{ matrix.agent_model }}
+                  SMOOTH_AGENT_JUDGE_MODEL: ${{ matrix.judge_model }}
+              run: |
+                  cargo test -p smooai-smooth-operator-evals --test regression \
+                      -- --nocapture --test-threads=1
+
+            # The suite writes its scorecard BEFORE asserting, so a failing night
+            # still produces the row that explains what it failed on.
+            - name: Upload scorecard
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: eval-scorecard-${{ matrix.agent_model }}
+                  path: rust/target/eval-scorecard.json
+                  if-no-files-found: warn
+
+    history:
+        name: Append score history
+        needs: judged
+        if: always()
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: Download tonight's scorecards
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: eval-scorecard-*
+                  path: scorecards
+
+            # The history lives in the Actions cache rather than in the repo: a
+            # committed history file would need push rights on a protected branch
+            # and would put a bot commit on main every night. The rotating key +
+            # prefix restore-key means each run reads the newest saved history and
+            # writes a new immutable entry.
+            - name: Restore score history
+              uses: actions/cache/restore@v4
+              with:
+                  path: eval-history.jsonl
+                  key: smooth-operator-eval-history-${{ github.run_id }}
+                  restore-keys: |
+                      smooth-operator-eval-history-
+
+            - name: Append tonight's rows
+              run: |
+                  set -euo pipefail
+                  touch eval-history.jsonl
+                  found=0
+                  while IFS= read -r f; do
+                      found=$((found + 1))
+                      jq -c \
+                          --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                          --arg run "${GITHUB_RUN_ID}" \
+                          --arg sha "${GITHUB_SHA}" \
+                          '. + {date: $date, run_id: $run, commit: $sha}' \
+                          "$f" >> eval-history.jsonl
+                  done < <(find scorecards -name 'eval-scorecard.json')
+                  echo "appended ${found} scorecard row(s)"
+
+            - name: Write the trend to the job summary
+              run: |
+                  set -euo pipefail
+                  {
+                      echo "### Eval score history — most recent 20 runs"
+                      echo ""
+                      echo "| date | agent | judge | overall | grounding | anti-halluc | tool use | multi-turn | safety | tone |"
+                      echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+                      tail -n 20 eval-history.jsonl | jq -r '
+                          def m(k): (.competencies[k].mean // null) | if . == null then "–" else (.*100|round/100|tostring) end;
+                          "| \(.date) | \(.agent_model) | \(.judge_model) | \((.overall_mean*100|round)/100) | \(m("grounding")) | \(m("anti_hallucination")) | \(m("tool_use")) | \(m("multi_turn_reasoning")) | \(m("safety")) | \(m("tone")) |"
+                      '
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Save score history
+              uses: actions/cache/save@v4
+              with:
+                  path: eval-history.jsonl
+                  key: smooth-operator-eval-history-${{ github.run_id }}
+
+            - name: Upload score history
+              uses: actions/upload-artifact@v4
+              with:
+                  name: eval-history
+                  path: eval-history.jsonl

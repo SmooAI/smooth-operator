@@ -4260,6 +4260,7 @@ dependencies = [
  "smooai-smooth-operator",
  "smooai-smooth-operator-adapter-memory",
  "smooai-smooth-operator-core",
+ "smooai-smooth-operator-ingestion",
  "tokio",
 ]
 
