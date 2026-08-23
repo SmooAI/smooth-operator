@@ -6,6 +6,7 @@
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
   <a href="https://smoo.ai/th"><img src="https://img.shields.io/badge/platform-smoo.ai%2Fth-FF6B6C?style=for-the-badge&labelColor=020618" alt="smoo.ai/th"></a>
+  <a href="https://github.com/SmooAI/smooth-operator/discussions"><img src="https://img.shields.io/badge/community-Discussions-00A6A6?style=for-the-badge&labelColor=020618" alt="GitHub Discussions"></a>
 </p>
 
 <p align="center">
@@ -523,7 +524,15 @@ smooth-operator is built and open-sourced by **[Smoo AI](https://smoo.ai)** — 
 
 ## 🤝 Contributing
 
-Built in the open, test-first. Issues and PRs welcome — see the [docs vault](docs/Home.md) for architecture, protocol, and the eval harness, and [`docs/Planning/Roadmap.md`](docs/Planning/Roadmap.md) for what's queued.
+Built in the open, test-first. Issues and PRs welcome — start with [**CONTRIBUTING.md**](CONTRIBUTING.md), which covers the bits that will otherwise bite you: the lockstep changeset anchor, Rust as the reference implementation, `spec/` codegen, and how to run each language's tests.
+
+Where things go:
+
+- **Bug or concrete task** → [an Issue](https://github.com/SmooAI/smooth-operator/issues)
+- **Question, idea, or "how do I…"** → [a Discussion](https://github.com/SmooAI/smooth-operator/discussions)
+- **Security vulnerability** → the private channel in [SECURITY.md](SECURITY.md), never either of the public two
+
+For background, see the [docs vault](docs/Home.md) for architecture, protocol, and the eval harness, and [`docs/Planning/Roadmap.md`](docs/Planning/Roadmap.md) for what's queued. By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## 📄 License
 
