@@ -328,6 +328,55 @@ fn every_chunk_carries_the_documents_title_metadata_source_and_acl() {
 }
 
 #[test]
+fn acl_survives_every_split_path() {
+    // Losing an ACL here fails *open*: the pipeline turns `Chunk.acl` into the
+    // `DocAcl` the adapters filter on, so a chunk that arrives with `acl: None`
+    // is stored org-public and retrievable by anyone — no error, no log. The
+    // check above covers the packed path; these are the paths where a future
+    // chunker change would actually drop it.
+    let acl = vec!["group:support".to_string(), "user:alice".to_string()];
+    let cases: [(&str, String); 4] = [
+        (
+            "packed paragraphs",
+            "alpha text\n\nbeta text\n\ngamma text".to_string(),
+        ),
+        (
+            "word spill",
+            (0..80)
+                .map(|i| format!("w{i}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "character spill (unspaced)",
+            "宽带上网服务的开通与故障处理流程".repeat(10),
+        ),
+        (
+            "heading break",
+            "## A\n\nfirst body\n\n## B\n\nsecond body".to_string(),
+        ),
+    ];
+
+    for (label, content) in cases {
+        let doc = RawDocument::new("doc-acl", "test", content).with_acl(acl.clone());
+        let chunks = Chunker::new(30, 8).chunk(&doc);
+        assert!(chunks.len() > 1, "{label}: expected a split to exercise");
+        for c in &chunks {
+            assert_eq!(
+                c.acl.as_deref(),
+                Some(&acl[..]),
+                "{label}: chunk {} lost its ACL — it would store org-public",
+                c.index
+            );
+        }
+    }
+
+    // And the absent case stays absent rather than becoming an empty allowlist.
+    let open_doc = RawDocument::new("doc-open", "test", "no acl on this one");
+    assert_eq!(Chunker::default().chunk(&open_doc)[0].acl, None);
+}
+
+#[test]
 fn explicit_metadata_wins_over_the_derived_title_and_source_keys() {
     let doc = RawDocument::new("doc-w", "web", "some content")
         .with_title("Derived")
