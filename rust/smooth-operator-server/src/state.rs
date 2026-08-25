@@ -176,6 +176,14 @@ pub struct AppState {
     /// session has at most one outstanding confirmation; an empty map means no
     /// turn is parked (the default, byte-for-byte unchanged from before HITL).
     pending_confirmations: Arc<RwLock<HashMap<String, UnboundedSender<HumanResponse>>>>,
+    /// **One-shot pre-approved confirmations** (th-db0816): `sessionId` → tool
+    /// name whose next confirmation-gated call this pod may approve WITHOUT
+    /// parking. Granted only by `handle_confirm_tool_action` when it resolves a
+    /// DURABLE pending confirmation (the parked turn lived on another pod, or
+    /// died with one) and spawns a continuation turn to carry out the approved
+    /// action. Consumed by the very next turn's `ConfirmationConfig`; never
+    /// readable from the wire, so a client cannot smuggle a bypass in a frame.
+    pre_approved_confirmations: Arc<RwLock<HashMap<String, String>>>,
     /// **Rich Interactions pending parks**: `sessionId` → the parked turn's
     /// interaction (id + kind + spec) and [`InteractionResolution`] sender. When an
     /// agent turn's raise tool parks on a capability-declaring session, the
@@ -285,6 +293,7 @@ impl AppState {
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
+            pre_approved_confirmations: Arc::new(RwLock::new(HashMap::new())),
             pending_interactions: Arc::new(RwLock::new(HashMap::new())),
             serve_widget: false,
             widget_token: None,
@@ -765,6 +774,93 @@ impl AppState {
         if let Ok(mut map) = self.pending_confirmations.write() {
             map.remove(session_id);
         }
+    }
+
+    /// Grant a ONE-SHOT pre-approval for `tool` on `session_id`'s next turn
+    /// (th-db0816). Set only by `handle_confirm_tool_action` when it resolves a
+    /// durable pending confirmation and spawns the continuation turn; consumed
+    /// by [`take_pre_approval`](Self::take_pre_approval) when that turn's
+    /// `ConfirmationConfig` is built, so the re-issued tool call executes
+    /// without parking a second time.
+    pub fn grant_pre_approval(&self, session_id: impl Into<String>, tool: impl Into<String>) {
+        if let Ok(mut map) = self.pre_approved_confirmations.write() {
+            map.insert(session_id.into(), tool.into());
+        }
+    }
+
+    /// Take (remove + return) the one-shot pre-approved tool name for
+    /// `session_id`, if any. Taking — not reading — is what makes the grant
+    /// one-shot: only the single turn spawned by the resolving
+    /// `confirm_tool_action` ever sees it.
+    #[must_use]
+    pub fn take_pre_approval(&self, session_id: &str) -> Option<String> {
+        self.pre_approved_confirmations
+            .write()
+            .ok()?
+            .remove(session_id)
+    }
+
+    /// Set or clear the DURABLE record of a parked write-tool confirmation on
+    /// the session's `metadata.pendingConfirmation` (th-db0816), local-first
+    /// then written through to storage — the same shape as
+    /// [`set_session_authenticated`](Self::set_session_authenticated).
+    ///
+    /// The in-process park (the [`HumanResponse`] sender in
+    /// `pending_confirmations`) is a channel into a turn running on THIS pod, so
+    /// it cannot survive a pod hop or a roll — which is exactly when a visitor's
+    /// refresh reconnects them elsewhere and their pending write-confirmation
+    /// used to evaporate. This record is the half that survives: tool name,
+    /// arguments and prompt, enough for `handle_confirm_tool_action` on any pod
+    /// to carry out the verdict with a continuation turn.
+    ///
+    /// A storage failure is logged, not raised, when SETTING (the in-process
+    /// park still works exactly as before — a degradation, not a regression).
+    /// Clearing returns the storage error to the caller, because the one caller
+    /// that must not proceed past a failed clear (the continuation path, which
+    /// is about to execute a write tool) needs to fail closed.
+    pub async fn set_pending_confirmation(
+        &self,
+        session_id: &str,
+        record: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let updated = {
+            let Ok(mut map) = self.sessions.write() else {
+                return Ok(());
+            };
+            let Some(session) = map.get_mut(session_id) else {
+                return Ok(());
+            };
+            let mut meta = session.metadata.take().unwrap_or_default();
+            match &record {
+                Some(rec) => {
+                    meta.insert("pendingConfirmation".to_string(), rec.clone());
+                }
+                None => {
+                    meta.remove("pendingConfirmation");
+                }
+            }
+            session.metadata = Some(meta.clone());
+            meta
+        };
+        if let Err(e) = self
+            .storage
+            .update_session(
+                session_id,
+                SessionUpdate {
+                    metadata: Some(updated),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                session_id,
+                "persisting pendingConfirmation failed — the park will not survive a pod hop"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Register a turn parked on a Rich Interaction for `session_id`. Any prior
