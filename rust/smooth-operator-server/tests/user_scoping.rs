@@ -52,15 +52,29 @@ fn scoped(email: &str) -> UserScope {
     UserScope::User(email.to_string())
 }
 
-/// Drive one frame as `scope` and return the first emitted event.
+/// Drive one frame as `scope` on an *authenticated* connection (one carrying a
+/// verified org) and return the first emitted event.
 async fn drive(state: &AppState, scope: &UserScope, frame: &Value) -> Value {
+    drive_as(state, Some(SEED_ORG_ID), scope, frame).await
+}
+
+/// [`drive`], with the connection's `auth_org` spelled out. `None` is the
+/// anonymous connection — no verified principal, which is what every public
+/// widget visitor is (`server::resolve_ws_access` sets `org_id: None` on both
+/// the tokenless and the degraded-token branches).
+async fn drive_as(
+    state: &AppState,
+    auth_org: Option<&str>,
+    scope: &UserScope,
+    frame: &Value,
+) -> Value {
     let (tx, mut rx) = unbounded_channel::<Value>();
     handler::handle_frame(
         state,
         &AccessContext::anonymous(),
         "conn-test",
         None,
-        Some(SEED_ORG_ID),
+        auth_org,
         scope,
         &frame.to_string(),
         &tx,
@@ -91,6 +105,18 @@ async fn create_session(
     scope: &UserScope,
     claimed_email: Option<&str>,
 ) -> Created {
+    create_session_as(state, storage, Some(SEED_ORG_ID), scope, claimed_email).await
+}
+
+/// [`create_session`], with the connection's `auth_org` spelled out (`None` =
+/// the anonymous widget connection).
+async fn create_session_as(
+    state: &AppState,
+    storage: &InMemoryStorageAdapter,
+    auth_org: Option<&str>,
+    scope: &UserScope,
+    claimed_email: Option<&str>,
+) -> Created {
     let mut frame = json!({
         "action": "create_conversation_session",
         "requestId": "cs",
@@ -99,7 +125,7 @@ async fn create_session(
     if let Some(email) = claimed_email {
         frame["userEmail"] = Value::from(email);
     }
-    let ev = drive(state, scope, &frame).await;
+    let ev = drive_as(state, auth_org, scope, &frame).await;
     assert_eq!(ev["type"], "immediate_response", "got: {ev}");
 
     let created = Created {
@@ -478,13 +504,24 @@ async fn anonymous_create_still_honors_the_frame_email() {
 /// Drive a frame and collect EVERY event it emits (a spawned turn would emit an
 /// ack + stream events; a denied one emits exactly one error).
 async fn drive_all(state: &AppState, scope: &UserScope, frame: &Value) -> Vec<Value> {
+    drive_all_as(state, Some(SEED_ORG_ID), scope, frame).await
+}
+
+/// [`drive_all`], with the connection's `auth_org` spelled out (`None` = the
+/// anonymous widget connection).
+async fn drive_all_as(
+    state: &AppState,
+    auth_org: Option<&str>,
+    scope: &UserScope,
+    frame: &Value,
+) -> Vec<Value> {
     let (tx, mut rx) = unbounded_channel::<Value>();
     let handle = handler::handle_frame(
         state,
         &AccessContext::anonymous(),
         "conn-test",
         None,
-        Some(SEED_ORG_ID),
+        auth_org,
         scope,
         &frame.to_string(),
         &tx,
@@ -962,4 +999,223 @@ async fn an_ownerless_conversation_is_reachable_by_every_scope() {
     assert!(!list_ids(&state, &UserScope::Denied)
         .await
         .contains(&alice.conversation_id));
+}
+
+// ---- the anonymous widget visitor who typed an email (th-anon-owned) -------
+//
+// P0 outage, live on smoo.ai: `create_conversation_session { agentId, userEmail }`
+// answered 200, and the very next `send_message` on the SAME socket answered
+// `SESSION_NOT_FOUND` for a session that existed. Deterministic, and `userEmail`
+// alone was the trigger — the same create without it streamed fine.
+//
+// Mechanism: the widget's pre-chat form collects name + email, so the visitor's
+// own `user` participant carries an email, which makes the conversation `owned`.
+// The visitor's connection is anonymous, which on a multi-user deployment is
+// `UserScope::Denied`, whose arm was `!owned` — so the visitor was owner-checked
+// against an identity it does not have and locked out of its own session. Every
+// recovery attempt created a session with the same email and was denied the same
+// way, which is why real visitors saw an infinite retry loop, not a blip.
+//
+// Note what the section above tests and this one does not: `ownerless()` creates
+// WITHOUT `userEmail`, so it never produced an owned-and-anonymous conversation.
+// That is the exact gap — the tests covered capture and ownership separately and
+// never the create-then-send round trip a real visitor makes.
+
+/// One anonymous widget visitor who submitted the pre-chat form: no verified
+/// principal (`auth_org: None` ⇒ `UserScope::Denied`), `userEmail` supplied, so
+/// the conversation it creates is OWNED and owned by nobody it can prove it is.
+async fn anonymous_visitor_with_email() -> (AppState, Arc<InMemoryStorageAdapter>, Created) {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), base_config());
+    let created = create_session_as(
+        &state,
+        &storage,
+        None,
+        &UserScope::Denied,
+        Some("visitor@example.com"),
+    )
+    .await;
+    seed_message(&storage, &created.conversation_id, "visitor's question").await;
+    (state, storage, created)
+}
+
+/// Assert the conversation really is owned, so the tests below are exercising
+/// the ownership arm and not passing because the email never landed.
+async fn assert_owned(storage: &InMemoryStorageAdapter, conversation_id: &str) {
+    let participants = storage
+        .list_participants_by_conversation(conversation_id)
+        .await
+        .expect("list participants");
+    assert!(
+        participants.iter().any(|p| {
+            p.participant_type == smooth_operator::domain::ParticipantType::User
+                && p.email.as_deref().is_some_and(|e| !e.trim().is_empty())
+        }),
+        "the visitor's email must be on a user participant, or this test proves nothing: {participants:?}"
+    );
+}
+
+#[tokio::test]
+async fn anonymous_visitor_with_an_email_can_send_into_the_session_it_created() {
+    let (state, storage, mine) = anonymous_visitor_with_email().await;
+    let me = UserScope::Denied;
+    assert_owned(&storage, &mine.conversation_id).await;
+
+    // (a) vs (b): the session row EXISTS. The outage was never a failed create —
+    // `scoped_session` loads it fine and then hides it.
+    assert!(
+        state.get_session(&mine.session_id).is_some(),
+        "the session must exist in storage after a create that answered 200"
+    );
+
+    // The exact round trip every existing test skipped.
+    let events = drive_all_as(&state, None, &me, &send_frame(&mine.session_id)).await;
+    assert_ne!(
+        events[0]["error"]["code"], "SESSION_NOT_FOUND",
+        "the visitor must reach the session it just created: {events:?}"
+    );
+    assert_eq!(
+        events[0]["error"]["code"], "LLM_UNAVAILABLE",
+        "past the ACL gate, the only thing left is the absent gateway: {events:?}"
+    );
+
+    // And the rest of the by-id surface that routes through the same predicate.
+    let read = drive_as(
+        &state,
+        None,
+        &me,
+        &json!({
+            "action": "get_conversation_messages",
+            "requestId": "gcm",
+            "sessionId": mine.session_id,
+        }),
+    )
+    .await;
+    assert_eq!(read["type"], "immediate_response", "got: {read}");
+
+    // ...but NOT listing. The exception is deliberately by-id only: an
+    // identity-less connection may use an id it already holds and must never be
+    // handed ids it could not name. Anonymous listing falls back to the SEED org,
+    // which is exactly where widget conversations pool, so widening it would leak
+    // visitors' chats to each other. The visitor keeps its own thread through
+    // resume-by-id below, which is what the widget actually uses.
+    assert!(
+        !list_ids_as(&state, None, &me)
+            .await
+            .contains(&mine.conversation_id),
+        "an owned conversation must stay out of an anonymous list"
+    );
+
+    // Resume binds back rather than minting a fresh conversation each reload —
+    // the loop the widget was stuck in.
+    let resumed = drive_as(
+        &state,
+        None,
+        &me,
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "cs",
+            "agentId": "agent-fixed",
+            "conversationId": mine.conversation_id,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resumed["data"]["conversationId"], mine.conversation_id,
+        "got: {resumed}"
+    );
+}
+
+#[tokio::test]
+async fn the_not_found_response_is_still_reachable_for_an_anonymous_visitor() {
+    // Negative control for the test above: `assert_ne!(SESSION_NOT_FOUND)` only
+    // means something if this handler can still produce that code for this
+    // caller. An id that never existed must still come back not-found.
+    let (state, _storage, _mine) = anonymous_visitor_with_email().await;
+    let ghost = uuid::Uuid::new_v4().to_string();
+
+    let events = drive_all_as(&state, None, &UserScope::Denied, &send_frame(&ghost)).await;
+    assert_eq!(events.len(), 1, "no turn may be spawned: {events:?}");
+    assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND", "got: {events:?}");
+}
+
+#[tokio::test]
+async fn an_authenticated_emailless_principal_still_cannot_reach_an_owned_session() {
+    // Negative control: the exception is keyed on "no verified principal", NOT
+    // on the `Denied` scope. A connection that DID authenticate but carries no
+    // `email` claim keeps failing closed — that half of th-909995 is unchanged.
+    let (state, storage, visitor) = anonymous_visitor_with_email().await;
+    assert_owned(&storage, &visitor.conversation_id).await;
+
+    let read = get_messages(&state, &UserScope::Denied, &visitor.session_id).await;
+    assert_eq!(read["error"]["code"], "SESSION_NOT_FOUND", "got: {read}");
+
+    let events = drive_all(&state, &UserScope::Denied, &send_frame(&visitor.session_id)).await;
+    assert_eq!(events.len(), 1, "no turn may be spawned: {events:?}");
+    assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn another_user_still_cannot_reach_the_visitors_owned_session() {
+    // Negative control: making the conversation reachable by its anonymous
+    // creator must not make it reachable by a DIFFERENT authenticated user.
+    let (state, storage, visitor) = anonymous_visitor_with_email().await;
+    assert_owned(&storage, &visitor.conversation_id).await;
+    let bob = scoped("bob@example.com");
+
+    let read = get_messages(&state, &bob, &visitor.session_id).await;
+    assert_eq!(read["error"]["code"], "SESSION_NOT_FOUND", "got: {read}");
+
+    let events = drive_all(&state, &bob, &send_frame(&visitor.session_id)).await;
+    assert_eq!(events.len(), 1, "no turn may be spawned: {events:?}");
+    assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND");
+
+    assert!(
+        !list_ids(&state, &bob).await.contains(&visitor.conversation_id),
+        "the visitor's conversation must not appear in another user's list"
+    );
+
+    // Nothing landed in the visitor's log.
+    let messages = storage
+        .list_messages_by_conversation(smooth_operator::adapter::MessageQuery::new(
+            &visitor.conversation_id,
+            50,
+        ))
+        .await
+        .expect("list messages")
+        .messages;
+    assert_eq!(messages.len(), 1, "only the visitor's own message: {messages:?}");
+}
+
+#[tokio::test]
+async fn an_anonymous_visitor_still_cannot_reach_an_authenticated_users_session() {
+    // Negative control: the exception lets an anonymous connection past the
+    // OWNERSHIP axis, not past ownership *of an authenticated user's* session
+    // in a way that widens listing. Alice's conversation is owned by a real
+    // principal; an anonymous connection knowing its id is the residual risk
+    // called out in the doc comment, but it must not be ENUMERABLE.
+    let (state, storage, _a, _b) = two_users().await;
+    let alice_ids = list_ids_as(&state, None, &UserScope::Denied).await;
+    assert!(
+        alice_ids.is_empty(),
+        "an anonymous connection must not enumerate authenticated users' conversations: {alice_ids:?}"
+    );
+    drop(storage);
+}
+
+async fn list_ids_as(state: &AppState, auth_org: Option<&str>, scope: &UserScope) -> Vec<String> {
+    let ev = drive_as(
+        state,
+        auth_org,
+        scope,
+        &json!({ "action": "list_conversations", "requestId": "lc" }),
+    )
+    .await;
+    assert_eq!(ev["type"], "immediate_response", "got: {ev}");
+    ev["data"]["conversations"]
+        .as_array()
+        .expect("conversations array")
+        .iter()
+        .map(|c| c["conversationId"].as_str().expect("id").to_string())
+        .collect()
 }
