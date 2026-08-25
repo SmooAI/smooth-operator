@@ -92,6 +92,23 @@ fn same_org(auth_org: Option<&str>, row_org: &str) -> bool {
     auth_org.is_none_or(|o| o == row_org)
 }
 
+/// How the caller arrived at the conversation, which is what decides whether the
+/// anonymous exception in [`may_read_conversation`] applies.
+///
+/// [`Reach::ById`] means the caller already holds an unguessable id — for a
+/// public widget visitor that id IS its capability, the only credential it has.
+/// [`Reach::Listing`] means `list_conversations` turned the conversation up by
+/// enumeration. Letting an identity-less connection past the ownership axis is
+/// defensible for the first and never for the second: it must not be handed ids
+/// it could not already name. Listing is org-bounded but falls back to the SEED
+/// org for an anonymous caller, which is precisely where widget conversations
+/// pool — so widening it there would leak visitors' chats to each other.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    ById,
+    Listing,
+}
+
 /// Whether this connection may read `conversation_id`.
 ///
 /// Two boundaries, outer first. **Tenant**: a connection carrying a verified org
@@ -104,8 +121,27 @@ fn same_org(auth_org: Option<&str>, row_org: &str) -> bool {
 /// anonymous or emailless principal, or predating ownership) stays readable by
 /// everyone, as it was before scoping shipped; fail-closing it instead denied
 /// those principals their own sessions (th-909995, and the .NET revert in #309).
-/// An owned conversation still needs a matching `User(email)`, so `Denied` — and
-/// any other user — is refused.
+/// An owned conversation still needs a matching `User(email)`, so an
+/// *authenticated* `Denied` — and any other user — is refused.
+///
+/// **The anonymous exception (th-anon-owned).** `Denied` covers two very
+/// different connections: an authenticated principal whose token carries no
+/// `email` claim, and a connection with no verified principal at all — every
+/// public widget visitor (see `server::anonymous_scope`). Only the first can
+/// meaningfully fail the owner check; the second can NEVER satisfy it, because
+/// it has no identity to match with. Applying ownership to it broke the widget
+/// outright the moment its pre-chat form started sending `userEmail`: that email
+/// lands on the visitor's own `user` participant, makes the conversation
+/// `owned`, and the visitor is then locked out of the session it just created —
+/// `send_message` answers `SESSION_NOT_FOUND` for a session that plainly exists,
+/// and the widget's recovery loop re-creates and is denied identically, forever.
+/// This is th-909995 recurring for the emailful case. So an anonymous connection
+/// (`auth_org.is_none()` — set only by the tokenless and degraded-token branches
+/// of `server::resolve_ws_access`) skips the ownership axis *for a
+/// [`Reach::ById`] read only*, and is bounded by session-id unguessability,
+/// exactly as it was before scoping shipped. An authenticated emailless
+/// principal still fails closed, and [`Reach::Listing`] stays strict for
+/// everyone so nothing becomes enumerable.
 ///
 /// A storage error is a denial — an owner check that can't be completed must not
 /// pass.
@@ -114,6 +150,7 @@ async fn may_read_conversation(
     conversation_id: &str,
     auth_org: Option<&str>,
     scope: &UserScope,
+    reach: Reach,
 ) -> bool {
     // Nothing to check on either axis — skip the participant read entirely, as
     // this function did for `Unscoped` before the tenant check existed.
@@ -153,7 +190,12 @@ async fn may_read_conversation(
                             .iter()
                             .any(|p| smooth_operator::adapter::is_owner(p, email))
                 }
-                UserScope::Denied => !owned,
+                // Ownerless ⇒ open. Owned ⇒ refused for an authenticated
+                // emailless principal, and refused for everyone while
+                // enumerating — but NOT for an anonymous connection that already
+                // named the id, which has no identity the check could ever be
+                // satisfied by.
+                UserScope::Denied => !owned || (auth_org.is_none() && reach == Reach::ById),
                 UserScope::Unscoped => true, // handled above
             }
         }
@@ -198,11 +240,15 @@ async fn scoped_session(
     if !same_org(auth_org, &session.organization_id) {
         return Ok(None);
     }
-    Ok(
-        may_read_conversation(state, &session.conversation_id, auth_org, scope)
-            .await
-            .then_some(session),
+    Ok(may_read_conversation(
+        state,
+        &session.conversation_id,
+        auth_org,
+        scope,
+        Reach::ById,
     )
+    .await
+    .then_some(session))
 }
 
 /// The `error` event for a session read that storage could not answer. Distinct
@@ -510,7 +556,8 @@ async fn handle_create_session(
     // conversations by their ids alone.
     let resume = match parsed.get("conversationId").and_then(Value::as_str) {
         Some(cid)
-            if !cid.is_empty() && may_read_conversation(state, cid, auth_org, scope).await =>
+            if !cid.is_empty()
+                && may_read_conversation(state, cid, auth_org, scope, Reach::ById).await =>
         {
             state.storage.get_conversation(cid).await.ok().flatten()
         }
@@ -953,7 +1000,7 @@ async fn handle_list_conversations(
     const MSG_CAP: usize = 200;
     let mut rows: Vec<(i64, Value)> = Vec::new();
     for conv in conversations {
-        if !may_read_conversation(state, &conv.id, auth_org, scope).await {
+        if !may_read_conversation(state, &conv.id, auth_org, scope, Reach::Listing).await {
             continue;
         }
         let mut query = smooth_operator::adapter::MessageQuery::new(&conv.id, MSG_CAP);
@@ -1083,7 +1130,9 @@ async fn handle_rename_conversation(
     // retitle another user's conversation. Not-ours is reported exactly as
     // never-existed.
     match state.storage.get_conversation(conversation_id).await {
-        Ok(Some(_)) if may_read_conversation(state, conversation_id, auth_org, scope).await => {}
+        Ok(Some(_))
+            if may_read_conversation(state, conversation_id, auth_org, scope, Reach::ById)
+                .await => {}
         Ok(_) => {
             let _ = sink.send(protocol::error(
                 request_id,
