@@ -195,9 +195,7 @@ async fn may_read_conversation(
                 // enumerating — but NOT for an anonymous connection that already
                 // named the id, which has no identity the check could ever be
                 // satisfied by.
-                UserScope::Denied => {
-                    !owned || (auth_org.is_none() && reach == Reach::ById)
-                }
+                UserScope::Denied => !owned || (auth_org.is_none() && reach == Reach::ById),
                 UserScope::Unscoped => true, // handled above
             }
         }
@@ -242,11 +240,15 @@ async fn scoped_session(
     if !same_org(auth_org, &session.organization_id) {
         return Ok(None);
     }
-    Ok(
-        may_read_conversation(state, &session.conversation_id, auth_org, scope, Reach::ById)
-            .await
-            .then_some(session),
+    Ok(may_read_conversation(
+        state,
+        &session.conversation_id,
+        auth_org,
+        scope,
+        Reach::ById,
     )
+    .await
+    .then_some(session))
 }
 
 /// The `error` event for a session read that storage could not answer. Distinct

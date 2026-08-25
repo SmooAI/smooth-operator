@@ -1136,7 +1136,10 @@ async fn the_not_found_response_is_still_reachable_for_an_anonymous_visitor() {
 
     let events = drive_all_as(&state, None, &UserScope::Denied, &send_frame(&ghost)).await;
     assert_eq!(events.len(), 1, "no turn may be spawned: {events:?}");
-    assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND", "got: {events:?}");
+    assert_eq!(
+        events[0]["error"]["code"], "SESSION_NOT_FOUND",
+        "got: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -1171,7 +1174,9 @@ async fn another_user_still_cannot_reach_the_visitors_owned_session() {
     assert_eq!(events[0]["error"]["code"], "SESSION_NOT_FOUND");
 
     assert!(
-        !list_ids(&state, &bob).await.contains(&visitor.conversation_id),
+        !list_ids(&state, &bob)
+            .await
+            .contains(&visitor.conversation_id),
         "the visitor's conversation must not appear in another user's list"
     );
 
@@ -1184,7 +1189,11 @@ async fn another_user_still_cannot_reach_the_visitors_owned_session() {
         .await
         .expect("list messages")
         .messages;
-    assert_eq!(messages.len(), 1, "only the visitor's own message: {messages:?}");
+    assert_eq!(
+        messages.len(),
+        1,
+        "only the visitor's own message: {messages:?}"
+    );
 }
 
 #[tokio::test]
