@@ -1934,7 +1934,12 @@ async fn handle_send_message(
                 // Production: `None` (a live client is built from `llm`). Tests: the
                 // scenario corpus's `MockLlmClient`, which runs the turn offline.
                 llm_provider: chat_provider,
-                executor: None,
+                // SEAM — the executor this turn runs on. `None` (the default)
+                // is in-process. A host installs one via `AppState::with_executor`:
+                // a durable backend (ADR-030), or a decorator that guards the
+                // returned conversation's reply against the tools that actually
+                // ran (pearl th-39999c).
+                executor: state_for_turn.executor.clone(),
                 // Opt-in rerank stage (feature gap G8): `None` unless the operator
                 // enabled it via `SMOOTH_AGENT_RERANK` (gateway/lexical). Default-off
                 // keeps retrieval behavior unchanged.
