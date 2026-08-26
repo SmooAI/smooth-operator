@@ -1636,6 +1636,11 @@ fn spawn_confirmation_bridge(
                         );
                         record_outstanding = true;
                     }
+                    tracing::info!(
+                        session_id,
+                        tool = %tool_name,
+                        "confirmation: turn parked awaiting confirm_tool_action"
+                    );
                     // Register THIS turn's response sender so the next
                     // `confirm_tool_action` for this session resumes it. Re-clone
                     // per request: the hook takes one verdict per parked tool.
@@ -1713,6 +1718,12 @@ fn spawn_interaction_bridge(
                 );
                 record_outstanding = true;
             }
+            tracing::info!(
+                session_id,
+                interaction_id = %raise.id,
+                kind = %req.kind,
+                "interaction: turn parked awaiting submit_interaction"
+            );
             // Register THIS turn's outcome sender (+ the kind/spec as the
             // validation contract) so the next `submit_interaction` for this
             // session resumes it. Re-clone per request: the raise tool takes one
