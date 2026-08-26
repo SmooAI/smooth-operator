@@ -854,6 +854,38 @@ impl AppState {
         session_id: &str,
         record: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
+        self.set_session_meta_key(session_id, "pendingConfirmation", record)
+            .await
+    }
+
+    /// Set or clear the DURABLE record of a parked Rich Interaction on the
+    /// session's `metadata.pendingInteraction` — the interaction sibling of
+    /// [`set_pending_confirmation`](Self::set_pending_confirmation) (th-db0816).
+    /// The record carries the interaction id, kind and spec, so a
+    /// `submit_interaction` landing on a pod without the live park can still
+    /// validate and resolve it. Unlike confirmations it carries no TTL: the
+    /// resolution's host effect (identity attach) is idempotent and
+    /// non-destructive, so a late submit is a feature, not a hazard.
+    pub async fn set_pending_interaction(
+        &self,
+        session_id: &str,
+        record: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.set_session_meta_key(session_id, "pendingInteraction", record)
+            .await
+    }
+
+    /// Shared write path for the durable park records: set/remove one metadata
+    /// key locally, then write the whole map through to storage (the same
+    /// local-first shape as [`set_session_authenticated`](Self::set_session_authenticated)).
+    /// A storage failure is returned so a caller about to act on a retired
+    /// record can fail closed.
+    async fn set_session_meta_key(
+        &self,
+        session_id: &str,
+        key: &str,
+        value: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
         let updated = {
             let Ok(mut map) = self.sessions.write() else {
                 return Ok(());
@@ -862,12 +894,12 @@ impl AppState {
                 return Ok(());
             };
             let mut meta = session.metadata.take().unwrap_or_default();
-            match &record {
-                Some(rec) => {
-                    meta.insert("pendingConfirmation".to_string(), rec.clone());
+            match &value {
+                Some(v) => {
+                    meta.insert(key.to_string(), v.clone());
                 }
                 None => {
-                    meta.remove("pendingConfirmation");
+                    meta.remove(key);
                 }
             }
             session.metadata = Some(meta.clone());
@@ -887,7 +919,8 @@ impl AppState {
             tracing::warn!(
                 error = %e,
                 session_id,
-                "persisting pendingConfirmation failed — the park will not survive a pod hop"
+                key,
+                "persisting session metadata key failed — it will not survive a pod hop"
             );
             return Err(e);
         }
@@ -968,29 +1001,58 @@ impl AppState {
     /// intake that collected just an email never clobbers a known name).
     /// Durable participant/CRM attach is a host concern.
     pub fn attach_session_identity(&self, session_id: &str, values: &IntakeValues) {
-        if let Ok(mut map) = self.sessions.write() {
-            if let Some(session) = map.get_mut(session_id) {
-                let mut meta = session.metadata.take().unwrap_or_default();
-                if let Some(name) = &values.name {
-                    meta.insert(
-                        "userName".to_string(),
-                        serde_json::Value::from(name.clone()),
-                    );
-                }
-                if let Some(email) = &values.email {
-                    meta.insert(
-                        "contactEmail".to_string(),
-                        serde_json::Value::from(email.clone()),
-                    );
-                }
-                if let Some(phone) = &values.phone {
-                    meta.insert(
-                        "contactPhone".to_string(),
-                        serde_json::Value::from(phone.clone()),
-                    );
-                }
-                session.metadata = Some(meta);
+        let updated = {
+            let Ok(mut map) = self.sessions.write() else {
+                return;
+            };
+            let Some(session) = map.get_mut(session_id) else {
+                return;
+            };
+            let mut meta = session.metadata.take().unwrap_or_default();
+            if let Some(name) = &values.name {
+                meta.insert(
+                    "userName".to_string(),
+                    serde_json::Value::from(name.clone()),
+                );
             }
+            if let Some(email) = &values.email {
+                meta.insert(
+                    "contactEmail".to_string(),
+                    serde_json::Value::from(email.clone()),
+                );
+            }
+            if let Some(phone) = &values.phone {
+                meta.insert(
+                    "contactPhone".to_string(),
+                    serde_json::Value::from(phone.clone()),
+                );
+            }
+            session.metadata = Some(meta.clone());
+            meta
+        };
+        // Write through to storage (th-db0816): a captured contact used to live
+        // only in this pod's map, so a pod roll forgot who the visitor was even
+        // though they had just told us. Spawned (this is a sync seam) and
+        // best-effort — the in-process attach above already served the turn.
+        // Guarded so the sync unit tests, which run without a runtime, still
+        // exercise the local half.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let storage = Arc::clone(&self.storage);
+            let sid = session_id.to_string();
+            handle.spawn(async move {
+                if let Err(e) = storage
+                    .update_session(
+                        &sid,
+                        SessionUpdate {
+                            metadata: Some(updated),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, session_id = %sid, "persisting attached identity failed — it will not survive a pod hop");
+                }
+            });
         }
     }
 }
