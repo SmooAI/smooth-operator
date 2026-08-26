@@ -47,6 +47,32 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `cancel` | stop the in-flight turn (the "Stop button") | `requestId` (of the `send_message` to cancel), `sessionId?` | `cancelled` (or nothing, if no turn is running) |
 | `ping` | keepalive | — | `pong` |
 
+### When a conversation actually exists
+
+`create_conversation_session` answers with a `conversationId` immediately, but a
+**bare open — no `userEmail`, no `metadata.userPhone`, no `conversationId` to
+resume — persists nothing until the session's first `send_message`.** The
+conversation, both participants and the session are written together at that
+point, in that order.
+
+This is deliberate: opening a widget is not a conversation. In a 30-day
+production sample 38% of web conversations carried zero messages — opens that
+still occupied an inbox row — and a reconnect before the first message used to
+mint a second row for the same visitor. Deferring the write removes both.
+
+What a client can rely on:
+
+- the `sessionId` works immediately on the connection that created it (a
+  WebSocket stays pinned to one server for its life);
+- a reconnect that names the still-unwritten `conversationId` binds to it,
+  keeping the id and the durable `supports` record;
+- an open that carries visitor identity (`userEmail`, or ADR-048's
+  `metadata.userPhone`) is **not** deferred — it is a captured lead, and a host
+  adapter hooking the `user` participant write (CRM capture) still sees it at
+  once;
+- reading the conversation from a *different* connection before its first
+  message will not find it. There is nothing there yet.
+
 ## Events (server → client)
 
 | type | meaning |

@@ -902,6 +902,9 @@ async fn connection_loop(
     // the backplane so no stale registry entry is left behind, then drop the
     // sink so the writer task exits.
     state.backplane.detach(&conn_id).await;
+    // SMOODEV-3057: an open that never sent a message never earns its rows, so
+    // drop its held-back create rather than carrying it for the pod's lifetime.
+    state.discard_pending_sessions_for_conn(&conn_id);
     drop(sink_tx);
     let _ = writer.await;
 }

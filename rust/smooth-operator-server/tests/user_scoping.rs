@@ -142,6 +142,12 @@ async fn create_session_as(
 /// Poll until the spawned persistence task has written the participants and
 /// registered the session, so ownership checks see a settled world.
 async fn await_persisted(state: &AppState, storage: &InMemoryStorageAdapter, created: &Created) {
+    // SMOODEV-3057: an identity-less create is parked until its first message, so
+    // land it explicitly — the same call `send_message` makes.
+    state
+        .materialize_session(&created.session_id)
+        .await
+        .expect("materialize the deferred create");
     for _ in 0..100 {
         let participants = storage
             .list_participants_by_conversation(&created.conversation_id)

@@ -22,7 +22,7 @@ use smooth_operator::agent_config::{AgentConfigResolver, StaticAgentConfigResolv
 use smooth_operator::auth::{AuthVerifier, NoAuthVerifier};
 use smooth_operator::backplane::{Backplane, InMemoryBackplane};
 use smooth_operator::connector_config::{ConnectorConfigStore, InMemoryConnectorConfigStore};
-use smooth_operator::domain::Session;
+use smooth_operator::domain::{Conversation, Participant, Session};
 use smooth_operator::gateway_key::{EnvGatewayKeyResolver, GatewayKeyResolver};
 use smooth_operator::identity_intake::IntakeValues;
 use smooth_operator::interaction::{InteractionRegistry, InteractionResolution};
@@ -38,6 +38,37 @@ use smooth_operator_core::tool::ToolHook;
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
 
 use crate::config::ServerConfig;
+
+/// A create-session's storage writes, held back until the conversation earns a
+/// row (SMOODEV-3057).
+///
+/// Opening a widget used to write a `conversations` row (plus both participants
+/// and a session) before the visitor had typed anything. In a 30-day production
+/// sample **44 of 117** web conversations carried zero messages — bare opens
+/// occupying an inbox row — and because a web create feeds a fresh UUID as the
+/// conversation's `idempotency_key`, the unique index's `ON CONFLICT DO NOTHING`
+/// could never collapse a double-connect the way it does for sms/slack/discord.
+///
+/// Parking the writes here fixes both: an abandoned open leaves nothing behind,
+/// and a double-connect is harmless because neither connection has written.
+///
+/// Each field is cleared as its write lands, so a retry after a transient
+/// storage failure resumes rather than re-inserting an already-taken id.
+pub struct PendingSession {
+    /// The session this create would have produced — the key it is parked under.
+    pub session_id: String,
+    /// The connection that opened it; its close discards the parked writes.
+    pub conn_id: String,
+    /// Written first: every other row FKs it, and a host adapter's participant
+    /// hook may read its `metadata_json`.
+    pub conversation: Option<Conversation>,
+    /// The `user` participant — the write a host adapter hooks for CRM capture.
+    pub user_participant: Option<Participant>,
+    /// The `ai_agent` participant.
+    pub agent_participant: Option<Participant>,
+    /// Written last, as in the eager path.
+    pub session: Option<Session>,
+}
 
 /// Shared, cloneable application state handed to every WebSocket connection +
 /// every admin HTTP request.
@@ -174,6 +205,13 @@ pub struct AppState {
     pub shutdown: CancellationToken,
     /// Session registry: `sessionId` → session blob. Shared across connections.
     sessions: Arc<RwLock<HashMap<String, Session>>>,
+    /// **Held-back create-session writes** (SMOODEV-3057): `sessionId` →
+    /// [`PendingSession`]. An anonymous widget open that carries no visitor
+    /// identity is parked here instead of being written, and lands in storage on
+    /// its first message ([`materialize_session`](Self::materialize_session)) or
+    /// is dropped when the connection closes
+    /// ([`discard_pending_sessions_for_conn`](Self::discard_pending_sessions_for_conn)).
+    pending_sessions: Arc<RwLock<HashMap<String, PendingSession>>>,
     /// Document-set registry, **org-scoped**: `org_id` → (set name → document
     /// count). The in-memory knowledge backend drops document metadata on
     /// ingest, so the admin API reads document-set membership from this side
@@ -311,6 +349,7 @@ impl AppState {
             // site) keeps construction ripple-free.
             shutdown: CancellationToken::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            pending_sessions: Arc::new(RwLock::new(HashMap::new())),
             doc_sets: Arc::new(RwLock::new(HashMap::new())),
             connectors: Arc::new(RwLock::new(HashMap::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
@@ -525,6 +564,116 @@ impl AppState {
     pub fn insert_session(&self, session: Session) {
         if let Ok(mut map) = self.sessions.write() {
             map.insert(session.session_id.clone(), session);
+        }
+    }
+
+    /// Park a create-session's storage writes until the conversation earns them
+    /// (SMOODEV-3057). See [`PendingSession`].
+    pub fn defer_session(&self, pending: PendingSession) {
+        if let Ok(mut map) = self.pending_sessions.write() {
+            map.insert(pending.session_id.clone(), pending);
+        }
+    }
+
+    /// True while `session_id`'s create is still parked (nothing written yet).
+    /// Test/introspection helper.
+    #[must_use]
+    pub fn is_session_deferred(&self, session_id: &str) -> bool {
+        self.pending_sessions
+            .read()
+            .is_ok_and(|map| map.contains_key(session_id))
+    }
+
+    /// Flush a parked create to storage, in the SAME order the eager path used:
+    /// conversation → user participant → agent participant → session. That order
+    /// is load-bearing twice over — every child row FKs the conversation, and a
+    /// host adapter may hook the `user` participant write to capture the visitor
+    /// into its CRM, reading phone/consent off the conversation's `metadata_json`
+    /// (SmooAI's `chat-storage::crm_capture` does exactly that).
+    ///
+    /// A no-op for a session that was never deferred, so callers need no branch.
+    ///
+    /// Each step clears itself from the parked record only once it has actually
+    /// landed, so a retry after a transient failure resumes where it stopped
+    /// rather than re-inserting a row whose primary key is already taken.
+    pub async fn materialize_session(&self, session_id: &str) -> anyhow::Result<()> {
+        let Some(mut pending) = ({
+            let mut map = self
+                .pending_sessions
+                .write()
+                .map_err(|_| anyhow::anyhow!("pending-session registry poisoned"))?;
+            map.remove(session_id)
+        }) else {
+            return Ok(());
+        };
+        let result = self.flush_pending(&mut pending).await;
+        if result.is_err() {
+            // Put it back so the visitor's retry finishes the job. Dropping it
+            // here would leave a live session whose rows can never be written.
+            self.defer_session(pending);
+        }
+        result
+    }
+
+    /// Land the parked create that owns `conversation_id`, if one is parked here.
+    ///
+    /// A reconnect names a `conversationId`; if that conversation's create is
+    /// still parked (the visitor opened the widget, the socket blipped, and they
+    /// had not yet typed) the resume would otherwise find nothing and mint a
+    /// fresh conversation — losing the durable `supports` record a reconnect that
+    /// omits `supports` inherits, and the conversation id itself. Landing it
+    /// first keeps the resume path behaving exactly as it did when every create
+    /// wrote immediately.
+    ///
+    /// Writing rows for a caller-named id before the ownership check leaks
+    /// nothing: it persists what this pod already holds, reads nothing back to
+    /// the caller, and the resume is still gated by `may_read_conversation`.
+    pub async fn materialize_conversation(&self, conversation_id: &str) -> anyhow::Result<()> {
+        let Some(session_id) = ({
+            let map = self
+                .pending_sessions
+                .read()
+                .map_err(|_| anyhow::anyhow!("pending-session registry poisoned"))?;
+            map.values()
+                .find(|pending| {
+                    pending
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.conversation_id == conversation_id)
+                })
+                .map(|pending| pending.session_id.clone())
+        }) else {
+            return Ok(());
+        };
+        self.materialize_session(&session_id).await
+    }
+
+    async fn flush_pending(&self, pending: &mut PendingSession) -> anyhow::Result<()> {
+        if let Some(conversation) = pending.conversation.clone() {
+            self.storage.create_conversation(conversation).await?;
+            pending.conversation = None;
+        }
+        if let Some(participant) = pending.user_participant.clone() {
+            self.storage.add_participant(participant).await?;
+            pending.user_participant = None;
+        }
+        if let Some(participant) = pending.agent_participant.clone() {
+            self.storage.add_participant(participant).await?;
+            pending.agent_participant = None;
+        }
+        if let Some(session) = pending.session.clone() {
+            self.storage.create_session(session).await?;
+            pending.session = None;
+        }
+        Ok(())
+    }
+
+    /// Drop every parked create belonging to a closed connection — an open that
+    /// never sent a message never earns its rows, and without this the pending
+    /// map would grow for the pod's whole lifetime.
+    pub fn discard_pending_sessions_for_conn(&self, conn_id: &str) {
+        if let Ok(mut map) = self.pending_sessions.write() {
+            map.retain(|_, pending| pending.conn_id != conn_id);
         }
     }
 
