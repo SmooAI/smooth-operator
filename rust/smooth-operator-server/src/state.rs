@@ -568,6 +568,13 @@ impl AppState {
         }
         match self.storage.get_session(session_id).await {
             Ok(Some(session)) => {
+                // th-694c22: this is the cross-pod resume in action — a session
+                // another pod created, served here via storage. The one line
+                // that tells an incident responder routing worked as designed.
+                tracing::info!(
+                    session_id,
+                    "session primed from storage (not in local registry)"
+                );
                 self.insert_session(session.clone());
                 Ok(Some(session))
             }

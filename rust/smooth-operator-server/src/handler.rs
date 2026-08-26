@@ -1531,6 +1531,15 @@ async fn handle_send_message(
         }
     };
 
+    // th-694c22: one line per turn — enough to correlate a visitor's report
+    // ("I sent a message and nothing happened") to a session and requestId.
+    tracing::info!(
+        session_id,
+        request_id,
+        message_chars = message.len(),
+        "send_message: turn requested"
+    );
+
     // Optional multimodal attachments. Fail-soft: absent ⇒ text-only; a malformed
     // `images` array is dropped rather than rejecting the turn (per the schema).
     let images: Vec<smooth_operator::tool_provider::UserImage> = parsed
@@ -2218,6 +2227,11 @@ async fn handle_confirm_tool_action(
         };
 
         if responder.send(verdict).is_ok() {
+            tracing::info!(
+                session_id,
+                approved,
+                "confirm_tool_action: live park resolved"
+            );
             // The park is resolved: retire the durable record NOW rather than at
             // turn end, shrinking the window in which a duplicate confirm could
             // read it back as still pending (th-db0816). Best-effort — the
@@ -2365,6 +2379,11 @@ async fn durable_confirm_fallback(
         return None;
     }
 
+    tracing::info!(
+        session_id,
+        tool,
+        "confirm_tool_action: durable record resolved approved — driving continuation turn"
+    );
     // The continuation turn: a normal `send_message` whose user message IS the
     // approval. The model sees the full conversation (its own "shall I?"
     // included) plus the recorded arguments, re-issues the call, and the
@@ -2786,6 +2805,12 @@ async fn handle_submit_interaction(
                 }
             };
             if resolved {
+                tracing::info!(
+                    session_id,
+                    kind = %pending.kind,
+                    live = pending.live,
+                    "submit_interaction: resolved with values"
+                );
                 attach_interaction_effect(state, session_id, &pending.kind, &canonical);
                 let _ = sink.send(protocol::immediate_response(
                     Some(request_id),
@@ -2925,6 +2950,7 @@ async fn handle_verify_otp(
     match otp.verify_otp(session_id, code).await {
         smooth_operator::otp::OtpVerifyOutcome::Verified => {
             state.set_session_authenticated(session_id, true).await;
+            tracing::info!(session_id, "verify_otp: session identity verified");
             let _ = sink.send(protocol::otp_verified(
                 request_id,
                 "Identity verified successfully.",

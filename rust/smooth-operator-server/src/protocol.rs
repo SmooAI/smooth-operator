@@ -400,6 +400,19 @@ pub fn otp_invalid(
 /// backward-compatibility (per `error.schema.json`).
 #[must_use]
 pub fn error(request_id: Option<&str>, code: &str, message: &str) -> Value {
+    // th-694c22: every client-visible error frame is logged HERE, at its single
+    // construction site, so a prod failure is diagnosable from logs alone. A
+    // live incident ("session not found" rendered to a visitor) produced ZERO
+    // server log lines because each of the ~30 emit sites sent the frame
+    // silently — one warn at the chokepoint covers them all, present and future.
+    // (`message` is tracing's reserved event-message field — alias the frame's
+    // human text as `detail` so neither clobbers the other.)
+    tracing::warn!(
+        code,
+        detail = message,
+        request_id = request_id.unwrap_or(""),
+        "error frame emitted"
+    );
     let err = json!({ "code": code, "message": message });
     let mut data = json!({ "error": err });
     if let Some(rid) = request_id {
