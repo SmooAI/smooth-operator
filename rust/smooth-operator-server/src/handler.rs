@@ -1746,6 +1746,20 @@ async fn handle_send_message(
             let sid = session.session_id.clone();
             Arc::new(move |kind, values| attach_interaction_effect(&state, &sid, kind, values))
         },
+        // th-db0816: mirror every raise into the session's durable
+        // `metadata.pendingInteraction`, the interaction sibling of the
+        // confirmation record — a submit landing on another pod (or after this
+        // turn died) can then still validate and resolve it.
+        persist: {
+            let state = state.clone();
+            Some(Arc::new(move |sid: &str, record: Option<Value>| {
+                let state = state.clone();
+                let sid = sid.to_string();
+                tokio::spawn(async move {
+                    let _ = state.set_pending_interaction(&sid, record).await;
+                });
+            }) as crate::runner::PersistPendingConfirmation)
+        },
     });
 
     // The turn's org, used to (a) resolve the org's persona override (SEAM 2)
@@ -2500,6 +2514,51 @@ fn attach_interaction_effect(state: &AppState, session_id: &str, kind: &str, val
     }
 }
 
+/// A pending interaction's validation contract, from either source: the live
+/// park on this pod, or the durable `metadata.pendingInteraction` record
+/// (th-db0816).
+struct PendingView {
+    interaction_id: String,
+    kind: String,
+    spec: Value,
+    /// Whether a live park (with a resumable responder) backs this view.
+    live: bool,
+}
+
+/// The durable pending-interaction record for a session, read FRESH from
+/// storage (the local cache can predate the park on another pod). Primes the
+/// cache with the fresh session so a later retire edits current state.
+async fn durable_pending_interaction(
+    state: &AppState,
+    session_id: &str,
+) -> anyhow::Result<Option<PendingView>> {
+    let Some(session) = state.storage.get_session(session_id).await? else {
+        return Ok(None);
+    };
+    let record = session
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("pendingInteraction"))
+        .cloned();
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    state.insert_session(session);
+    let (Some(interaction_id), Some(kind), Some(spec)) = (
+        record.get("interactionId").and_then(Value::as_str),
+        record.get("kind").and_then(Value::as_str),
+        record.get("spec"),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(PendingView {
+        interaction_id: interaction_id.to_string(),
+        kind: kind.to_string(),
+        spec: spec.clone(),
+        live: false,
+    }))
+}
+
 /// `submit_interaction` — resume a turn parked on a Rich Interaction.
 ///
 /// Per `spec/actions/submit-interaction.schema.json` the client sends
@@ -2558,16 +2617,43 @@ async fn handle_submit_interaction(
             return;
         }
     };
-    let Some(pending) = owned
+    // The pending interaction, from the live park on THIS pod or — when no
+    // live park exists (the raise happened on another pod, or its turn died) —
+    // from the durable record the bridge persisted (th-db0816). Either source
+    // carries the full validation contract: id, kind, spec.
+    let live = owned
         .then(|| state.pending_interaction(session_id))
-        .flatten()
-    else {
-        let _ = sink.send(protocol::error(
-            Some(request_id),
-            "NO_PENDING_INTERACTION",
-            &format!("no interaction is awaiting submission for session '{session_id}'"),
-        ));
-        return;
+        .flatten();
+    let pending = match &live {
+        Some(p) => PendingView {
+            interaction_id: p.interaction_id.clone(),
+            kind: p.kind.clone(),
+            spec: p.spec.clone(),
+            live: true,
+        },
+        None => {
+            let durable = if owned {
+                match durable_pending_interaction(state, session_id).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // Could not find out — retryable, the record is untouched.
+                        let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let Some(view) = durable else {
+                let _ = sink.send(protocol::error(
+                    Some(request_id),
+                    "NO_PENDING_INTERACTION",
+                    &format!("no interaction is awaiting submission for session '{session_id}'"),
+                ));
+                return;
+            };
+            view
+        }
     };
 
     // The submit must target THIS interaction instance (and, when it names a
@@ -2601,13 +2687,26 @@ async fn handle_submit_interaction(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        if resolve_interaction(
-            state,
-            session_id,
-            request_id,
-            InteractionOutcome::Declined,
-            sink,
-        ) {
+        let resolved = if pending.live {
+            resolve_interaction(
+                state,
+                session_id,
+                request_id,
+                InteractionOutcome::Declined,
+                sink,
+            )
+        } else {
+            // No live park to resume — retiring the durable record IS the
+            // resolution (a dead raise cannot be fed a decline).
+            match state.set_pending_interaction(session_id, None).await {
+                Ok(()) => true,
+                Err(e) => {
+                    let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+                    false
+                }
+            }
+        };
+        if resolved {
             let _ = sink.send(protocol::immediate_response(
                 Some(request_id),
                 200,
@@ -2660,15 +2759,33 @@ async fn handle_submit_interaction(
             // let a submit against a park whose turn was cancelled or
             // disconnected stamp contact metadata anyway — repeatably, since a
             // failed resolve leaves nothing behind to notice (th-6fbab2).
-            if resolve_interaction(
-                state,
-                session_id,
-                request_id,
-                InteractionOutcome::Submitted {
-                    values: canonical.clone(),
-                },
-                sink,
-            ) {
+            //
+            // Durable path (th-db0816): with no live park, retiring the record
+            // is the "proven" step — fail-closed, so a record that cannot be
+            // cleared never runs the effect (the same retire-before-act rule as
+            // durable confirmations). The visitor's card resolves and their
+            // identity is attached durably; the dead raise's model
+            // acknowledgment is forgone rather than fabricated.
+            let resolved = if pending.live {
+                resolve_interaction(
+                    state,
+                    session_id,
+                    request_id,
+                    InteractionOutcome::Submitted {
+                        values: canonical.clone(),
+                    },
+                    sink,
+                )
+            } else {
+                match state.set_pending_interaction(session_id, None).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+                        false
+                    }
+                }
+            };
+            if resolved {
                 attach_interaction_effect(state, session_id, &pending.kind, &canonical);
                 let _ = sink.send(protocol::immediate_response(
                     Some(request_id),

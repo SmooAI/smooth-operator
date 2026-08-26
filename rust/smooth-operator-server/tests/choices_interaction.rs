@@ -110,6 +110,7 @@ fn interactions_for(state: &AppState, capabilities: &[&str]) -> InteractionConfi
             Arc::new(move |sid: &str| state.clear_interaction(sid))
         },
         attach: Arc::new(|_kind, _values| {}),
+        persist: None,
     }
 }
 

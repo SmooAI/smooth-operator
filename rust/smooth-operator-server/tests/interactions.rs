@@ -126,6 +126,7 @@ fn interactions_for(state: &AppState, capabilities: &[&str]) -> InteractionConfi
                 }
             })
         },
+        persist: None,
     }
 }
 

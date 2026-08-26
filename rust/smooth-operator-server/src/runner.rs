@@ -440,6 +440,11 @@ pub struct InteractionConfig {
     /// `(kind, canonical values)` — the rich path attaches in the WS handler,
     /// which owns validation there.
     pub attach: InteractionAttach,
+    /// Persists/clears the durable pending-interaction record when a raise
+    /// parks / the turn ends (th-db0816) — the interaction sibling of
+    /// [`ConfirmationConfig::persist`]. `None` (the default) keeps the park
+    /// in-process only.
+    pub persist: Option<PersistPendingConfirmation>,
 }
 
 /// A turn's **conversation-workflow** context: the agent's configured workflow
@@ -918,6 +923,7 @@ pub async fn run_streaming_turn(
                 request_id.to_string(),
                 cfg.session_id.clone(),
                 Arc::clone(&cfg.register),
+                cfg.persist.clone(),
             ))
         }
         None => None,
@@ -1684,10 +1690,29 @@ fn spawn_interaction_bridge(
     request_id: String,
     session_id: String,
     register: RegisterInteraction,
+    persist: Option<PersistPendingConfirmation>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Same shape as the confirmation bridge (th-db0816): clear the durable
+        // record when the loop ends with one outstanding; a pod that dies
+        // outright never runs this, which is the point.
+        let mut record_outstanding = false;
         while let Some(raise) = request_rx.recv().await {
             let req = raise.request;
+            // Persist the durable half of the park BEFORE announcing it: the
+            // id, kind and spec are the whole validation contract, so any pod
+            // can validate and resolve a submit against them.
+            if let Some(persist) = &persist {
+                persist(
+                    &session_id,
+                    Some(serde_json::json!({
+                        "interactionId": raise.id,
+                        "kind": req.kind,
+                        "spec": req.spec,
+                    })),
+                );
+                record_outstanding = true;
+            }
             // Register THIS turn's outcome sender (+ the kind/spec as the
             // validation contract) so the next `submit_interaction` for this
             // session resumes it. Re-clone per request: the raise tool takes one
@@ -1707,6 +1732,11 @@ fn spawn_interaction_bridge(
                 &req.spec,
                 &req.reason,
             ));
+        }
+        if record_outstanding {
+            if let Some(persist) = &persist {
+                persist(&session_id, None);
+            }
         }
     })
 }
