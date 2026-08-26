@@ -120,6 +120,8 @@ fn confirmation_for(state: &AppState) -> ConfirmationConfig {
             let state = state.clone();
             Arc::new(move |sid: &str| state.clear_confirmation(sid))
         },
+        persist: None,
+        pre_approved: None,
     }
 }
 

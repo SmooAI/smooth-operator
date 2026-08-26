@@ -167,7 +167,7 @@ const MAX_PRIOR_MESSAGES: usize = 50;
 /// before the core `ConfirmationHook` gives up and treats the tool as denied
 /// (a timeout). Bounds a stuck turn so a client that never confirms can't pin a
 /// task forever. Generous (5 min) because a human is in the loop.
-const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// `max_tokens` for the fast-model preamble — one short sentence. Pearl th-9a5794.
 const PREAMBLE_MAX_TOKENS: u32 = 64;
@@ -188,6 +188,13 @@ pub type RegisterConfirmation = Arc<dyn Fn(&str, UnboundedSender<HumanResponse>)
 /// Clears any registered confirmation sender for a session id when its turn ends.
 /// Typically `AppState::clear_confirmation`.
 pub type ClearConfirmation = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Persists (`Some`) or clears (`None`) the DURABLE record of a parked
+/// confirmation for a session id (th-db0816). Typically wraps
+/// `AppState::set_pending_confirmation` (spawning the async write). The record
+/// is what lets `confirm_tool_action` on ANOTHER pod — or on this pod after the
+/// parked turn died — still carry out the verdict.
+pub type PersistPendingConfirmation = Arc<dyn Fn(&str, Option<serde_json::Value>) + Send + Sync>;
 
 /// Hooks the runner needs to wire **write-confirmation HITL** into a turn
 /// without depending on `AppState` directly (keeps the runner unit-testable).
@@ -238,6 +245,17 @@ pub struct ConfirmationConfig {
     ///
     /// [`PermissionHook`]: smooth_operator::permission::PermissionHook
     pub host_approver: Option<HostApprover>,
+    /// Persists/clears the durable pending-confirmation record when a tool
+    /// parks / the turn ends (th-db0816). `None` (the default) keeps the park
+    /// in-process only — byte-for-byte the pre-durability behavior.
+    pub persist: Option<PersistPendingConfirmation>,
+    /// ONE tool name whose next confirmation this turn may approve without
+    /// parking (th-db0816): the continuation turn spawned by a
+    /// `confirm_tool_action` that resolved a durable record re-issues the
+    /// approved call, and this is what lets it execute instead of parking a
+    /// second time. Consumed by the first matching `Confirm`; any other tool
+    /// still parks normally. `None` (the default) changes nothing.
+    pub pre_approved: Option<String>,
 }
 
 /// Runs its teardown closure when dropped — **including** when the turn future
@@ -1047,6 +1065,8 @@ pub async fn run_streaming_turn(
                 request_id.to_string(),
                 cfg.session_id.clone(),
                 Arc::clone(&cfg.register),
+                cfg.persist.clone(),
+                cfg.pre_approved.clone(),
             ))
         }
         _ => None,
@@ -1561,6 +1581,7 @@ async fn judge_next_step(
 /// tool name is a stable, sufficient correlation key for the resume. The bridge
 /// loops until the request channel closes (the hook/agent dropped at turn end),
 /// then returns — letting the caller clear the registration.
+#[allow(clippy::too_many_arguments)]
 fn spawn_confirmation_bridge(
     mut request_rx: UnboundedReceiver<HumanRequest>,
     response_tx: UnboundedSender<HumanResponse>,
@@ -1568,13 +1589,47 @@ fn spawn_confirmation_bridge(
     request_id: String,
     session_id: String,
     register: RegisterConfirmation,
+    persist: Option<PersistPendingConfirmation>,
+    mut pre_approved: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Whether this turn persisted a durable record that is still
+        // outstanding when the loop ends (turn over / aborted): clear it, so a
+        // resolved-or-dead park can't later masquerade as pending. A pod that
+        // dies outright never runs this — which is the point: the record is
+        // what survives it.
+        let mut record_outstanding = false;
         while let Some(req) = request_rx.recv().await {
             match req {
                 HumanRequest::Confirm {
-                    tool_name, prompt, ..
+                    tool_name,
+                    arguments,
+                    prompt,
                 } => {
+                    // th-db0816: a continuation turn re-issuing an ALREADY
+                    // approved call executes it instead of parking a second
+                    // time. One-shot (`take`), and only for the named tool —
+                    // any other call this turn makes still parks normally.
+                    if pre_approved.as_deref() == Some(tool_name.as_str()) {
+                        pre_approved.take();
+                        let _ = response_tx.send(HumanResponse::Approved);
+                        continue;
+                    }
+                    // Persist the durable half of the park BEFORE announcing it
+                    // (th-db0816): tool + arguments + prompt, enough for any pod
+                    // to carry out the verdict if this one never gets to.
+                    if let Some(persist) = &persist {
+                        persist(
+                            &session_id,
+                            Some(serde_json::json!({
+                                "tool": tool_name,
+                                "arguments": arguments,
+                                "prompt": prompt,
+                                "requestedAt": chrono::Utc::now().timestamp(),
+                            })),
+                        );
+                        record_outstanding = true;
+                    }
                     // Register THIS turn's response sender so the next
                     // `confirm_tool_action` for this session resumes it. Re-clone
                     // per request: the hook takes one verdict per parked tool.
@@ -1596,6 +1651,15 @@ fn spawn_confirmation_bridge(
                         reason: "free-form human input is not supported on this channel".into(),
                     });
                 }
+            }
+        }
+        // Turn over (resolved, timed out, or aborted): the park no longer
+        // exists in any form on this pod, so retire the durable record too —
+        // a later `confirm_tool_action` must not execute a write against a
+        // park that already resolved (th-db0816).
+        if record_outstanding {
+            if let Some(persist) = &persist {
+                persist(&session_id, None);
             }
         }
     })

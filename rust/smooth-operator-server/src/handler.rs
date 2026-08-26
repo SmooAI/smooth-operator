@@ -359,9 +359,13 @@ pub async fn handle_frame(
         Some("send_message") => {
             handle_send_message(state, auth_org, access, scope, &parsed, request_id, sink).await
         }
+        // May ALSO spawn a turn (th-db0816): resolving a DURABLE pending
+        // confirmation — the parked turn lived on another pod, or died — spawns
+        // a continuation turn to carry out the approved action, and its handle
+        // flows back for `cancel`/disconnect exactly like `send_message`'s.
         Some("confirm_tool_action") => {
-            handle_confirm_tool_action(state, auth_org, scope, &parsed, request_id, sink).await;
-            None
+            handle_confirm_tool_action(state, auth_org, access, scope, &parsed, request_id, sink)
+                .await
         }
         Some("verify_otp") => {
             handle_verify_otp(state, auth_org, scope, &parsed, request_id, sink).await;
@@ -1686,6 +1690,26 @@ async fn handle_send_message(
                 let state = state.clone();
                 Arc::new(move |sid: &str| state.clear_confirmation(sid))
             },
+            // th-db0816: mirror every park into the session's durable
+            // `metadata.pendingConfirmation` (and clear it when the park
+            // resolves), so a confirm that lands on another pod — or after this
+            // turn died — can still carry out the verdict. The closure is sync;
+            // the write-through is spawned (best-effort on set, and the bridge
+            // never blocks a live turn on storage).
+            persist: {
+                let state = state.clone();
+                Some(Arc::new(move |sid: &str, record: Option<Value>| {
+                    let state = state.clone();
+                    let sid = sid.to_string();
+                    tokio::spawn(async move {
+                        let _ = state.set_pending_confirmation(&sid, record).await;
+                    });
+                })
+                    as crate::runner::PersistPendingConfirmation)
+            },
+            // One-shot: `Some` only on the continuation turn spawned by a
+            // `confirm_tool_action` that resolved a durable record.
+            pre_approved: state.take_pre_approval(session_id),
         }
     });
 
@@ -2116,18 +2140,19 @@ async fn handle_send_message(
 async fn handle_confirm_tool_action(
     state: &AppState,
     auth_org: Option<&str>,
+    access: &AccessContext,
     scope: &UserScope,
     parsed: &Value,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
-) {
+) -> Option<SpawnedTurn> {
     let Some(session_id) = parsed.get("sessionId").and_then(Value::as_str) else {
         let _ = sink.send(protocol::error(
             request_id,
             "VALIDATION_ERROR",
             "confirm_tool_action requires a 'sessionId'",
         ));
-        return;
+        return None;
     };
 
     // `approved` is required and must be a boolean — a missing/garbled verdict
@@ -2138,7 +2163,7 @@ async fn handle_confirm_tool_action(
             "VALIDATION_ERROR",
             "confirm_tool_action requires a boolean 'approved'",
         ));
-        return;
+        return None;
     };
 
     // Approving a write parked in ANOTHER user's turn is the same class of hole
@@ -2150,49 +2175,192 @@ async fn handle_confirm_tool_action(
             // Not "no such pending confirmation" — we could not find out. The
             // parked turn is still waiting; a retry can still approve it.
             let _ = sink.send(session_storage_error(request_id, session_id, &e));
-            return;
+            return None;
         }
     };
-    let Some(responder) = owned.then(|| state.take_confirmation(session_id)).flatten() else {
+    if !owned {
         let _ = sink.send(protocol::error(
             request_id,
             "NO_PENDING_CONFIRMATION",
             &format!("no tool action is awaiting confirmation for session '{session_id}'"),
         ));
-        return;
-    };
-
-    let verdict = if approved {
-        smooth_operator_core::HumanResponse::Approved
-    } else {
-        smooth_operator_core::HumanResponse::Denied {
-            reason: "user rejected the action".to_string(),
-        }
-    };
-
-    if responder.send(verdict).is_err() {
-        // The parked turn ended (timeout / disconnect) before the confirm landed.
-        let _ = sink.send(protocol::error(
-            request_id,
-            "NO_PENDING_CONFIRMATION",
-            &format!(
-                "the turn awaiting confirmation for session '{session_id}' is no longer active"
-            ),
-        ));
-        return;
+        return None;
     }
 
-    // Ack the confirmation; the resumed turn streams its own follow-on events.
-    let _ = sink.send(protocol::immediate_response(
-        request_id,
-        200,
-        if approved {
-            "Tool action approved"
+    // FAST PATH: the parked turn lives on THIS pod — feed its sender the
+    // verdict and it resumes in place (execute or reject the tool).
+    if let Some(responder) = state.take_confirmation(session_id) {
+        let verdict = if approved {
+            smooth_operator_core::HumanResponse::Approved
         } else {
-            "Tool action rejected"
-        },
-        json!({ "sessionId": session_id, "approved": approved }),
-    ));
+            smooth_operator_core::HumanResponse::Denied {
+                reason: "user rejected the action".to_string(),
+            }
+        };
+
+        if responder.send(verdict).is_ok() {
+            // The park is resolved: retire the durable record NOW rather than at
+            // turn end, shrinking the window in which a duplicate confirm could
+            // read it back as still pending (th-db0816). Best-effort — the
+            // bridge clears it again at turn end.
+            {
+                let state = state.clone();
+                let sid = session_id.to_string();
+                tokio::spawn(async move {
+                    let _ = state.set_pending_confirmation(&sid, None).await;
+                });
+            }
+            // Ack; the resumed turn streams its own follow-on events.
+            let _ = sink.send(protocol::immediate_response(
+                request_id,
+                200,
+                if approved {
+                    "Tool action approved"
+                } else {
+                    "Tool action rejected"
+                },
+                json!({ "sessionId": session_id, "approved": approved }),
+            ));
+            return None;
+        }
+        // The local park died (timeout / disconnect) before the confirm landed
+        // — fall through to the durable record, which may still be resolvable.
+    }
+
+    // DURABLE PATH (th-db0816): no live park on this pod. The park may live on
+    // ANOTHER pod (a refresh reconnected the visitor elsewhere), or its turn
+    // may have died with a pod roll. Storage carries the record the bridge
+    // persisted at park time — enough to carry out the verdict here with a
+    // continuation turn instead of telling a human their approval went nowhere.
+    durable_confirm_fallback(
+        state, auth_org, access, scope, session_id, approved, request_id, sink,
+    )
+    .await
+}
+
+/// Resolve a `confirm_tool_action` against the DURABLE pending-confirmation
+/// record when no live park exists on this pod (th-db0816).
+///
+/// The record (`metadata.pendingConfirmation`, written by the runner's
+/// confirmation bridge) is read FRESH from storage — the local session cache
+/// may predate the park. It is then cleared BEFORE acting, fail-closed: a
+/// record we cannot retire is a record that could execute a write twice, so a
+/// failed clear surfaces as a retryable storage error instead of proceeding.
+///
+/// Approved → grant a one-shot pre-approval for the recorded tool and spawn a
+/// continuation turn through the normal `send_message` path; the model re-issues
+/// the call (the approval message carries the recorded arguments), the bridge
+/// auto-approves that one call, and the reply streams to THIS socket. Denied →
+/// ack; the parked tool never runs anywhere (a dead park cannot execute, and a
+/// still-parked twin on another pod resolves to a timeout rejection).
+#[allow(clippy::too_many_arguments)]
+async fn durable_confirm_fallback(
+    state: &AppState,
+    auth_org: Option<&str>,
+    access: &AccessContext,
+    scope: &UserScope,
+    session_id: &str,
+    approved: bool,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) -> Option<SpawnedTurn> {
+    let no_pending = || {
+        protocol::error(
+            request_id,
+            "NO_PENDING_CONFIRMATION",
+            &format!("no tool action is awaiting confirmation for session '{session_id}'"),
+        )
+    };
+
+    // Fresh read — the local cache may hold a copy primed BEFORE the park was
+    // persisted (e.g. this pod served an earlier frame for the session).
+    let session = match state.storage.get_session(session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            let _ = sink.send(no_pending());
+            return None;
+        }
+        Err(e) => {
+            let _ = sink.send(session_storage_error(request_id, session_id, &e));
+            return None;
+        }
+    };
+    let Some(record) = session
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("pendingConfirmation"))
+        .cloned()
+    else {
+        let _ = sink.send(no_pending());
+        return None;
+    };
+
+    // Same lifetime as the in-process park: a record older than the
+    // confirmation timeout belongs to a park that would have expired anyway
+    // (its pod died before the bridge could clear it). Refuse rather than
+    // execute a stale write.
+    let fresh = record
+        .get("requestedAt")
+        .and_then(Value::as_i64)
+        .is_some_and(|at| {
+            let age = chrono::Utc::now().timestamp().saturating_sub(at);
+            age >= 0 && age <= crate::runner::CONFIRMATION_TIMEOUT.as_secs() as i64
+        });
+
+    // Prime the cache with the FRESH session so the metadata edit below starts
+    // from current state, then retire the record — fail-closed on a failed
+    // clear when we are about to execute (a lingering record could run the
+    // write twice), best-effort when refusing anyway.
+    state.insert_session(session);
+    let cleared = state.set_pending_confirmation(session_id, None).await;
+    if !fresh {
+        let _ = sink.send(no_pending());
+        return None;
+    }
+    if let Err(e) = cleared {
+        let _ = sink.send(session_storage_error(request_id, session_id, &e));
+        return None;
+    }
+
+    if !approved {
+        let _ = sink.send(protocol::immediate_response(
+            request_id,
+            200,
+            "Tool action rejected",
+            json!({ "sessionId": session_id, "approved": false }),
+        ));
+        return None;
+    }
+
+    let tool = record
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let prompt = record
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let arguments = record.get("arguments").cloned().unwrap_or(Value::Null);
+    if tool.is_empty() {
+        let _ = sink.send(no_pending());
+        return None;
+    }
+
+    // The continuation turn: a normal `send_message` whose user message IS the
+    // approval. The model sees the full conversation (its own "shall I?"
+    // included) plus the recorded arguments, re-issues the call, and the
+    // one-shot grant below lets that single call execute without parking again.
+    state.grant_pre_approval(session_id, tool);
+    let message = format!(
+        "Approved — please proceed with the pending \"{tool}\" action now ({prompt}). \
+         Use exactly these arguments: {arguments}"
+    );
+    let synthetic = json!({
+        "action": "send_message",
+        "sessionId": session_id,
+        "message": message,
+    });
+    handle_send_message(state, auth_org, access, scope, &synthetic, request_id, sink).await
 }
 
 /// Apply an optional per-turn `model` override (from a `send_message` body) to a
