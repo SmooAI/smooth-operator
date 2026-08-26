@@ -32,6 +32,7 @@ use smooth_operator::tool_provider::ToolProvider;
 use smooth_operator::widget_auth::{PermissiveWidgetAuth, WidgetAuthProvider};
 use tokio_util::sync::CancellationToken;
 
+use smooth_operator_core::executor::AgentExecutor;
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::tool::ToolHook;
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
@@ -81,6 +82,25 @@ pub struct AppState {
     /// [`with_tool_hooks`](Self::with_tool_hooks). This is the seam Big Smooth uses
     /// to inject its auto-mode permission gate + narc judge into every turn.
     pub tool_hooks: Vec<Arc<dyn ToolHook>>,
+    /// **Host turn-executor seam.** The [`AgentExecutor`] every turn runs on.
+    /// `None` (the default) is the in-process executor — a verbatim delegation to
+    /// `Agent::run_with_channel` — so a host that never installs one is
+    /// byte-for-byte unchanged.
+    ///
+    /// Two things arrive through here. A durable backend (ADR-030) is the one the
+    /// trait was written for. The other is a **decorator**: an executor that
+    /// delegates to `InProcessExecutor` and then inspects or edits the returned
+    /// `Conversation` before the runner reads its final assistant message. That is
+    /// the only host-side seam on the emitted reply, and it is what a post-response
+    /// guard needs — the conversation carries the turn's tool calls, so a host can
+    /// strip a claim the tools never backed (pearl th-39999c).
+    ///
+    /// Note the boundary: tokens the turn streamed have already left over the
+    /// events channel by the time the conversation is returned, so an edit here
+    /// changes the persisted message and the `eventual_response`, not what already
+    /// streamed. A decorator that needs the stream too can pass its own channel
+    /// down and forward.
+    pub executor: Option<Arc<dyn AgentExecutor>>,
     /// Embeddable-widget auth hook: resolves an agent's origin-allowlist +
     /// public-key policy for `<smooth-agent-chat>` connections. Defaults to
     /// [`PermissiveWidgetAuth`] (no enforcement) until a host installs a real
@@ -276,6 +296,7 @@ impl AppState {
             settings: Arc::new(InMemorySettingsStore::new()),
             tool_provider: None,
             tool_hooks: Vec::new(),
+            executor: None,
             widget_auth: Arc::new(PermissiveWidgetAuth),
             agent_config: Arc::new(StaticAgentConfigResolver::default()),
             backplane: Arc::new(InMemoryBackplane::new()),
@@ -361,6 +382,16 @@ impl AppState {
     #[must_use]
     pub fn with_tool_hooks(mut self, hooks: Vec<Arc<dyn ToolHook>>) -> Self {
         self.tool_hooks = hooks;
+        self
+    }
+
+    /// Install the [`AgentExecutor`] every turn runs on (builder). `None` — the
+    /// default — is the in-process executor, so omitting this is unchanged
+    /// behavior. See [`executor`](Self::executor) for the two things that arrive
+    /// through this seam (a durable backend, or a decorator that guards the reply).
+    #[must_use]
+    pub fn with_executor(mut self, executor: Arc<dyn AgentExecutor>) -> Self {
+        self.executor = Some(executor);
         self
     }
 
