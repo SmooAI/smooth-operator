@@ -79,6 +79,7 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
 | Backplane `attach`/`detach` | ✅ | — | ✅ | ✅ | ✅ |
 | Backplane `publish` (event fan-out) | ✅ | — | ✅ | ✅ | — |
 | **Cross-pod backplane (Redis / NATS)** | ✅ | — | — | — | — |
+| Deferred conversation create (a bare open writes no row until its first message) [^deferred] | ✅ | — | — | — | — |
 
 [^ingest]: The api-prime OTLP ingest builds a span's attribute set from the resource
     attrs plus **that span's own**, with no inheritance from the parent. A tool span
@@ -88,6 +89,15 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
     `"chat"` / `"tool"`: the ingest takes the attribute verbatim when present and only
     derives it from the span name as a fallback, so any other spelling lands in the
     column and matches nothing.
+
+[^deferred]: Rust-only so far, and a **storage-side** difference only — the wire is
+    unchanged, so the shared scenario conformance corpus passes identically in all
+    five. The other four servers still write the conversation + participants +
+    session at `create_conversation_session`, which is why a bare open there still
+    leaves an empty inbox row. Porting it is four small changes of the same shape
+    (park the create, flush it on the first `send_message`, drop it on disconnect,
+    and keep the write ORDER — a host adapter may hook the `user` participant write
+    to capture the visitor into a CRM, reading the conversation's `metadata_json`).
 
 [^provenance]: Rust-only because it needs engine support that exists only in the Rust
     core (1.10.0): `usage_estimated` / `cost_estimated` on `AgentEvent::Completed`, plus

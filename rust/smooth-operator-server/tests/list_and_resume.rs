@@ -290,6 +290,13 @@ async fn create_session(
         .as_str()
         .expect("conversationId")
         .to_string();
+    // SMOODEV-3057: an identity-less create is parked until its first message.
+    // These cases are about which conversation the session bound to, so land it
+    // explicitly — the same call `send_message` makes.
+    state
+        .materialize_conversation(&cid)
+        .await
+        .expect("materialize the deferred create");
     (cid, ev)
 }
 

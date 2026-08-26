@@ -100,6 +100,14 @@ async fn victim_session(state: &AppState, storage: &InMemoryStorageAdapter) -> (
         .expect("conversationId")
         .into();
 
+    // SMOODEV-3057: an identity-less create is parked until its first message, so
+    // land it explicitly — the same call `send_message` makes. This fixture wants
+    // the settled, persisted world the ownership checks below are about.
+    state
+        .materialize_session(&session_id)
+        .await
+        .expect("materialize the deferred create");
+
     // create-session persists participants in a spawned task; wait for a settled
     // world so the ownership check sees what production would.
     for _ in 0..100 {

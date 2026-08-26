@@ -558,6 +558,22 @@ async fn handle_create_session(
     // distinct denial here would be an existence oracle: it would confirm which
     // conversation ids are real, letting a caller enumerate other users'
     // conversations by their ids alone.
+    // SMOODEV-3057: a reconnect may name a conversation whose create is still
+    // parked (opened the widget, socket blipped, never typed). Land it first so
+    // the resume below finds it — otherwise the reconnect mints a fresh
+    // conversation and loses the durable `supports` record it should inherit.
+    // Best-effort: on failure the resume simply falls through to the unknown-id
+    // path, which is the pre-existing behavior for a conversation that is gone.
+    if let Some(cid) = parsed
+        .get("conversationId")
+        .and_then(Value::as_str)
+        .filter(|cid| !cid.is_empty())
+    {
+        if let Err(e) = state.materialize_conversation(cid).await {
+            tracing::warn!(error = %e, conversation_id = cid, "deferred conversation could not be landed for resume");
+        }
+    }
+
     let resume = match parsed.get("conversationId").and_then(Value::as_str) {
         Some(cid)
             if !cid.is_empty()
@@ -759,6 +775,57 @@ async fn handle_create_session(
         "userParticipantId": user_participant_id,
         "agentParticipantId": agent_participant_id,
     });
+
+    // SMOODEV-3057: a bare widget open writes NOTHING until it earns it. Opening
+    // the widget used to mint a `conversations` row on the spot — 44 of 117 web
+    // conversations in a 30-day production sample had zero messages, every one of
+    // them an inbox row for a visitor who never typed — and a web create feeds a
+    // fresh UUID as the conversation's `idempotency_key`, so the unique index can
+    // never collapse a double-connect the way it does for sms/slack/discord.
+    // Parking the whole create until the first message removes the empty rows and
+    // makes a double-connect harmless.
+    //
+    // An open that already carries visitor identity is NOT bare — it is a
+    // captured lead. A host adapter may hook the `user` participant write to
+    // upsert that visitor into its CRM (SmooAI's `chat-storage::crm_capture`
+    // does, reading phone + marketing consent off the conversation's
+    // `metadata_json`), and deferring those would silently stop capturing a
+    // pre-chat form submit from someone who then closed the tab. So identity —
+    // an authenticated principal's email, the frame's `userEmail`, or ADR-048's
+    // `metadata.userPhone` — persists immediately, exactly as before, as does
+    // every non-web channel and every resume.
+    let carries_identity = user_email.is_some()
+        || parsed
+            .get("metadata")
+            .and_then(|m| m.get("userPhone"))
+            .and_then(Value::as_str)
+            .is_some_and(|phone| !phone.trim().is_empty());
+
+    // ponytail: `clone` rather than restructure the eager path around a partial
+    // move — one Conversation per session create is not worth the churn.
+    if let Some(conversation) = conversation.clone().filter(|_| !carries_identity) {
+        state.defer_session(crate::state::PendingSession {
+            session_id: session_id.clone(),
+            conn_id: conn_id.to_string(),
+            conversation: Some(conversation),
+            user_participant: Some(user_participant),
+            agent_participant: Some(agent_participant),
+            session: Some(session),
+        });
+        // The registry is what `send_message` resolves the session through
+        // (`load_session` reads it before storage), and a WebSocket stays pinned
+        // to this pod for its life, so the create→first-message window is served
+        // locally. A reconnect that lands elsewhere finds nothing and mints a
+        // fresh session — which is correct: there was no conversation to resume.
+        state.insert_session(session_for_registry);
+        let _ = sink.send(protocol::immediate_response(
+            request_id,
+            200,
+            "Session created",
+            data,
+        ));
+        return;
+    }
 
     tokio::spawn(async move {
         let rid = request_id_owned.as_deref();
@@ -1605,6 +1672,18 @@ async fn handle_send_message(
             return None;
         }
     };
+
+    // SMOODEV-3057: this is the moment a deferred create earns its rows — the
+    // first message. Before the turn spawns, because the runner persists the
+    // inbound message against `conversation_id` and every child row FKs the
+    // conversation. A no-op for a session that was never deferred.
+    //
+    // A failure is reported as retryable (`STORAGE_ERROR`), not as a missing
+    // session: the parked writes are kept, so the visitor's resend finishes them.
+    if let Err(e) = state.materialize_session(session_id).await {
+        let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
+        return None;
+    }
 
     // A test-injected provider (the scenario-parity corpus's `MockLlmClient`)
     // overrides the live gateway client entirely — the turn never touches the

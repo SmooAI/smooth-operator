@@ -72,7 +72,15 @@ async fn create_session(
         &tx,
     )
     .await;
-    recv_conversation_id(&mut rx).await
+    let conversation_id = recv_conversation_id(&mut rx).await;
+    // SMOODEV-3057: an identity-less create is parked until its first message.
+    // These cases are about the org/agent columns the write carries, so land it
+    // explicitly — the same call `send_message` makes.
+    state
+        .materialize_conversation(&conversation_id)
+        .await
+        .expect("materialize the deferred create");
+    conversation_id
 }
 
 /// Await the `immediate_response` and pull `conversationId` out of it.
