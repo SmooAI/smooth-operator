@@ -28,6 +28,10 @@ type Server struct {
 	auth      AuthVerifier
 	backplane Backplane
 	systemP   string
+	// skills resolves send_message.skill to its markdown body (th-ebe27d / Rust #338).
+	// Nil → fall back to the env-configured DirSkillResolver (SMOOTH_SKILLS_DIR); with
+	// neither, any skill field is a clean SKILL_NOT_FOUND.
+	skills SkillResolver
 	// tools are registered with the agent on every turn (default none → no behavior
 	// change). The dispatcher threads them into the turn runner, which passes them
 	// straight to the engine AgentOptions; the engine drives the tool loop and the
@@ -117,6 +121,11 @@ func WithBackplane(b Backplane) Option { return func(srv *Server) { srv.backplan
 
 // WithSystemPrompt overrides the agent system prompt (default: support-agent prompt).
 func WithSystemPrompt(p string) Option { return func(srv *Server) { srv.systemP = p } }
+
+// WithSkillResolver installs the resolver for send_message.skill. Omitted → the
+// env-configured DirSkillResolver (SMOOTH_SKILLS_DIR) if set, else the feature stays off
+// and any skill field is a clean SKILL_NOT_FOUND.
+func WithSkillResolver(r SkillResolver) Option { return func(srv *Server) { srv.skills = r } }
 
 // WithTools registers the engine tools the agent may call during a turn (default none).
 // Threaded into every turn via the dispatcher → turn runner → engine AgentOptions.
@@ -351,6 +360,13 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// construction (before the dispatcher serves any frame) to avoid churning the
 	// long constructor signature. Nil → no hooks.
 	dispatcher.hooks = s.hooks
+	// Same post-construction seam as hooks. Explicit resolver wins, else the
+	// env-configured default, else off — mirrors the Rust/TS rule.
+	if s.skills != nil {
+		dispatcher.skills = s.skills
+	} else if env := DirSkillResolverFromEnv(); env != nil {
+		dispatcher.skills = env
+	}
 	// Same connection-scoped seam as hooks: set after construction rather than growing
 	// the constructor. Nil → session/agent targets simply never become routable.
 	dispatcher.associate = func(target Target) {

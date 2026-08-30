@@ -34,6 +34,11 @@ type FrameDispatcher struct {
 	// hooks are engine ToolHooks threaded into every turn the runner builds (nil →
 	// none). Set by the server after construction, alongside tools.
 	hooks []core.ToolHook
+	// skills resolves send_message.skill to its markdown body (th-ebe27d / Rust #338).
+	// Set by the server after construction, alongside hooks — the constructor signature
+	// is long enough. Nil → the feature is off and any skill field is a clean
+	// SKILL_NOT_FOUND, so a multi-tenant deploy never serves host skills by accident.
+	skills SkillResolver
 	// associate records this connection's backplane targets as they are learned (set by
 	// the connection loop). Nil → session/agent targets are never routable.
 	associate func(target Target)
@@ -213,6 +218,10 @@ type inboundFrame struct {
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
+	// send_message — optional named skill to apply to THIS turn (th-ebe27d / Rust #338).
+	// The wire carries the NAME; the server resolves the body and composes it into the
+	// system prompt, so the persisted user message stays exactly what the user typed.
+	Skill string `json:"skill"`
 	// send_message — optional multimodal/file attachments. Captured RAW and parsed
 	// separately (fail-soft) in handleSendMessage: a malformed images/files array is
 	// dropped without rejecting the turn, mirroring the Rust reference's
@@ -610,6 +619,21 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		return
 	}
 
+	// Resolve the optional `skill` BEFORE the ack: the turn either runs WITH the skill or
+	// does not run at all. Resolving after the 202 would leave the client holding an
+	// accepted turn that then errors, and an unknown skill would otherwise silently
+	// degrade into an unskilled answer. A blank field is "no skill", not an unknown one.
+	var skillSection string
+	if name := strings.TrimSpace(frame.Skill); name != "" {
+		section, ok := ResolveSkillSection(ctx, d.skills, name)
+		if !ok {
+			sink(errorEvent(requestID, "SKILL_NOT_FOUND",
+				"skill '"+name+"' is not available on this server"))
+			return
+		}
+		skillSection = section
+	}
+
 	// Resolve this agent's per-agent config (instructions, conversation workflow,
 	// greeting, personality, tool allow-list) by the session's agent id, and fold it into
 	// the effective system prompt + tools for THIS turn (SMOODEV-590). An un-configured
@@ -630,6 +654,11 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	prior, _ := d.store.ListMessages(ctx, session.ConversationID, 1)
 	isFirstTurn := len(prior) == 0
 	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID, isFirstTurn)
+	// The invoked skill goes LAST: it is this turn's explicit instruction and should read
+	// as the most recent, most specific directive the model sees.
+	if skillSection != "" {
+		effectiveSystemPrompt += "\n\n" + skillSection
+	}
 	// Thread the session's OTP-verified bit (from a prior successful verify_otp) into the
 	// auth gate so a verified caller's end_user tools run — the Go analog of Rust threading
 	// metadata.otpVerified into build_auth_gate. A verified session short-circuits to
