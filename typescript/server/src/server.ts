@@ -27,6 +27,7 @@ import type { AgentConfigResolver } from './agentConfig.js';
 import type { SessionAuthenticator } from './toolGating.js';
 import type { OtpService } from './otp.js';
 import { type AccessKnowledge, FrameDispatcher } from './frameDispatcher.js';
+import type { MemoryProvider } from './memory.js';
 import { DirSkillResolver, type SkillResolver } from './skills.js';
 import type { ModelCeilingResolver } from './modelCeiling.js';
 import type { ToolContext, ToolProvider } from './toolContext.js';
@@ -120,6 +121,12 @@ export interface ServerOptions {
      * `SKILL_NOT_FOUND`, so a multi-tenant deploy never serves host skills by accident.
      */
     skillResolver?: SkillResolver;
+
+    /**
+     * Supplies each turn's durable-recall store, scoped to the connection's access (th-ebe27d /
+     * Rust #330). Omitted ⇒ no auto-recall, which is every deployment that has not opted in.
+     */
+    memoryProvider?: MemoryProvider;
     /**
      * The Rich Interactions the server hosts (see `interaction.ts`). Each turn registers
      * one `request_<kind>` raise tool per kind, gated per-kind by the session's declared
@@ -206,6 +213,7 @@ export function buildServer(options: ServerOptions): {
             toolProvider: options.toolProvider,
             // Mirrors Rust's install_skill_resolver_from_env: explicit wins, else env, else off.
             skillResolver: options.skillResolver ?? DirSkillResolver.fromEnv(),
+            memoryProvider: options.memoryProvider,
         });
         // Fire-and-forget the per-connection loop; it owns the socket's lifecycle.
         void runConnection(socket, dispatcher, backplane, drain.signal);

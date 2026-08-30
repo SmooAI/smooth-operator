@@ -62,6 +62,9 @@ public sealed class TurnRunner
     private readonly IChatClient _chatClient;
     private readonly ISessionStore _store;
     private readonly IKnowledgeBase? _knowledge;
+    /// <summary>Durable-recall store for this turn, already resolved for the connection's access by
+    /// the dispatcher (th-ebe27d / Rust #330). Null → the turn runs without auto-recall.</summary>
+    private readonly IAgentMemory? _memory;
     private readonly IReranker? _reranker;
     private readonly string _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
@@ -96,11 +99,12 @@ public sealed class TurnRunner
     /// — or a test — narrows it).</summary>
     public TimeSpan ConfirmationTimeout { get; init; } = DefaultConfirmationTimeout;
 
-    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null, SessionIdentityRegistry? interactionEffects = null)
+    public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null, SessionIdentityRegistry? interactionEffects = null, IAgentMemory? memory = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _knowledge = knowledge;
+        _memory = memory;
         _reranker = reranker;
         _systemPrompt = systemPrompt ??
             "You are a helpful customer support agent. Answer using only the knowledge provided to you; if it is not there, say you don't know.";
@@ -331,6 +335,10 @@ public sealed class TurnRunner
             MaxIterations = _limits.MaxIterations,
             MaxOutputTokens = _limits.MaxTokens,
             ModelMaxOutputTokens = _limits.ModelMaxOutputTokens,
+            // Durable auto-recall: with a store attached the engine pulls the entries relevant to the
+            // user's message into context. Null (every deployment that has not opted in) leaves the
+            // turn byte-for-byte unchanged.
+            Memory = _memory,
         };
         foreach (var tool in _tools)
         {

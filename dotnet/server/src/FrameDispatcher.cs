@@ -59,6 +59,9 @@ public sealed class FrameDispatcher
     private readonly TurnLimits _limits;
     private readonly ILogger? _logger;
     private readonly ISkillResolver? _skillResolver;
+    /// <summary>Supplies the turn's durable-recall store, scoped to this connection's access
+    /// (th-ebe27d / Rust #330). Null → no auto-recall, the default.</summary>
+    private readonly IMemoryProvider? _memoryProvider;
 
     // The connection's SINGLE in-flight send_message turn, if one is running. A turn that calls a
     // confirmation-gated tool parks awaiting a later confirm_tool_action frame, so the turn runs as a
@@ -102,7 +105,8 @@ public sealed class FrameDispatcher
         TurnLimits? limits = null,
         ILogger? logger = null,
         IReadOnlyList<IToolHook>? toolHooks = null,
-        ISkillResolver? skillResolver = null)
+        ISkillResolver? skillResolver = null,
+        IMemoryProvider? memoryProvider = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -110,6 +114,7 @@ public sealed class FrameDispatcher
         _access = access ?? AccessContext.Anonymous;
         _systemPrompt = systemPrompt;
         _skillResolver = skillResolver;
+        _memoryProvider = memoryProvider;
         _reranker = reranker;
         _tools = tools ?? Array.Empty<AITool>();
         // Tool-call hooks (surveillance / redaction) forwarded to every turn's registry (empty → no
@@ -784,6 +789,11 @@ public sealed class FrameDispatcher
         // through the same ACL-filtered store (a doc the caller's groups don't grant is never a candidate).
         var scopedKnowledge = _knowledge?.ForAccess(_access);
 
+        // Durable auto-recall, scoped the same way retrieval is: the host decides which memory this
+        // caller recalls from. Null (no provider installed, or one that declines this access) leaves
+        // the turn without auto-recall — byte-for-byte unchanged.
+        var scopedMemory = _memoryProvider?.MemoryForAccess(_access);
+
         // Built-in knowledge_search: a model-callable search over the connection's ACL-scoped knowledge
         // (parity with the Rust server's KnowledgeSearchTool). Prepended before the enabled_tools filter
         // so it flows through the SAME per-agent restriction + auth gate as every other tool — an agent
@@ -824,7 +834,7 @@ public sealed class FrameDispatcher
         // have arrived on a PREVIOUS connection (a reconnect resumes the conversation on a fresh
         // dispatcher), and a per-connection map would read empty there. th-13df6d.
         var capabilities = await _store.GetClientSupportsAsync(session.ConversationId, cancellationToken).ConfigureAwait(false);
-        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity)
+        var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity, memory: scopedMemory)
         {
             ConfirmationTimeout = ConfirmationTimeout,
         };

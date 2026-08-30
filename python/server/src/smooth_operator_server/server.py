@@ -38,6 +38,7 @@ from .coding_tools import coding_tools_from_env
 from .confirmation import ConfirmationRegistry
 from .dispatcher import FrameDispatcher
 from .interaction import InteractionRegistry, PendingInteractions
+from .memory import MemoryProvider
 from .otp import OtpService
 from .session_store import InMemorySessionStore, SessionStore
 from .skills import DirSkillResolver, SkillResolver
@@ -69,6 +70,10 @@ class ServerState:
     #: (``SMOOTH_SKILLS_DIR``); with neither, any ``skill`` field is a clean
     #: ``SKILL_NOT_FOUND``, so a multi-tenant deploy never serves host skills by accident.
     skill_resolver: SkillResolver | None = None
+    #: Supplies each turn's durable-recall store, scoped to the connection's access
+    #: (th-ebe27d / Rust #330). ``None`` → no auto-recall, which is every deployment
+    #: that has not opted in.
+    memory_provider: MemoryProvider | None = None
     model: str | None = None
     #: Tools the agent may call during a turn (default none). Each is an engine
     #: ``FunctionTool``/``Tool``; the turn runner passes them straight to the agent.
@@ -172,6 +177,7 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         # Mirrors the Rust/TS rule: explicit resolver wins, else the env-configured
         # default, else off.
         skill_resolver=state.skill_resolver or DirSkillResolver.from_env(),
+        memory_provider=state.memory_provider,
         model=state.model,
         tools=state.tools,
         confirm_tools=state.confirm_tools,

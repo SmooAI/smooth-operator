@@ -16,6 +16,7 @@ import type { StoredSession } from './sessionStore.js';
 import { randomUUID } from 'node:crypto';
 
 import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
+import type { MemoryProvider } from './memory.js';
 import { resolveSection, type SkillResolver } from './skills.js';
 import { gateTools, type SessionAuthenticator } from './toolGating.js';
 import { ANONYMOUS_ACCESS, type AccessContext } from './auth.js';
@@ -53,6 +54,8 @@ export interface FrameDispatcherOptions {
      * `SKILL_NOT_FOUND`, so a multi-tenant deploy never serves host skills by accident.
      */
     skillResolver?: SkillResolver;
+    /** Supplies the turn's durable-recall store, scoped to this connection's access (Rust #330). */
+    memoryProvider?: MemoryProvider;
     /** Tools the agent may call during a turn (default none); forwarded to the {@link TurnRunner}. */
     tools?: Tool[];
     /**
@@ -136,6 +139,7 @@ export class FrameDispatcher {
     associate?: (target: Target) => void;
     private readonly systemPrompt?: string;
     private readonly skillResolver?: SkillResolver;
+    private readonly memoryProvider?: MemoryProvider;
     private readonly tools: Tool[];
     private readonly toolHooks: ToolHook[];
     private readonly confirmTools: string[];
@@ -168,6 +172,7 @@ export class FrameDispatcher {
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
         this.skillResolver = options.skillResolver;
+        this.memoryProvider = options.memoryProvider;
         this.tools = options.tools ?? [];
         this.toolHooks = options.toolHooks ?? [];
         this.confirmTools = options.confirmTools ?? [];
@@ -723,6 +728,10 @@ export class FrameDispatcher {
             chatClient: this.chatClient,
             store: this.store,
             knowledge: scopedKnowledge,
+            // Durable auto-recall, scoped the way retrieval is: the host decides which memory this
+            // caller recalls from. Absent (no provider, or one that declines this access) leaves the
+            // turn without auto-recall — byte-for-byte unchanged.
+            memory: this.memoryProvider?.memoryForAccess(this.access),
             systemPrompt: effectiveSystemPrompt,
             tools: effectiveTools,
             toolHooks: this.toolHooks,

@@ -33,6 +33,7 @@ from .auth import AccessContext, normalize_email
 from .backplane import Target
 from .confirmation import ConfirmationRegistry
 from .interaction import InteractionOutcome, InteractionRegistry, PendingInteractions
+from .memory import MemoryProvider
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
 from .skills import SkillResolver, resolve_section
@@ -66,6 +67,7 @@ class FrameDispatcher:
         otp_service: OtpService | None = None,
         associate: Callable[[Target], Awaitable[None]] | None = None,
         skill_resolver: SkillResolver | None = None,
+        memory_provider: MemoryProvider | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
@@ -76,6 +78,9 @@ class FrameDispatcher:
         #: None → the feature is off and any `skill` field is a clean SKILL_NOT_FOUND,
         #: so a multi-tenant deploy never serves host skills by accident.
         self._skill_resolver = skill_resolver
+        #: Supplies the turn's durable-recall store, scoped to this connection's access
+        #: (th-ebe27d / Rust #330). None → no auto-recall, the default.
+        self._memory_provider = memory_provider
         self._model = model
         self._tools = tools or []
         #: Tool-name patterns gated behind human confirmation (empty → HITL off).
@@ -586,6 +591,10 @@ class FrameDispatcher:
             self._chat_client,
             self._store,
             knowledge=self._knowledge,
+            # Durable auto-recall, scoped the way retrieval is: the host decides which memory
+            # this caller recalls from. None (no provider, or one that declines this access)
+            # leaves the turn without auto-recall — byte-for-byte unchanged.
+            memory=(self._memory_provider.memory_for_access(self._access) if self._memory_provider else None),
             system_prompt=self._system_prompt,
             skill_section=skill_section_for_turn,
             model=self._model,

@@ -29,6 +29,7 @@ from smooth_operator_core import (
     HumanApprovalResponse,
     InProcessExecutor,
     Knowledge,
+    Memory,
     SmoothAgent,
     SmoothAgentThread,
     TextEvent,
@@ -241,6 +242,7 @@ class TurnRunner:
         chat_client: Any,
         store: SessionStore,
         knowledge: Knowledge | None = None,
+        memory: Memory | None = None,
         system_prompt: str | None = None,
         skill_section: str | None = None,
         model: str | None = None,
@@ -265,6 +267,9 @@ class TurnRunner:
         #: verbatim delegation to ``SmoothAgent.run_stream`` — behavior unchanged.
         self._executor = select_turn_executor(executor)
         self._knowledge = knowledge
+        #: Durable-recall store for this turn, already resolved for the connection's access
+        #: by the dispatcher (th-ebe27d / Rust #330). ``None`` → no auto-recall.
+        self._memory = memory
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         #: Pre-rendered `## Skill: <name>` section for THIS turn (th-ebe27d / Rust
         #: #338), already resolved by the dispatcher. Appended last in
@@ -389,6 +394,11 @@ class TurnRunner:
             "max_tokens": DEFAULT_MAX_TOKENS,
             "max_iterations": DEFAULT_MAX_ITERATIONS,
         }
+        # Durable auto-recall: with a store attached the engine pulls the entries relevant to
+        # the user's message into context. None (every deployment that has not opted in) leaves
+        # the turn byte-for-byte unchanged.
+        if self._memory is not None:
+            options_kwargs["memory"] = self._memory
         if agent_tools:
             options_kwargs["tools"] = agent_tools
         if self._model is not None:

@@ -123,7 +123,10 @@ public static class SmoothOperatorWebSocketExtensions
             // fall back to the env-configured directory resolver (SMOOTH_SKILLS_DIR). Unset ⇒ null ⇒ any
             // `skill` field is a clean SKILL_NOT_FOUND, so a multi-tenant deploy never serves host skills
             // by accident. Mirrors Rust's install_skill_resolver_from_env.
-            skillResolver: services.GetService<ISkillResolver>() ?? DirSkillResolver.FromEnv());
+            skillResolver: services.GetService<ISkillResolver>() ?? DirSkillResolver.FromEnv(),
+            // Durable auto-recall (th-ebe27d / Rust #330). A host registers an IMemoryProvider — or a
+            // StaticMemoryProvider over one store — to light it up; unregistered ⇒ no auto-recall.
+            memoryProvider: services.GetService<IMemoryProvider>());
     }
 
     private static async Task PumpAsync(

@@ -12,7 +12,7 @@
  * `runStream` mapped event-by-event onto protocol events.
  */
 import { approve, deny, SmoothAgent } from '@smooai/smooth-operator-core';
-import type { AgentExecutor, AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, StreamEvent, Tool, ToolHook } from '@smooai/smooth-operator-core';
+import type { AgentExecutor, AgentOptions, ChatClientLike, HumanApprovalRequest, HumanApprovalResponse, Knowledge, Memory, StreamEvent, Tool, ToolHook } from '@smooai/smooth-operator-core';
 
 import type { ConfirmationRegistry } from './confirmation.js';
 import { turnExecutor } from './executorSelection.js';
@@ -166,6 +166,11 @@ export interface TurnRunnerOptions {
     store: SessionStore;
     /** Optional knowledge retriever, already SCOPED to the connection's access (ACL). */
     knowledge?: Knowledge;
+    /**
+     * Durable-recall store for this turn, already resolved for the connection's access by the
+     * dispatcher (th-ebe27d / Rust #330). Absent → the turn runs without auto-recall.
+     */
+    memory?: Memory;
     systemPrompt?: string;
     /** Tools the agent may call during the turn (default none); passed straight to the engine. */
     tools?: Tool[];
@@ -245,6 +250,7 @@ export class TurnRunner {
     private readonly chatClient: ChatClientLike;
     private readonly store: SessionStore;
     private readonly knowledge?: Knowledge;
+    private readonly memory?: Memory;
     private readonly systemPrompt: string;
     private readonly tools: Tool[];
     private readonly toolHooks: ToolHook[];
@@ -271,6 +277,7 @@ export class TurnRunner {
         this.chatClient = options.chatClient;
         this.store = options.store;
         this.knowledge = options.knowledge;
+        this.memory = options.memory;
         this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
         this.tools = options.tools ?? [];
         this.toolHooks = options.toolHooks ?? [];
@@ -346,6 +353,10 @@ export class TurnRunner {
             maxIterations: DEFAULT_MAX_ITERATIONS,
         };
         if (this.knowledge) agentOptions.knowledge = this.knowledge;
+        // Durable auto-recall: with a store attached the engine pulls the entries relevant to the
+        // user's message into context. Absent (every deployment that has not opted in) leaves the
+        // turn byte-for-byte unchanged.
+        if (this.memory) agentOptions.memory = this.memory;
         if (this.tools.length > 0) agentOptions.tools = this.tools;
         // Thread consumer-supplied surveillance hooks into the engine's per-turn tool
         // registry. Empty ⇒ unset ⇒ behaviour unchanged.
