@@ -100,6 +100,17 @@ jobs:
 
             # Deploy BEFORE anything that can fail cheaply, so the teardown step
             # below always has a stack to remove and never runs against nothing.
+            # `SmoothAgentGatewayKey` is an sst.Secret with no default, so a fresh
+            # stage cannot deploy until it has SOME value (SecretMissingError).
+            #
+            # This sets an obvious non-credential placeholder, deliberately. The
+            # probe is keyless by design — it verifies transport, session and
+            # protocol, and treats "no gateway key" as a pass — so a real key
+            # would buy nothing here except LLM spend and a secret to manage.
+            - name: Seed a placeholder gateway key
+              working-directory: deploy/sst
+              run: pnpm sst secret set SmoothAgentGatewayKey not-a-real-key-ci-smoke-only --stage "$STAGE"
+
             - name: Deploy ephemeral stage
               id: deploy
               working-directory: deploy/sst
