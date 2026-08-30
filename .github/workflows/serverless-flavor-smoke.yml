@@ -1,0 +1,117 @@
+# E2E for the AWS-SERVERLESS deploy flavor: deploy an ephemeral stage, drive the
+# real protocol against API Gateway, then tear it down.
+#
+# This is the only flavor whose test costs money, so the cost design is explicit:
+#
+#   - The RUN is cents. Lambda, DynamoDB (PAY_PER_REQUEST) and API Gateway are
+#     all per-request; a handful of protocol frames is noise on the bill.
+#   - The RISK is a LEAKED STAGE, not the run. Teardown is therefore in an
+#     `if: always()` step — and that is still not enough on its own, because
+#     `always()` does not run if the job is cancelled or the runner dies. The
+#     companion sweeper (sst-sweep-stale-stages.yml) is the actual backstop.
+#
+# Keyless like the other flavors: the probe treats "no gateway key" as a pass,
+# so no LLM spend and no secret beyond the deploy role.
+name: serverless flavor smoke
+
+on:
+    workflow_dispatch: {}
+    pull_request:
+        paths:
+            - 'rust/smooth-operator-lambda/**'
+            - 'deploy/sst/**'
+            - '.github/workflows/serverless-flavor-smoke.yml'
+
+concurrency:
+    # Keyed on the stage name below, so two runs never fight over one stack's
+    # SST state lock (and never tear down each other's).
+    group: serverless-smoke-${{ github.event.pull_request.number || github.ref_name }}
+    cancel-in-progress: false
+
+permissions:
+    id-token: write
+    contents: read
+
+jobs:
+    smoke:
+        runs-on: ubuntu-latest
+        timeout-minutes: 45
+        # Skips cleanly on forks and before the OIDC role exists, rather than
+        # failing every PR with a credentials error.
+        if: vars.AWS_DEPLOY_ROLE_ARN != ''
+        env:
+            # Ephemeral, per-PR, and prefixed so the sweeper can recognise it.
+            STAGE: pr-${{ github.event.pull_request.number || github.run_id }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-unknown-linux-gnu
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust
+
+            - name: Install cargo-lambda
+              run: |
+                  pip install ziglang
+                  cargo install cargo-lambda --locked
+
+            - name: Build the Lambda bootstrap (arm64)
+              working-directory: rust
+              run: cargo lambda build --release --arm64 -p smooai-smooth-operator-lambda
+
+            - name: Assert the artifact exists
+              run: test -f rust/target/lambda/smooai-smooth-operator-lambda/bootstrap
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            - name: Install SST
+              working-directory: deploy/sst
+              run: |
+                  pnpm install --ignore-workspace --frozen-lockfile
+                  pnpm sst install
+
+            - uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+                  aws-region: us-east-1
+
+            # Deploy BEFORE anything that can fail cheaply, so the teardown step
+            # below always has a stack to remove and never runs against nothing.
+            - name: Deploy ephemeral stage
+              id: deploy
+              working-directory: deploy/sst
+              run: pnpm sst deploy --stage "$STAGE"
+
+            - name: Resolve the WebSocket URL
+              id: url
+              working-directory: deploy/sst
+              # `api` is SmoothAgentApi's output for the API Gateway WebSocket URL.
+              run: |
+                  url=$(pnpm --silent sst outputs --stage "$STAGE" 2>/dev/null | awk '/^api/ {print $NF}')
+                  test -n "$url" || { echo "::error::no api output on stage $STAGE"; exit 1; }
+                  echo "ws=$url" >> "$GITHUB_OUTPUT"
+                  echo "stage $STAGE → $url"
+
+            - name: Install the SDK the probe imports
+              run: |
+                  pnpm install --frozen-lockfile
+                  pnpm --filter @smooai/smooth-operator build
+
+            - name: Smoke the deployed stage
+              working-directory: examples/web-chat
+              env:
+                  SMOOTH_WS_URL: ${{ steps.url.outputs.ws }}
+              run: node e2e/smoke.mjs
+
+            # ALWAYS. A failed probe must still cost nothing tomorrow.
+            - name: Tear down
+              if: always()
+              working-directory: deploy/sst
+              run: pnpm sst remove --stage "$STAGE"
