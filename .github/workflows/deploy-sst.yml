@@ -1,0 +1,106 @@
+# Deploy the AWS-serverless flavor (deploy/sst) — API Gateway WebSocket + Rust
+# Lambda + DynamoDB + S3 blobs.
+#
+# workflow_dispatch ONLY. There is no push trigger on purpose: this provisions
+# real AWS infrastructure, and "merging deploys" is the right default for
+# application images, not for a stack that owns a database table.
+#
+# Prerequisites (one-time, and NOT doable from this workflow):
+#   1. An IAM role that trusts GitHub's OIDC provider for this repo, with
+#      permissions for the resources in deploy/sst.
+#   2. Repository variable AWS_DEPLOY_ROLE_ARN pointing at it.
+#   3. The gateway key as an SST secret, per stage:
+#        pnpm sst secret set SmoothAgentGatewayKey <key> --stage <stage>
+#      Without it the Lambda still serves protocol actions and returns a clean
+#      LLM_UNAVAILABLE for send_message — so a keyless deploy is a valid smoke
+#      test, not a broken one.
+name: Deploy SST (serverless)
+
+on:
+    workflow_dispatch:
+        inputs:
+            stage:
+                description: 'SST stage to deploy'
+                required: true
+                default: 'dev'
+                type: string
+
+concurrency:
+    # One deploy per stage at a time. SST takes a state lock; two concurrent
+    # runs against one stage fail the second and can leave the lock held.
+    group: deploy-sst-${{ inputs.stage }}
+    cancel-in-progress: false
+
+permissions:
+    id-token: write # OIDC federation to AWS
+    contents: read
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        environment: ${{ inputs.stage }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Guard production
+              # Production deploys go through a deliberate, reviewed path — not a
+              # dispatch box someone can type "production" into.
+              if: inputs.stage == 'production'
+              run: |
+                  echo "::error::refusing to deploy the production stage from workflow_dispatch"
+                  exit 1
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-unknown-linux-gnu
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust
+
+            # cargo-lambda cross-compiles via Zig; both are needed for the arm64
+            # `provided.al2023` bootstrap artifact SST is pointed at.
+            - name: Install cargo-lambda
+              run: |
+                  pip install ziglang
+                  cargo install cargo-lambda --locked
+
+            - name: Build the Lambda bootstrap (arm64)
+              working-directory: rust
+              run: cargo lambda build --release --arm64 -p smooai-smooth-operator-lambda
+
+            - name: Assert the artifact exists
+              # SST points at a directory; if the build silently produced nothing,
+              # the deploy would otherwise succeed with an empty function.
+              run: test -f rust/target/lambda/smooai-smooth-operator-lambda/bootstrap
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: deploy/sst/pnpm-lock.yaml
+
+            - name: Install SST
+              working-directory: deploy/sst
+              # --ignore-workspace: deploy/sst is deliberately NOT a member of the
+              # root pnpm workspace, so a plain install resolves against the root
+              # and installs nothing here.
+              run: |
+                  pnpm install --ignore-workspace --frozen-lockfile
+                  pnpm sst install
+
+            - name: Typecheck
+              working-directory: deploy/sst
+              run: pnpm typecheck
+
+            - uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+                  aws-region: us-east-1
+
+            - name: Deploy
+              working-directory: deploy/sst
+              run: pnpm sst deploy --stage ${{ inputs.stage }}
