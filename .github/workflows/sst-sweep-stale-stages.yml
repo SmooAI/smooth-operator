@@ -44,12 +44,15 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
+            # No `version:` on purpose — package.json pins
+            # `packageManager: pnpm@10.34.5`, and action-setup honours that pin
+            # when no version is given. Specifying one here can override the pin
+            # and produce a pnpm whose lockfile format differs from the committed
+            # one, which surfaces as a --frozen-lockfile failure.
             - uses: pnpm/action-setup@v4
-              with:
-                  version: 10
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 22
+            # Toolchains come from mise.toml (node is pinned there), same as
+            # typescript.yml — not a second, drifting setup-node pin.
+            - uses: jdx/mise-action@v4
 
             - name: Install SST
               working-directory: deploy/sst
