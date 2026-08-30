@@ -106,7 +106,10 @@ jobs:
               env:
                   # Relative to deploy/sst, which is two levels down from the repo root.
                   SMOOTH_LAMBDA_ARTIFACT_DIR: ../../${{ steps.artifact.outputs.artifact_dir }}
-              run: pnpm sst deploy --stage "$STAGE"
+              # --print-logs: without it SST reports "Unexpected error occurred.
+              # Please run with --print-logs", which on a runner means the actual
+              # cause is in a file nobody will ever see.
+              run: pnpm sst deploy --stage "$STAGE" --print-logs
 
             - name: Resolve the WebSocket URL
               id: url
@@ -136,5 +139,14 @@ jobs:
             # second, misleading failure on a run that had created nothing.
             - name: Tear down
               if: always() && steps.deploy.conclusion != 'skipped'
+              # continue-on-error so a teardown failure does not MASK the real
+              # failure above it — but it still shows as a red step, and the
+              # daily sweeper is the backstop that actually guarantees no leak.
+              continue-on-error: true
               working-directory: deploy/sst
-              run: pnpm sst remove --stage "$STAGE"
+              run: pnpm sst remove --stage "$STAGE" --print-logs
+
+            - name: Dump SST log on failure
+              if: failure()
+              working-directory: deploy/sst
+              run: tail -200 .sst/log/sst.log || echo "no sst.log"
