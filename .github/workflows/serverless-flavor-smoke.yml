@@ -62,8 +62,20 @@ jobs:
               working-directory: rust
               run: cargo lambda build --release --arm64 -p smooai-smooth-operator-lambda
 
-            - name: Assert the artifact exists
-              run: test -f rust/target/lambda/smooai-smooth-operator-lambda/bootstrap
+            - name: Locate the Lambda bootstrap
+              id: artifact
+              # cargo-lambda writes target/lambda/<BINARY-NAME>/bootstrap, and this
+              # crate's [[bin]] is literally named `bootstrap` — so the directory is
+              # target/lambda/bootstrap, NOT target/lambda/<package-name>. Discover it
+              # instead of hard-coding, because a rename of either would silently move
+              # it again and SST points at a DIRECTORY: a wrong path deploys an empty
+              # function rather than failing.
+              run: |
+                  found=$(find rust/target/lambda -name bootstrap -type f -print -quit)
+                  test -n "$found" || { echo "::error::no bootstrap artifact under rust/target/lambda"; find rust/target/lambda -maxdepth 2 || true; exit 1; }
+                  dir=$(dirname "$found")
+                  echo "artifact_dir=$dir" >> "$GITHUB_OUTPUT"
+                  echo "found bootstrap at $found"
 
             # No `version:` on purpose — package.json pins
             # `packageManager: pnpm@10.34.5`, and action-setup honours that pin
@@ -91,6 +103,9 @@ jobs:
             - name: Deploy ephemeral stage
               id: deploy
               working-directory: deploy/sst
+              env:
+                  # Relative to deploy/sst, which is two levels down from the repo root.
+                  SMOOTH_LAMBDA_ARTIFACT_DIR: ../../${{ steps.artifact.outputs.artifact_dir }}
               run: pnpm sst deploy --stage "$STAGE"
 
             - name: Resolve the WebSocket URL
@@ -114,8 +129,12 @@ jobs:
                   SMOOTH_WS_URL: ${{ steps.url.outputs.ws }}
               run: node e2e/smoke.mjs
 
-            # ALWAYS. A failed probe must still cost nothing tomorrow.
+            # ALWAYS — a failed probe must still cost nothing tomorrow — but only
+            # once a deploy was actually ATTEMPTED. Unconditional `always()` fired
+            # after an early failure where pnpm had not been installed yet, so the
+            # teardown itself died on `pnpm: command not found` and reported a
+            # second, misleading failure on a run that had created nothing.
             - name: Tear down
-              if: always()
+              if: always() && steps.deploy.conclusion != 'skipped'
               working-directory: deploy/sst
               run: pnpm sst remove --stage "$STAGE"

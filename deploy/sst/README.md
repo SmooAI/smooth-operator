@@ -49,8 +49,15 @@ cargo lambda build --release --arm64 -p smooai-smooth-operator-lambda
 This produces:
 
 ```
-rust/target/lambda/smooai-smooth-operator-lambda/bootstrap
+rust/target/lambda/bootstrap/bootstrap
 ```
+
+Note the directory is `bootstrap`, **not** the package name: cargo-lambda names it
+after the BINARY, and this crate's `[[bin]]` is `bootstrap`. The config used to
+point at `target/lambda/smooai-smooth-operator-lambda`, which does not exist —
+and because SST points at a *directory*, that is not an error, it just deploys an
+**empty function**. CI now discovers the artifact and passes its dir via
+`SMOOTH_LAMBDA_ARTIFACT_DIR`, so a rename cannot bring the silent failure back.
 
 …which is exactly the `ARTIFACT_DIR` the SST `Function` `handler` points at (with `runtime: 'provided.al2023'`, `architecture: 'arm64'`). The crate's `[[bin]]` is named `bootstrap` so the artifact matches the `provided.al2023` contract.
 
