@@ -6,6 +6,9 @@
 # not "regardless of whether this job keeps running". Those cases leak a live
 # API Gateway + Lambda + DynamoDB table with nothing scheduled to remove them.
 #
+# Needs ssm:GetParameter on /sst/bootstrap (to resolve the state bucket) and
+# read/list on that bucket — both already in the deploy role.
+#
 # This is the backstop: daily, remove any `pr-*` stage whose SST state file has
 # not been touched in STALE_HOURS. Deliberately conservative — it only ever
 # touches the `pr-` prefix the smoke workflow owns, so `dev`/`production` and
@@ -63,15 +66,21 @@ jobs:
             - uses: aws-actions/configure-aws-credentials@v4
               with:
                   role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-                  aws-region: us-east-1
+                  aws-region: us-east-2
 
             - name: Find and remove stale pr-* stages
               working-directory: deploy/sst
               run: |
                   set -euo pipefail
-                  # SST v4 keeps per-stage state at s3://sst-state-<account>/app/<app>/<stage>.json
-                  acct=$(aws sts get-caller-identity --query Account --output text)
-                  bucket="sst-state-${acct}"
+                  # SST v4 keeps per-stage state at s3://<state-bucket>/app/<app>/<stage>.json.
+                  # The bucket is `sst-state-<random>`, NOT `sst-state-<account>` —
+                  # its real name lives in the account-level bootstrap parameter, so
+                  # read it rather than guessing (guessing is what broke the deploy
+                  # role's S3 scope).
+                  bucket=$(aws ssm get-parameter --name /sst/bootstrap --query 'Parameter.Value' --output text \
+                             | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+                  test -n "$bucket" || { echo "::error::could not resolve the SST state bucket"; exit 1; }
+                  echo "state bucket: $bucket"
                   cutoff=$(( $(date -u +%s) - STALE_HOURS * 3600 ))
                   found=0
 
