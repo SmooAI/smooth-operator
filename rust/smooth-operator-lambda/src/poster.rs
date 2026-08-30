@@ -94,7 +94,9 @@ impl ConnectionPoster {
     pub async fn post(&self, event: &Value) -> Result<bool> {
         let (client, connection_id) = match self {
             Self::Capturing(buf) => {
-                buf.lock().expect("capture mutex poisoned").push(event.clone());
+                buf.lock()
+                    .expect("capture mutex poisoned")
+                    .push(event.clone());
                 return Ok(true);
             }
             Self::ApiGateway {

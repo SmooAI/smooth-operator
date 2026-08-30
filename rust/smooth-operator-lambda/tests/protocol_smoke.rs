@@ -52,7 +52,12 @@ fn test_config() -> LambdaConfig {
     }
 }
 
-fn harness() -> (Arc<dyn StorageAdapter>, LambdaConfig, Arc<dyn AuthVerifier>, ConnectionPoster) {
+fn harness() -> (
+    Arc<dyn StorageAdapter>,
+    LambdaConfig,
+    Arc<dyn AuthVerifier>,
+    ConnectionPoster,
+) {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::new());
     let auth: Arc<dyn AuthVerifier> =
         Arc::from(AuthConfig::from_env().expect("auth disabled by default with no env set"));
@@ -74,7 +79,11 @@ async fn ping_is_answered_with_pong() {
     dispatch::handle_frame(&storage, &config, &auth, &poster, r#"{"action":"ping"}"#)
         .await
         .expect("ping must not error");
-    assert_eq!(types(&poster), vec!["pong"], "ping should produce exactly one pong");
+    assert_eq!(
+        types(&poster),
+        vec!["pong"],
+        "ping should produce exactly one pong"
+    );
 }
 
 #[tokio::test]
@@ -116,6 +125,9 @@ async fn unknown_action_is_a_protocol_error() {
     let (storage, config, auth, poster) = harness();
     let frame = json!({ "action": "definitely_not_an_action", "requestId": "req-2" }).to_string();
     let result = dispatch::handle_frame(&storage, &config, &auth, &poster, &frame).await;
-    assert!(result.is_ok(), "an unknown action must not fail the invocation");
+    assert!(
+        result.is_ok(),
+        "an unknown action must not fail the invocation"
+    );
     assert_eq!(types(&poster), vec!["error"]);
 }
