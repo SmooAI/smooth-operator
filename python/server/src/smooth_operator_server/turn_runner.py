@@ -242,6 +242,7 @@ class TurnRunner:
         store: SessionStore,
         knowledge: Knowledge | None = None,
         system_prompt: str | None = None,
+        skill_section: str | None = None,
         model: str | None = None,
         tools: list[Any] | None = None,
         confirm_tools: list[str] | None = None,
@@ -265,6 +266,11 @@ class TurnRunner:
         self._executor = select_turn_executor(executor)
         self._knowledge = knowledge
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        #: Pre-rendered `## Skill: <name>` section for THIS turn (th-ebe27d / Rust
+        #: #338), already resolved by the dispatcher. Appended last in
+        #: :meth:`_assemble_system_prompt` so an invoked skill outranks the agent's
+        #: standing configuration. ``None`` → no skill was invoked.
+        self._skill_section = skill_section
         #: Resolved per-agent config (instructions / workflow / persona). ``None`` →
         #: the server-wide default prompt drives the turn (behavior unchanged).
         self._agent_config = agent_config
@@ -676,6 +682,11 @@ class TurnRunner:
             workflow_section = render_workflow_prompt_section(config.conversation_workflow, current_step_id)
             if workflow_section:
                 sections.append(workflow_section)
+
+        # The invoked skill goes LAST: it is this turn's explicit instruction and should
+        # read as the most recent, most specific directive the model sees.
+        if self._skill_section:
+            sections.append(self._skill_section)
 
         return "\n\n".join(sections)
 

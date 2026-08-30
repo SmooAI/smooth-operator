@@ -55,6 +55,15 @@ from .server import (
     serve,
     serve_local,
 )
+from .skills import (
+    SKILLS_DIR_ENV,
+    DirSkillResolver,
+    SkillResolver,
+    is_valid_skill_name,
+    resolve_section,
+    skill_section,
+    strip_frontmatter,
+)
 from .session_store import (
     InMemorySessionStore,
     MessageDirection,
@@ -77,6 +86,13 @@ __all__ = [
     "coding_tools_from_env",
     "resolve_workspace_path",
     "FrameDispatcher",
+    "SKILLS_DIR_ENV",
+    "DirSkillResolver",
+    "SkillResolver",
+    "is_valid_skill_name",
+    "resolve_section",
+    "skill_section",
+    "strip_frontmatter",
     "ChoicesKind",
     "validate_choices",
     "IdentityIntakeKind",

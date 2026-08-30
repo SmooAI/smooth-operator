@@ -1,0 +1,40 @@
+{
+    "name": "skill-unknown-error",
+    "description": "A send_message naming a skill the server cannot resolve must fail CLOSED: exactly one error event with code SKILL_NOT_FOUND, emitted INSTEAD of the 202 ack, and no turn. Resolving after the ack would leave the client holding an accepted turn that then errors, and running the turn anyway would silently degrade a typo'd skill into an unskilled answer. The default server installs no skill resolver (SMOOTH_SKILLS_DIR unset), so every server rejects this name identically with no filesystem setup. No mock script is needed — the turn never reaches the engine.",
+    "mockLlmScript": [],
+    "steps": [
+        {
+            "send": {
+                "action": "create_conversation_session",
+                "requestId": "r-sess",
+                "agentId": "agent-skill"
+            },
+            "expect": [
+                {
+                    "type": "immediate_response",
+                    "status": 200,
+                    "capture": { "sessionId": "data.sessionId" }
+                }
+            ]
+        },
+        {
+            "send": {
+                "action": "send_message",
+                "requestId": "r-skill",
+                "sessionId": "{{sessionId}}",
+                "message": "review this diff",
+                "skill": "no-such-skill-on-any-server",
+                "stream": true
+            },
+            "expect": [
+                {
+                    "type": "error",
+                    "assert": {
+                        "error.code": "SKILL_NOT_FOUND",
+                        "requestId": "r-skill"
+                    }
+                }
+            ]
+        }
+    ]
+}

@@ -846,7 +846,7 @@ wheels = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.56.2"
+version = "1.58.7"
 source = { editable = "." }
 dependencies = [
     { name = "opentelemetry-api" },

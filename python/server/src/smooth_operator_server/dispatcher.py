@@ -35,6 +35,7 @@ from .confirmation import ConfirmationRegistry
 from .interaction import InteractionOutcome, InteractionRegistry, PendingInteractions
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
 from .session_store import SessionStore
+from .skills import SkillResolver, resolve_section
 from .turn_runner import Sink, TurnContext, TurnRunner
 
 #: An ``INTERNAL_ERROR`` on the wire must leave a traceback behind here. The wire message stays
@@ -64,12 +65,17 @@ class FrameDispatcher:
         judge_model: str | None = None,
         otp_service: OtpService | None = None,
         associate: Callable[[Target], Awaitable[None]] | None = None,
+        skill_resolver: SkillResolver | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
         self._knowledge = knowledge
         self._access = access if access is not None else AccessContext.ANONYMOUS  # type: ignore[attr-defined]
         self._system_prompt = system_prompt
+        #: Resolves `send_message.skill` to its markdown body (th-ebe27d / Rust #338).
+        #: None → the feature is off and any `skill` field is a clean SKILL_NOT_FOUND,
+        #: so a multi-tenant deploy never serves host skills by accident.
+        self._skill_resolver = skill_resolver
         self._model = model
         self._tools = tools or []
         #: Tool-name patterns gated behind human confirmation (empty → HITL off).
@@ -525,6 +531,24 @@ class FrameDispatcher:
             )
             return
 
+        # Resolve the optional `skill` BEFORE the ack: the turn either runs WITH the
+        # skill or does not run at all. Resolving after the 202 would leave the client
+        # holding an accepted turn that then errors, and a typo'd skill would otherwise
+        # silently degrade into an unskilled answer.
+        skill_section_for_turn: str | None = None
+        skill_name = frame.get("skill")
+        if isinstance(skill_name, str) and skill_name.strip():
+            skill_section_for_turn = await resolve_section(self._skill_resolver, skill_name.strip())
+            if skill_section_for_turn is None:
+                sink(
+                    protocol.error(
+                        request_id,
+                        "SKILL_NOT_FOUND",
+                        f"skill '{skill_name.strip()}' is not available on this server",
+                    )
+                )
+                return
+
         # 1. Immediate ack (202).
         sink(protocol.immediate_response(request_id, 202, "Processing your request...", {}))
 
@@ -563,6 +587,7 @@ class FrameDispatcher:
             self._store,
             knowledge=self._knowledge,
             system_prompt=self._system_prompt,
+            skill_section=skill_section_for_turn,
             model=self._model,
             tools=agent_tools,
             confirm_tools=self._confirm_tools,
