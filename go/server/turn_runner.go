@@ -77,6 +77,10 @@ type TurnRunner struct {
 	// around every tool the agent dispatches this turn (nil → none). Set by the
 	// dispatcher after construction, alongside tools.
 	hooks []core.ToolHook
+	// memory is the durable-recall store for this turn, already resolved for the connection's
+	// access by the dispatcher (th-ebe27d / Rust #330). Set after construction alongside hooks —
+	// the constructor signature is long enough. nil → the turn runs without auto-recall.
+	memory core.Memory
 	// knowledge is the retriever (already SCOPED to the connection's access) the agent
 	// grounds on. When set, the runner also queries it with the user message (top
 	// autoContextLimit) to build the turn's auto-context citations — the sources the
@@ -248,6 +252,10 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	//    citations built above. r.systemPrompt is already assembled (base + per-agent
 	//    config + current workflow step) by the caller.
 	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge, Hooks: r.hooks}
+	// Durable auto-recall: with a store attached the engine pulls the entries relevant to the
+	// user's message into context. nil (every deployment that has not opted in) leaves the turn
+	// byte-for-byte unchanged.
+	opts.Memory = r.memory
 	// Raised, no-longer-starving turn defaults (8192 / 20), with max_tokens clamped to
 	// the model's output ceiling when known (nil ⇒ the raised default). Setting these
 	// explicitly (rather than relying on the engine defaults) keeps the server robust

@@ -39,6 +39,10 @@ type FrameDispatcher struct {
 	// is long enough. Nil → the feature is off and any skill field is a clean
 	// SKILL_NOT_FOUND, so a multi-tenant deploy never serves host skills by accident.
 	skills SkillResolver
+	// memoryProvider supplies the turn's durable-recall store, scoped to this connection's
+	// access (th-ebe27d / Rust #330). Set by the server after construction, alongside skills.
+	// nil → no auto-recall, the default.
+	memoryProvider MemoryProvider
 	// associate records this connection's backplane targets as they are learned (set by
 	// the connection loop). Nil → session/agent targets are never routable.
 	associate func(target Target)
@@ -790,6 +794,12 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		}()
 		runner := NewTurnRunner(d.client, d.store, effectiveSystemPrompt, d.knowledge, effectiveTools, d.confirmTools, d.confirmations, workflow, session.CurrentStepID, d.judgeModel, d.modelCeiling)
 		runner.hooks = d.hooks
+		// Durable auto-recall, scoped the way retrieval is: the host decides which memory this
+		// caller recalls from. nil (no provider, or one that declines this access) leaves the turn
+		// without auto-recall — byte-for-byte unchanged.
+		if d.memoryProvider != nil {
+			runner.memory = d.memoryProvider.MemoryForAccess(d.access)
+		}
 		// Rich Interactions: give the runner the hosted kinds, the park/resume registry,
 		// and this session's declared capabilities, so it registers one raise tool per
 		// kind (rich park when the capability is declared, else conversational fallback).

@@ -37,6 +37,7 @@ from .interaction import (
     InteractionRequest,
     PendingInteractions,
 )
+from .memory import MemoryProvider, StaticMemoryProvider
 from .otp import (
     OtpChannel,
     OtpContact,
@@ -86,6 +87,8 @@ __all__ = [
     "coding_tools_from_env",
     "resolve_workspace_path",
     "FrameDispatcher",
+    "MemoryProvider",
+    "StaticMemoryProvider",
     "SKILLS_DIR_ENV",
     "DirSkillResolver",
     "SkillResolver",
