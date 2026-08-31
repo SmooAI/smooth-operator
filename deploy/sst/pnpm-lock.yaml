@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@smooai/deploy':
-        specifier: ^0.2.0
-        version: 0.2.0(sst@4.13.0)
+        specifier: ^0.2.1
+        version: 0.2.1(sst@4.13.0)
     devDependencies:
       '@types/node':
         specifier: 22.10.5
@@ -116,8 +116,8 @@ packages:
     resolution: {integrity: sha512-FOKpVZob9MPTn2znRzGrnsMHv7BOsKVw3XiP/cOyYLDVZ9qKp4nifIiSCuUU/fIj5Vu0UOAxCFr+qRAtG0NUkA==}
     engines: {node: '>=18.0.0'}
 
-  '@smooai/deploy@0.2.0':
-    resolution: {integrity: sha512-Ss/h8fuT+tm/MvBfALrAzsLd36fZ8XKCbYrFibKlCJb+MfLspVvf4f4KousB7JDvAXvUtgvAvCDFn13wHoh2vg==}
+  '@smooai/deploy@0.2.1':
+    resolution: {integrity: sha512-gQqhD/IAVItGmppEMJWrefWPf/4rK/+VSmvzfXAoSAgnT5BQzHz0+9t8kS2/IbOXRxMH8r7OE39ch6ShVXXrQQ==}
     peerDependencies:
       '@aws-sdk/client-s3': '>=3'
       sst: '>=4.13.0 <5'
@@ -397,7 +397,7 @@ snapshots:
     dependencies:
       tslib: 2.8.1
 
-  '@smooai/deploy@0.2.0(sst@4.13.0)':
+  '@smooai/deploy@0.2.1(sst@4.13.0)':
     dependencies:
       sst: 4.13.0
 
