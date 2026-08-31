@@ -176,6 +176,19 @@ jobs:
                   echo "-- integrations"
                   aws apigatewayv2 get-integrations --api-id "$api" \
                       --query 'Items[].[IntegrationId,IntegrationType,IntegrationUri]' --output text 2>/dev/null || true
+                  echo "-- invoke permission (empty log groups => never invoked)"
+                  # If API Gateway cannot invoke the function, the connection is
+                  # refused before any handler runs and every log group stays
+                  # empty — which is exactly what we see. This is the check that
+                  # distinguishes 'not wired' from 'wired but not permitted'.
+                  for fn in $(aws lambda list-functions \
+                                --query "Functions[?contains(FunctionName,'$STAGE')].FunctionName" \
+                                --output text 2>/dev/null); do
+                      echo "  fn: $fn"
+                      aws lambda get-policy --function-name "$fn" --query Policy --output text 2>&1 \
+                        | head -c 600 || echo "  (no resource policy — API Gateway CANNOT invoke it)"
+                      echo
+                  done
                   echo "-- stages"
                   aws apigatewayv2 get-stages --api-id "$api" \
                       --query 'Items[].[StageName,AutoDeploy,DeploymentId]' --output text 2>/dev/null || true
