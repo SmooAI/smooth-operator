@@ -195,9 +195,15 @@ jobs:
                           --query "Items[?contains(Name,'$STAGE')].ApiId" --output text 2>/dev/null | head -1)
                   echo "───── API $api"
                   [ -n "$api" ] || exit 0
-                  echo "-- routes"
+                  echo "-- routes (RouteKey / AuthorizationType / ApiKeyRequired / Target)"
+                  # AuthorizationType is the field that matters for a 403 at the
+                  # edge: API Gateway refuses before routing to the integration,
+                  # which is exactly the signature here (403 + empty Lambda logs).
                   aws apigatewayv2 get-routes --api-id "$api" \
-                      --query 'Items[].[RouteKey,Target]' --output text 2>/dev/null || true
+                      --query 'Items[].[RouteKey,AuthorizationType,ApiKeyRequired,Target]' --output text 2>/dev/null || true
+                  echo "-- api (ApiKeySelectionExpression / RouteSelectionExpression / Disable execute-api)"
+                  aws apigatewayv2 get-api --api-id "$api" \
+                      --query '[Name,RouteSelectionExpression,ApiKeySelectionExpression,DisableExecuteApiEndpoint]' --output text 2>/dev/null || true
                   echo "-- integrations"
                   aws apigatewayv2 get-integrations --api-id "$api" \
                       --query 'Items[].[IntegrationId,IntegrationType,IntegrationUri]' --output text 2>/dev/null || true
