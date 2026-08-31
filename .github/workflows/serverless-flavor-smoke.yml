@@ -153,14 +153,30 @@ jobs:
             - name: Lambda logs on failure
               if: failure()
               run: |
+                  # Log groups are named for the FUNCTION, which SST prefixes with
+                  # the app as well as the stage (smooth-operator-<stage>-…) — not
+                  # just the stage, which is why the first version of this found
+                  # nothing and made it look like the Lambda had never run.
                   for lg in $(aws logs describe-log-groups \
-                                --log-group-name-prefix "/aws/lambda/$STAGE-" \
+                                --log-group-name-prefix "/aws/lambda/smooth-operator-$STAGE" \
                                 --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
                       echo "───── $lg"
-                      aws logs tail "$lg" --since 15m --format short 2>/dev/null | tail -40 || true
+                      aws logs tail "$lg" --since 20m --format short 2>/dev/null | tail -40 || true
                   done
-                  echo "───── API Gateway"
-                  aws apigatewayv2 get-apis --query "Items[?contains(Name,'$STAGE')].[ApiId,Name,ProtocolType]" --output text 2>/dev/null || true
+
+                  api=$(aws apigatewayv2 get-apis \
+                          --query "Items[?contains(Name,'$STAGE')].ApiId" --output text 2>/dev/null | head -1)
+                  echo "───── API $api"
+                  [ -n "$api" ] || exit 0
+                  echo "-- routes"
+                  aws apigatewayv2 get-routes --api-id "$api" \
+                      --query 'Items[].[RouteKey,Target]' --output text 2>/dev/null || true
+                  echo "-- integrations"
+                  aws apigatewayv2 get-integrations --api-id "$api" \
+                      --query 'Items[].[IntegrationId,IntegrationType,IntegrationUri]' --output text 2>/dev/null || true
+                  echo "-- stages"
+                  aws apigatewayv2 get-stages --api-id "$api" \
+                      --query 'Items[].[StageName,AutoDeploy,DeploymentId]' --output text 2>/dev/null || true
 
             # ALWAYS — a failed probe must still cost nothing tomorrow — but only
             # once a deploy was actually ATTEMPTED. Unconditional `always()` fired
