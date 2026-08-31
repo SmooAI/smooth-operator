@@ -147,6 +147,21 @@ jobs:
                   SMOOTH_WS_URL: ${{ steps.deploy.outputs.ws }}
               run: node e2e/smoke.mjs
 
+            # Before teardown: the Lambda's own logs are the only way to tell a
+            # rejected $connect from a crashing handler, and the stack is about to
+            # be destroyed. Best-effort — never fail the run for a missing log.
+            - name: Lambda logs on failure
+              if: failure()
+              run: |
+                  for lg in $(aws logs describe-log-groups \
+                                --log-group-name-prefix "/aws/lambda/$STAGE-" \
+                                --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
+                      echo "───── $lg"
+                      aws logs tail "$lg" --since 15m --format short 2>/dev/null | tail -40 || true
+                  done
+                  echo "───── API Gateway"
+                  aws apigatewayv2 get-apis --query "Items[?contains(Name,'$STAGE')].[ApiId,Name,ProtocolType]" --output text 2>/dev/null || true
+
             # ALWAYS — a failed probe must still cost nothing tomorrow — but only
             # once a deploy was actually ATTEMPTED. Unconditional `always()` fired
             # after an early failure where pnpm had not been installed yet, so the
