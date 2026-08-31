@@ -120,17 +120,21 @@ jobs:
               # --print-logs: without it SST reports "Unexpected error occurred.
               # Please run with --print-logs", which on a runner means the actual
               # cause is in a file nobody will ever see.
-              run: pnpm sst deploy --stage "$STAGE" --print-logs
-
-            - name: Resolve the WebSocket URL
-              id: url
-              working-directory: deploy/sst
-              # `api` is SmoothAgentApi's output for the API Gateway WebSocket URL.
+              #
+              # The URL is read from THIS command's own output — SST prints the
+              # stack outputs on completion (`api: wss://…`). A separate
+              # `sst outputs` call returned nothing, and needing the deploy to
+              # succeed before the URL exists makes one step the honest shape.
+              #
+              # `set -o pipefail` is load-bearing: without it `tee` decides the
+              # step's exit status and a FAILED deploy reports success.
               run: |
-                  url=$(pnpm --silent sst outputs --stage "$STAGE" 2>/dev/null | awk '/^api/ {print $NF}')
-                  test -n "$url" || { echo "::error::no api output on stage $STAGE"; exit 1; }
+                  set -o pipefail
+                  pnpm sst deploy --stage "$STAGE" --print-logs 2>&1 | tee /tmp/deploy.out
+                  url=$(grep -oE 'wss://[^ ]+' /tmp/deploy.out | head -1)
+                  test -n "$url" || { echo "::error::deploy succeeded but printed no wss:// URL"; exit 1; }
                   echo "ws=$url" >> "$GITHUB_OUTPUT"
-                  echo "stage $STAGE → $url"
+                  echo "stage $STAGE -> $url"
 
             - name: Install the SDK the probe imports
               run: |
@@ -140,7 +144,7 @@ jobs:
             - name: Smoke the deployed stage
               working-directory: examples/web-chat
               env:
-                  SMOOTH_WS_URL: ${{ steps.url.outputs.ws }}
+                  SMOOTH_WS_URL: ${{ steps.deploy.outputs.ws }}
               run: node e2e/smoke.mjs
 
             # ALWAYS — a failed probe must still cost nothing tomorrow — but only
