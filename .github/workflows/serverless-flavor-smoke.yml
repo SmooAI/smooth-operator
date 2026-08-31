@@ -141,6 +141,31 @@ jobs:
                   pnpm install --frozen-lockfile
                   pnpm --filter @smooai/smooth-operator build
 
+            # A raw handshake first. The SDK reports any failure as the same
+            # opaque "WebSocket connection error", which cannot distinguish
+            # "API Gateway refused the path" (403) from "the integration blew up"
+            # (500) — and with every Lambda log group empty, that distinction is
+            # the entire question.
+            - name: Probe the raw WebSocket handshake
+              env:
+                  WS: ${{ steps.deploy.outputs.ws }}
+              run: |
+                  https_url="${WS/wss:/https:}"
+                  echo "handshake -> $https_url"
+                  curl -isS --http1.1 --max-time 20 \
+                       -H "Connection: Upgrade" \
+                       -H "Upgrade: websocket" \
+                       -H "Sec-WebSocket-Version: 13" \
+                       -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" \
+                       "$https_url" | head -20 || true
+                  echo "── same host, no stage path (expect a different status if the stage path is the problem)"
+                  base="${https_url%/*}"
+                  curl -isS --http1.1 --max-time 20 \
+                       -H "Connection: Upgrade" -H "Upgrade: websocket" \
+                       -H "Sec-WebSocket-Version: 13" \
+                       -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" \
+                       "$base/" | head -12 || true
+
             - name: Smoke the deployed stage
               working-directory: examples/web-chat
               env:
