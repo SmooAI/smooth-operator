@@ -153,13 +153,15 @@ jobs:
             - name: Lambda logs on failure
               if: failure()
               run: |
-                  # Log groups are named for the FUNCTION, which SST prefixes with
-                  # the app as well as the stage (smooth-operator-<stage>-…) — not
-                  # just the stage, which is why the first version of this found
-                  # nothing and made it look like the Lambda had never run.
+                  # Do NOT guess the function-name prefix. SST TRUNCATES the app
+                  # name to fit Lambda's 64-char limit, inconsistently per route —
+                  # the same deploy produced `smooth-pr-559-`, `smo-pr-559-` AND
+                  # `smooth--pr-559-`. Two earlier versions of this guessed a prefix,
+                  # found nothing, and made it look like the Lambda had never been
+                  # invoked. List everything and filter on the stage instead.
                   for lg in $(aws logs describe-log-groups \
-                                --log-group-name-prefix "/aws/lambda/smooth-operator-$STAGE" \
-                                --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
+                                --query "logGroups[?contains(logGroupName,'$STAGE')].logGroupName" \
+                                --output text 2>/dev/null); do
                       echo "───── $lg"
                       aws logs tail "$lg" --since 20m --format short 2>/dev/null | tail -40 || true
                   done
