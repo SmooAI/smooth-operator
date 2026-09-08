@@ -25,6 +25,8 @@
 # ──────────────────────────────────────────────────────────────────────────
 #   deploy/scripts/kind-smoke.sh                 # full run: create cluster, build, deploy, smoke, teardown
 #   KEEP_CLUSTER=1 deploy/scripts/kind-smoke.sh  # leave the cluster up after the run
+#   KEEP_RUNNING=1 deploy/scripts/kind-smoke.sh  # LOCAL EXAMPLE: bring the stack up and HOLD it
+#                                                # open, port-forwarded, for a UI to talk to
 #   SKIP_BUILD=1   deploy/scripts/kind-smoke.sh  # reuse an already-loaded image (fast local reruns)
 #   USE_EXISTING_CLUSTER=1 deploy/scripts/kind-smoke.sh   # target the current kube-context, don't create/delete a cluster
 #
@@ -37,6 +39,17 @@
 #   SKIP_BUILD             reuse loaded image, skip docker build + kind load
 #   USE_EXISTING_CLUSTER   use current context; skip kind create/delete
 #   KEEP_CLUSTER           do not delete the kind cluster on exit
+#   KEEP_RUNNING           after the smoke passes, hold the port-forward open instead of
+#                          tearing down (implies KEEP_CLUSTER). This is what turns the
+#                          smoke test into the k8s flavor's LOCAL RUNNABLE EXAMPLE: the
+#                          chart is the same one a self-hoster installs, so what you are
+#                          talking to is the real deployment path, not a mock of it.
+#                          In this mode the run is a demo rather than a probe, so it also
+#                          honours SMOOAI_GATEWAY_KEY / SMOOAI_GATEWAY_URL /
+#                          SMOOTH_AGENT_MODEL and seeds the demo KB — without a key the
+#                          server still connects and the sidebar works, but `send_message`
+#                          returns a clean error instead of a reply.
+#   SEED_KB                override the demo-KB seed in KEEP_RUNNING mode (default: true)
 #
 # Requires: kind, kubectl, helm, docker. A WS client — websocat OR python3
 # (with `websockets`) OR node (with a global `ws`) — is auto-detected.
@@ -54,6 +67,12 @@ IMAGE="${IMAGE:-smooth-operator:smoke}"
 NAMESPACE="${NAMESPACE:-smooth-agent-smoke}"
 RELEASE="${RELEASE:-smooth-agent}"
 LOCAL_PORT="${LOCAL_PORT:-18787}"
+# KEEP_RUNNING implies KEEP_CLUSTER: holding a port-forward open to a cluster the
+# trap is about to delete would be a demo that dies the moment it prints its URL.
+KEEP_RUNNING="${KEEP_RUNNING:-0}"
+if [[ "${KEEP_RUNNING}" == "1" ]]; then
+    KEEP_CLUSTER=1
+fi
 # Single-repo Docker context: the engine crate is fetched from crates.io, so the
 # build context is just this repo's root.
 DOCKERFILE="${REPO_ROOT}/Dockerfile"
@@ -212,6 +231,38 @@ kubectl -n "${NAMESPACE}" rollout status deployment/pgvector --timeout=180s
 # Inline DB url (dev-only path; chart writes a managed Secret), 0.0.0.0 bind,
 # NO gateway key (protocol-only smoke), single replica + IfNotPresent so the
 # kind-loaded image is used (never pulled).
+#
+# In KEEP_RUNNING mode this stops being a keyless probe and becomes a demo, so
+# the provider settings are passed through when the caller supplied them. They
+# are deliberately NOT passed in smoke mode: the smoke asserts protocol-only
+# actions, and a key there would buy nothing but LLM spend on every PR.
+HELM_EXTRA=()
+if [[ "${KEEP_RUNNING}" == "1" ]]; then
+    # Two separate hazards, and --set-string only covers the first:
+    #   - type coercion: a key like `12345` or a value `true` would arrive as a
+    #     number/bool rather than a string. --set-string prevents that.
+    #   - COMMAS: helm splits an unescaped ',' in the VALUE into list entries no
+    #     matter which --set variant is used, so a key containing one fails with
+    #     `key "..." has no value`. Escaping is the only fix; ${v//,/\\,} is it.
+    # ('.' in a value is safe — helm only treats it as a path separator in the
+    # KEY half — so dotted model ids like gpt-5.6-luna need no handling.)
+    esc() { printf '%s' "${1//,/\\,}"; }
+    if [[ -n "${SMOOAI_GATEWAY_KEY:-}" ]]; then
+        HELM_EXTRA+=(--set-string "gateway.key=$(esc "${SMOOAI_GATEWAY_KEY}")")
+    else
+        warn "SMOOAI_GATEWAY_KEY is not set — the stack will come up and the UI will connect, but send_message returns a clean error instead of a reply."
+    fi
+    if [[ -n "${SMOOAI_GATEWAY_URL:-}" ]]; then
+        HELM_EXTRA+=(--set-string "gateway.url=$(esc "${SMOOAI_GATEWAY_URL}")")
+    fi
+    if [[ -n "${SMOOTH_AGENT_MODEL:-}" ]]; then
+        HELM_EXTRA+=(--set-string "server.model=$(esc "${SMOOTH_AGENT_MODEL}")")
+    fi
+    # Seeded demo docs, so the example's return-policy question has something to
+    # retrieve — matching what examples/web-chat's compose stack sets up.
+    HELM_EXTRA+=(--set "server.seedKb=${SEED_KB:-true}")
+fi
+
 log "helm lint + install the chart from ${CHART_DIR}"
 helm lint "${CHART_DIR}"
 helm upgrade --install "${RELEASE}" "${CHART_DIR}" \
@@ -224,6 +275,7 @@ helm upgrade --install "${RELEASE}" "${CHART_DIR}" \
     --set server.bind="0.0.0.0" \
     --set server.seedKb=false \
     --set database.url="${DB_URL}" \
+    ${HELM_EXTRA[@]+"${HELM_EXTRA[@]}"} \
     --wait --timeout 240s
 
 log "Waiting for the agent pod to be Ready"
@@ -373,4 +425,48 @@ case "${WS_CLIENT}" in
 esac
 
 log "✅ kind deployment smoke PASSED — chart serves the protocol over a live pod"
+
+# ── 7. KEEP_RUNNING: hold it open as the local example ──────────────────────
+# Everything above already built the k8s flavor's local stack — kind cluster,
+# pgvector, the real Helm chart, a port-forward — and then threw it away because
+# this file was only ever a test. Holding it instead is the whole difference
+# between "CI proves the chart works" and "a self-hoster can try it", which is
+# what deploy/README.md's k8s `helm install` one-liner could not deliver on its
+# own: that command assumes a cluster and a Postgres you do not have yet.
+if [[ "${KEEP_RUNNING}" == "1" ]]; then
+    cat <<EOF
+
+  ────────────────────────────────────────────────────────────────────────
+   smooth-operator (k8s flavor) is UP and holding.
+
+     WebSocket    ws://127.0.0.1:${LOCAL_PORT}/ws
+     namespace    ${NAMESPACE}    release: ${RELEASE}
+     cluster      kind-${CLUSTER_NAME}
+
+   Point the web-chat example at it — same UI the local flavor uses, so the
+   only thing that changed is what is serving:
+
+     pnpm --filter @smooai/smooth-operator-web-chat-example dev
+     open 'http://localhost:5173/?url=ws://127.0.0.1:${LOCAL_PORT}/ws'
+
+   Or drive the protocol directly:
+
+     SMOOTH_WS_URL=ws://127.0.0.1:${LOCAL_PORT}/ws node examples/web-chat/e2e/smoke.mjs
+
+     kubectl -n ${NAMESPACE} logs -l app.kubernetes.io/name=smooth-operator -f
+
+   Ctrl-C stops the port-forward and leaves the cluster up (SKIP_BUILD=1 makes
+   the next run fast). Delete it with:
+
+     kind delete cluster --name ${CLUSTER_NAME}
+  ────────────────────────────────────────────────────────────────────────
+
+EOF
+    # Waiting on the port-forward IS the hold. If kubectl drops it (a pod
+    # restart will), say so rather than exiting silently and leaving someone
+    # staring at a URL that stopped answering a minute ago.
+    wait "${PF_PID}" 2>/dev/null || true
+    PF_PID=""
+    warn "port-forward ended. The cluster is still up — re-run with SKIP_BUILD=1 to reattach."
+fi
 # cleanup() runs on EXIT (teardown / cluster delete).
