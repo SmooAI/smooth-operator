@@ -64,8 +64,40 @@ jobs:
           # The cluster is created by helm/kind-action above; don't let the
           # script create/delete it — just build, load, deploy, smoke.
           USE_EXISTING_CLUSTER: '0'
-          KEEP_CLUSTER: '0'
+          # Keep the cluster + loaded image so the KEEP_RUNNING check below can
+          # reuse them with SKIP_BUILD=1. The runner is ephemeral, so nothing
+          # leaks past the job.
+          KEEP_CLUSTER: '1'
         run: bash deploy/scripts/kind-smoke.sh
+
+      # The local-example mode, which deploy/README.md tells self-hosters to run.
+      # Without this it would be the one branch of the script CI never executes —
+      # and a broken `helm --set` or a hold that exits immediately would only ever
+      # be discovered by the person trying the project for the first time.
+      #
+      # Exit 124 IS the pass: `timeout` can only fire if the script got all the
+      # way through deploy + smoke, printed its banner, and then held the
+      # port-forward open as designed. Any real failure exits non-zero long
+      # before the deadline and is reported as itself.
+      - name: Check the KEEP_RUNNING local-example mode holds
+        working-directory: smooth-operator
+        env:
+          CLUSTER_NAME: smooth-agent-smoke
+          USE_EXISTING_CLUSTER: '0'
+          KEEP_RUNNING: '1'
+          SKIP_BUILD: '1'
+          LOCAL_PORT: '18788'
+        run: |
+          set +e
+          timeout 180 bash deploy/scripts/kind-smoke.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ]; then
+              echo "✅ KEEP_RUNNING held the stack open until the deadline"
+              exit 0
+          fi
+          echo "::error::KEEP_RUNNING mode exited with $rc instead of holding"
+          exit 1
 
       # On failure, surface pod state for debugging (the script also dumps this
       # in its trap, but this catches earlier-stage failures too).

@@ -6,6 +6,33 @@ All three paths are first-class. The storage adapter (and the in-memory/Redis/NA
 - `sst/` — **AWS serverless** (default, cloud-codable). API Gateway WebSocket + Lambda handlers + DynamoDB (ElectroDB) + S3 Vectors + S3 blobs. One command: `npx smooth-operator deploy`.
 - `k8s/` — **Kubernetes / self-host**. Helm chart: service + Postgres + pgvector + ingress. One command: `helm install smooth-operator ./deploy/k8s`.
 
+## Trying the k8s flavor locally
+
+`helm install` assumes a cluster and a Postgres you may not have yet, which made
+the primary self-host target the one path you could not try before committing to
+it. This brings the whole thing up on a throwaway [kind](https://kind.sigs.k8s.io)
+cluster and holds it open:
+
+```bash
+# kind + kubectl + helm + docker, and a WS client (websocat, python3 'websockets', or node 'ws')
+SMOOAI_GATEWAY_KEY=<your llm.smoo.ai key> KEEP_RUNNING=1 deploy/scripts/kind-smoke.sh
+```
+
+It creates the cluster, builds and loads the image, deploys a throwaway pgvector
+Postgres, installs **the same chart a self-hoster installs**, runs the protocol
+smoke, then holds a port-forward at `ws://127.0.0.1:18787/ws` and prints how to
+point [`examples/web-chat`](../examples/web-chat) at it — the same UI the local
+flavor uses, so the only thing that changes is what is serving.
+
+Without `SMOOAI_GATEWAY_KEY` the stack still comes up and the UI still connects;
+`send_message` returns a clean error instead of a reply. `SKIP_BUILD=1` makes
+reruns fast, and Ctrl-C leaves the cluster up (`kind delete cluster --name
+smooth-agent-smoke` removes it).
+
+The same script without `KEEP_RUNNING` is the CI gate
+(`.github/workflows/pr-kind-deploy-smoke.yml`), so the local example and the
+deployment test cannot drift apart — there is only one of them.
+
 See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §6 for the target matrix.
 
 ## Container images
