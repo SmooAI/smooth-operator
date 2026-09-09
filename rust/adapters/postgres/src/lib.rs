@@ -164,7 +164,72 @@ fn pool_config_for(pg_config: &tokio_postgres::Config) -> PoolConfig {
     // DOWNGRADE the moment TLS works, where an operator who wrote `require` gets
     // a pool that will happily fall back to plaintext.
     cfg.ssl_mode = Some(ssl_mode_for(pg_config));
+    // `options` is how libpq carries `search_path`, which is how a self-hoster
+    // puts this store in its own schema rather than scattering nine tables across
+    // whatever `public` happens to be. Dropping it here is the same defect as
+    // dropping sslmode: the copy is a list, and a list can be fallen off the end
+    // of. `application_name` comes along for the ride so these connections are
+    // identifiable in `pg_stat_activity`, which on a shared database is the
+    // difference between "some pool is holding 20 connections" and knowing whose.
+    cfg.options = pg_config.get_options().map(str::to_string);
+    cfg.application_name = pg_config.get_application_name().map(str::to_string);
     cfg
+}
+
+/// The schema named by a `search_path` in the connection string's `options`, if
+/// any — e.g. `?options=-c%20search_path%3Dsmooth`.
+///
+/// Why this is needed at all: the DDL in [`schema`] is UNQUALIFIED
+/// (`CREATE TABLE conversations …`), so it lands wherever `search_path` points.
+/// Setting `search_path` alone is not enough, because Postgres will not create a
+/// schema on demand — unqualified DDL against a `search_path` naming a schema
+/// that does not exist fails with "no schema has been selected to create in",
+/// which reads like a connection-string typo rather than a missing `CREATE
+/// SCHEMA`.
+///
+/// Only the FIRST entry is returned. `search_path` is a search list, and the
+/// first existing entry is where unqualified `CREATE TABLE` lands, so that is
+/// the only one this adapter could sensibly create.
+///
+/// Returns `None` for `$user`, `public`, and anything not a plain identifier —
+/// see [`is_safe_schema_ident`]. `public` already exists everywhere, and `$user`
+/// resolves per-connection to something this code has no business creating.
+fn search_path_schema(options: Option<&str>) -> Option<String> {
+    let options = options?;
+    // libpq accepts both `-c search_path=x` and `-csearch_path=x`, and the whole
+    // string may carry several `-c` settings.
+    let idx = options.find("search_path=")?;
+    let value = &options[idx + "search_path=".len()..];
+    let first = value
+        .split([',', ' '])
+        .next()?
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    if first.is_empty() || first.eq_ignore_ascii_case("public") || first.starts_with('$') {
+        return None;
+    }
+    is_safe_schema_ident(first).then(|| first.to_string())
+}
+
+/// Whether a schema name is a plain identifier safe to embed in DDL.
+///
+/// This name is interpolated into `CREATE SCHEMA`, and it arrives from an
+/// operator-supplied connection string — a trust boundary, however friendly the
+/// operator. Quoting alone is not enough, because a name containing a quote
+/// escapes the quoting; so the name is VALIDATED and anything outside
+/// `[A-Za-z0-9_]` starting with a letter or underscore is refused rather than
+/// escaped. A refused name is not an error: the adapter simply does not create
+/// the schema, and the operator creates it themselves, which is the same
+/// position they were in before this existed.
+fn is_safe_schema_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The pool's `sslmode`, taken from the connection string the caller supplied.
@@ -263,6 +328,16 @@ impl PostgresAdapter {
                 .get()
                 .await
                 .context("acquiring connection for migration")?;
+            // Before ANY unqualified DDL: create the schema the connection string
+            // asked for. Ordering is load-bearing — every statement below is
+            // unqualified and resolves through `search_path`, so a missing schema
+            // fails on the first `CREATE TABLE`, not here.
+            if let Some(schema_name) = search_path_schema(pg_config.get_options()) {
+                client
+                    .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\""))
+                    .await
+                    .with_context(|| format!("creating schema {schema_name}"))?;
+            }
             client
                 .batch_execute(schema::OLTP_SCHEMA)
                 .await
@@ -1093,6 +1168,93 @@ mod tls_config_tests {
         assert_eq!(
             mode_of("postgresql://u:p@127.0.0.1:5432/smooth"),
             deadpool_postgres::SslMode::Prefer,
+        );
+    }
+
+    /// `options` is how libpq carries `search_path`, and it was missing from the
+    /// hand-rolled copy for the same reason `sslmode` was. Without it a
+    /// self-hoster's `?options=-c search_path=smooth` is silently ignored and the
+    /// nine tables land in `public`.
+    #[test]
+    fn options_and_application_name_survive_the_copy() {
+        let cfg = config_of(
+            "postgresql://u:p@db.example.com:5432/postgres\
+             ?options=-c%20search_path%3Dsmooth&application_name=smooth-operator",
+        );
+        assert_eq!(cfg.options.as_deref(), Some("-c search_path=smooth"));
+        assert_eq!(cfg.application_name.as_deref(), Some("smooth-operator"));
+    }
+
+    /// The schema this adapter will create. Both libpq spellings, and only the
+    /// FIRST entry of the search list — that is where unqualified CREATE TABLE
+    /// lands, so it is the only one worth creating.
+    #[test]
+    fn search_path_schema_is_extracted_from_both_spellings() {
+        for opts in ["-c search_path=smooth", "-csearch_path=smooth"] {
+            assert_eq!(
+                super::search_path_schema(Some(opts)).as_deref(),
+                Some("smooth"),
+                "failed for {opts}"
+            );
+        }
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=smooth,public")).as_deref(),
+            Some("smooth"),
+        );
+    }
+
+    /// Nothing to create: no options at all, `public` (exists everywhere), and
+    /// `$user` (resolves per-connection to something this code must not create).
+    #[test]
+    fn nothing_is_created_for_absent_public_or_user_search_paths() {
+        assert_eq!(super::search_path_schema(None), None);
+        assert_eq!(
+            super::search_path_schema(Some("-c statement_timeout=5s")),
+            None
+        );
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=public")),
+            None
+        );
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=$user,public")),
+            None
+        );
+    }
+
+    /// The schema name is interpolated into `CREATE SCHEMA`, and it comes from an
+    /// operator-supplied connection string. A name carrying a quote would escape
+    /// the quoting, so names are VALIDATED, not escaped — anything that is not a
+    /// plain identifier is refused, and the adapter simply does not create it.
+    #[test]
+    fn injection_shaped_schema_names_are_refused_not_escaped() {
+        for evil in [
+            r#"a"; DROP TABLE conversations; --"#,
+            "a-b",
+            "1leading_digit",
+            "",
+            // A name written with an ESCAPED space keeps the backslash after the
+            // split, which is not an identifier character, so it is refused too.
+            r"a\ b",
+        ] {
+            assert_eq!(
+                super::search_path_schema(Some(&format!("-c search_path={evil}"))),
+                None,
+                "must refuse {evil:?}",
+            );
+        }
+    }
+
+    /// A BARE space is libpq's separator between settings, not part of the name,
+    /// so `search_path=a b` means `search_path=a` — matching libpq rather than
+    /// inventing a stricter rule that would reject a connection string Postgres
+    /// itself accepts.
+    #[test]
+    fn a_bare_space_ends_the_search_path_value_as_libpq_does() {
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=smooth -c statement_timeout=5s"))
+                .as_deref(),
+            Some("smooth"),
         );
     }
 
