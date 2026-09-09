@@ -22,9 +22,6 @@ use std::sync::RwLock;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// The default model an org uses until settings are saved.
-pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
-
 /// The default system prompt for a fresh org.
 pub const DEFAULT_SYSTEM_PROMPT: &str =
     "You are a helpful support assistant. Answer using the provided knowledge; \
@@ -36,9 +33,28 @@ pub const DEFAULT_SYSTEM_PROMPT: &str =
 pub struct AgentSettings {
     /// The owning organization.
     pub org_id: String,
-    /// The LLM model id the agent runs on.
-    pub model: String,
-    /// The agent's system prompt.
+    /// Optional per-org **model override** — when set, this org's turns run on
+    /// this gateway model id instead of the server default. `None` (the default)
+    /// leaves the server's `SMOOTH_AGENT_MODEL` in force.
+    ///
+    /// An `Option`, and not a plain `String`, for the same reason
+    /// [`persona`](Self::persona) is: [`SettingsStore::get`] returns
+    /// [`defaults`](Self::defaults) for an org that has never saved settings, so
+    /// a field that always carries a value cannot express "no override". It used
+    /// to hold a hardcoded `"gpt-4o-mini"` that disagreed with the server's own
+    /// default and was never read on the turn path — so the admin API reported a
+    /// model the agent did not run on, and honoring that value would have
+    /// silently moved EVERY org onto it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The agent's system prompt, as shown and edited in the management console.
+    ///
+    /// **Not read on the turn path** — [`persona`](Self::persona) is the field
+    /// the runner keys off, and this one is storage for the console's editor.
+    /// That is deliberate, but it was previously undocumented, which made this
+    /// indistinguishable from the genuinely unwired fields it sat beside: an
+    /// admin editing it saw 200 and no change in behavior, with nothing saying
+    /// why (th-e92ba9). Set `persona` to actually change a turn's prompt.
     pub system_prompt: String,
     /// Optional per-org **agent persona** — when set, the runner uses it as the
     /// turn's system prompt INSTEAD of its built-in default, letting a host give
@@ -51,7 +67,14 @@ pub struct AgentSettings {
     /// signal* the runner keys off — absent ⇒ fall back to the const.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
-    /// Tool names enabled by default for this org's agent.
+    /// Tool names this org's agent may use. EMPTY ⇒ no restriction (the full
+    /// server tool set), matching the per-agent `enabledTools` allow-list, where
+    /// empty likewise means "all". A non-empty list restricts the agent to
+    /// exactly these tools.
+    ///
+    /// Empty-means-all is load-bearing: the alternative reading — empty means
+    /// "no tools" — would dark every tool for any org that had ever saved
+    /// settings, since `defaults()` starts empty and the console round-trips it.
     pub default_tools: Vec<String>,
     /// When the settings were last written.
     pub updated_at: DateTime<Utc>,
@@ -63,7 +86,7 @@ impl AgentSettings {
     pub fn defaults(org_id: impl Into<String>) -> Self {
         Self {
             org_id: org_id.into(),
-            model: DEFAULT_MODEL.to_string(),
+            model: None,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             persona: None,
             default_tools: Vec::new(),
@@ -121,7 +144,7 @@ mod tests {
         let store = InMemorySettingsStore::new();
         let s = store.get("org-x");
         assert_eq!(s.org_id, "org-x");
-        assert_eq!(s.model, DEFAULT_MODEL);
+        assert_eq!(s.model, None, "an unsaved org must carry NO model override");
         assert!(!s.system_prompt.is_empty());
         // No per-org persona override by default — the runner stays on its const.
         assert!(s.persona.is_none());
@@ -133,7 +156,7 @@ mod tests {
         let store = InMemorySettingsStore::new();
         store.put(AgentSettings {
             org_id: "org-a".into(),
-            model: "claude-x".into(),
+            model: Some("claude-x".into()),
             system_prompt: "be terse".into(),
             persona: Some("You are Org A's snarky concierge.".into()),
             default_tools: vec!["knowledge_search".into(), "fetch_url".into()],
@@ -141,7 +164,7 @@ mod tests {
         });
 
         let a = store.get("org-a");
-        assert_eq!(a.model, "claude-x");
+        assert_eq!(a.model.as_deref(), Some("claude-x"));
         assert_eq!(a.system_prompt, "be terse");
         assert_eq!(
             a.persona.as_deref(),
@@ -150,7 +173,11 @@ mod tests {
         assert_eq!(a.default_tools, vec!["knowledge_search", "fetch_url"]);
 
         // A different org still sees defaults.
-        assert_eq!(store.get("org-b").model, DEFAULT_MODEL);
+        assert_eq!(
+            store.get("org-b").model,
+            None,
+            "an unsaved org must carry NO model override"
+        );
     }
 
     #[test]
@@ -158,7 +185,7 @@ mod tests {
         let store = InMemorySettingsStore::new();
         store.put(AgentSettings {
             org_id: "o".into(),
-            model: "m1".into(),
+            model: Some("m1".into()),
             system_prompt: "p".into(),
             persona: None,
             default_tools: vec![],
@@ -166,12 +193,12 @@ mod tests {
         });
         store.put(AgentSettings {
             org_id: "o".into(),
-            model: "m2".into(),
+            model: Some("m2".into()),
             system_prompt: "p".into(),
             persona: None,
             default_tools: vec![],
             updated_at: Utc::now(),
         });
-        assert_eq!(store.get("o").model, "m2");
+        assert_eq!(store.get("o").model.as_deref(), Some("m2"));
     }
 }

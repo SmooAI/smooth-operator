@@ -970,7 +970,11 @@ impl<C: Connector> Connector for NamedConnector<C> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsWrite {
-    model: String,
+    /// Optional per-org model override. Omitted ⇒ `None` ⇒ the org stays on the
+    /// server default, rather than being pinned to whatever the console last
+    /// rendered.
+    #[serde(default)]
+    model: Option<String>,
     system_prompt: String,
     /// Optional per-org agent persona override (see [`AgentSettings::persona`]).
     /// Omitted ⇒ `None` ⇒ the runner stays on its built-in const prompt.

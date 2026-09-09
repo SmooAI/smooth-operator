@@ -594,7 +594,16 @@ async fn settings_get_returns_defaults_then_put_reflects() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["settings"]["orgId"], ORG);
-    assert!(body["settings"]["model"].as_str().is_some());
+    // An org that has never saved settings carries NO model override, and the API
+    // now says so. It used to answer with a hardcoded "gpt-4o-mini" that the
+    // server did not run on and no turn ever read — so this endpoint reported one
+    // model while the agent used another (th-e92ba9). `null` is the honest answer:
+    // "no override, you are on the server default".
+    assert!(
+        body["settings"]["model"].is_null(),
+        "a fresh org must report no model override, got {:?}",
+        body["settings"]["model"],
+    );
 
     // Admin PUTs new settings.
     let update = json!({

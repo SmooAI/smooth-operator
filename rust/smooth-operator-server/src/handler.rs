@@ -21,6 +21,7 @@ use smooth_operator::domain::{
 };
 use smooth_operator::identity_intake::IntakeValues;
 use smooth_operator::interaction::{InteractionOutcome, InteractionResolution};
+use smooth_operator::settings::AgentSettings;
 use smooth_operator_core::llm_provider::LlmProvider;
 use smooth_operator_core::{LlmClient, LlmConfig};
 
@@ -1882,10 +1883,18 @@ async fn handle_send_message(
 
     // SEAM 3 — model precedence, applied low → high so the winner clobbers last:
     //   1. server default (`SMOOTH_AGENT_MODEL`, already in `llm`),
-    //   2. the per-AGENT `model` override (when configured),
-    //   3. the per-TURN `send_message.model` (Smooth Modes) — always wins.
-    let llm = apply_agent_model_override(llm, agent_cfg.as_ref());
-    let llm = apply_model_override(llm, parsed);
+    //   2. the per-ORG `AgentSettings.model` override (when saved),
+    //   3. the per-AGENT `model` override (when configured),
+    //   4. the per-TURN `send_message.model` (Smooth Modes) — always wins.
+    //
+    // Layer 2 was MISSING: `PUT /admin/settings` accepted a model, stored it,
+    // echoed it back with 200, and no turn ever read it (th-e92ba9).
+    let llm = resolve_turn_model(
+        llm,
+        &state.settings.get(&org_id),
+        agent_cfg.as_ref(),
+        parsed,
+    );
 
     // SEAM 3 — per-agent agent-loop cap: the resolved `max_iterations`, else the
     // server default (`SMOOTH_AGENT_MAX_ITERATIONS`). Computed here (not in the
@@ -1913,9 +1922,20 @@ async fn handle_send_message(
     let greeting_section = agent_cfg
         .as_ref()
         .and_then(AgentBehaviorConfig::greeting_section);
+    // Tool allow-list: the per-AGENT list wins; failing that, the org's saved
+    // `defaultTools`. Like the per-agent list, EMPTY means "no restriction" —
+    // never "no tools" — because `AgentSettings::defaults` starts empty and the
+    // admin console round-trips it, so reading empty as a deny-all would silently
+    // dark every tool for any org that had ever opened the settings page.
+    // Previously `defaultTools` was accepted, stored, echoed back and never read
+    // (th-e92ba9).
     let enabled_tools = agent_cfg
         .as_ref()
-        .and_then(AgentBehaviorConfig::enabled_tool_ids);
+        .and_then(AgentBehaviorConfig::enabled_tool_ids)
+        .or_else(|| {
+            let org_tools = state.settings.get(&org_id).default_tools;
+            (!org_tools.is_empty()).then_some(org_tools)
+        });
     // Per-agent passthrough LLM-request metadata (spend attribution etc);
     // `None`/empty ⇒ no `metadata` on the wire. A host resolver sets it on the
     // agent's `AgentBehaviorConfig`; core normalizes empty to omitted.
@@ -2489,6 +2509,43 @@ async fn durable_confirm_fallback(
 /// stays as resolved — only the model id changes.
 fn apply_model_override(mut llm: LlmConfig, body: &Value) -> LlmConfig {
     if let Some(model) = body.get("model").and_then(Value::as_str) {
+        let model = model.trim();
+        if !model.is_empty() {
+            llm.model = model.to_string();
+        }
+    }
+    llm
+}
+
+/// Resolve the model a turn runs on, applying every layer of SEAM 3 in order.
+///
+/// One function rather than three call-site lines, so the PRECEDENCE is a
+/// testable unit. The individual `apply_*` helpers each had their own test and
+/// all passed while the org layer was not wired at all — a test that exercises a
+/// function proves nothing about whether anything calls it. Dropping a layer
+/// from here now fails [`turn_model_precedence_runs_lowest_to_highest`].
+fn resolve_turn_model(
+    llm: LlmConfig,
+    settings: &AgentSettings,
+    agent_cfg: Option<&AgentBehaviorConfig>,
+    body: &Value,
+) -> LlmConfig {
+    let llm = apply_org_model_override(llm, settings);
+    let llm = apply_agent_model_override(llm, agent_cfg);
+    apply_model_override(llm, body)
+}
+
+/// Apply the per-ORG `model` override from [`AgentSettings`].
+///
+/// `Some(model)` pins this org's turns to that gateway model id; `None` — which
+/// is what an org that never saved settings resolves to — leaves the server
+/// default untouched. The per-agent and per-turn overrides layer on top.
+///
+/// The `None` case is the whole reason `AgentSettings::model` is an `Option`:
+/// `SettingsStore::get` synthesizes defaults for an unsaved org, so a plain
+/// `String` here would have applied a default to every org on the server.
+fn apply_org_model_override(mut llm: LlmConfig, settings: &AgentSettings) -> LlmConfig {
+    if let Some(model) = settings.model.as_deref() {
         let model = model.trim();
         if !model.is_empty() {
             llm.model = model.to_string();
@@ -3285,6 +3342,85 @@ mod tests {
             apply_model_override(base_llm(), &wrong_type).model,
             "claude-haiku-4-5"
         );
+    }
+
+    /// The whole ladder, lowest → highest. This is the test that fails if a layer
+    /// is dropped from `resolve_turn_model` — the per-layer tests below cannot,
+    /// because they call their helper directly.
+    #[test]
+    fn turn_model_precedence_runs_lowest_to_highest() {
+        let mut org = AgentSettings::defaults("org-1");
+        org.model = Some("org-model".into());
+        let agent = cfg_with_model(Some("agent-model"));
+        let turn = json!({ "model": "turn-model" });
+
+        // 1. nothing set ⇒ server default survives
+        let base = base_llm().model;
+        assert_eq!(
+            resolve_turn_model(
+                base_llm(),
+                &AgentSettings::defaults("org-1"),
+                None,
+                &json!({})
+            )
+            .model,
+            base,
+        );
+        // 2. org beats the server default
+        assert_eq!(
+            resolve_turn_model(base_llm(), &org, None, &json!({})).model,
+            "org-model",
+        );
+        // 3. agent beats org
+        assert_eq!(
+            resolve_turn_model(base_llm(), &org, Some(&agent), &json!({})).model,
+            "agent-model",
+        );
+        // 4. the per-turn override beats everything
+        assert_eq!(
+            resolve_turn_model(base_llm(), &org, Some(&agent), &turn).model,
+            "turn-model",
+        );
+    }
+
+    /// The per-ORG override, layer 2 of SEAM 3. Before th-e92ba9 this layer did
+    /// not exist: `PUT /admin/settings` stored a model, echoed it back with 200,
+    /// and every turn kept running the server default.
+    #[test]
+    fn org_model_override_applies_when_the_org_saved_one() {
+        let mut settings = AgentSettings::defaults("org-1");
+        settings.model = Some("claude-opus-4-8".into());
+        assert_eq!(
+            apply_org_model_override(base_llm(), &settings).model,
+            "claude-opus-4-8"
+        );
+    }
+
+    /// THE trap this design exists to avoid. `SettingsStore::get` synthesizes
+    /// defaults for an org that never saved settings, so if `model` were a plain
+    /// `String` — as it was, holding a hardcoded "gpt-4o-mini" — this layer would
+    /// have moved EVERY org on the server onto that model the moment it was
+    /// wired. An unsaved org must change nothing.
+    #[test]
+    fn unsaved_org_does_not_move_anyone_off_the_server_default() {
+        let base = base_llm().model;
+        assert_eq!(
+            apply_org_model_override(base_llm(), &AgentSettings::defaults("org-1")).model,
+            base,
+        );
+    }
+
+    /// Blank/whitespace is not an override — the same defensive trim the
+    /// per-agent and per-turn layers apply, so a console writing "" cannot blank
+    /// the model out from under a turn.
+    #[test]
+    fn blank_org_model_is_not_an_override() {
+        let base = base_llm().model;
+        for blank in ["", "   "] {
+            let mut settings = AgentSettings::defaults("org-1");
+            settings.model = Some(blank.into());
+            assert_eq!(apply_org_model_override(base_llm(), &settings).model, base);
+        }
     }
 
     fn cfg_with_model(model: Option<&str>) -> AgentBehaviorConfig {
