@@ -147,16 +147,11 @@ fn turn_executor(injected: Option<Arc<dyn AgentExecutor>>) -> Arc<dyn AgentExecu
 /// that grounded the first LLM call.
 const AUTO_CONTEXT_LIMIT: usize = 3;
 
-/// System prompt for the knowledge-chat agent. Mirrors core's prompt: ground
-/// answers in the knowledge base and search it before answering anything
-/// organization-specific.
-const KNOWLEDGE_CHAT_SYSTEM_PROMPT: &str =
-    "You are a helpful customer-support agent for the organization. \
-    Answer the user's question accurately and concisely. When a question depends on \
-    organization-specific facts (policies, products, documentation), call the \
-    `knowledge_search` tool to retrieve them before answering, and ground your answer \
-    in what you retrieve. If the knowledge base has no relevant information, say so. \
-    Remember facts the user tells you within the conversation and use them when asked.";
+/// The knowledge-chat system prompt, re-exported from its single source in
+/// `smooth-operator`. This used to be a byte-identical private copy, which meant
+/// the deployed server and the nightly judged evals could run different prompts
+/// with nothing to notice (th-7ef414).
+use smooth_operator::runtime::KNOWLEDGE_CHAT_SYSTEM_PROMPT;
 
 /// Max prior turns to replay into the conversation for memory. Bounds context
 /// growth on long sessions; the in-memory log is small but a real backend could
