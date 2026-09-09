@@ -30,6 +30,36 @@
 //!   `(created_at, id)` can. Keep it.
 //! - **No RLS policies.** Single-tenant self-hosting; org scoping is enforced in the queries.
 //!
+//! # Putting the store in its own schema
+//!
+//! The DDL below is UNQUALIFIED, so it lands wherever `search_path` points. Pass
+//! Postgres's own mechanism in the connection string rather than a bespoke
+//! setting:
+//!
+//! ```text
+//! postgresql://user:pw@host:5432/db?options=-c%20search_path%3Dsmooth
+//! ```
+//!
+//! The adapter issues `CREATE SCHEMA IF NOT EXISTS` for the first entry before
+//! applying any DDL, because Postgres will not create a schema on demand and the
+//! error when it is missing ("no schema has been selected to create in") reads
+//! like a typo in the URL rather than a missing `CREATE SCHEMA`.
+//!
+//! **Two things this does NOT give you, both of which matter on a shared database:**
+//!
+//! - **`checkpoints` does not follow it.** That table is created by
+//!   [`PostgresCheckpointStore`](smooth_operator_core::PostgresCheckpointStore)
+//!   on its OWN connection, built from its own config in another crate — so it
+//!   lands in that connection's `search_path`, not this one. Schema isolation
+//!   here is isolation of THIS crate's nine tables, not of everything the
+//!   operator writes.
+//! - **Still no RLS.** A schema is a namespace, not a boundary. Dropping these
+//!   tables into a database that otherwise relies on RLS (a Supabase project,
+//!   say) puts an un-RLS'd table set beside RLS'd ones, where org scoping holds
+//!   only because every query in this crate applies it. That is defensible for a
+//!   dedicated database and is a real decision to make for a shared one — see
+//!   the RLS note below.
+//!
 //! The `checkpoints` table is **not** created here — that is owned by
 //! smooth-operator's [`PostgresCheckpointStore`](smooth_operator_core::PostgresCheckpointStore),
 //! which runs its own `CREATE TABLE IF NOT EXISTS checkpoints …` against the same

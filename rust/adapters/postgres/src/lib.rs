@@ -49,7 +49,6 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use deadpool_postgres::{Config as PoolConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
-use tokio_postgres::NoTls;
 
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{
@@ -128,6 +127,165 @@ fn bridge_runtime_handle() -> tokio::runtime::Handle {
         .clone()
 }
 
+/// Translate a parsed connection string into the deadpool config the pool is
+/// built from.
+///
+/// deadpool builds its manager from its OWN `Config`, not from a
+/// `tokio_postgres::Config`, so every field has to be copied across by hand —
+/// and a hand-rolled copy is a list you can silently fall off the end of. That
+/// is precisely what happened to `sslmode`: it was not among the copied fields,
+/// so `?sslmode=require` was dropped and the pool ran at the default `prefer`.
+///
+/// It lives here, out of `connect_with_embedder`, so a test can assert the copy
+/// is complete WITHOUT a database. Testing the translation of `sslmode` alone
+/// would not have caught the real defect, which was never a bad mapping — it was
+/// a field nobody assigned.
+fn pool_config_for(pg_config: &tokio_postgres::Config) -> PoolConfig {
+    let mut cfg = PoolConfig::new();
+    cfg.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+    cfg.dbname = pg_config.get_dbname().map(str::to_string);
+    cfg.user = pg_config.get_user().map(str::to_string);
+    cfg.password = pg_config
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+    if let Some(host) = pg_config.get_hosts().iter().find_map(|h| match h {
+        tokio_postgres::config::Host::Tcp(t) => Some(t.clone()),
+        tokio_postgres::config::Host::Unix(p) => p.to_str().map(str::to_string),
+    }) {
+        cfg.host = Some(host);
+    }
+    if let Some(port) = pg_config.get_ports().first().copied() {
+        cfg.port = Some(port);
+    }
+    // Carry the connection string's OWN sslmode. Harmless to omit while the
+    // connector was `NoTls` and nothing was encrypted either way; a silent
+    // DOWNGRADE the moment TLS works, where an operator who wrote `require` gets
+    // a pool that will happily fall back to plaintext.
+    cfg.ssl_mode = Some(ssl_mode_for(pg_config));
+    // `options` is how libpq carries `search_path`, which is how a self-hoster
+    // puts this store in its own schema rather than scattering nine tables across
+    // whatever `public` happens to be. Dropping it here is the same defect as
+    // dropping sslmode: the copy is a list, and a list can be fallen off the end
+    // of. `application_name` comes along for the ride so these connections are
+    // identifiable in `pg_stat_activity`, which on a shared database is the
+    // difference between "some pool is holding 20 connections" and knowing whose.
+    cfg.options = pg_config.get_options().map(str::to_string);
+    cfg.application_name = pg_config.get_application_name().map(str::to_string);
+    cfg
+}
+
+/// The schema named by a `search_path` in the connection string's `options`, if
+/// any — e.g. `?options=-c%20search_path%3Dsmooth`.
+///
+/// Why this is needed at all: the DDL in [`schema`] is UNQUALIFIED
+/// (`CREATE TABLE conversations …`), so it lands wherever `search_path` points.
+/// Setting `search_path` alone is not enough, because Postgres will not create a
+/// schema on demand — unqualified DDL against a `search_path` naming a schema
+/// that does not exist fails with "no schema has been selected to create in",
+/// which reads like a connection-string typo rather than a missing `CREATE
+/// SCHEMA`.
+///
+/// Only the FIRST entry is returned. `search_path` is a search list, and the
+/// first existing entry is where unqualified `CREATE TABLE` lands, so that is
+/// the only one this adapter could sensibly create.
+///
+/// Returns `None` for `$user`, `public`, and anything not a plain identifier —
+/// see [`is_safe_schema_ident`]. `public` already exists everywhere, and `$user`
+/// resolves per-connection to something this code has no business creating.
+fn search_path_schema(options: Option<&str>) -> Option<String> {
+    let options = options?;
+    // libpq accepts both `-c search_path=x` and `-csearch_path=x`, and the whole
+    // string may carry several `-c` settings.
+    let idx = options.find("search_path=")?;
+    let value = &options[idx + "search_path=".len()..];
+    let first = value
+        .split([',', ' '])
+        .next()?
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    if first.is_empty() || first.eq_ignore_ascii_case("public") || first.starts_with('$') {
+        return None;
+    }
+    is_safe_schema_ident(first).then(|| first.to_string())
+}
+
+/// Whether a schema name is a plain identifier safe to embed in DDL.
+///
+/// This name is interpolated into `CREATE SCHEMA`, and it arrives from an
+/// operator-supplied connection string — a trust boundary, however friendly the
+/// operator. Quoting alone is not enough, because a name containing a quote
+/// escapes the quoting; so the name is VALIDATED and anything outside
+/// `[A-Za-z0-9_]` starting with a letter or underscore is refused rather than
+/// escaped. A refused name is not an error: the adapter simply does not create
+/// the schema, and the operator creates it themselves, which is the same
+/// position they were in before this existed.
+fn is_safe_schema_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The pool's `sslmode`, taken from the connection string the caller supplied.
+///
+/// Split out so it is testable without a database: the bug this exists to stop
+/// is a SILENT DOWNGRADE, and a silent downgrade is exactly the kind that no
+/// integration test notices — everything still connects, just not with the
+/// guarantee that was asked for.
+fn ssl_mode_for(pg_config: &tokio_postgres::Config) -> deadpool_postgres::SslMode {
+    match pg_config.get_ssl_mode() {
+        tokio_postgres::config::SslMode::Disable => deadpool_postgres::SslMode::Disable,
+        tokio_postgres::config::SslMode::Require => deadpool_postgres::SslMode::Require,
+        // `Prefer` is tokio-postgres's own default and the safe fallback for any
+        // variant added later: try TLS, accept plaintext. `SslMode` is
+        // #[non_exhaustive], so this arm is required.
+        _ => deadpool_postgres::SslMode::Prefer,
+    }
+}
+
+/// TLS for the async pool.
+///
+/// Every managed Postgres worth naming (Supabase, RDS, Neon) requires TLS, and
+/// this adapter passed `NoTls`, so it could not reach any of them — from a
+/// laptop or from a container. There was no TLS in the crate at all; the rustls
+/// already in `Cargo.toml` belonged to `reqwest`, for HTTP.
+///
+/// The roots are webpki's COMPILED-IN Mozilla set rather than the OS trust
+/// store, so this behaves identically on a laptop, in a scratch container, and
+/// in a `provided.al2023` Lambda — the last two need not carry a trust store at
+/// all, and discovering that at connect time in production is the failure this
+/// avoids.
+///
+/// Passing a connector does not force TLS on: `sslmode` still decides. A local
+/// or test Postgres with `sslmode=disable` never dials TLS, and the default
+/// `prefer` negotiates it where available and falls back where it is not — which
+/// is why the pgvector testcontainer keeps working untouched.
+fn tls_connector() -> tokio_postgres_rustls::MakeRustlsConnect {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // An EXPLICIT provider, not `ClientConfig::builder()`. That constructor reads
+    // a process-wide default which nothing here installs, so it panics at runtime
+    // when no other crate happened to install one first — a failure that depends
+    // on unrelated dependencies and on link order, and would surface as a crash
+    // on the first database connection.
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+
+    tokio_postgres_rustls::MakeRustlsConnect::new(config)
+}
+
 impl PostgresAdapter {
     /// Connect to Postgres, build the async pool + in-memory checkpoint store, and
     /// apply the schema. Uses the [`DeterministicEmbedder`] (1024-d) by default.
@@ -158,27 +316,10 @@ impl PostgresAdapter {
         let pg_config: tokio_postgres::Config = conn_str
             .parse()
             .context("parsing connection string for async pool")?;
-        let mut cfg = PoolConfig::new();
-        cfg.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        // deadpool builds its manager from a tokio_postgres::Config.
-        cfg.dbname = pg_config.get_dbname().map(str::to_string);
-        cfg.user = pg_config.get_user().map(str::to_string);
-        cfg.password = pg_config
-            .get_password()
-            .map(|p| String::from_utf8_lossy(p).into_owned());
-        if let Some(host) = pg_config.get_hosts().iter().find_map(|h| match h {
-            tokio_postgres::config::Host::Tcp(t) => Some(t.clone()),
-            tokio_postgres::config::Host::Unix(p) => p.to_str().map(str::to_string),
-        }) {
-            cfg.host = Some(host);
-        }
-        if let Some(port) = pg_config.get_ports().first().copied() {
-            cfg.port = Some(port);
-        }
+        let cfg = pool_config_for(&pg_config);
+
         let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .create_pool(Some(Runtime::Tokio1), tls_connector())
             .context("building deadpool")?;
 
         // --- apply schema (OLTP unconditionally; pgvector knowledge table) ---
@@ -187,6 +328,16 @@ impl PostgresAdapter {
                 .get()
                 .await
                 .context("acquiring connection for migration")?;
+            // Before ANY unqualified DDL: create the schema the connection string
+            // asked for. Ordering is load-bearing — every statement below is
+            // unqualified and resolves through `search_path`, so a missing schema
+            // fails on the first `CREATE TABLE`, not here.
+            if let Some(schema_name) = search_path_schema(pg_config.get_options()) {
+                client
+                    .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\""))
+                    .await
+                    .with_context(|| format!("creating schema {schema_name}"))?;
+            }
             client
                 .batch_execute(schema::OLTP_SCHEMA)
                 .await
@@ -968,5 +1119,157 @@ impl StorageAdapter for PostgresAdapter {
         // and the filter survives the ingest→serve process boundary (unlike the
         // in-memory side table). See `knowledge::PgKnowledgeBase::query_async`.
         Arc::new(self.knowledge.with_access(access.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tls_config_tests {
+
+    fn mode_of(conn_str: &str) -> deadpool_postgres::SslMode {
+        config_of(conn_str)
+            .ssl_mode
+            .expect("sslmode must be set on the pool config")
+    }
+
+    fn config_of(conn_str: &str) -> super::PoolConfig {
+        let cfg: tokio_postgres::Config = conn_str.parse().expect("parses");
+        super::pool_config_for(&cfg)
+    }
+
+    /// The regression that matters. The pool config is built by copying fields
+    /// off the parsed connection string one at a time, and `sslmode` was not one
+    /// of them — so an operator who wrote `require` got `prefer`, a pool that
+    /// will fall back to plaintext. Harmless while the connector was `NoTls` and
+    /// nothing was encrypted either way; a silent downgrade the moment TLS works.
+    #[test]
+    fn require_is_carried_through_and_not_downgraded_to_prefer() {
+        assert_eq!(
+            mode_of("postgresql://u:p@db.example.com:5432/postgres?sslmode=require"),
+            deadpool_postgres::SslMode::Require,
+        );
+    }
+
+    /// A local/test Postgres must keep working untouched: `disable` never dials
+    /// TLS, connector present or not. This is what keeps the pgvector
+    /// testcontainer conformance suite green.
+    #[test]
+    fn disable_is_preserved_so_local_postgres_still_connects() {
+        assert_eq!(
+            mode_of("postgresql://u:p@127.0.0.1:5432/smooth?sslmode=disable"),
+            deadpool_postgres::SslMode::Disable,
+        );
+    }
+
+    /// No `sslmode` at all is tokio-postgres's `Prefer`: negotiate TLS where the
+    /// server offers it, fall back where it does not. That is what lets one
+    /// connector serve both Supabase and a bare local container.
+    #[test]
+    fn absent_sslmode_is_prefer() {
+        assert_eq!(
+            mode_of("postgresql://u:p@127.0.0.1:5432/smooth"),
+            deadpool_postgres::SslMode::Prefer,
+        );
+    }
+
+    /// `options` is how libpq carries `search_path`, and it was missing from the
+    /// hand-rolled copy for the same reason `sslmode` was. Without it a
+    /// self-hoster's `?options=-c search_path=smooth` is silently ignored and the
+    /// nine tables land in `public`.
+    #[test]
+    fn options_and_application_name_survive_the_copy() {
+        let cfg = config_of(
+            "postgresql://u:p@db.example.com:5432/postgres\
+             ?options=-c%20search_path%3Dsmooth&application_name=smooth-operator",
+        );
+        assert_eq!(cfg.options.as_deref(), Some("-c search_path=smooth"));
+        assert_eq!(cfg.application_name.as_deref(), Some("smooth-operator"));
+    }
+
+    /// The schema this adapter will create. Both libpq spellings, and only the
+    /// FIRST entry of the search list — that is where unqualified CREATE TABLE
+    /// lands, so it is the only one worth creating.
+    #[test]
+    fn search_path_schema_is_extracted_from_both_spellings() {
+        for opts in ["-c search_path=smooth", "-csearch_path=smooth"] {
+            assert_eq!(
+                super::search_path_schema(Some(opts)).as_deref(),
+                Some("smooth"),
+                "failed for {opts}"
+            );
+        }
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=smooth,public")).as_deref(),
+            Some("smooth"),
+        );
+    }
+
+    /// Nothing to create: no options at all, `public` (exists everywhere), and
+    /// `$user` (resolves per-connection to something this code must not create).
+    #[test]
+    fn nothing_is_created_for_absent_public_or_user_search_paths() {
+        assert_eq!(super::search_path_schema(None), None);
+        assert_eq!(
+            super::search_path_schema(Some("-c statement_timeout=5s")),
+            None
+        );
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=public")),
+            None
+        );
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=$user,public")),
+            None
+        );
+    }
+
+    /// The schema name is interpolated into `CREATE SCHEMA`, and it comes from an
+    /// operator-supplied connection string. A name carrying a quote would escape
+    /// the quoting, so names are VALIDATED, not escaped — anything that is not a
+    /// plain identifier is refused, and the adapter simply does not create it.
+    #[test]
+    fn injection_shaped_schema_names_are_refused_not_escaped() {
+        for evil in [
+            r#"a"; DROP TABLE conversations; --"#,
+            "a-b",
+            "1leading_digit",
+            "",
+            // A name written with an ESCAPED space keeps the backslash after the
+            // split, which is not an identifier character, so it is refused too.
+            r"a\ b",
+        ] {
+            assert_eq!(
+                super::search_path_schema(Some(&format!("-c search_path={evil}"))),
+                None,
+                "must refuse {evil:?}",
+            );
+        }
+    }
+
+    /// A BARE space is libpq's separator between settings, not part of the name,
+    /// so `search_path=a b` means `search_path=a` — matching libpq rather than
+    /// inventing a stricter rule that would reject a connection string Postgres
+    /// itself accepts.
+    #[test]
+    fn a_bare_space_ends_the_search_path_value_as_libpq_does() {
+        assert_eq!(
+            super::search_path_schema(Some("-c search_path=smooth -c statement_timeout=5s"))
+                .as_deref(),
+            Some("smooth"),
+        );
+    }
+
+    /// The rest of the hand-rolled copy, asserted together — because the defect
+    /// class here is "a field nobody assigned", and `sslmode` is only the one we
+    /// happened to find. A connection whose host or port silently vanished would
+    /// fail loudly; one whose `sslmode` vanished would not.
+    #[test]
+    fn every_connection_field_survives_the_copy() {
+        let cfg = config_of("postgresql://alice:s3cret@db.example.com:6543/smooth?sslmode=require");
+        assert_eq!(cfg.host.as_deref(), Some("db.example.com"));
+        assert_eq!(cfg.port, Some(6543));
+        assert_eq!(cfg.user.as_deref(), Some("alice"));
+        assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+        assert_eq!(cfg.dbname.as_deref(), Some("smooth"));
+        assert_eq!(cfg.ssl_mode, Some(deadpool_postgres::SslMode::Require));
     }
 }
