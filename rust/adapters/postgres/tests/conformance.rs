@@ -429,3 +429,55 @@ async fn full_lifecycle_through_the_postgres_adapter() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// The named-schema path, against a real Postgres (th-4bb624).
+///
+/// The unit tests cover parsing and validating the schema name; they cannot
+/// cover the part that actually matters — that `CREATE SCHEMA` runs first and
+/// that the unqualified DDL then RESOLVES INTO that schema rather than `public`.
+/// Ordering is the whole risk here, and only a live server can show it.
+///
+/// It also pins the negative half. Asserting the tables exist in `smooth` would
+/// pass just as happily if they ALSO existed in `public`, which is precisely the
+/// failure a self-hoster is trying to avoid when they ask for their own schema.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tables_land_in_the_search_path_schema_and_not_in_public() -> anyhow::Result<()> {
+    let Some((_node, conn_str)) = start_pgvector().await? else {
+        return Ok(()); // Docker unavailable — skip, don't fail.
+    };
+
+    // The schema does NOT exist yet: the adapter has to create it. That is the
+    // ordering under test — Postgres will not create one on demand, so if this
+    // ran after the DDL the first CREATE TABLE would fail.
+    let scoped = format!("{conn_str} options='-c search_path=smooth'");
+    let store = PostgresAdapter::connect(&scoped).await?;
+    store
+        .create_conversation(conversation("conv-schema", "org-schema"))
+        .await?;
+
+    // Verify from a SEPARATE connection with a default search_path, so the
+    // assertion cannot be satisfied by the same session's own path.
+    let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let row = client
+        .query_one(
+            "SELECT to_regclass('smooth.conversations') IS NOT NULL AS in_schema, \
+                    to_regclass('public.conversations')  IS NULL     AS not_in_public",
+            &[],
+        )
+        .await?;
+    assert!(
+        row.get::<_, bool>("in_schema"),
+        "conversations must be created in the search_path schema",
+    );
+    assert!(
+        row.get::<_, bool>("not_in_public"),
+        "nothing may be left behind in public — that is the whole point of the schema",
+    );
+
+    println!("POSTGRES SCHEMA: CREATE SCHEMA ran first and the unqualified DDL landed in `smooth`, not `public`");
+    drop(store);
+    Ok(())
+}
