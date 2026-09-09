@@ -28,6 +28,17 @@ tracing = { workspace = true }
 # Async OLTP CRUD (conversations / participants / messages / sessions / knowledge).
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
 deadpool-postgres = "0.14"
+# TLS for the async pool. Managed Postgres (Supabase, RDS, Neon) requires it, and
+# without a connector this adapter could not reach any of them.
+#
+# rustls + webpki-roots rather than native-tls, deliberately: the roots are
+# COMPILED IN, so this works unchanged in a scratch/distroless container and in a
+# `provided.al2023` Lambda, neither of which is guaranteed to carry an OS trust
+# store. `ring` rather than aws-lc-rs because aws-lc-rs needs a C toolchain and
+# is a known cross-compilation snag for the arm64 Lambda build.
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 # Optional gateway-backed embeddings (OpenAI-compatible /v1/embeddings).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 

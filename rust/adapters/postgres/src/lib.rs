@@ -49,7 +49,6 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use deadpool_postgres::{Config as PoolConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
-use tokio_postgres::NoTls;
 
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::{
@@ -128,6 +127,100 @@ fn bridge_runtime_handle() -> tokio::runtime::Handle {
         .clone()
 }
 
+/// Translate a parsed connection string into the deadpool config the pool is
+/// built from.
+///
+/// deadpool builds its manager from its OWN `Config`, not from a
+/// `tokio_postgres::Config`, so every field has to be copied across by hand —
+/// and a hand-rolled copy is a list you can silently fall off the end of. That
+/// is precisely what happened to `sslmode`: it was not among the copied fields,
+/// so `?sslmode=require` was dropped and the pool ran at the default `prefer`.
+///
+/// It lives here, out of `connect_with_embedder`, so a test can assert the copy
+/// is complete WITHOUT a database. Testing the translation of `sslmode` alone
+/// would not have caught the real defect, which was never a bad mapping — it was
+/// a field nobody assigned.
+fn pool_config_for(pg_config: &tokio_postgres::Config) -> PoolConfig {
+    let mut cfg = PoolConfig::new();
+    cfg.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+    cfg.dbname = pg_config.get_dbname().map(str::to_string);
+    cfg.user = pg_config.get_user().map(str::to_string);
+    cfg.password = pg_config
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+    if let Some(host) = pg_config.get_hosts().iter().find_map(|h| match h {
+        tokio_postgres::config::Host::Tcp(t) => Some(t.clone()),
+        tokio_postgres::config::Host::Unix(p) => p.to_str().map(str::to_string),
+    }) {
+        cfg.host = Some(host);
+    }
+    if let Some(port) = pg_config.get_ports().first().copied() {
+        cfg.port = Some(port);
+    }
+    // Carry the connection string's OWN sslmode. Harmless to omit while the
+    // connector was `NoTls` and nothing was encrypted either way; a silent
+    // DOWNGRADE the moment TLS works, where an operator who wrote `require` gets
+    // a pool that will happily fall back to plaintext.
+    cfg.ssl_mode = Some(ssl_mode_for(pg_config));
+    cfg
+}
+
+/// The pool's `sslmode`, taken from the connection string the caller supplied.
+///
+/// Split out so it is testable without a database: the bug this exists to stop
+/// is a SILENT DOWNGRADE, and a silent downgrade is exactly the kind that no
+/// integration test notices — everything still connects, just not with the
+/// guarantee that was asked for.
+fn ssl_mode_for(pg_config: &tokio_postgres::Config) -> deadpool_postgres::SslMode {
+    match pg_config.get_ssl_mode() {
+        tokio_postgres::config::SslMode::Disable => deadpool_postgres::SslMode::Disable,
+        tokio_postgres::config::SslMode::Require => deadpool_postgres::SslMode::Require,
+        // `Prefer` is tokio-postgres's own default and the safe fallback for any
+        // variant added later: try TLS, accept plaintext. `SslMode` is
+        // #[non_exhaustive], so this arm is required.
+        _ => deadpool_postgres::SslMode::Prefer,
+    }
+}
+
+/// TLS for the async pool.
+///
+/// Every managed Postgres worth naming (Supabase, RDS, Neon) requires TLS, and
+/// this adapter passed `NoTls`, so it could not reach any of them — from a
+/// laptop or from a container. There was no TLS in the crate at all; the rustls
+/// already in `Cargo.toml` belonged to `reqwest`, for HTTP.
+///
+/// The roots are webpki's COMPILED-IN Mozilla set rather than the OS trust
+/// store, so this behaves identically on a laptop, in a scratch container, and
+/// in a `provided.al2023` Lambda — the last two need not carry a trust store at
+/// all, and discovering that at connect time in production is the failure this
+/// avoids.
+///
+/// Passing a connector does not force TLS on: `sslmode` still decides. A local
+/// or test Postgres with `sslmode=disable` never dials TLS, and the default
+/// `prefer` negotiates it where available and falls back where it is not — which
+/// is why the pgvector testcontainer keeps working untouched.
+fn tls_connector() -> tokio_postgres_rustls::MakeRustlsConnect {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // An EXPLICIT provider, not `ClientConfig::builder()`. That constructor reads
+    // a process-wide default which nothing here installs, so it panics at runtime
+    // when no other crate happened to install one first — a failure that depends
+    // on unrelated dependencies and on link order, and would surface as a crash
+    // on the first database connection.
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+
+    tokio_postgres_rustls::MakeRustlsConnect::new(config)
+}
+
 impl PostgresAdapter {
     /// Connect to Postgres, build the async pool + in-memory checkpoint store, and
     /// apply the schema. Uses the [`DeterministicEmbedder`] (1024-d) by default.
@@ -158,27 +251,10 @@ impl PostgresAdapter {
         let pg_config: tokio_postgres::Config = conn_str
             .parse()
             .context("parsing connection string for async pool")?;
-        let mut cfg = PoolConfig::new();
-        cfg.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        // deadpool builds its manager from a tokio_postgres::Config.
-        cfg.dbname = pg_config.get_dbname().map(str::to_string);
-        cfg.user = pg_config.get_user().map(str::to_string);
-        cfg.password = pg_config
-            .get_password()
-            .map(|p| String::from_utf8_lossy(p).into_owned());
-        if let Some(host) = pg_config.get_hosts().iter().find_map(|h| match h {
-            tokio_postgres::config::Host::Tcp(t) => Some(t.clone()),
-            tokio_postgres::config::Host::Unix(p) => p.to_str().map(str::to_string),
-        }) {
-            cfg.host = Some(host);
-        }
-        if let Some(port) = pg_config.get_ports().first().copied() {
-            cfg.port = Some(port);
-        }
+        let cfg = pool_config_for(&pg_config);
+
         let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .create_pool(Some(Runtime::Tokio1), tls_connector())
             .context("building deadpool")?;
 
         // --- apply schema (OLTP unconditionally; pgvector knowledge table) ---
@@ -968,5 +1044,70 @@ impl StorageAdapter for PostgresAdapter {
         // and the filter survives the ingest→serve process boundary (unlike the
         // in-memory side table). See `knowledge::PgKnowledgeBase::query_async`.
         Arc::new(self.knowledge.with_access(access.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tls_config_tests {
+
+    fn mode_of(conn_str: &str) -> deadpool_postgres::SslMode {
+        config_of(conn_str)
+            .ssl_mode
+            .expect("sslmode must be set on the pool config")
+    }
+
+    fn config_of(conn_str: &str) -> super::PoolConfig {
+        let cfg: tokio_postgres::Config = conn_str.parse().expect("parses");
+        super::pool_config_for(&cfg)
+    }
+
+    /// The regression that matters. The pool config is built by copying fields
+    /// off the parsed connection string one at a time, and `sslmode` was not one
+    /// of them — so an operator who wrote `require` got `prefer`, a pool that
+    /// will fall back to plaintext. Harmless while the connector was `NoTls` and
+    /// nothing was encrypted either way; a silent downgrade the moment TLS works.
+    #[test]
+    fn require_is_carried_through_and_not_downgraded_to_prefer() {
+        assert_eq!(
+            mode_of("postgresql://u:p@db.example.com:5432/postgres?sslmode=require"),
+            deadpool_postgres::SslMode::Require,
+        );
+    }
+
+    /// A local/test Postgres must keep working untouched: `disable` never dials
+    /// TLS, connector present or not. This is what keeps the pgvector
+    /// testcontainer conformance suite green.
+    #[test]
+    fn disable_is_preserved_so_local_postgres_still_connects() {
+        assert_eq!(
+            mode_of("postgresql://u:p@127.0.0.1:5432/smooth?sslmode=disable"),
+            deadpool_postgres::SslMode::Disable,
+        );
+    }
+
+    /// No `sslmode` at all is tokio-postgres's `Prefer`: negotiate TLS where the
+    /// server offers it, fall back where it does not. That is what lets one
+    /// connector serve both Supabase and a bare local container.
+    #[test]
+    fn absent_sslmode_is_prefer() {
+        assert_eq!(
+            mode_of("postgresql://u:p@127.0.0.1:5432/smooth"),
+            deadpool_postgres::SslMode::Prefer,
+        );
+    }
+
+    /// The rest of the hand-rolled copy, asserted together — because the defect
+    /// class here is "a field nobody assigned", and `sslmode` is only the one we
+    /// happened to find. A connection whose host or port silently vanished would
+    /// fail loudly; one whose `sslmode` vanished would not.
+    #[test]
+    fn every_connection_field_survives_the_copy() {
+        let cfg = config_of("postgresql://alice:s3cret@db.example.com:6543/smooth?sslmode=require");
+        assert_eq!(cfg.host.as_deref(), Some("db.example.com"));
+        assert_eq!(cfg.port, Some(6543));
+        assert_eq!(cfg.user.as_deref(), Some("alice"));
+        assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+        assert_eq!(cfg.dbname.as_deref(), Some("smooth"));
+        assert_eq!(cfg.ssl_mode, Some(deadpool_postgres::SslMode::Require));
     }
 }
