@@ -21,7 +21,7 @@ mod common;
 use serde_json::json;
 
 use smooth_operator::connector_config::{ConnectorConfig, ConnectorConfigStore, ConnectorKind};
-use smooth_operator::settings::{AgentSettings, SettingsStore, DEFAULT_MODEL};
+use smooth_operator::settings::{AgentSettings, SettingsStore};
 use smooth_operator_ingestion::indexing::{IndexingRun, IndexingRunStatus, IndexingStore};
 use smooth_operator_ingestion::Timestamp;
 
@@ -138,35 +138,35 @@ async fn admin_stores_round_trip_through_dynamodb() -> anyhow::Result<()> {
 
         let unset = settings.get("org-x");
         assert_eq!(unset.org_id, "org-x");
-        assert_eq!(unset.model, DEFAULT_MODEL);
+        assert_eq!(unset.model, None, "an unsaved org must carry NO model override");
         assert!(unset.default_tools.is_empty());
 
         settings.put(AgentSettings {
             org_id: "org-a".into(),
-            model: "claude-x".into(),
+            model: Some("claude-x".into()),
             system_prompt: "be terse".into(),
             persona: None,
             default_tools: vec!["knowledge_search".into(), "fetch_url".into()],
             updated_at: Utc::now(),
         });
         let got = settings.get("org-a");
-        assert_eq!(got.model, "claude-x");
+        assert_eq!(got.model.as_deref(), Some("claude-x"));
         assert_eq!(got.system_prompt, "be terse");
         assert_eq!(got.default_tools, vec!["knowledge_search", "fetch_url"]);
 
         // A different org still sees defaults (org-scoped).
-        assert_eq!(settings.get("org-b").model, DEFAULT_MODEL);
+        assert_eq!(settings.get("org-b").model, None, "an unsaved org must carry NO model override");
 
         // put replaces existing.
         settings.put(AgentSettings {
             org_id: "org-a".into(),
-            model: "claude-y".into(),
+            model: Some("claude-y".into()),
             system_prompt: "be verbose".into(),
             persona: None,
             default_tools: vec![],
             updated_at: Utc::now(),
         });
-        assert_eq!(settings.get("org-a").model, "claude-y");
+        assert_eq!(settings.get("org-a").model.as_deref(), Some("claude-y"));
         assert!(settings.get("org-a").default_tools.is_empty());
 
         // ---- indexing: record_run -> list_runs(asc) -> latest_cursor ----

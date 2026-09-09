@@ -87,9 +87,7 @@ pub use rerank::{apply_optional_rerank, LexicalReranker, NoopReranker, Reranker}
 pub use runtime::{
     AgentRuntime, KnowledgeChatRuntime, SharedRuntime, TurnOutcome, TurnState, MAX_CITATIONS,
 };
-pub use settings::{
-    AgentSettings, InMemorySettingsStore, SettingsStore, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
-};
+pub use settings::{AgentSettings, InMemorySettingsStore, SettingsStore, DEFAULT_SYSTEM_PROMPT};
 pub use telemetry::init_telemetry;
 pub use tool_provider::{ToolProvider, ToolProviderContext, UserImage};
 pub use tools::{
