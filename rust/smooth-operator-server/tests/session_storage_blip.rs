@@ -252,6 +252,51 @@ async fn a_storage_blip_is_never_reported_as_not_found() {
     );
 }
 
+/// THE DOWNSTREAM CONTRACT, stated as one comparison: for the SAME action, the
+/// blip and the genuine miss must not share an error **code**.
+///
+/// `@smooai/chat-widget` (#48) recovers from a dead session by discarding the
+/// session pointer and its history and creating a fresh one, and it decides on
+/// the code alone: `SESSION_NOT_FOUND` ⇒ recover, anything else ⇒ keep the live
+/// session. So a code the widget cannot tell apart is not a cosmetic wording
+/// bug — it is the widget destroying a live conversation because Postgres
+/// hiccuped. A distinct `message` would not save it: the widget never reads one.
+#[tokio::test]
+async fn the_two_outcomes_never_share_an_error_code() {
+    let (adapter, fail) = FlakySessionAdapter::new();
+    let state = AppState::new(Arc::new(adapter), base_config());
+
+    let mut collisions = Vec::new();
+    for (frame, _) in session_frames() {
+        fail.store(false, Ordering::SeqCst);
+        let miss = drive(&state, &frame).await;
+        let miss_code = miss["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        fail.store(true, Ordering::SeqCst);
+        let blip = drive(&state, &frame).await;
+        let blip_code = blip["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        if miss_code == blip_code {
+            collisions.push(format!(
+                "{}: both outcomes emit {miss_code}",
+                frame["action"]
+            ));
+        }
+    }
+    assert!(
+        collisions.is_empty(),
+        "a client keying on the error code cannot tell a blip from a dead session — \
+         it will discard live conversations on a storage hiccup:\n{}",
+        collisions.join("\n")
+    );
+}
+
 /// The other half — and the reason this needs two tests. A genuinely unknown id
 /// must still be not-found; a fix that reported everything as retryable would
 /// leave a client retrying an id that will never resolve.
