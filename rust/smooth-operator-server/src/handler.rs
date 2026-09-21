@@ -807,9 +807,14 @@ pub async fn maybe_auto_title(
     // Only title conversations still on their default name.
     let conversation = match state.storage.get_conversation(conversation_id).await {
         Ok(Some(c)) => c,
-        _ => return,
+        _ => {
+            tracing::warn!(conversation_id, "auto-title: conversation not found");
+            return;
+        }
     };
     if !conversation.name.starts_with(DEFAULT_NAME_PREFIX) {
+        // Expected on every turn after the first (or after a manual rename) — debug.
+        tracing::debug!(conversation_id, name = %conversation.name, "auto-title: name not default, skip");
         return;
     }
 
@@ -821,16 +826,22 @@ pub async fn maybe_auto_title(
         state.config.gateway_key.as_deref(),
     )
     .await;
-    let Some(key) = key else { return };
+    let Some(key) = key else {
+        tracing::warn!(org = %conversation.organization_id, "auto-title: no gateway key resolved");
+        return;
+    };
 
     let Some(raw) = generate_title(&state.config.gateway_url, &key, user_message, reply).await
     else {
+        tracing::warn!("auto-title: generate_title returned None (gateway/parse)");
         return;
     };
     let title = sanitize_title(&raw);
     if title.is_empty() {
+        tracing::warn!(raw = %raw, "auto-title: sanitized title empty");
         return;
     }
+    tracing::debug!(conversation_id, title = %title, "auto-title: writing title");
 
     // Re-check the guard right before writing: a manual rename could have landed
     // while the model was thinking. Best-effort — a lost race just means the
@@ -868,8 +879,12 @@ async fn generate_title(
         "Give this conversation a short 3-6 word title. Reply with ONLY the title, no quotes.\n\nUser: {user_snippet}\nAssistant: {reply_snippet}"
     );
     let body = json!({
+        // The title model (groq-gpt-oss-20b) is a reasoning model: reasoning
+        // tokens count against max_tokens, so a tight cap (32) gets fully consumed
+        // by reasoning and leaves the content empty. Give reasoning headroom — the
+        // title itself is capped to TITLE_MAX chars by sanitize_title regardless.
+        "max_tokens": 512,
         "model": AUTO_TITLE_MODEL,
-        "max_tokens": 32,
         "temperature": 0.3,
         "messages": [{ "role": "user", "content": prompt }],
     });
