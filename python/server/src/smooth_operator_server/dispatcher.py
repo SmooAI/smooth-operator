@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 from smooth_operator_core import Knowledge
@@ -30,8 +31,47 @@ from .agent_config import (
 from .auth import AccessContext
 from .confirmation import ConfirmationRegistry
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
-from .session_store import SessionStore
+from .session_store import MessageDirection, SessionStore, StoredMessage
 from .turn_runner import Sink, TurnRunner
+
+#: Default cap on conversations returned by ``list_conversations`` (after filtering).
+_DEFAULT_CONVERSATION_LIMIT = 50
+#: Per-conversation message peek cap for title + count (see ponytail note in handler).
+_MSG_CAP = 200
+#: Sidebar title length — a short preview of the first inbound message.
+_TITLE_MAX = 60
+
+
+def _conversation_title(messages: list[StoredMessage], fallback: str) -> str:
+    """A sidebar title: a truncated preview of the FIRST inbound (user) message,
+    falling back to the conversation's ``name`` when there is none. ``messages`` is
+    oldest-first. Mirrors the Rust ``conversation_title``."""
+    for m in messages:
+        if m.direction is MessageDirection.INBOUND:
+            text = _clean_lead(m.text)
+            if text:
+                return _truncate_preview(text, _TITLE_MAX)
+    return fallback
+
+
+def _clean_lead(text: str) -> str:
+    """Strip leading control chars and markdown syntax (heading/quote/list/emphasis
+    markers) so a title reads as prose, not ``## `` or ``- ``. Interior text is
+    untouched."""
+    out = text.strip()
+    # Peel leading markdown/control noise until a real character remains.
+    while out and (out[0] in "#>*-+`~ \t" or ord(out[0]) < 0x20):
+        out = out[1:].lstrip()
+    return out.strip()
+
+
+def _truncate_preview(text: str, max_chars: int) -> str:
+    """Trim to ``max_chars`` characters, appending ``…`` when clipped. Mirrors the
+    Rust ``truncate_preview`` (char-safe: Python slices by code point)."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
 
 
 class FrameDispatcher:
@@ -115,6 +155,8 @@ class FrameDispatcher:
                 await self._handle_create_session(frame, request_id, sink)
             elif action == "get_session":
                 await self._handle_get_session(frame, request_id, sink)
+            elif action == "list_conversations":
+                await self._handle_list_conversations(frame, request_id, sink)
             elif action == "send_message":
                 await self._handle_send_message(frame, request_id, sink)
             elif action == "confirm_tool_action":
@@ -132,10 +174,17 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "INTERNAL_ERROR", "Internal error processing the request."))
 
     async def _handle_create_session(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        # Resume: a non-empty `conversationId` binds the new session to an existing
+        # conversation (reuse its id + history); absent/unknown → a fresh conversation
+        # (unchanged behavior). The store gates on whether the conversation exists.
+        conversation_id = frame.get("conversationId")
+        if not isinstance(conversation_id, str) or not conversation_id:
+            conversation_id = None
         session = await self._store.create_session(
             frame.get("agentId") or "",
             frame.get("userName"),
             frame.get("userEmail"),
+            conversation_id=conversation_id,
         )
         data = {
             "sessionId": session.session_id,
@@ -165,6 +214,46 @@ class FrameDispatcher:
             "agentParticipantId": session.agent_participant_id,
         }
         sink(protocol.immediate_response(request_id, 200, "Session", data))
+
+    async def _handle_list_conversations(self, frame: dict, request_id: str | None, sink: Sink) -> None:
+        """``list_conversations`` — the conversation-sidebar / resume substrate.
+
+        Returns conversations that have at least one message, most-recent-first, each
+        with a short title preview + message count. Empty conversations (every create
+        currently mints one) are filtered out so the sidebar isn't buried in blanks.
+        Reply is an ``immediate_response`` carrying ``{ conversations: [ {
+        conversationId, title, updatedAt, messageCount } ] }``. Optional ``limit``
+        (default 50) caps the result after filtering + sorting. Mirrors the Rust
+        ``handle_list_conversations``."""
+        limit = frame.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            limit = _DEFAULT_CONVERSATION_LIMIT
+
+        rows: list[tuple[datetime, dict[str, Any]]] = []
+        for conv in await self._store.list_conversations():
+            # Peek oldest-first (the first inbound is the title source); the cap keeps a
+            # runaway thread from dominating a single scan.
+            # ponytail: per-conversation peek capped at _MSG_CAP — fine for a local
+            # daemon's ~100 convos. If this ever fronts a multi-thousand-message
+            # conversation, push count + first-inbound down into the store.
+            messages = await self._store.list_messages(conv.id, _MSG_CAP)
+            if not messages:
+                continue
+            rows.append(
+                (
+                    conv.updated_at,
+                    {
+                        "conversationId": conv.id,
+                        "title": _conversation_title(messages, conv.name),
+                        "updatedAt": conv.updated_at.isoformat(),
+                        "messageCount": len(messages),
+                    },
+                )
+            )
+
+        rows.sort(key=lambda r: r[0], reverse=True)
+        conversations = [payload for _, payload in rows[:limit]]
+        sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": conversations}))
 
     async def _handle_send_message(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         # requestId is load-bearing for streaming correlation; generate one if the

@@ -48,6 +48,7 @@ from .session_store import (
     InMemorySessionStore,
     MessageDirection,
     SessionStore,
+    StoredConversation,
     StoredMessage,
     StoredSession,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "InMemorySessionStore",
     "MessageDirection",
     "SessionStore",
+    "StoredConversation",
     "StoredMessage",
     "StoredSession",
     "TurnResult",
