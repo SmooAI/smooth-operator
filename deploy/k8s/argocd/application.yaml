@@ -36,7 +36,7 @@ spec:
           tag: ""          # pin an immutable tag/digest in prod
         gateway:
           url: https://llm.smoo.ai/v1
-          model: claude-haiku-4-5
+          model: gpt-6-luna
           keySecretRef:
             name: smooth-operator-gateway
             key: SMOOAI_GATEWAY_KEY

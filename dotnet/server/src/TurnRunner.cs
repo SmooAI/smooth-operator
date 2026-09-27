@@ -154,12 +154,7 @@ public sealed class TurnRunner
     // ponytail: env is the model config surface (host reads the same chain); no plumbing a model
     // string through FrameDispatcher just for a span tag. Thread it explicitly if a host ever injects
     // a client whose model diverges from the env.
-    private static string ConfiguredModel() =>
-        (Environment.GetEnvironmentVariable("SMOOTH_AGENT_MODEL")
-         ?? Environment.GetEnvironmentVariable("SMOOAI_MODEL")
-         ?? Environment.GetEnvironmentVariable("SMOOTH_MODEL"))?.Trim() is { Length: > 0 } model
-            ? model
-            : "claude-haiku-4-5";
+    private static string ConfiguredModel() => ServerEnv.ResolveModel(Environment.GetEnvironmentVariable);
 
     /// <summary>Emit a <c>gen_ai.tool</c> child span (parented to the ambient turn span) for one tool
     /// call, carrying the tool name and its redacted JSON arguments. No-op when nothing is sampling

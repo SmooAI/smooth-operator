@@ -160,13 +160,13 @@ flowchart LR
 %%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart TD
   J["🎯 LLM-as-judge quality evals (Rust harness)"]
-  E["🌐 Live cross-language E2E — this client boots the real server + drives a real claude-haiku-4-5 turn"]
+  E["🌐 Live cross-language E2E — this client boots the real server + drives a real gpt-6-luna turn"]
   C["🧪 Conformance fixtures (shared across all 5 clients)"]
   U["⚡ Unit tests (event discrimination, transport, correlation) — race-clean"]
   J --> E --> C --> U
 ```
 
-**26 tests, race-clean** (`go test -race`). In the live cross-language E2E ([`e2e_live_test.go`](https://github.com/SmooAI/smooth-operator/blob/main/go/e2e_live_test.go)), this client boots a real `smooth-operator-server` subprocess (KB seeded) and drives a real `claude-haiku-4-5` turn over WebSocket — asserting ≥1 streamed event, a knowledge-grounded "17", and per-session memory.
+**26 tests, race-clean** (`go test -race`). In the live cross-language E2E ([`e2e_live_test.go`](https://github.com/SmooAI/smooth-operator/blob/main/go/e2e_live_test.go)), this client boots a real `smooth-operator-server` subprocess (KB seeded) and drives a real `gpt-6-luna` turn over WebSocket — asserting ≥1 streamed event, a knowledge-grounded "17", and per-session memory.
 
 **The proof story:** an LLM-as-judge scored a multi-turn answer **1/5** (the runtime forgot turn 1's context); the failing eval drove a per-session-memory fix; **it now scores 5/5** — a regression a substring test would have missed. See [`docs/EVALS.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/EVALS.md).
 

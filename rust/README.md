@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     storage.knowledge().ingest(/* Document: "Our return window is 17 days." */)?;
 
     // The runtime talks to any OpenAI-compatible gateway (llm.smoo.ai or BYO).
-    let runtime = KnowledgeChatRuntime::new(storage, gateway_client, "claude-haiku-4-5");
+    let runtime = KnowledgeChatRuntime::new(storage, gateway_client, "gpt-6-luna");
 
     let outcome = runtime
         .run_turn("conversation-1", "How long is your return window?")
@@ -109,7 +109,8 @@ The server is configured entirely by env vars (defined in [`smooth-operator-serv
 | `SMOOTH_AGENT_PORT` | `8787` | TCP port. |
 | `SMOOAI_GATEWAY_URL` | `https://llm.smoo.ai/v1` | OpenAI-compatible LLM gateway base URL. |
 | `SMOOAI_GATEWAY_KEY` | *(unset)* | Gateway API key. When unset, `send_message` errors cleanly; everything else still works. |
-| `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id requested from the gateway. |
+| `SMOOTH_AGENT_MODEL` | `gpt-6-luna` | Model id requested from the gateway. |
+| `SMOOTH_AGENT_JUDGE_MODEL` | `groq-gpt-oss-120b` | Model the conversation-workflow judge runs on (its own default, independent of `SMOOTH_AGENT_MODEL`). |
 | `SMOOTH_AGENT_SEED_KB` | *(unset)* | When `1`, seed a couple of distinctive demo docs on startup. |
 | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
 | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway (kept low — paid endpoint). |

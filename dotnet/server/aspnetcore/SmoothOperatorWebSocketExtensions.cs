@@ -81,7 +81,7 @@ public static class SmoothOperatorWebSocketExtensions
 
         // Per-agent config seam: a host that registered an IAgentConfigResolver has per-agent
         // instructions/workflow applied per turn. When a resolver is present, default the workflow
-        // judge to the LLM judge over the server's IChatClient (already the cheap default model) so
+        // judge to the LLM judge over the server's IChatClient (on its own judge model, ServerEnv.DefaultJudgeModel) so
         // wiring the resolver is enough to make workflows advance — a host can still register its own
         // IWorkflowJudge to override.
         var agentConfigResolver = services.GetService<IAgentConfigResolver>();

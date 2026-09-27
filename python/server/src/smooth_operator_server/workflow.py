@@ -26,10 +26,19 @@ from .agent_config import ConversationWorkflow, ConversationWorkflowStep
 #: The judge verdict. ``skipped`` means "no workflow / nothing to evaluate".
 WorkflowJudgeVerdict = Literal["yes", "no", "maybe", "skipped"]
 
-#: Cheap fast-tier model for the yes/no/maybe judge decision. Matches the engine's
-#: default (``claude-haiku-4-5``) so the extra per-turn latency + cost stays minimal
-#: (the analog of the TS ``getFastModel`` fast slot).
-WORKFLOW_JUDGE_MODEL = "claude-haiku-4-5"
+#: Fast model for the yes/no/maybe judge decision — its own default, independent of
+#: the main-turn ``DEFAULT_MODEL``, because the judge runs after EVERY workflow turn and
+#: wants the fastest tier. Mirrors the Rust reference's ``DEFAULT_JUDGE_MODEL``
+#: (SMOODEV-3342).
+WORKFLOW_JUDGE_MODEL = "groq-gpt-oss-120b"
+
+#: Output cap for the judge call. The verdict is a few tokens, but the default judge
+#: (``groq-gpt-oss-120b``) is a reasoning model whose reasoning counts against
+#: ``max_tokens`` — a small cap is spent entirely on reasoning and the reply comes back
+#: empty (gpt-oss on Groq exhausted even 200, SMOODEV-2427). 512 matches the Rust
+#: reference's ``JUDGE_MAX_TOKENS`` (SMOODEV-3342); the prompt still demands a one-word
+#: JSON verdict.
+JUDGE_MAX_TOKENS = 512
 
 _JUDGE_SYSTEM_PROMPT = (
     "You are a conversation-workflow judge. Given the CURRENT STEP's intent + criteria "
@@ -164,7 +173,7 @@ async def judge_workflow_step(
         response = await chat_client.chat.completions.create(
             model=model,
             temperature=0,
-            max_tokens=200,
+            max_tokens=JUDGE_MAX_TOKENS,
             messages=[
                 {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": human_prompt},

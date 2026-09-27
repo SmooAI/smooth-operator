@@ -1236,7 +1236,7 @@ mod tests {
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
             confirm_tools: Vec::new(),
-            judge_model: "claude-haiku-4-5".to_string(),
+            judge_model: crate::config::DEFAULT_JUDGE_MODEL.to_string(),
         }
     }
 

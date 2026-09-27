@@ -1062,7 +1062,7 @@ mod tests {
             storage: crate::config::StorageBackend::Memory,
             widget_auth_strict: false,
             confirm_tools: Vec::new(),
-            judge_model: "claude-haiku-4-5".to_string(),
+            judge_model: crate::config::DEFAULT_JUDGE_MODEL.to_string(),
         };
         let state = build_state(cfg);
         assert!(!state.config.has_llm());
@@ -1083,7 +1083,7 @@ mod tests {
             storage: crate::config::StorageBackend::Memory,
             widget_auth_strict: false,
             confirm_tools: Vec::new(),
-            judge_model: "claude-haiku-4-5".to_string(),
+            judge_model: crate::config::DEFAULT_JUDGE_MODEL.to_string(),
         }
     }
 

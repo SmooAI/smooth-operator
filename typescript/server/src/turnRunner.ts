@@ -49,10 +49,12 @@ const MAX_PRIOR_MESSAGES = 50;
 const CITATION_SNIPPET_MAX_CHARS = 280;
 
 /**
- * Default model when the host doesn't set one. Matches the engine's own default so
- * behaviour is unchanged; also the model the per-turn output ceiling is looked up for.
+ * Default model when the host doesn't set one — the Smoo AI gateway's standard chat
+ * tier, in lockstep with the Rust reference's `DEFAULT_MODEL` (SMOODEV-3342). Always
+ * sent explicitly (never left to the engine's own fallback); also the model the
+ * per-turn output ceiling is looked up for.
  */
-export const DEFAULT_MODEL = 'claude-haiku-4-5';
+export const DEFAULT_MODEL = 'gpt-6-luna';
 /**
  * Default agent-loop iteration cap. Was the engine's chat-widget-sized 6 — too tight
  * for any multi-step turn. Raised to 20 for agentic use (EPIC th-1cc9fa).

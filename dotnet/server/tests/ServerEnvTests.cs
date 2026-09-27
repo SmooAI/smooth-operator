@@ -25,6 +25,36 @@ public class ServerEnvTests
         Assert.Equal("trimmed", ServerEnv.First("  trimmed  "));
     }
 
+    // ── Model defaults (SMOODEV-3342) — parity with the Rust reference's config.rs ──
+
+    [Fact]
+    public void ResolveModel_defaults_to_gpt_6_luna()
+    {
+        Assert.Equal("gpt-6-luna", ServerEnv.DefaultModel);
+        Assert.Equal("gpt-6-luna", ServerEnv.ResolveModel(Env()));
+        Assert.Equal("gpt-6-luna", ServerEnv.ResolveModel(Env(("SMOOTH_AGENT_MODEL", "   "))));
+    }
+
+    [Fact]
+    public void ResolveModel_reads_the_canonical_name_then_its_aliases()
+    {
+        Assert.Equal("a", ServerEnv.ResolveModel(Env(("SMOOTH_AGENT_MODEL", "a"), ("SMOOAI_MODEL", "b"), ("SMOOTH_MODEL", "c"))));
+        Assert.Equal("b", ServerEnv.ResolveModel(Env(("SMOOAI_MODEL", "b"), ("SMOOTH_MODEL", "c"))));
+        Assert.Equal("c", ServerEnv.ResolveModel(Env(("SMOOTH_MODEL", "c"))));
+    }
+
+    [Fact]
+    public void ResolveJudgeModel_has_its_own_groq_default_and_env_overrides()
+    {
+        Assert.Equal("groq-gpt-oss-120b", ServerEnv.DefaultJudgeModel);
+        Assert.NotEqual(ServerEnv.DefaultModel, ServerEnv.DefaultJudgeModel);
+        Assert.Equal("groq-gpt-oss-120b", ServerEnv.ResolveJudgeModel(Env()));
+        // The judge does NOT follow the main-turn model.
+        Assert.Equal("groq-gpt-oss-120b", ServerEnv.ResolveJudgeModel(Env(("SMOOTH_AGENT_MODEL", "gpt-6-sol"))));
+        Assert.Equal("x", ServerEnv.ResolveJudgeModel(Env(("SMOOTH_AGENT_JUDGE_MODEL", "x"), ("SMOOTH_JUDGE_MODEL", "y"))));
+        Assert.Equal("y", ServerEnv.ResolveJudgeModel(Env(("SMOOTH_JUDGE_MODEL", "y"))));
+    }
+
     [Fact]
     public void ResolveUrls_falls_in_line_with_the_sibling_hosts_when_nothing_is_configured()
     {

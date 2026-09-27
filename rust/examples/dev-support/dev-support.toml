@@ -30,8 +30,8 @@ code   = true   # source files (extension allowlist; vendored/binary/lockfiles s
 issues = true   # issues + PRs (Q&A-style documents)
 
 [agent]
-# The model id requested from the gateway (cheap + fast by default).
-model = "claude-haiku-4-5"
+# The model id requested from the gateway (the gateway's standard chat tier).
+model = "gpt-6-luna"
 system_prompt = """
 You are the dev-team knowledge & support agent for this repository. Answer questions \
 about the codebase, its documentation, and its issue history. ALWAYS ground your answers \

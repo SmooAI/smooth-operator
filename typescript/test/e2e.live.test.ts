@@ -132,7 +132,7 @@ describe.skipIf(!E2E_ENABLED)('live WS E2E — real Rust server + real LLM', () 
                 ...process.env,
                 SMOOTH_AGENT_PORT: String(PORT),
                 SMOOTH_AGENT_SEED_KB: '1',
-                SMOOTH_AGENT_MODEL: 'claude-haiku-4-5',
+                SMOOTH_AGENT_MODEL: 'gpt-6-luna',
                 SMOOAI_GATEWAY_KEY: GATEWAY_KEY,
             },
             stdio: ['ignore', 'pipe', 'pipe'],

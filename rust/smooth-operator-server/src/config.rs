@@ -14,7 +14,8 @@
 //! | `SMOOTH_AGENT_PORT` | `8787` | TCP port to bind. |
 //! | `SMOOAI_GATEWAY_URL` | `https://llm.smoo.ai/v1` | OpenAI-compatible LLM gateway base URL. |
 //! | `SMOOAI_GATEWAY_KEY` | *(unset)* | Gateway API key. When unset, `send_message` errors cleanly. |
-//! | `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id requested from the gateway. |
+//! | `SMOOTH_AGENT_MODEL` | `gpt-6-luna` | Model id requested from the gateway. |
+//! | `SMOOTH_AGENT_JUDGE_MODEL` | `groq-gpt-oss-120b` | Model the post-turn conversation-workflow judge runs on — its own default, independent of `SMOOTH_AGENT_MODEL`. |
 //! | `SMOOTH_AGENT_PREAMBLE_MODEL` | *(unset → off)* | When set to a fast model id (e.g. `groq-gpt-oss-20b`), a small model runs in parallel with each streaming turn and emits ONE ephemeral `stream_preamble` sentence ("what I'm about to do") to cover the main model's time-to-first-token. Uses the same gateway/key as `SMOOTH_AGENT_MODEL`. Unset ⇒ no extra call, behavior unchanged. |
 //! | `SMOOTH_AGENT_SEED_KB` | *(unset)* | When `1`, seed a couple of distinctive demo docs on startup. |
 //! | `SMOOTH_AGENT_MAX_ITERATIONS` | `20` | Agent-loop iteration cap per turn. |
@@ -59,8 +60,20 @@ pub const DEFAULT_BIND: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 8787;
 /// Default OpenAI-compatible LLM gateway.
 pub const DEFAULT_GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
-/// Default (cheap) model.
-pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
+/// Default main-turn model.
+///
+/// `gpt-6-luna` is the Smoo AI gateway's standard chat tier: every LLM call on
+/// the gateway defaults to the gpt-6-luna family or a Groq alias (SMOODEV-3342).
+/// A deploy that wants something else sets `SMOOTH_AGENT_MODEL`; an org / agent
+/// / turn can still override per request.
+pub const DEFAULT_MODEL: &str = "gpt-6-luna";
+/// Default model for the post-turn conversation-workflow judge.
+///
+/// Its own default — not [`DEFAULT_MODEL`] — because the judge is a small
+/// structured classification that runs after EVERY workflow turn, so it wants
+/// the fastest/cheapest tier rather than whatever the main turn runs on.
+/// Override with `SMOOTH_AGENT_JUDGE_MODEL`.
+pub const DEFAULT_JUDGE_MODEL: &str = "groq-gpt-oss-120b";
 /// Default agent-loop iteration cap. Was 6 (chat-widget sizing) — too tight for
 /// any multi-step turn. Raised to 20 for agentic use (EPIC th-1cc9fa).
 pub const DEFAULT_MAX_ITERATIONS: u32 = 20;
@@ -180,7 +193,7 @@ pub struct ServerConfig {
     /// Cheap fast-tier model for the post-turn conversation-workflow judge
     /// (SMOODEV-590). Independent of [`model`](Self::model) so the judge stays
     /// cheap even when a turn runs on a bigger model. Read from
-    /// `SMOOTH_AGENT_JUDGE_MODEL`; defaults to [`DEFAULT_MODEL`] (haiku-tier).
+    /// `SMOOTH_AGENT_JUDGE_MODEL`; defaults to [`DEFAULT_JUDGE_MODEL`].
     pub judge_model: String,
 }
 
@@ -248,11 +261,7 @@ impl ServerConfig {
             .map(|s| parse_confirm_tools(&s))
             .unwrap_or_default();
 
-        let judge_model = std::env::var("SMOOTH_AGENT_JUDGE_MODEL")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let judge_model = resolve_judge_model(std::env::var("SMOOTH_AGENT_JUDGE_MODEL").ok());
 
         Self {
             bind,
@@ -347,6 +356,15 @@ impl ServerConfig {
     }
 }
 
+/// Resolve the workflow-judge model from the raw `SMOOTH_AGENT_JUDGE_MODEL`
+/// value: a non-blank value wins (trimmed); absent/blank falls back to
+/// [`DEFAULT_JUDGE_MODEL`].
+fn resolve_judge_model(raw: Option<String>) -> String {
+    raw.map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_JUDGE_MODEL.to_string())
+}
+
 /// Parse the comma-separated `SMOOTH_AGENT_CONFIRM_TOOLS` value into trimmed,
 /// non-empty tool-name patterns. Whitespace-only / empty entries are dropped so
 /// `","` or `" "` yields no patterns (HITL stays off).
@@ -378,14 +396,29 @@ mod tests {
             storage: StorageBackend::Memory,
             widget_auth_strict: false,
             confirm_tools: Vec::new(),
-            judge_model: DEFAULT_MODEL.to_string(),
+            judge_model: DEFAULT_JUDGE_MODEL.to_string(),
         };
         assert_eq!(cfg.port, 8787);
         assert_eq!(cfg.storage, StorageBackend::Memory);
         assert_eq!(cfg.gateway_url, "https://llm.smoo.ai/v1");
-        assert_eq!(cfg.model, "claude-haiku-4-5");
+        assert_eq!(cfg.model, "gpt-6-luna");
+        assert_eq!(cfg.judge_model, "groq-gpt-oss-120b");
         assert!(!cfg.has_llm());
         assert!(cfg.llm_config().is_none());
+    }
+
+    /// SMOODEV-3342: the judge has its OWN default — a Groq model, not the
+    /// main-turn default — and `SMOOTH_AGENT_JUDGE_MODEL` still overrides it.
+    /// Blank/whitespace is not an override.
+    #[test]
+    fn judge_model_defaults_to_groq_and_env_overrides() {
+        assert_eq!(resolve_judge_model(None), "groq-gpt-oss-120b");
+        assert_eq!(resolve_judge_model(Some("   ".into())), DEFAULT_JUDGE_MODEL);
+        assert_eq!(
+            resolve_judge_model(Some(" gpt-6-luna-fast ".into())),
+            "gpt-6-luna-fast"
+        );
+        assert_ne!(DEFAULT_JUDGE_MODEL, DEFAULT_MODEL);
     }
 
     #[test]

@@ -133,8 +133,21 @@ Focus this turn on the CURRENT STEP: pursue the INTENT directly in this reply �
 </ConversationWorkflow>`;
 }
 
-/** Default cheap (haiku-tier) model slot for the judge — matches the cross-lane default. */
-export const DEFAULT_JUDGE_MODEL = 'claude-haiku-4-5';
+/**
+ * Default model for the post-turn judge — its OWN default, independent of the main-turn
+ * `DEFAULT_MODEL`, because the judge runs after every workflow turn and wants the fastest
+ * tier. Mirrors the Rust reference's `DEFAULT_JUDGE_MODEL` (SMOODEV-3342).
+ */
+export const DEFAULT_JUDGE_MODEL = 'groq-gpt-oss-120b';
+
+/**
+ * Output cap for the judge call. The verdict is a few tokens, but the default judge
+ * (`groq-gpt-oss-120b`) is a reasoning model whose reasoning counts against `max_tokens` —
+ * a small cap is spent entirely on reasoning and the reply comes back empty (gpt-oss on
+ * Groq exhausted even 200, SMOODEV-2427). 512 matches the Rust reference's
+ * `JUDGE_MAX_TOKENS` (SMOODEV-3342); the prompt still demands a one-word JSON verdict.
+ */
+export const JUDGE_MAX_TOKENS = 512;
 
 /** Extract the first `yes` / `no` / `maybe` token from a judge reply. */
 function parseVerdict(content: string | null | undefined): 'yes' | 'no' | 'maybe' | undefined {
@@ -199,7 +212,7 @@ ${reply}`;
         const response = await chatClient.chat.completions.create({
             model: model ?? DEFAULT_JUDGE_MODEL,
             temperature: 0,
-            max_tokens: 200,
+            max_tokens: JUDGE_MAX_TOKENS,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: humanPrompt },

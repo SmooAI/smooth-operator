@@ -235,7 +235,7 @@ func (s *inMemoryAdminStore) RecordRun(_ context.Context, run *indexingRun) erro
 func defaultSettings(orgID string) *agentSettings {
 	return &agentSettings{
 		OrgID:        orgID,
-		Model:        "claude-haiku-4-5",
+		Model:        DefaultModel,
 		SystemPrompt: "",
 		DefaultTools: []string{},
 		UpdatedAt:    time.Now().UTC(),

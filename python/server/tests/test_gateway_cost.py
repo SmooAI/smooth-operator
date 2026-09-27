@@ -65,12 +65,13 @@ class _Gateway:
         return f"http://{host}:{port}/v1"
 
 
-async def _turn_usage(headers: dict[str, str]) -> dict[str, Any] | None:
+async def _turn_usage(headers: dict[str, str], *, model: str | None = None) -> dict[str, Any] | None:
     """Run one real turn through the server's TurnRunner; return its usage dict."""
     with _Gateway(headers) as gw:
         runner = TurnRunner(
             chat_client=GatewayLlmProvider(base_url=gw.base_url, api_key="k"),
             store=InMemorySessionStore(),
+            model=model,
         )
         result = await runner.run(
             conversation_id="conv-1",
@@ -104,10 +105,13 @@ async def test_zero_margin_does_not_zero_real_spend() -> None:
 async def test_absent_and_all_zero_headers_are_both_unmeasured() -> None:
     """Absent and present-but-zero must be INDISTINGUISHABLE, and neither may be
     taken at face value as a real $0 — both fall through to the local pricing
-    estimate. (The default model is priced, so that estimate is non-zero here; the
-    invariant is the equality and the fall-through, not the specific number.)"""
-    absent = (await _turn_usage({}))["costUsd"]
-    all_zero = (await _turn_usage({"x-litellm-response-cost": "0", "x-cost-usd": "0"}))["costUsd"]
+    estimate. (The turn is pinned to a model the engine's local pricing table knows,
+    so that estimate is non-zero here — the server default, gpt-6-luna, is not in
+    core's table and would estimate $0, hiding the fall-through. The invariant is the
+    equality and the fall-through, not the specific number.)"""
+    priced = "claude-haiku-4-5"
+    absent = (await _turn_usage({}, model=priced))["costUsd"]
+    all_zero = (await _turn_usage({"x-litellm-response-cost": "0", "x-cost-usd": "0"}, model=priced))["costUsd"]
 
     assert absent == all_zero
     # Fell back to the local estimate rather than locking in the gateway's zero.

@@ -27,6 +27,39 @@ public static class ServerEnv
     /// <summary>Default bind port, shared with the sibling hosts.</summary>
     public const int DefaultPort = 8787;
 
+    /// <summary>
+    /// Default main-turn model — the Smoo AI gateway's standard chat tier, in lockstep with the
+    /// Rust reference's <c>DEFAULT_MODEL</c> (SMOODEV-3342).
+    /// </summary>
+    public const string DefaultModel = "gpt-6-luna";
+
+    /// <summary>
+    /// Default model for the post-turn conversation-workflow judge. Its OWN default, independent
+    /// of <see cref="DefaultModel"/>: the judge is a small structured classification that runs
+    /// after every workflow turn, so it wants the fastest tier. Mirrors the Rust reference's
+    /// <c>DEFAULT_JUDGE_MODEL</c> (SMOODEV-3342).
+    /// </summary>
+    public const string DefaultJudgeModel = "groq-gpt-oss-120b";
+
+    /// <summary>
+    /// The main-turn model: canonical <c>SMOOTH_AGENT_MODEL</c>, then this host's aliases
+    /// <c>SMOOAI_MODEL</c> / <c>SMOOTH_MODEL</c>, else <see cref="DefaultModel"/>.
+    /// </summary>
+    public static string ResolveModel(Func<string, string?> get) =>
+        First(get("SMOOTH_AGENT_MODEL"), get("SMOOAI_MODEL"), get("SMOOTH_MODEL")) is { Length: > 0 } model
+            ? model
+            : DefaultModel;
+
+    /// <summary>
+    /// The workflow-judge model: canonical <c>SMOOTH_AGENT_JUDGE_MODEL</c> (the name the Rust
+    /// host reads), then this host's pre-parity <c>SMOOTH_JUDGE_MODEL</c>, else
+    /// <see cref="DefaultJudgeModel"/>. Never follows the main-turn model.
+    /// </summary>
+    public static string ResolveJudgeModel(Func<string, string?> get) =>
+        First(get("SMOOTH_AGENT_JUDGE_MODEL"), get("SMOOTH_JUDGE_MODEL")) is { Length: > 0 } model
+            ? model
+            : DefaultJudgeModel;
+
     /// <summary>The first of <paramref name="values"/> that is non-null and non-blank, else "".</summary>
     public static string First(params string?[] values) =>
         Array.Find(values, v => !string.IsNullOrWhiteSpace(v))?.Trim() ?? string.Empty;

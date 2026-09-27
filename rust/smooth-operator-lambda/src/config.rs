@@ -13,7 +13,7 @@
 //! | `SMOOTH_AGENT_DDB_TABLE` | `smooth-operator` | DynamoDB single-table name. Read directly by the adapter's `from_env`; mirrored here for the resolved view. |
 //! | `SMOOAI_GATEWAY_URL` | `https://llm.smoo.ai/v1` | OpenAI-compatible LLM gateway base URL. |
 //! | `SMOOAI_GATEWAY_KEY` | *(unset)* | Gateway API key. When unset, `send_message` errors cleanly. |
-//! | `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id requested from the gateway. |
+//! | `SMOOTH_AGENT_MODEL` | `gpt-6-luna` | Model id requested from the gateway. |
 //! | `SMOOTH_AGENT_MAX_ITERATIONS` | `6` | Agent-loop iteration cap per turn. |
 //! | `SMOOTH_AGENT_MAX_TOKENS` | `512` | `max_tokens` sent to the gateway. |
 //! | `SMOOTH_AGENT_ORG_ID` | `default` | Org partition for knowledge + conversations. |
@@ -27,8 +27,8 @@ use smooth_operator_core::LlmConfig;
 pub const DEFAULT_TABLE_NAME: &str = "smooth-operator";
 /// Default OpenAI-compatible LLM gateway.
 pub const DEFAULT_GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
-/// Default (cheap) model.
-pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
+/// Default model — the Smoo AI gateway's standard chat tier (SMOODEV-3342).
+pub const DEFAULT_MODEL: &str = "gpt-6-luna";
 /// Default agent-loop iteration cap.
 pub const DEFAULT_MAX_ITERATIONS: u32 = 6;
 /// Default `max_tokens` per LLM call.
@@ -134,6 +134,13 @@ impl LambdaConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SMOODEV-3342: the Lambda host defaults to the gateway's gpt-6-luna tier,
+    /// in lockstep with `smooth-operator-server`.
+    #[test]
+    fn default_model_is_gpt_6_luna() {
+        assert_eq!(DEFAULT_MODEL, "gpt-6-luna");
+    }
 
     #[test]
     fn llm_config_absent_without_key() {

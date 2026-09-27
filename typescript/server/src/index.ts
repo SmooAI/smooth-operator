@@ -51,6 +51,7 @@ export type { OtpChannel, OtpContact, OtpDelivery, OtpError, OtpRefusal, OtpServ
 export {
     advanceStep,
     DEFAULT_JUDGE_MODEL,
+    JUDGE_MAX_TOKENS,
     judgeStep,
     nextStep,
     parseWorkflow,

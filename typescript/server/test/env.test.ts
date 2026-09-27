@@ -36,7 +36,7 @@ describe('resolveBind', () => {
 
 describe('resolveModel', () => {
     it('defaults, reads the canonical name, and prefers it over the alias', () => {
-        expect(resolveModel({})).toBe('claude-haiku-4-5');
+        expect(resolveModel({})).toBe('gpt-6-luna');
         expect(resolveModel({ SMOOTH_AGENT_MODEL: 'a' })).toBe('a');
         expect(resolveModel({ SMOOAI_MODEL: 'b' })).toBe('b');
         expect(resolveModel({ SMOOTH_AGENT_MODEL: 'a', SMOOAI_MODEL: 'b' })).toBe('a');

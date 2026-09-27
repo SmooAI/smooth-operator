@@ -98,7 +98,7 @@ class ServerState:
     #: keeps the fail-closed behavior — the reference server never generates/holds a
     #: code, so it ships without a service.
     otp_service: OtpService | None = None
-    #: Fast/cheap model for the post-turn workflow judge (default haiku-tier).
+    #: Fast model for the post-turn workflow judge (default ``WORKFLOW_JUDGE_MODEL``).
     judge_model: str = WORKFLOW_JUDGE_MODEL
     #: Rich Interactions catalog — the kinds this server hosts (default: the reference
     #: ``choices`` kind). Each turn registers the per-kind ``request_<kind>`` raise tools;

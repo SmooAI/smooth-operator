@@ -13,7 +13,7 @@
 //! `SMOOTH_AGENT_E2E=1` + `SMOOAI_GATEWAY_KEY`. Prefer a stronger judge here:
 //!
 //! ```sh
-//! SMOOTH_AGENT_JUDGE_MODEL=claude-sonnet-4-5 scripts/run-evals.sh \
+//! SMOOTH_AGENT_JUDGE_MODEL=gpt-6-luna-high scripts/run-evals.sh \
 //!   -p smooai-smooth-operator-evals --test extended_judge -- --nocapture --test-threads=1
 //! ```
 

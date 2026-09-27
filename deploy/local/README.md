@@ -19,7 +19,7 @@ directory is the doc.
 ```bash
 cd rust
 cargo run -p smooai-smooth-operator-server
-# → smooth-operator-server listening on ws://127.0.0.1:8787/ws (model=claude-haiku-4-5, llm_enabled=false)
+# → smooth-operator-server listening on ws://127.0.0.1:8787/ws (model=gpt-6-luna, llm_enabled=false)
 ```
 
 With **no environment set**, the binary already boots the local flavor:

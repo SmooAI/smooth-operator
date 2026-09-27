@@ -7,7 +7,7 @@ import { MockLlmProvider } from '@smooai/smooth-operator-core';
 import { describe, expect, it } from 'vitest';
 
 import { InMemorySessionStore } from '../src/sessionStore.js';
-import { DEFAULT_MAX_TOKENS, TurnRunner } from '../src/turnRunner.js';
+import { DEFAULT_MAX_TOKENS, DEFAULT_MODEL, TurnRunner } from '../src/turnRunner.js';
 import type { Frame } from '../src/protocol.js';
 
 /** Run one turn against a fresh conversation and return the recorded request body. */
@@ -21,6 +21,14 @@ async function runTurn(mock: MockLlmProvider, runnerOptions: Partial<Constructor
 }
 
 describe('TurnRunner max_tokens clamp + defaults', () => {
+    // SMOODEV-3342 — parity with the Rust reference's DEFAULT_MODEL: an unpinned turn
+    // requests gpt-6-luna explicitly (never the engine's built-in fallback model).
+    it('requests the server DEFAULT_MODEL (gpt-6-luna) when no model is set', async () => {
+        const body = await runTurn(new MockLlmProvider().pushText('hi'));
+        expect(DEFAULT_MODEL).toBe('gpt-6-luna');
+        expect(body.model).toBe(DEFAULT_MODEL);
+    });
+
     it('sends the raised DEFAULT_MAX_TOKENS when no ceiling resolver is set', async () => {
         const body = await runTurn(new MockLlmProvider().pushText('hi'));
         expect(body.max_tokens).toBe(DEFAULT_MAX_TOKENS);
