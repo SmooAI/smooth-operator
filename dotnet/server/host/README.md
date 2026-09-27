@@ -36,7 +36,8 @@ docker run -p 8787:8787 -e SMOOAI_GATEWAY_KEY=… -e SMOOTH_AGENT_AUTH_MODE=jwt 
 | `SMOOAI_GATEWAY_KEY` | — | The model API key. **Required** for chat. `SMOOTH_GATEWAY_KEY` is accepted as a fallback. |
 | `SMOOTH_AGENT_BIND` | `127.0.0.1` | Bind host. Set `0.0.0.0` in k8s/containers (translated to ASP.NET's `+`). |
 | `SMOOTH_AGENT_PORT` | `8787` | TCP port. `ASPNETCORE_URLS` is accepted as a fallback. |
-| `SMOOTH_AGENT_MODEL` | `claude-haiku-4-5` | Model id at the gateway. `SMOOAI_MODEL` and `SMOOTH_MODEL` are accepted as fallbacks. |
+| `SMOOTH_AGENT_MODEL` | `gpt-6-luna` | Model id at the gateway. `SMOOAI_MODEL` and `SMOOTH_MODEL` are accepted as fallbacks. |
+| `SMOOTH_AGENT_JUDGE_MODEL` | `groq-gpt-oss-120b` | Model the conversation-workflow judge runs on — its own default, independent of `SMOOTH_AGENT_MODEL`. `SMOOTH_JUDGE_MODEL` is accepted as a fallback. |
 | `SMOOTH_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for the durable knowledge store (semantic retrieval when a gateway key is set, else a deterministic fallback). |
 | `SMOOTH_AGENT_RERANK` | `off` | Post-retrieval reorder stage: `gateway` (cross-encoder if keyed, else lexical), `lexical` (offline), or `off`. |
 | `SMOOTH_RERANK_MODEL` | `rerank-english-v3.0` | Rerank model id when `SMOOTH_AGENT_RERANK=gateway`. |

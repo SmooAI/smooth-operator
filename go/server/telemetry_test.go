@@ -61,7 +61,11 @@ func TestStreamingTurnEmitsGenAISpans(t *testing.T) {
 	}
 
 	runner := NewTurnRunner(mock, store, "", nil, []core.Tool{kbTool}, nil, nil, nil, "", "", nil)
-	runner.model = "openai/gpt-4o"
+	// A model the engine's local DefaultPricing table knows, so the mock turn is priced
+	// (the table carries only claude-haiku-4-5 / claude-sonnet-4-5; the server default
+	// gpt-6-luna is unpriced locally and relies on the gateway's cost header). Since
+	// SMOODEV-3342 the runner's model is what the engine actually requests, not span-only.
+	runner.model = "claude-haiku-4-5"
 	runner.orgID = "org-telemetry"
 
 	if _, err := runner.Run(context.Background(), session.SessionID, session.ConversationID, "req-otel", "what is the return policy?", func(map[string]any) {}); err != nil {
@@ -82,7 +86,7 @@ func TestStreamingTurnEmitsGenAISpans(t *testing.T) {
 		t.Fatalf("expected a %q span; got %d spans: %+v", SpanChat, len(spans), spans)
 	}
 	assertAttr(t, chat.Attributes, GenAISystem, SystemName)
-	assertAttr(t, chat.Attributes, GenAIRequestModel, "openai/gpt-4o")
+	assertAttr(t, chat.Attributes, GenAIRequestModel, "claude-haiku-4-5")
 	assertAttr(t, chat.Attributes, GenAIConversationID, session.ConversationID)
 	assertAttr(t, chat.Attributes, GenAIAgentName, AgentName)
 	assertAttr(t, chat.Attributes, SmooaiOrgID, "org-telemetry")
@@ -128,7 +132,7 @@ func TestStreamingTurnEmitsGenAISpans(t *testing.T) {
 	assertAttr(t, chat.Attributes, GenAIOperationName, OperationChat)
 
 	// Cost: exactly one of the two is ever set. The mock turn IS priced (local
-	// ModelPricing knows openai/gpt-4o), so the cost lands and the marker must not —
+	// DefaultPricing knows claude-haiku-4-5), so the cost lands and the marker must not —
 	// a zero must never be exported as a real cost, and a real cost must never carry
 	// an "unavailable" marker beside it.
 	cost, hasCost := attr(chat.Attributes, GenAIUsageCostUSD)

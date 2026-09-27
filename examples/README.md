@@ -36,7 +36,7 @@ Groq, or a local Ollama/LM Studio. Set three values in `.env`:
 | --- | --- |
 | `SMOOAI_GATEWAY_URL` | Base URL of your gateway (default `https://llm.smoo.ai/v1`). |
 | `SMOOAI_GATEWAY_KEY` | Your key. Required for real replies **and** semantic retrieval (embeddings run through the same gateway). |
-| `SMOOTH_AGENT_MODEL` | A chat model your gateway exposes (default `claude-haiku-4-5`). |
+| `SMOOTH_AGENT_MODEL` | A chat model your gateway exposes (default `gpt-6-luna`). |
 
 Nothing is baked into an image — the key stays in your gitignored `.env`.
 

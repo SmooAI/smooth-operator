@@ -95,7 +95,7 @@ func bootServer(t *testing.T, key string) {
 	cmd.Env = append(os.Environ(),
 		"SMOOTH_AGENT_PORT="+e2ePort,
 		"SMOOTH_AGENT_SEED_KB=1",
-		"SMOOTH_AGENT_MODEL=claude-haiku-4-5",
+		"SMOOTH_AGENT_MODEL=gpt-6-luna",
 		"SMOOAI_GATEWAY_KEY="+key,
 	)
 

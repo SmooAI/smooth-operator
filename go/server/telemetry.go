@@ -85,11 +85,13 @@ const (
 	SpanTool = "gen_ai.tool"
 )
 
-// defaultTurnModel is recorded as gen_ai.request.model when the turn has no explicit
-// model set. ponytail: mirrors the core engine's unexported `defaultModel`; the Go server
-// leaves AgentOptions.Model empty today so the engine picks this. If per-agent model
-// selection is wired into the turn runner, set TurnRunner.model and this falls away.
-const defaultTurnModel = "claude-haiku-4-5"
+// DefaultModel is the main-turn model the server requests when the turn has no explicit
+// model set — the Smoo AI gateway's standard chat tier, in lockstep with the Rust
+// reference's DEFAULT_MODEL (SMOODEV-3342). The turn runner passes it to the engine
+// explicitly (AgentOptions.Model) rather than leaving the model empty, so the engine's own
+// built-in fallback model is never what goes on the wire. It is also what the turn's OTel
+// span records as gen_ai.request.model.
+const DefaultModel = "gpt-6-luna"
 
 // otlpEndpointEnv, when set, switches InitTelemetry from the local-only no-op provider to
 // a real OTLP exporter. Matches the Rust server's OTLP_ENDPOINT_ENV gate.

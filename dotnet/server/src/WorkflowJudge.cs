@@ -26,29 +26,37 @@ public interface IWorkflowJudge
 }
 
 /// <summary>
-/// The default LLM-backed judge. One structured yes/no/maybe call against a cheap model. Mirrors the
-/// monorepo's Haiku-class fast-tier judge: the server's own <see cref="IChatClient"/> is already the
-/// cheap default model (SMOOTH_MODEL defaults to <c>claude-haiku-4-5</c>), so it's reused unless a
-/// distinct <c>SMOOTH_JUDGE_MODEL</c> is set. Failure-tolerant: parse/model/transport errors resolve
+/// The default LLM-backed judge. One structured yes/no/maybe call against a fast model. It reuses the
+/// server's own <see cref="IChatClient"/> (same gateway + key) but always overrides the per-request
+/// model to the judge model — <see cref="ServerEnv.DefaultJudgeModel"/> (<c>groq-gpt-oss-120b</c>)
+/// unless <c>SMOOTH_AGENT_JUDGE_MODEL</c> / <c>SMOOTH_JUDGE_MODEL</c> or an explicit option names
+/// another — so the judge never silently rides the main-turn model. Mirrors the Rust reference's
+/// <c>DEFAULT_JUDGE_MODEL</c> (SMOODEV-3342). Failure-tolerant: parse/model/transport errors resolve
 /// to <see cref="WorkflowVerdict.Skipped"/>.
 /// </summary>
 public sealed class LlmWorkflowJudge : IWorkflowJudge
 {
-    // ponytail: reuse the server's IChatClient (already the cheap default model) rather than wiring a
-    // second client. Override the per-request model via SMOOTH_JUDGE_MODEL if the deploy wants a
-    // distinct cheaper slot; upgrade to an injected fast-client if the two models must differ per org.
-    private const int JudgeMaxTokens = 200;
+    // ponytail: reuse the server's IChatClient rather than wiring a second client; the judge model is
+    // a per-request ModelId override. Upgrade to an injected fast-client if it must differ per org.
+    /// <summary>Output cap for the judge call. The verdict is a few tokens, but the default judge
+    /// (<c>groq-gpt-oss-120b</c>) is a reasoning model whose reasoning counts against the cap — a
+    /// small cap is spent entirely on reasoning and the reply comes back empty (gpt-oss on Groq
+    /// exhausted even 200, SMOODEV-2427). 512 matches the Rust reference's <c>JUDGE_MAX_TOKENS</c>
+    /// (SMOODEV-3342); the prompt still demands a one-word JSON verdict.</summary>
+    public const int JudgeMaxTokens = 512;
 
     private readonly IChatClient _chatClient;
-    private readonly string? _judgeModel;
+    private readonly string _judgeModel;
 
     /// <summary><paramref name="judgeModel"/> — the uniform cross-lane judge-model option. Null ⇒ the
-    /// <c>SMOOTH_JUDGE_MODEL</c> env, else the server's own IChatClient model (already the cheap
-    /// haiku-tier default).</summary>
+    /// <c>SMOOTH_AGENT_JUDGE_MODEL</c> / <c>SMOOTH_JUDGE_MODEL</c> env, else
+    /// <see cref="ServerEnv.DefaultJudgeModel"/>.</summary>
     public LlmWorkflowJudge(IChatClient chatClient, string? judgeModel = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
-        _judgeModel = string.IsNullOrWhiteSpace(judgeModel) ? Environment.GetEnvironmentVariable("SMOOTH_JUDGE_MODEL") : judgeModel;
+        _judgeModel = string.IsNullOrWhiteSpace(judgeModel)
+            ? ServerEnv.ResolveJudgeModel(Environment.GetEnvironmentVariable)
+            : judgeModel.Trim();
     }
 
     public async Task<WorkflowVerdict> JudgeAsync(ConversationWorkflow workflow, ConversationWorkflowStep step, string userMessage, string agentReply, CancellationToken cancellationToken = default)
@@ -90,11 +98,7 @@ public sealed class LlmWorkflowJudge : IWorkflowJudge
 
         try
         {
-            var options = new ChatOptions { Temperature = 0f, MaxOutputTokens = JudgeMaxTokens };
-            if (!string.IsNullOrWhiteSpace(_judgeModel))
-            {
-                options.ModelId = _judgeModel;
-            }
+            var options = new ChatOptions { Temperature = 0f, MaxOutputTokens = JudgeMaxTokens, ModelId = _judgeModel };
             var response = await _chatClient.GetResponseAsync(
                 new[] { new ChatMessage(ChatRole.System, system), new ChatMessage(ChatRole.User, human) },
                 options,

@@ -126,9 +126,8 @@ type TurnRunner struct {
 	currentStepID string
 	// judgeModel is the cheap model id the workflow judge uses ("" → DefaultJudgeModel).
 	judgeModel string
-	// model is recorded as gen_ai.request.model on the turn's OTel span ("" → the engine
-	// default; see spanModel). Span-only — it does NOT change what the engine requests.
-	// Set by the dispatcher after construction, alongside hooks/orgID.
+	// model is the model the turn requests from the gateway AND records as
+	// gen_ai.request.model on the turn's OTel span ("" → DefaultModel; see turnModel).
 	model string
 	// orgID is recorded as smooai.org_id on the turn span so the observability studio
 	// groups turns by org ("" → attribute omitted). Set by the dispatcher after construction.
@@ -215,7 +214,7 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	ctx, turnSpan := tr.Start(ctx, SpanChat, oteltrace.WithAttributes(
 		attribute.String(GenAISystem, SystemName),
 		attribute.String(GenAIOperationName, OperationChat),
-		attribute.String(GenAIRequestModel, r.spanModel()),
+		attribute.String(GenAIRequestModel, r.turnModel()),
 		attribute.String(GenAIConversationID, conversationID),
 		attribute.String(GenAIAgentName, AgentName),
 	))
@@ -251,7 +250,9 @@ func (r *TurnRunner) Run(ctx context.Context, sessionID, conversationID, request
 	//    knowledge feeds the engine's grounding so its auto-injected context matches the
 	//    citations built above. r.systemPrompt is already assembled (base + per-agent
 	//    config + current workflow step) by the caller.
-	opts := core.AgentOptions{Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge, Hooks: r.hooks}
+	// The model is always explicit (r.model, else DefaultModel) so the engine never falls
+	// back to its own built-in default model (SMOODEV-3342).
+	opts := core.AgentOptions{Model: r.turnModel(), Instructions: r.systemPrompt, Tools: r.tools, Knowledge: r.knowledge, Hooks: r.hooks}
 	// Durable auto-recall: with a store attached the engine pulls the entries relevant to the
 	// user's message into context. nil (every deployment that has not opted in) leaves the turn
 	// byte-for-byte unchanged.
@@ -638,14 +639,13 @@ type toolSpanRecord struct {
 	errText    string
 }
 
-// spanModel is the model recorded as gen_ai.request.model on the turn span — the runner's
-// explicit model, or the engine default when unset (the Go server leaves it unset today;
-// see defaultTurnModel).
-func (r *TurnRunner) spanModel() string {
+// turnModel is the model the turn requests and records as gen_ai.request.model on the
+// turn span — the runner's explicit model, or DefaultModel when unset.
+func (r *TurnRunner) turnModel() string {
 	if r.model != "" {
 		return r.model
 	}
-	return defaultTurnModel
+	return DefaultModel
 }
 
 // isToolError reports whether a tool result string carries the engine's failure

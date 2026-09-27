@@ -87,7 +87,7 @@ The smooai monorepo standard is `@smooai/config`. For this **standalone OSS repo
 pnpm sst secret set SmoothAgentGatewayKey <gateway-api-key> --stage <stage>
 # Optional overrides (have defaults baked into sst.config.ts):
 pnpm sst secret set SmoothAgentGatewayUrl https://llm.smoo.ai/v1 --stage <stage>
-pnpm sst secret set SmoothAgentModel claude-haiku-4-5 --stage <stage>
+pnpm sst secret set SmoothAgentModel gpt-6-luna --stage <stage>
 ```
 
 Without `SmoothAgentGatewayKey` the Lambda still answers protocol-only actions (`ping`, `create_conversation_session`, `get_session`) and returns a clean `LLM_UNAVAILABLE` error for `send_message`.

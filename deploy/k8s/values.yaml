@@ -54,7 +54,7 @@ server:
   # SMOOTH_AGENT_PORT — TCP port the server binds. The Service/probes target this.
   port: 8787
   # SMOOTH_AGENT_MODEL — model id requested from the gateway.
-  model: "claude-haiku-4-5"
+  model: "gpt-6-luna"
   # SMOOTH_AGENT_SEED_KB — "1" seeds a couple of demo docs on startup.
   seedKb: false
   # SMOOTH_AGENT_MAX_ITERATIONS — agent-loop iteration cap per turn.

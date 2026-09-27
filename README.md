@@ -212,7 +212,7 @@ export SMOOAI_GATEWAY_KEY=sk-…           # your llm.smoo.ai key
 export SMOOTH_AGENT_SEED_KB=1            # seeds the demo knowledge docs
 
 cargo run -p smooai-smooth-operator-server
-# → smooth-operator-server (local flavor) listening on ws://127.0.0.1:8787/ws (model claude-haiku-4-5)
+# → smooth-operator-server (local flavor) listening on ws://127.0.0.1:8787/ws (model gpt-6-luna)
 ```
 
 That's it — an agent backend on `ws://127.0.0.1:8787/ws`, with knowledge retrieval, tool-calling, and streaming. With no env set, the binary boots the **local flavor**: in-memory storage, in-memory backplane, loopback bind, admin off. Set `SMOOTH_AGENT_STORAGE=postgres` (or `dynamodb`) and a backplane to graduate the *same* binary to the k8s or serverless flavor.

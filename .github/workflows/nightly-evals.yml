@@ -40,16 +40,27 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
+                # The matrix grades the models production actually runs on the
+                # Smoo AI gateway (SMOODEV-3342): the gpt-6-luna family and the
+                # Groq aliases. It used to name claude-haiku-4-5 / claude-sonnet-4-5,
+                # but the gateway spend logs for this workflow's key showed those
+                # requests being SERVED by LiteLLM fallbacks (gemini-2.5-flash,
+                # gpt-4.1-mini, gpt-4.1, gpt-6-sol) while Anthropic was failing —
+                # the scorecard was labelled with models it never measured. Only
+                # name models the gateway serves directly, or the row lies.
+                #
+                # Both rows share one judge (gpt-6-luna), so their scores are
+                # comparable to each other. The Groq row is the cross-family grade;
+                # the luna row is same-model judging (luna grading luna), which
+                # reads a little lenient — compare it against its own history, not
+                # against the Groq row's absolute score.
                 include:
-                    # The default/production model, graded by a stronger, different
-                    # family — the most trustworthy grade we can get.
-                    - agent_model: claude-haiku-4-5
-                      judge_model: claude-sonnet-4-5
-                    # Sonnet grading Sonnet is same-family judging and reads lenient;
-                    # it is here to catch drift in the stronger model over time, and
-                    # its absolute score should not be compared against the row above.
-                    - agent_model: claude-sonnet-4-5
-                      judge_model: claude-sonnet-4-5
+                    # What prod runs (the Smoo AI platform's operator agents).
+                    - agent_model: groq-gpt-oss-120b
+                      judge_model: gpt-6-luna
+                    # smooth-operator-server's main-turn default (DEFAULT_MODEL).
+                    - agent_model: gpt-6-luna
+                      judge_model: gpt-6-luna
 
         steps:
             - uses: actions/checkout@v4

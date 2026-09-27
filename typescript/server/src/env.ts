@@ -21,7 +21,8 @@
 /** Process defaults, shared with the sibling hosts. */
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8787;
-export const DEFAULT_MODEL = 'claude-haiku-4-5';
+/** Default main-turn model — the Smoo AI gateway's standard chat tier (SMOODEV-3342). */
+export const DEFAULT_MODEL = 'gpt-6-luna';
 
 /** The first of `keys` with a non-blank value, or `undefined`. */
 function firstSet(env: NodeJS.ProcessEnv, keys: string[]): string | undefined {

@@ -25,7 +25,7 @@
 #                             org and returns the wrong value. Export it (or source
 #                             the monorepo's .envrc) before running outside that repo.
 #   SMOOTH_AGENT_JUDGE_MODEL  judge model (default: the harness CHEAP_MODEL);
-#                             set e.g. claude-sonnet-4-5 for an adversarial grade
+#                             set e.g. gpt-6-luna-high for an adversarial grade
 set -euo pipefail
 
 KEY_NAME="${SMOOAI_GATEWAY_KEY_NAME:-smooaiLlmKey}"

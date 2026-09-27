@@ -57,7 +57,7 @@ pytestmark = pytest.mark.skipif(
 # ── server location / config ────────────────────────────────────────────────────
 _PORT = 8813
 _WS_URL = f"ws://127.0.0.1:{_PORT}/ws"
-_MODEL = "claude-haiku-4-5"
+_MODEL = "gpt-6-luna"
 
 # The server echoes the supplied agentId back in its create-session response, and
 # the wire schema types agentId as a UUID — so the "e2e" agent is identified by a

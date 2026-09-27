@@ -178,7 +178,7 @@ flowchart LR
 
 > **Nothing here is vibe-coded — it's verified against a real LLM gateway.**
 
-**27 tests.** In the live cross-language E2E, this client boots a real `smooth-operator-server` subprocess (KB seeded) and drives a real `claude-haiku-4-5` turn over WebSocket — asserting ≥1 streamed event, a knowledge-grounded "17", and per-session memory. The `ITransport` seam lets the rest of the suite drive real client code (correlation, event discrimination, HITL routing) with a mock — no network.
+**27 tests.** In the live cross-language E2E, this client boots a real `smooth-operator-server` subprocess (KB seeded) and drives a real `gpt-6-luna` turn over WebSocket — asserting ≥1 streamed event, a knowledge-grounded "17", and per-session memory. The `ITransport` seam lets the rest of the suite drive real client code (correlation, event discrimination, HITL routing) with a mock — no network.
 
 **The proof story:** an LLM-as-judge scored a multi-turn answer **1/5** (the runtime forgot turn 1's context); the failing eval drove a per-session-memory fix; **it now scores 5/5** — a regression a substring test would have missed. See [`docs/EVALS.md`](https://github.com/SmooAI/smooth-operator/blob/main/docs/EVALS.md).
 

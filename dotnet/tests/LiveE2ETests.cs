@@ -39,7 +39,7 @@ public sealed class LiveE2ETests
 {
     private const int Port = 8812;
     private const string WsUrl = "ws://127.0.0.1:8812/ws";
-    private const string Model = "claude-haiku-4-5";
+    private const string Model = "gpt-6-luna";
 
     // The pre-built debug binary. If absent the test is skipped (it is not the
     // test's job to compile Rust).

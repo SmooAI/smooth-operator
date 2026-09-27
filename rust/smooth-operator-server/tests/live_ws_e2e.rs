@@ -34,7 +34,7 @@ use serde_json::{json, Value};
 use smooth_operator_server::config::ServerConfig;
 
 const GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
-const CHEAP_MODEL: &str = "claude-haiku-4-5";
+const CHEAP_MODEL: &str = "gpt-6-luna";
 /// Generous overall budget per turn — the live gateway + tool loop can take a
 /// while, but should not hang.
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -69,7 +69,7 @@ fn live_config(key: String) -> ServerConfig {
         storage: smooth_operator_server::config::StorageBackend::Memory,
         widget_auth_strict: false,
         confirm_tools: Vec::new(),
-        judge_model: "claude-haiku-4-5".to_string(),
+        judge_model: smooth_operator_server::config::DEFAULT_JUDGE_MODEL.to_string(),
     }
 }
 

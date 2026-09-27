@@ -37,10 +37,18 @@ const (
 	VerdictSkipped WorkflowVerdict = "skipped"
 )
 
-// DefaultJudgeModel is the cheap fast-tier model the workflow judge uses when the server
-// configures no explicit judge model. Matches this server's default main model
-// (claude-haiku-4-5) — already a fast tier, so the extra per-turn latency/cost stays low.
-const DefaultJudgeModel = "claude-haiku-4-5"
+// DefaultJudgeModel is the fast model the workflow judge uses when the server configures
+// no explicit judge model (WithJudgeModel). Its own default, independent of DefaultModel:
+// the judge is a small structured classification that runs after EVERY workflow turn, so
+// it wants the fastest tier. Mirrors the Rust reference's DEFAULT_JUDGE_MODEL (SMOODEV-3342).
+const DefaultJudgeModel = "groq-gpt-oss-120b"
+
+// JudgeMaxTokens caps the judge call's output. The verdict is a few tokens, but the default
+// judge (groq-gpt-oss-120b) is a reasoning model whose reasoning counts against max_tokens —
+// a small cap is spent entirely on reasoning and the reply comes back empty (gpt-oss on Groq
+// exhausted even 200, SMOODEV-2427). 512 matches the Rust reference's JUDGE_MAX_TOKENS
+// (SMOODEV-3342); the prompt still demands a one-word JSON verdict.
+const JudgeMaxTokens = 512
 
 // workflowJudgeSystemPrompt instructs the judge model. Mirrors the sibling servers' judge
 // prompt: yes for any usable answer to the step (terse counts), reply as a JSON verdict object.
@@ -99,7 +107,7 @@ AGENT REPLY:
 			{Role: "user", Content: human},
 		},
 		Temperature: 0,
-		MaxTokens:   200,
+		MaxTokens:   JudgeMaxTokens,
 	})
 	if err != nil {
 		// Never freeze the conversation on a judge failure — stay on the current step.

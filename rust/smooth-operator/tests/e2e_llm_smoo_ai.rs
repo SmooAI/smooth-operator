@@ -2,8 +2,8 @@
 //!
 //! These tests drive the **actual** smooth-operator-core engine (via
 //! [`KnowledgeChatRuntime`]) and the **actual** [`LlmClient`] against the live
-//! OpenAI-compatible LiteLLM proxy at `https://llm.smoo.ai/v1`, using the cheap
-//! `claude-haiku-4-5` model. There is no mock here — every assertion is about
+//! OpenAI-compatible LiteLLM proxy at `https://llm.smoo.ai/v1`, using the
+//! gateway's standard `gpt-6-luna` model. There is no mock here — every assertion is about
 //! real model behavior.
 //!
 //! ## Gating (safe to commit, safe in CI)
@@ -39,7 +39,7 @@ use smooth_operator_core::{Document, DocumentType, LlmClient, LlmConfig, Message
 use futures_util::StreamExt;
 
 const GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
-const CHEAP_MODEL: &str = "claude-haiku-4-5";
+const CHEAP_MODEL: &str = "gpt-6-luna";
 
 /// Returns the gateway key from the env, or `None` (with a printed skip notice)
 /// when the test should be skipped. NEVER prints the key value.

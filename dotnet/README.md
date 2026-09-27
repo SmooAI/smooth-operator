@@ -154,13 +154,13 @@ flowchart LR
 %%{init: {'theme':'base','themeVariables':{'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52','lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif','clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart TD
   J["🎯 LLM-as-judge quality evals (Rust harness)"]
-  E["🌐 Live cross-language E2E — this client boots the real server + drives a real claude-haiku-4-5 turn"]
+  E["🌐 Live cross-language E2E — this client boots the real server + drives a real gpt-6-luna turn"]
   C["🧪 Conformance fixtures (shared across all 5 clients)"]
   U["⚡ Unit + serialization tests (polymorphic event union, HITL routing)"]
   J --> E --> C --> U
 ```
 
-**27 tests** — conformance, client, and serialization. The live cross-language E2E boots a real `smooth-operator-server` subprocess (KB seeded) and drives a real `claude-haiku-4-5` turn over WebSocket: ≥1 streamed event, a knowledge-grounded "17", per-session memory.
+**27 tests** — conformance, client, and serialization. The live cross-language E2E boots a real `smooth-operator-server` subprocess (KB seeded) and drives a real `gpt-6-luna` turn over WebSocket: ≥1 streamed event, a knowledge-grounded "17", per-session memory.
 
 **A real bug the live E2E caught (mocks masked it):** `[JsonPolymorphic]` required the `type` discriminator first, but the Rust server emits JSON keys alphabetically — so deserialization failed against the real server. The fix is a position-independent `ServerEventConverter`. A mock that emitted keys in declaration order would never have surfaced it.
 

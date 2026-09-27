@@ -30,8 +30,9 @@ issues = true   # issues + pull requests (title + body + top comments)
 
 [agent]
 # The model id sent to the gateway. Any model the gateway routes works;
-# claude-haiku-4-5 is cheap + fast and great for grounded Q&A.
-model = "claude-haiku-4-5"
+# gpt-6-luna is the gateway's standard chat tier and great for grounded Q&A
+# (gpt-6-luna-fast / a groq-* alias for lower latency).
+model = "gpt-6-luna"
 
 # The system prompt. The default keeps the agent grounded — search the index
 # first, reach for live github_search when the snapshot may be stale.

@@ -2570,9 +2570,15 @@ fn apply_agent_model_override(mut llm: LlmConfig, cfg: Option<&AgentBehaviorConf
     llm
 }
 
-/// Cap the judge's output: a `yes` / `no` / `maybe` verdict needs only a few
-/// tokens. Small so the extra per-turn cost + latency stay negligible.
-const JUDGE_MAX_TOKENS: u32 = 16;
+/// Cap the judge's output. The verdict itself is a few tokens, but the default
+/// judge (`groq-gpt-oss-120b`) is a REASONING model: reasoning tokens count
+/// against `max_tokens`, so a small cap is spent entirely on reasoning and the
+/// completion comes back with no text — the judge then parses nothing and the
+/// workflow never advances. gpt-oss on Groq exhausted even 200 (SMOODEV-2427)
+/// and `gpt-6-luna-fast` returns `status=incomplete` at 16. 512 is what the
+/// voice path uses; the verdict prompt still demands a one-word JSON answer, so
+/// a well-behaved model stops far short of it (SMOODEV-3342).
+const JUDGE_MAX_TOKENS: u32 = 512;
 
 /// Build the per-agent authLevel gate, or `None` when it would be inert.
 ///
@@ -3109,17 +3115,27 @@ async fn handle_verify_otp(
 
 /// Build the workflow judge's LLM surface. Prefers a test-injected chat provider
 /// (the scenario mock — runs offline); otherwise builds a live client on the
-/// server's **default** (cheap) model with the turn's resolved gateway url/key,
-/// independent of any per-turn model override, so the judge stays cheap even when
-/// the turn itself runs on a bigger model.
+/// configured judge model (`SMOOTH_AGENT_JUDGE_MODEL`, default
+/// [`crate::config::DEFAULT_JUDGE_MODEL`]) with the turn's resolved gateway
+/// url/key, independent of any per-turn model override, so the judge stays fast
+/// and cheap even when the turn itself runs on a bigger model.
 fn build_judge_provider(state: &AppState, turn_llm: &LlmConfig) -> Arc<dyn LlmProvider> {
     if let Some(mock) = state.chat_provider.clone() {
         return mock;
     }
+    Arc::new(LlmClient::new(judge_llm_config(
+        &state.config.judge_model,
+        turn_llm,
+    )))
+}
+
+/// The judge's `LlmConfig`: the turn's gateway url/key, but the judge model and
+/// [`JUDGE_MAX_TOKENS`] — never the turn's (possibly bigger) model or budget.
+fn judge_llm_config(judge_model: &str, turn_llm: &LlmConfig) -> LlmConfig {
     let mut cfg = turn_llm.clone();
-    cfg.model = state.config.judge_model.clone();
+    cfg.model = judge_model.to_string();
     cfg.max_tokens = JUDGE_MAX_TOKENS;
-    Arc::new(LlmClient::new(cfg))
+    cfg
 }
 
 #[cfg(test)]
@@ -3296,13 +3312,30 @@ mod tests {
         );
     }
 
+    /// SMOODEV-3342: the default judge (`groq-gpt-oss-120b`) is a reasoning model,
+    /// so the judge's cap must leave room for reasoning — at 16 (the old value) the
+    /// completion came back empty and the workflow never advanced. The judge's
+    /// client carries the judge model + this cap regardless of the turn's config.
+    #[test]
+    fn judge_provider_uses_judge_model_with_reasoning_headroom() {
+        assert_eq!(JUDGE_MAX_TOKENS, 512);
+        let mut turn = base_llm();
+        turn.model = "gpt-6-sol".into();
+        let cfg = judge_llm_config(crate::config::DEFAULT_JUDGE_MODEL, &turn);
+        assert_eq!(cfg.model, "groq-gpt-oss-120b");
+        assert_eq!(cfg.max_tokens, JUDGE_MAX_TOKENS);
+        // Gateway url/key follow the turn.
+        assert_eq!(cfg.api_url, turn.api_url);
+        assert_eq!(cfg.api_key, turn.api_key);
+    }
+
     /// A baseline config whose `model` is the server default, so each override
     /// test asserts against a known starting model.
     fn base_llm() -> LlmConfig {
         LlmConfig {
             api_url: "https://llm.smoo.ai/v1".to_string(),
             api_key: "sk-test".to_string(),
-            model: "claude-haiku-4-5".to_string(),
+            model: crate::config::DEFAULT_MODEL.to_string(),
             max_tokens: 512,
             temperature: crate::config::DEFAULT_TEMPERATURE,
             retry_policy: RetryPolicy::default(),
@@ -3325,7 +3358,7 @@ mod tests {
     fn model_override_absent_keeps_default() {
         let body = json!({ "action": "send_message", "message": "hi" });
         let llm = apply_model_override(base_llm(), &body);
-        assert_eq!(llm.model, "claude-haiku-4-5");
+        assert_eq!(llm.model, crate::config::DEFAULT_MODEL);
     }
 
     #[test]
@@ -3334,13 +3367,13 @@ mod tests {
         let blank = json!({ "model": "   " });
         assert_eq!(
             apply_model_override(base_llm(), &blank).model,
-            "claude-haiku-4-5"
+            crate::config::DEFAULT_MODEL
         );
         // A non-string `model` is ignored (no panic, default kept).
         let wrong_type = json!({ "model": 42 });
         assert_eq!(
             apply_model_override(base_llm(), &wrong_type).model,
-            "claude-haiku-4-5"
+            crate::config::DEFAULT_MODEL
         );
     }
 
@@ -3444,13 +3477,13 @@ mod tests {
         // No per-agent config at all.
         assert_eq!(
             apply_agent_model_override(base_llm(), None).model,
-            "claude-haiku-4-5"
+            crate::config::DEFAULT_MODEL
         );
         // Config present but no model set.
         let cfg = cfg_with_model(None);
         assert_eq!(
             apply_agent_model_override(base_llm(), Some(&cfg)).model,
-            "claude-haiku-4-5"
+            crate::config::DEFAULT_MODEL
         );
     }
 

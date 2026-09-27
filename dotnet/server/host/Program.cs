@@ -40,7 +40,8 @@ var gatewayUrl = Get("SMOOAI_GATEWAY_URL", Get("SMOOTH_GATEWAY_URL", "https://ll
 var gatewayKey = Get("SMOOAI_GATEWAY_KEY", Get("SMOOTH_GATEWAY_KEY"));
 // The model, unlike the gateway pair, IS this server's own config surface, so it takes the
 // canonical SMOOTH_AGENT_MODEL the Rust host reads. SMOOAI_MODEL / SMOOTH_MODEL stay as aliases.
-var model = Get("SMOOTH_AGENT_MODEL", Get("SMOOAI_MODEL", Get("SMOOTH_MODEL", "claude-haiku-4-5")));
+// Unset => ServerEnv.DefaultModel (gpt-6-luna), the same default every sibling host uses.
+var model = ServerEnv.ResolveModel(key => config[key]);
 // Core's own client, not the MEAI OpenAI adapter. The gateway reports per-request cost ONLY
 // in a response header, and the adapter's parsed ChatResponse drops HTTP headers entirely —
 // so core's cost-header parser had nothing to read and every turn's costUsd came back 0.

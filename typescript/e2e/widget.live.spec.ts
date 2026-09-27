@@ -68,7 +68,7 @@ test.beforeAll(async () => {
             SMOOTH_AGENT_PORT: String(AGENT_PORT),
             SMOOAI_GATEWAY_KEY: GATEWAY_KEY,
             SMOOTH_AGENT_SEED_KB: '1',
-            SMOOTH_AGENT_MODEL: process.env.SMOOTH_AGENT_MODEL ?? 'claude-haiku-4-5',
+            SMOOTH_AGENT_MODEL: process.env.SMOOTH_AGENT_MODEL ?? 'gpt-6-luna',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
     });

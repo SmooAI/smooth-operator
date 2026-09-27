@@ -18,7 +18,7 @@
 //! issues = true   # issues + PRs
 //!
 //! [agent]
-//! model         = "claude-haiku-4-5"
+//! model         = "gpt-6-luna"
 //! system_prompt = "You are the dev-team support agent for this repository. …"
 //!
 //! tools = ["knowledge_search", "github_search"]
@@ -46,9 +46,9 @@ use smooth_operator_ingestion::{
 /// LiteLLM proxy). Overridable via `SMOOAI_GATEWAY_URL`.
 pub const DEFAULT_GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
 
-/// The default model — the cheap, fast Haiku the rest of the workspace's live
-/// tests use.
-pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
+/// The default model — the Smoo AI gateway's standard chat tier, the same
+/// default `smooth-operator-server` uses (SMOODEV-3342).
+pub const DEFAULT_MODEL: &str = "gpt-6-luna";
 
 /// The default system prompt for the dev-support agent. Keeps it grounded:
 /// search the indexed repo first, reach for live GitHub when the index is stale.
@@ -287,7 +287,7 @@ mod tests {
         issues = true
 
         [agent]
-        model = "claude-haiku-4-5"
+        model = "gpt-6-luna-fast"
         system_prompt = "Be helpful."
         tools = ["knowledge_search", "github_search"]
     "#;
@@ -301,7 +301,7 @@ mod tests {
         assert!(cfg.github.include.prose);
         assert!(!cfg.github.include.code);
         assert!(cfg.github.include.issues);
-        assert_eq!(cfg.agent.model, "claude-haiku-4-5");
+        assert_eq!(cfg.agent.model, "gpt-6-luna-fast");
         assert_eq!(cfg.repo_slug(), "rust-lang/mdBook");
         assert!(cfg.has_tool(ToolName::KnowledgeSearch));
         assert!(cfg.has_tool(ToolName::GithubSearch));
@@ -322,6 +322,7 @@ mod tests {
         assert_eq!(cfg.github.auth, AuthMode::Token);
         assert!(cfg.github.include.prose && cfg.github.include.code && cfg.github.include.issues);
         assert_eq!(cfg.agent.model, DEFAULT_MODEL);
+        assert_eq!(DEFAULT_MODEL, "gpt-6-luna");
         assert_eq!(cfg.agent.system_prompt, DEFAULT_SYSTEM_PROMPT);
         // tools default to both.
         assert_eq!(cfg.agent.tools.len(), 2);

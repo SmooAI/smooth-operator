@@ -250,6 +250,36 @@ public class WorkflowTests
         Assert.Equal(WorkflowVerdict.Skipped, verdict);
     }
 
+    // ── LlmWorkflowJudge — model selection (SMOODEV-3342) ───────────────────
+    // Parity with the Rust reference's `judge_model_defaults_to_groq_and_env_overrides`: the judge
+    // has its OWN default (a Groq model), not the server's main-turn model, and an explicit judge
+    // model wins over it.
+
+    [Fact]
+    public async Task Judge_DefaultsToItsOwnGroqModel_NotTheTurnModel()
+    {
+        var chat = new CapturingChatClient("""{"verdict":"yes"}""");
+        var judge = new LlmWorkflowJudge(chat);
+        var wf = ThreeStep();
+        await judge.JudgeAsync(wf, wf.Steps[0], "hi", "some reply");
+        Assert.Equal("groq-gpt-oss-120b", ServerEnv.DefaultJudgeModel);
+        Assert.Equal(ServerEnv.DefaultJudgeModel, chat.LastModelId);
+        // The default judge is a reasoning model: the cap must leave room for reasoning
+        // (parity with the Rust JUDGE_MAX_TOKENS = 512).
+        Assert.Equal(512, LlmWorkflowJudge.JudgeMaxTokens);
+        Assert.Equal(LlmWorkflowJudge.JudgeMaxTokens, chat.LastMaxOutputTokens);
+    }
+
+    [Fact]
+    public async Task Judge_ExplicitModel_WinsOverTheDefault()
+    {
+        var chat = new CapturingChatClient("""{"verdict":"yes"}""");
+        var judge = new LlmWorkflowJudge(chat, "gpt-6-luna-fast");
+        var wf = ThreeStep();
+        await judge.JudgeAsync(wf, wf.Steps[0], "hi", "some reply");
+        Assert.Equal("gpt-6-luna-fast", chat.LastModelId);
+    }
+
     // ── StaticAgentConfigResolver — the delivery seam ───────────────────────
 
     [Fact]
@@ -558,8 +588,14 @@ public class WorkflowTests
 
         public IReadOnlyList<string> LastToolNames { get; private set; } = Array.Empty<string>();
 
+        public string? LastModelId { get; private set; }
+
+        public int? LastMaxOutputTokens { get; private set; }
+
         private void Capture(IEnumerable<ChatMessage> messages, ChatOptions? options)
         {
+            LastModelId = options?.ModelId;
+            LastMaxOutputTokens = options?.MaxOutputTokens;
             var system = messages.LastOrDefault(m => m.Role == ChatRole.System);
             if (system is not null)
             {

@@ -23,12 +23,20 @@
 //!
 //! ## Same-model-judging limitation
 //!
-//! By default the agent and the judge are the **same model** (`claude-haiku-4-5`).
+//! By default the agent and the judge are the **same model** (`gpt-6-luna`, the
+//! Smoo AI gateway's standard chat tier — see [`CHEAP_MODEL`]).
 //! A model judging output from its own family is a known weak spot — it tends to
 //! be lenient toward its own phrasing and shares blind spots. The
 //! [`JudgeConfig`] honors `SMOOTH_AGENT_JUDGE_MODEL` so you can point the judge
-//! at a stronger, different model (e.g. a Sonnet/GPT class) for a more adversarial
-//! grade. This is the single most impactful knob for eval trustworthiness.
+//! at a different or stronger model (e.g. `gpt-6-luna-high`) for a more
+//! adversarial grade; the nightly matrix pins `gpt-6-luna` as the judge for
+//! every agent so rows stay comparable. This is the single most impactful knob for eval
+//! trustworthiness.
+//!
+//! Every model named here must be one the gateway actually serves. LiteLLM
+//! silently falls back to another model when the named one fails, so a
+//! scorecard row labelled with a model the gateway can't serve is really
+//! grading whatever the fallback chain picked (SMOODEV-3342).
 //!
 //! ## Secret handling
 //!
@@ -61,8 +69,12 @@ use smooth_operator_core::{Document, DocumentType, LlmClient, LlmConfig, Message
 
 /// The live OpenAI-compatible gateway.
 pub const GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
-/// The cheap model used for both the agent and (by default) the judge.
-pub const CHEAP_MODEL: &str = "claude-haiku-4-5";
+/// The default model for both the agent and (by default) the judge:
+/// `gpt-6-luna`, the Smoo AI gateway's standard chat tier and the same default
+/// `smooth-operator-server` runs turns on — so an unconfigured eval grades what
+/// production actually serves. Override with `SMOOTH_AGENT_EVAL_MODEL` /
+/// `SMOOTH_AGENT_JUDGE_MODEL`.
+pub const CHEAP_MODEL: &str = "gpt-6-luna";
 
 /// One seeded knowledge-base document for a scenario.
 #[derive(Debug, Clone)]
@@ -215,8 +227,8 @@ impl Scorecard {
     /// One history row: a self-describing JSON object.
     ///
     /// `agent_model` / `judge_model` are part of the row because a score only
-    /// means something next to the models that produced it — comparing a haiku
-    /// night against a sonnet night is how a "regression" gets invented.
+    /// means something next to the models that produced it — comparing a luna
+    /// night against a groq night is how a "regression" gets invented.
     #[must_use]
     pub fn to_json(&self, agent_model: &str, judge_model: &str) -> serde_json::Value {
         let mut scores = serde_json::Map::new();
@@ -959,5 +971,11 @@ mod tests {
             assert_eq!(cfg.judge_model, cfg.agent_model);
             assert_eq!(cfg.judge_model, CHEAP_MODEL);
         }
+    }
+
+    /// SMOODEV-3342: an unconfigured eval grades the model production runs.
+    #[test]
+    fn cheap_model_is_the_gateway_standard_tier() {
+        assert_eq!(CHEAP_MODEL, "gpt-6-luna");
     }
 }

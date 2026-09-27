@@ -71,7 +71,7 @@ export default $config({
         // IAM links/permissions (ManageConnections post-back + s3vectors:*).
         const agent = new SmoothAgentApi('SmoothAgent', {
             artifactDir: ARTIFACT_DIR,
-            model: 'claude-haiku-4-5',
+            model: 'gpt-6-luna',
         });
 
         return agent.outputs;

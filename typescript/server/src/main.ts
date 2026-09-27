@@ -13,7 +13,7 @@
  * work as aliases; see `env.ts` for the full table):
  *   SMOOTH_AGENT_BIND      bind host   (default 127.0.0.1)
  *   SMOOTH_AGENT_PORT      bind port   (default 8787)
- *   SMOOTH_AGENT_MODEL     model id    (default claude-haiku-4-5)
+ *   SMOOTH_AGENT_MODEL     model id    (default gpt-6-luna)
  *   SMOOAI_GATEWAY_URL     OpenAI-compatible base URL (enables live turns with a key)
  *   SMOOAI_GATEWAY_KEY     gateway API key
  *   SMOOTH_WORKSPACE       root the coding tools are confined to (default: cwd)

@@ -10,6 +10,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
     advanceStep,
+    DEFAULT_JUDGE_MODEL,
+    JUDGE_MAX_TOKENS,
     judgeStep,
     nextStep,
     parseWorkflow,
@@ -165,6 +167,18 @@ describe('judgeStep — LLM verdict', () => {
         const mock = new MockLlmProvider().pushText('{"verdict":"yes"}');
         expect(await judgeStep(mock, { ...base, reply: '   ' })).toBe('skipped');
         expect(mock.callCount).toBe(0);
+    });
+
+    // SMOODEV-3342 — parity with the Rust reference: the judge has its OWN Groq default
+    // (not the main-turn model), and because that model reasons, the cap leaves room for
+    // reasoning (JUDGE_MAX_TOKENS = 512) — a small cap comes back with no verdict text.
+    it('defaults to its own Groq judge model with reasoning headroom', async () => {
+        const mock = new MockLlmProvider().pushText('{"verdict":"yes"}');
+        await judgeStep(mock, base);
+        expect(DEFAULT_JUDGE_MODEL).toBe('groq-gpt-oss-120b');
+        expect(JUDGE_MAX_TOKENS).toBe(512);
+        expect(mock.lastCall?.body.model).toBe(DEFAULT_JUDGE_MODEL);
+        expect(mock.lastCall?.body.max_tokens).toBe(JUDGE_MAX_TOKENS);
     });
 
     it('judges with the configured cheap model', async () => {

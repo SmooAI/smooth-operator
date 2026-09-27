@@ -22,6 +22,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { AuthVerifier, Principal } from './auth.js';
 import { TARGET_KINDS, type Backplane, type Target } from './backplane.js';
+import { DEFAULT_MODEL } from './env.js';
 import type { SessionStore } from './sessionStore.js';
 
 /** Role ranks, mirroring Rust's `role_rank`. */
@@ -151,7 +152,7 @@ export class InMemoryAdminStore implements AdminStore {
 
 /** Rust's "defaults when unset" settings read. */
 function defaultSettings(orgId: string): AgentSettings {
-    return { orgId, model: 'claude-haiku-4-5', systemPrompt: '', defaultTools: [], updatedAt: new Date().toISOString() };
+    return { orgId, model: DEFAULT_MODEL, systemPrompt: '', defaultTools: [], updatedAt: new Date().toISOString() };
 }
 
 /** Strip the internal owner key before serializing. */

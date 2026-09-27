@@ -27,12 +27,12 @@
 //! adversarial grade — see the same-model-judging note in `lib.rs`:
 //!
 //! ```sh
-//! export SMOOTH_AGENT_JUDGE_MODEL=claude-sonnet-4-5
+//! export SMOOTH_AGENT_JUDGE_MODEL=gpt-6-luna-high
 //! ```
 //!
 //! ## Threshold strategy
 //!
-//! Same-model judging (haiku grading haiku) carries real run-to-run variance: a
+//! Same-model judging (luna grading luna) carries real run-to-run variance: a
 //! borderline reply can score 4 on one run and 3 on the next. To keep one
 //! judge-variance blip from reddening the whole suite while still catching real
 //! regressions, the suite asserts on the **aggregate mean** (≥ 4.0) and logs any

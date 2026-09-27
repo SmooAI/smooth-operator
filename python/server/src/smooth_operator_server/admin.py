@@ -44,6 +44,7 @@ from urllib.request import Request, urlopen
 
 from .auth import AccessContext, Principal
 from .backplane import TARGET_KINDS, Target
+from .turn_runner import DEFAULT_MODEL
 
 # Role ranks, mirroring Rust's ``role_rank``.
 ROLE_BASIC = 0
@@ -160,7 +161,7 @@ def _default_settings(org_id: str) -> dict[str, Any]:
     """Rust's "defaults when unset" settings read."""
     return {
         "orgId": org_id,
-        "model": "claude-haiku-4-5",
+        "model": DEFAULT_MODEL,
         "systemPrompt": "",
         "defaultTools": [],
         "updatedAt": _now(),

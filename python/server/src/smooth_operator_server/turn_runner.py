@@ -56,10 +56,12 @@ from .workflow import (
 #: Max prior turns replayed into the thread for memory (bounds context growth).
 MAX_PRIOR_MESSAGES = 50
 
-#: The engine's default model when the server pins none (matches
-#: ``AgentOptions.model`` in smooth-operator-core). Used to look up the output
-#: ceiling for the model the turn will actually send.
-DEFAULT_MODEL = "claude-haiku-4-5"
+#: The model a turn requests when the server pins none — the Smoo AI gateway's
+#: standard chat tier, in lockstep with the Rust reference's ``DEFAULT_MODEL``
+#: (SMOODEV-3342). Always passed to the engine explicitly (never left to the
+#: engine's own built-in fallback), and used to look up the output ceiling for
+#: the model the turn actually sends.
+DEFAULT_MODEL = "gpt-6-luna"
 
 #: Per-call ``max_tokens`` sent to the gateway. Raised from the old chat-widget
 #: default of 512 — that STARVES reasoning models (they exhaust the budget on
@@ -279,7 +281,7 @@ class TurnRunner:
         #: Resolved per-agent config (instructions / workflow / persona). ``None`` →
         #: the server-wide default prompt drives the turn (behavior unchanged).
         self._agent_config = agent_config
-        #: Fast/cheap model for the post-turn workflow judge (default haiku-tier).
+        #: Fast model for the post-turn workflow judge (default ``WORKFLOW_JUDGE_MODEL``).
         self._judge_model = judge_model or WORKFLOW_JUDGE_MODEL
         self._model = model
         self._tools = tools or []
@@ -401,8 +403,8 @@ class TurnRunner:
             options_kwargs["memory"] = self._memory
         if agent_tools:
             options_kwargs["tools"] = agent_tools
-        if self._model is not None:
-            options_kwargs["model"] = self._model
+        # Always explicit: the server default, never the engine's own fallback model.
+        options_kwargs["model"] = self._model or DEFAULT_MODEL
 
         # Install tool-call lifecycle hooks (ToolHook) on the per-turn engine. Every
         # hook's pre_call gates each tool (raise → block) and its post_call may redact

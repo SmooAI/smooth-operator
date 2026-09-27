@@ -590,7 +590,7 @@ public static class SmoothOperatorAdminExtensions
     private static AgentSettingsRow DefaultSettings(string orgId) => new()
     {
         OrgId = orgId,
-        Model = "claude-haiku-4-5",
+        Model = ServerEnv.DefaultModel,
         SystemPrompt = string.Empty,
         DefaultTools = Array.Empty<string>(),
         UpdatedAt = DateTimeOffset.UtcNow,

@@ -23,7 +23,7 @@ fi
 # Gateway creds: env first, else the smooth provider key from `th auth login smooth`.
 gateway_url="${SMOOTH_GATEWAY_URL:-https://llm.smoo.ai/v1}"
 gateway_key="${SMOOTH_GATEWAY_KEY:-$(python3 -c 'import json,os;d=json.load(open(os.path.expanduser("~/.smooth/providers.json")));print(next(p["api_key"] for p in d["providers"] if p["id"]=="smooth"))' 2>/dev/null || true)}"
-model="${SMOOTH_MODEL:-deepseek-v4-flash}"
+model="${SMOOTH_MODEL:-gpt-6-luna}"
 token="${SMOOTH_LOCAL_TOKEN:-$(openssl rand -hex 16)}"
 persona="${SMOOTH_PERSONA:-You are Big Smooth, your humans always-on personal AI operator. Speak plainly and warmly, first person. You are not a customer-support bot. Do not narrate chain-of-thought.}"
 

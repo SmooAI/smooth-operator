@@ -130,7 +130,7 @@ code  = true               # source files
 issues = true              # issues + PRs
 
 [agent]
-model = "claude-haiku-4-5"
+model = "gpt-6-luna"
 system_prompt = "…"        # keeps the agent grounded; sane default shipped
 tools = ["knowledge_search", "github_search"]
 ```
