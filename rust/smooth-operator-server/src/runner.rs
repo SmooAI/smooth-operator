@@ -48,9 +48,9 @@ use smooth_operator::domain::{Citation, Direction, Message as DomainMessage, Mes
 use smooth_operator::interaction::{InteractionRaise, InteractionRegistry, InteractionResolution};
 use smooth_operator::rerank::Reranker;
 use smooth_operator::telemetry::{
-    record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
+    record_turn_usage, tool_argument_keys, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
     GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
-    GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_SOURCE,
+    GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENT_KEYS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_SOURCE,
     GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT,
     OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SMOOAI_ORG_ID, SPAN_CHAT, SPAN_TOOL,
     SYSTEM_NAME,
@@ -504,7 +504,8 @@ pub struct TurnResult {
 /// context.
 struct ToolSpanRecord {
     tool_name: String,
-    /// Serialized JSON args from the matching `ToolCallStart` (redacted at emit).
+    /// Serialized JSON args from the matching `ToolCallStart`. Only their KEY
+    /// NAMES reach the span ([`tool_argument_keys`]); the values are customer PII.
     arguments: String,
     duration_ms: u64,
     is_error: bool,
@@ -942,6 +943,10 @@ pub async fn run_streaming_turn(
     // tool that intentionally reuses a built-in name replaces it; a distinct
     // name simply adds. With no provider this block is a no-op, leaving the
     // registry as exactly today's built-ins.
+    // Host tools that emit their own `gen_ai.tool` span (see
+    // `ToolProvider::traces_own_tools`). The runner skips its span for these so
+    // one call is one span — two made every "N tool calls" count double.
+    let mut self_traced_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(provider) = tool_provider {
         // Thread the per-turn handles the runner already has — the conversation
         // this turn runs in and the resolved per-org gateway key — so a host's
@@ -963,7 +968,11 @@ pub async fn run_streaming_turn(
         if let Some(configs) = tool_configs.clone() {
             ctx = ctx.with_tool_configs(configs);
         }
+        let traces_own = provider.traces_own_tools();
         for tool in provider.tools_for(&ctx).await {
+            if traces_own {
+                self_traced_tools.insert(tool.schema().name);
+            }
             tools.register_arc(tool);
         }
     }
@@ -980,6 +989,9 @@ pub async fn run_streaming_turn(
     // `enabled_tools` authoritative over the full extension surface.
     if let Some(ext) = &extensions {
         for tool in ext.host.tools() {
+            // An extension tool that replaces a same-named host tool is not
+            // traced by the host, so the runner's span must come back.
+            self_traced_tools.remove(&tool.schema().name);
             tools.register_arc(tool);
         }
         for tool in ext.host.deferred_tools() {
@@ -1374,7 +1386,8 @@ pub async fn run_streaming_turn(
     // that owns `turn_span` (the process-global OTLP subscriber in production).
     // Token usage on the turn span (omitted when the engine reported none, per
     // the GenAI conventions); one `gen_ai.tool` child span per tool call with the
-    // redacted arguments, latency, and an ERROR status on failure.
+    // argument KEY NAMES (never values), latency, and an ERROR status on failure —
+    // except for host tools that trace themselves.
     if let Some(u) = usage.as_ref() {
         // One helper owns the "measured or absent" policy for both turn paths —
         // which counts are real, and whether a cost may be trusted beside them.
@@ -1389,6 +1402,9 @@ pub async fn run_streaming_turn(
         );
     }
     for rec in &tool_records {
+        if self_traced_tools.contains(&rec.tool_name) {
+            continue;
+        }
         // The OTLP ingest merges resource attrs with THIS span's attrs and does
         // NOT inherit from the parent, so every identifying attribute has to be
         // repeated here or the tool span arrives unjoinable — and, without
@@ -1401,7 +1417,7 @@ pub async fn run_streaming_turn(
             { GEN_AI_CONVERSATION_ID } = %conversation_id,
             { SMOOAI_ORG_ID } = tracing::field::Empty,
             { GEN_AI_TOOL_NAME } = %rec.tool_name,
-            { GEN_AI_TOOL_ARGUMENTS } = %redact_tool_arguments(&rec.arguments),
+            { GEN_AI_TOOL_ARGUMENT_KEYS } = %tool_argument_keys(&rec.arguments),
             { OTEL_STATUS_CODE } = tracing::field::Empty,
             { OTEL_STATUS_MESSAGE } = tracing::field::Empty,
             duration_ms = rec.duration_ms,

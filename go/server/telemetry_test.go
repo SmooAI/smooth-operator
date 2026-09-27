@@ -29,8 +29,8 @@ func attr(kvs []attribute.KeyValue, key string) (string, bool) {
 //
 //  1. A `gen_ai.chat` turn span carrying gen_ai.system, gen_ai.request.model,
 //     gen_ai.conversation.id, gen_ai.agent.name, and smooai.org_id.
-//  2. A child `gen_ai.tool` span carrying gen_ai.tool.name and the REDACTED
-//     gen_ai.tool.call.arguments the model passed.
+//  2. A child `gen_ai.tool` span carrying gen_ai.tool.name and the argument KEY NAMES
+//     (gen_ai.tool.argument_keys) — never the argument values (SMOODEV-3364).
 func TestStreamingTurnEmitsGenAISpans(t *testing.T) {
 	// Install an in-memory exporter as the global provider for the turn, then restore.
 	exporter := tracetest.NewInMemoryExporter()
@@ -103,12 +103,17 @@ func TestStreamingTurnEmitsGenAISpans(t *testing.T) {
 		t.Fatalf("expected a %q span; got %d spans: %+v", SpanTool, len(spans), spans)
 	}
 	assertAttr(t, tool.Attributes, GenAIToolName, "knowledge_search")
-	args, _ := attr(tool.Attributes, GenAIToolArguments)
-	if !strings.Contains(args, "return policy refund window") {
-		t.Errorf("tool arguments should carry the model's query; got: %q", args)
+	// SMOODEV-3364: argument values are customer PII, so the span carries the shape of
+	// the call and never its content.
+	assertAttr(t, tool.Attributes, GenAIToolArgumentKeys, "api_key,query")
+	if args, ok := attr(tool.Attributes, GenAIToolArguments); ok {
+		t.Errorf("the tool span must not carry %s; got: %q", GenAIToolArguments, args)
 	}
-	if strings.Contains(args, "sk-live-123") {
-		t.Errorf("secret-named api_key value must be redacted from the span; got: %q", args)
+	for _, kv := range tool.Attributes {
+		v := kv.Value.Emit()
+		if strings.Contains(v, "return policy refund window") || strings.Contains(v, "sk-live-123") {
+			t.Errorf("span attribute %s leaked an argument value: %q", kv.Key, v)
+		}
 	}
 
 	// The tool span is a CHILD of the turn span (mirrors the Rust `parent: &turn_span`).
@@ -155,5 +160,31 @@ func assertAttr(t *testing.T, kvs []attribute.KeyValue, key, want string) {
 	}
 	if got != want {
 		t.Errorf("attribute %q = %q, want %q", key, got, want)
+	}
+}
+
+// TestToolArgumentKeysNeverCarryValues is the Go sibling of the Rust
+// tool_argument_keys_never_carry_values: the shared vectors, asserted verbatim.
+func TestToolArgumentKeysNeverCarryValues(t *testing.T) {
+	vectors := []struct{ in, want string }{
+		{`{"name":"Jane Customer","email":"jane@example.com","phone":"(317) 555-0142"}`, "email,name,phone"},
+		{`{"b":1,"a":{"nested":"jane@example.com"}}`, "a,b"},
+		{`{}`, ""},
+		{`null`, ""},
+		{``, ""},
+		{`["jane@example.com"]`, "<array>"},
+		{`"jane@example.com"`, "<scalar>"},
+		{`{"email":"jane@exa`, "<unparsed>"},
+	}
+	for _, v := range vectors {
+		got := toolArgumentKeys(v.in)
+		if got != v.want {
+			t.Errorf("toolArgumentKeys(%q) = %q, want %q", v.in, got, v.want)
+		}
+		for _, raw := range []string{"jane@example.com", "Jane Customer", "555-0142"} {
+			if strings.Contains(got, raw) {
+				t.Errorf("toolArgumentKeys(%q) leaked %q: %q", v.in, raw, got)
+			}
+		}
 	}
 }

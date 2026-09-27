@@ -11,8 +11,8 @@ namespace SmooAI.SmoothOperator.Server.Tests;
 ///
 /// 1. a <c>gen_ai.chat</c> turn span carrying <c>gen_ai.system</c>, <c>gen_ai.request.model</c>,
 ///    <c>gen_ai.conversation.id</c>, <c>gen_ai.agent.name</c>, and the usage token counts, and
-/// 2. a child <c>gen_ai.tool</c> span carrying <c>gen_ai.tool.name</c> and the (redacted)
-///    <c>gen_ai.tool.call.arguments</c> the model passed.
+/// 2. a child <c>gen_ai.tool</c> span carrying <c>gen_ai.tool.name</c> and the argument KEY NAMES
+///    (<c>gen_ai.tool.argument_keys</c>) — never the argument values (SMOODEV-3364).
 /// </summary>
 public class TelemetryTests
 {
@@ -113,13 +113,18 @@ public class TelemetryTests
         Assert.Equal(10L, Convert.ToInt64(chatSpan.GetTagItem(Telemetry.GenAiUsageInputTokens)));
         Assert.Equal(5L, Convert.ToInt64(chatSpan.GetTagItem(Telemetry.GenAiUsageOutputTokens)));
 
-        // (2) A child tool span carries the tool name + the model's (redacted) arguments, nested under
-        //     the turn span.
+        // (2) A child tool span carries the tool name + the argument KEY NAMES only, nested under the
+        //     turn span. SMOODEV-3364: argument values are customer PII, so the span carries the shape
+        //     of the call and never its content.
         var toolSpan = captured.SingleOrDefault(a => a.OperationName == Telemetry.SpanTool);
         Assert.NotNull(toolSpan);
         Assert.Equal(Tool, toolSpan!.GetTagItem(Telemetry.GenAiToolName));
-        var args = toolSpan.GetTagItem(Telemetry.GenAiToolArguments) as string ?? string.Empty;
-        Assert.Contains("return policy refund window", args);
+        Assert.Equal("query", toolSpan.GetTagItem(Telemetry.GenAiToolArgumentKeys));
+        Assert.Null(toolSpan.GetTagItem(Telemetry.GenAiToolArguments));
+        foreach (var tag in toolSpan.TagObjects)
+        {
+            Assert.DoesNotContain("return policy refund window", tag.Value?.ToString() ?? string.Empty);
+        }
         Assert.Equal(chatSpan.Id, toolSpan.ParentId);
 
         // Being a child is NOT enough. The OTLP ingest builds a span's attributes from
@@ -156,5 +161,24 @@ public class TelemetryTests
         var capped = Telemetry.RedactToolArguments(new string('x', 2148));
         Assert.True(capped.Length <= 2049, $"capped near max: {capped.Length}");
         Assert.EndsWith("…", capped);
+    }
+
+    [Theory]
+    [InlineData("{\"name\":\"Jane Customer\",\"email\":\"jane@example.com\",\"phone\":\"(317) 555-0142\"}", "email,name,phone")]
+    [InlineData("{\"b\":1,\"a\":{\"nested\":\"jane@example.com\"}}", "a,b")]
+    [InlineData("{}", "")]
+    [InlineData("null", "")]
+    [InlineData("", "")]
+    [InlineData("[\"jane@example.com\"]", "<array>")]
+    [InlineData("\"jane@example.com\"", "<scalar>")]
+    [InlineData("{\"email\":\"jane@exa", "<unparsed>")]
+    public void ToolArgumentKeysNeverCarryValues(string input, string expected)
+    {
+        var output = Telemetry.ToolArgumentKeys(input);
+        Assert.Equal(expected, output);
+        foreach (var raw in new[] { "jane@example.com", "Jane Customer", "555-0142" })
+        {
+            Assert.DoesNotContain(raw, output);
+        }
     }
 }

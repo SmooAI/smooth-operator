@@ -17,8 +17,18 @@
 //!   [`GEN_AI_USAGE_COST_USD`] when it reported a *measured* cost.
 //!
 //! Each tool call the engine emits opens a child span named [`SPAN_TOOL`]
-//! (`gen_ai.tool`) carrying [`GEN_AI_TOOL_NAME`] (`gen_ai.tool.name`) and the
-//! tool's wall-clock `duration_ms`.
+//! (`gen_ai.tool`) carrying [`GEN_AI_TOOL_NAME`] (`gen_ai.tool.name`),
+//! [`GEN_AI_TOOL_ARGUMENT_KEYS`] (`gen_ai.tool.argument_keys`) and the tool's
+//! wall-clock `duration_ms`.
+//!
+//! ## Argument key NAMES, never argument values
+//! A tool span records which argument keys a call carried, never their values
+//! (see [`tool_argument_keys`]). Tool arguments are customer data: a CRM write
+//! carries a person's name, email, phone and address; a message tool carries the
+//! body. [`redact_tool_arguments`] masks only secret-NAMED keys, so recording its
+//! output shipped that PII into every exporter's trace store (SMOODEV-3364). No
+//! pattern matcher can recognise a name or a note, so the value is not carried at
+//! all. "Did the update include `phone`?" stays answerable from the key list.
 //!
 //! ## Child spans repeat their identifiers
 //! The OTLP ingest builds each span's attribute set from the resource attrs
@@ -122,8 +132,15 @@ pub const COST_SOURCE_ESTIMATED: &str = "estimated";
 pub const GEN_AI_RESPONSE_ID: &str = "gen_ai.response.id";
 /// `gen_ai.tool.name` — the name of an invoked tool.
 pub const GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
-/// `gen_ai.tool.call.arguments` — the (redacted) JSON arguments passed to a tool.
+/// `gen_ai.tool.call.arguments` — the JSON arguments passed to a tool.
+///
+/// No span this crate emits records it: argument values are customer PII (see
+/// the module docs). Kept for hosts that reference the name.
 pub const GEN_AI_TOOL_ARGUMENTS: &str = "gen_ai.tool.call.arguments";
+/// `gen_ai.tool.argument_keys` — the sorted top-level argument KEY NAMES of a
+/// tool call, comma-joined ([`tool_argument_keys`]). The same attribute the
+/// smooai monorepo's host tool decorators record, so one query covers both.
+pub const GEN_AI_TOOL_ARGUMENT_KEYS: &str = "gen_ai.tool.argument_keys";
 /// `gen_ai.agent.name` — the agent/persona driving the turn.
 pub const GEN_AI_AGENT_NAME: &str = "gen_ai.agent.name";
 /// `smooai.org_id` — the owning org. Matches the monorepo TS chat handler's
@@ -239,7 +256,37 @@ pub fn record_turn_usage(
     }
 }
 
-/// Redact a tool's serialized JSON arguments for span recording.
+/// The sorted top-level key names of a tool call's serialized JSON arguments,
+/// comma-joined — what a `gen_ai.tool` span records instead of the arguments.
+///
+/// Never returns an argument value; this is the PII boundary. A JSON object
+/// yields its keys in byte order; JSON `null` or empty input yields `""`; an
+/// array yields `<array>` and any other scalar `<scalar>` (the model occasionally
+/// sends a bare value); input that does not parse yields `<unparsed>`. Every
+/// SDK's port asserts the same vectors.
+#[must_use]
+pub fn tool_argument_keys(arguments: &str) -> String {
+    if arguments.trim().is_empty() {
+        return String::new();
+    }
+    match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(serde_json::Value::Object(map)) => {
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            keys.join(",")
+        }
+        Ok(serde_json::Value::Null) => String::new(),
+        Ok(serde_json::Value::Array(_)) => "<array>".to_string(),
+        Ok(_) => "<scalar>".to_string(),
+        Err(_) => "<unparsed>".to_string(),
+    }
+}
+
+/// Redact a tool's serialized JSON arguments for recording.
+///
+/// **Not used for spans any more** — a secret-NAME denylist leaves every
+/// personal identifier in place, so spans record [`tool_argument_keys`] instead
+/// (SMOODEV-3364). Kept as public API for hosts that log arguments deliberately.
 ///
 /// Tool arguments can carry credentials a host tool needs (an API key, a bearer
 /// token, a password). We never want those in a span exported to ClickHouse, so
@@ -460,6 +507,32 @@ mod tests {
             2,
             "both secrets redacted: {out}"
         );
+    }
+
+    /// SMOODEV-3364. The shared vectors every SDK's `tool_argument_keys` port
+    /// asserts verbatim.
+    #[test]
+    fn tool_argument_keys_never_carry_values() {
+        let vectors = [
+            (
+                r#"{"name":"Jane Customer","email":"jane@example.com","phone":"(317) 555-0142"}"#,
+                "email,name,phone",
+            ),
+            (r#"{"b":1,"a":{"nested":"jane@example.com"}}"#, "a,b"),
+            ("{}", ""),
+            ("null", ""),
+            ("", ""),
+            (r#"["jane@example.com"]"#, "<array>"),
+            (r#""jane@example.com""#, "<scalar>"),
+            (r#"{"email":"jane@exa"#, "<unparsed>"),
+        ];
+        for (input, expected) in vectors {
+            let out = tool_argument_keys(input);
+            assert_eq!(out, expected, "input {input:?}");
+            for raw in ["jane@example.com", "Jane Customer", "555-0142"] {
+                assert!(!out.contains(raw), "{raw:?} leaked from {input:?}: {out}");
+            }
+        }
     }
 
     #[test]

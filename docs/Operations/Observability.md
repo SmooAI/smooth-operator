@@ -108,7 +108,7 @@ carrying:
 | `gen_ai.conversation.id`     | the `conversation_id` arg                   |
 | `smooai.org_id`              | the turn's `org_id` (streaming path only)   |
 | `gen_ai.tool.name`           | `ToolCallComplete.tool_name`                |
-| `gen_ai.tool.call.arguments` | the matching `ToolCallStart.arguments`, **redacted** (see below) and length-capped |
+| `gen_ai.tool.argument_keys`  | the sorted top-level KEY NAMES of the matching `ToolCallStart.arguments` — **never the values** (see below) |
 | `duration_ms`                | `ToolCallComplete.duration_ms` (wall clock) |
 | `is_error`                   | `ToolCallComplete.is_error`                 |
 | `otel.status_code` / `otel.status_message` | set to `ERROR` + the tool's error text when `is_error` — so a failed tool call surfaces as an OTLP span with error status |
@@ -128,14 +128,32 @@ tool spans were **discarded at ingest** — `operation_name = 'tool'` had zero
 rows, all time, while the emitter looked healthy. The ingest now also accepts a
 `gen_ai.`-prefixed span name, but the span carries the attributes regardless.
 
-**Argument redaction.** `telemetry::redact_tool_arguments` parses the JSON args
-and replaces the value of any object key whose name looks secret-bearing
-(`secret`, `token`, `password`, `api_key`, `authorization`, `bearer`,
-`credential`, `access_key`, `private_key`, …) with `"[REDACTED]"` before the
-string ever reaches a span. It is a best-effort scrub keyed on argument *names*,
-not a value scanner — a secret under an innocuous key still lands (Narc's
-value-pattern detection is the deeper net). Non-JSON args pass through as-is;
-everything is capped at 2 KiB.
+**Argument key names, never values (SMOODEV-3364).** The span used to record
+`gen_ai.tool.call.arguments` — the JSON args run through
+`telemetry::redact_tool_arguments`, which masks only secret-NAMED keys (`secret`,
+`token`, `password`, `api_key`, …). Tool arguments are customer data: a CRM
+write carries a person's name, email, phone and address, a message tool carries
+the body. A denylist of key names leaves all of it in place, so every
+exporter's trace store received it verbatim. No pattern matcher recognises a
+name or a note either, so the value is not carried at all.
+
+`telemetry::tool_argument_keys` records the argument SHAPE instead: a JSON
+object yields its top-level keys, sorted and comma-joined (`email,name,phone`);
+`null` or empty args yield `""`; an array yields `<array>`, any other scalar
+`<scalar>`, and unparseable input `<unparsed>`. "Did the update include
+`phone`?" stays answerable; the phone number is not stored. All five servers
+record the same attribute and assert the same test vectors.
+`redact_tool_arguments` stays exported for hosts that reference it; no span uses
+it.
+
+**One span per call — `ToolProvider::traces_own_tools`.** A host that wraps its
+own tools in a tracing decorator (real start/end times, result size, an
+`exception` event) returns `true` from `ToolProvider::traces_own_tools()`, and
+the runner skips its own span for those tools. Without it every host tool call
+produced two `gen_ai.tool` spans — one from the decorator, one from the runner —
+and every "N tool calls" count doubled. Built-in and extension tools keep the
+runner's span; an extension tool that replaces a same-named host tool gets it
+back. Default `false`. Rust-first.
 
 The attribute-name constants (`GEN_AI_SYSTEM`, `GEN_AI_REQUEST_MODEL`,
 `SMOOAI_ORG_ID`, …) and the span names (`SPAN_CHAT` = `gen_ai.chat`,

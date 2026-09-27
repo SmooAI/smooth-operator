@@ -10,7 +10,8 @@ namespace SmooAI.SmoothOperator.Server;
 /// <see cref="GenAiRequestModel"/>, <see cref="GenAiConversationId"/>, <see cref="GenAiAgentName"/>,
 /// and — on completion — <see cref="GenAiUsageInputTokens"/> / <see cref="GenAiUsageOutputTokens"/>.
 /// Each tool call opens a child <see cref="SpanTool"/> (<c>gen_ai.tool</c>) activity carrying
-/// <see cref="GenAiToolName"/> and the (redacted) <see cref="GenAiToolArguments"/>.
+/// <see cref="GenAiToolName"/> and the argument KEY NAMES (<see cref="GenAiToolArgumentKeys"/>) — never
+/// the argument values (SMOODEV-3364).
 /// <para>
 /// The attribute keys are the canonical GenAI semantic-convention names, byte-identical to the Rust
 /// telemetry module, so the observability studio groups Rust + .NET turns together. Registration is
@@ -37,7 +38,22 @@ public static class Telemetry
     public const string GenAiUsageInputTokens = "gen_ai.usage.input_tokens";
     public const string GenAiUsageOutputTokens = "gen_ai.usage.output_tokens";
     public const string GenAiToolName = "gen_ai.tool.name";
+
+    /// <summary>
+    /// <c>gen_ai.tool.call.arguments</c> — the tool's JSON arguments. Kept for API compatibility, but
+    /// the tool span NO LONGER records it (SMOODEV-3364): argument values are customer PII — names,
+    /// emails, phones, addresses in CRM writes — and a secret-NAME denylist cannot catch them. See
+    /// <see cref="GenAiToolArgumentKeys"/>.
+    /// </summary>
     public const string GenAiToolArguments = "gen_ai.tool.call.arguments";
+
+    /// <summary>
+    /// <c>gen_ai.tool.argument_keys</c> — the sorted top-level argument KEY NAMES of a tool call (see
+    /// <see cref="ToolArgumentKeys"/>). What the tool span records instead of the values: "did the
+    /// update include <c>phone</c>?" stays answerable; the number is not stored.
+    /// </summary>
+    public const string GenAiToolArgumentKeys = "gen_ai.tool.argument_keys";
+
     public const string GenAiAgentName = "gen_ai.agent.name";
 
     /// <summary>
@@ -99,10 +115,47 @@ public static class Telemetry
     };
 
     /// <summary>
-    /// Redact a tool's serialized JSON arguments for span recording — the C# port of the Rust
+    /// The sorted top-level key names of a tool's serialized JSON arguments, comma-joined — the C# port
+    /// of the Rust <c>tool_argument_keys</c>. NEVER returns a value: a JSON object yields its keys (ordinal
+    /// order); <c>null</c> or empty input yields <c>""</c>; an array <c>"&lt;array&gt;"</c>; any other scalar
+    /// <c>"&lt;scalar&gt;"</c>; unparseable input <c>"&lt;unparsed&gt;"</c>.
+    /// </summary>
+    public static string ToolArgumentKeys(string arguments)
+    {
+        if (string.IsNullOrWhiteSpace(arguments))
+        {
+            return string.Empty;
+        }
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(arguments);
+            var root = doc.RootElement;
+            return root.ValueKind switch
+            {
+                System.Text.Json.JsonValueKind.Object => string.Join(
+                    ",",
+                    root.EnumerateObject().Select(p => p.Name).Distinct(StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal)),
+                System.Text.Json.JsonValueKind.Null => string.Empty,
+                System.Text.Json.JsonValueKind.Array => "<array>",
+                _ => "<scalar>",
+            };
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return "<unparsed>";
+        }
+    }
+
+    /// <summary>
+    /// Redact a tool's serialized JSON arguments — the C# port of the Rust
     /// <c>redact_tool_arguments</c>. Walks parsed JSON and replaces the value of any object key whose
     /// name looks secret-bearing (substring, case-insensitive) with <c>"[REDACTED]"</c>; non-JSON
     /// input passes through as-is. Always length-capped at <see cref="MaxToolArgsLen"/>.
+    /// <para>
+    /// Spans no longer record argument values at all (SMOODEV-3364) — they record
+    /// <see cref="ToolArgumentKeys"/> — because the values are customer PII that no name-keyed
+    /// denylist can catch. Kept for API compatibility.
+    /// </para>
     /// </summary>
     public static string RedactToolArguments(string arguments)
     {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -35,8 +36,15 @@ const (
 	GenAIUsageOutputTokens = "gen_ai.usage.output_tokens"
 	// GenAIToolName is `gen_ai.tool.name` — the name of an invoked tool.
 	GenAIToolName = "gen_ai.tool.name"
-	// GenAIToolArguments is `gen_ai.tool.call.arguments` — the (redacted) JSON tool args.
+	// GenAIToolArguments is `gen_ai.tool.call.arguments` — the JSON tool args. Kept for
+	// API compatibility, but the tool span NO LONGER records it (SMOODEV-3364): argument
+	// values are customer PII — names, emails, phones, addresses in CRM writes — and a
+	// secret-NAME denylist cannot catch them. See GenAIToolArgumentKeys.
 	GenAIToolArguments = "gen_ai.tool.call.arguments"
+	// GenAIToolArgumentKeys is `gen_ai.tool.argument_keys` — the sorted top-level argument
+	// KEY NAMES of a tool call (see toolArgumentKeys). What the tool span records instead of
+	// the values: "did the update include `phone`?" stays answerable; the number is not stored.
+	GenAIToolArgumentKeys = "gen_ai.tool.argument_keys"
 	// GenAIAgentName is `gen_ai.agent.name` — the agent/persona driving the turn.
 	GenAIAgentName = "gen_ai.agent.name"
 	// SmooaiOrgID is `smooai.org_id` — the owning org. Matches the monorepo TS chat
@@ -97,10 +105,6 @@ const DefaultModel = "gpt-6-luna"
 // a real OTLP exporter. Matches the Rust server's OTLP_ENDPOINT_ENV gate.
 const otlpEndpointEnv = "OTEL_EXPORTER_OTLP_ENDPOINT"
 
-// maxToolArgsLen caps a serialized tool-arguments string recorded on a span so a
-// pathological argument blob can't bloat span export. Matches the Rust MAX_TOOL_ARGS_LEN.
-const maxToolArgsLen = 2048
-
 var initTelemetryOnce sync.Once
 
 // InitTelemetry installs an OTLP (HTTP) span exporter when OTEL_EXPORTER_OTLP_ENDPOINT is
@@ -138,78 +142,31 @@ func InitTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	return shutdown, err
 }
 
-// redactToolArguments redacts a tool's serialized JSON arguments for span recording,
-// then length-caps the result. A Go port of the Rust telemetry.rs `redact_tool_arguments`:
-// it walks parsed JSON and replaces the value of any object key whose name looks
-// secret-bearing with "[REDACTED]". Non-JSON input is passed through as-is (still capped).
-//
-// This is a best-effort scrub keyed on argument NAMES, not a secret scanner — a secret
-// passed under an innocuous key still lands.
-func redactToolArguments(arguments string) string {
+// toolArgumentKeys returns the sorted top-level key names of a tool's serialized JSON
+// arguments, comma-joined — a Go port of the Rust telemetry.rs `tool_argument_keys`. It
+// NEVER returns a value: a JSON object yields its keys; `null` or empty input yields "";
+// an array "<array>"; any other scalar "<scalar>"; unparseable input "<unparsed>".
+func toolArgumentKeys(arguments string) string {
+	if strings.TrimSpace(arguments) == "" {
+		return ""
+	}
 	var value any
 	if err := json.Unmarshal([]byte(arguments), &value); err != nil {
-		// Not JSON — record the raw string; still length-capped below.
-		return truncateRunes(arguments, maxToolArgsLen)
+		return "<unparsed>"
 	}
-	redactJSONInPlace(&value)
-	out, err := json.Marshal(value)
-	if err != nil {
-		return truncateRunes(arguments, maxToolArgsLen)
-	}
-	return truncateRunes(string(out), maxToolArgsLen)
-}
-
-// isSecretKey reports whether an object key name looks like it holds a secret value.
-// The needle set matches the Rust telemetry.rs is_secret_key.
-func isSecretKey(key string) bool {
-	needles := []string{
-		"secret", "token", "password", "api_key", "apikey",
-		"authorization", "bearer", "credential", "access_key", "private_key",
-	}
-	lower := strings.ToLower(key)
-	for _, n := range needles {
-		if strings.Contains(lower, n) {
-			return true
-		}
-	}
-	return false
-}
-
-// redactJSONInPlace recursively replaces secret-named object values with "[REDACTED]".
-func redactJSONInPlace(value *any) {
-	switch v := (*value).(type) {
+	switch v := value.(type) {
+	case nil:
+		return ""
 	case map[string]any:
+		keys := make([]string, 0, len(v))
 		for k := range v {
-			if isSecretKey(k) {
-				v[k] = "[REDACTED]"
-				continue
-			}
-			child := v[k]
-			redactJSONInPlace(&child)
-			v[k] = child
+			keys = append(keys, k)
 		}
+		sort.Strings(keys)
+		return strings.Join(keys, ",")
 	case []any:
-		for i := range v {
-			child := v[i]
-			redactJSONInPlace(&child)
-			v[i] = child
-		}
+		return "<array>"
+	default:
+		return "<scalar>"
 	}
 }
-
-// truncateRunes caps s to at most max bytes on a rune boundary, appending "…" when cut.
-// Mirrors the Rust telemetry.rs `truncate`.
-func truncateRunes(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	end := max
-	for end > 0 && !utf8RuneStart(s[end]) {
-		end--
-	}
-	return s[:end] + "…"
-}
-
-// utf8RuneStart reports whether b is not a UTF-8 continuation byte (i.e. a rune boundary
-// starts at it) — the analog of Rust's str::is_char_boundary for a byte index.
-func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }

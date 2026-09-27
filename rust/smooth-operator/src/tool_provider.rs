@@ -204,6 +204,18 @@ impl ToolProviderContext {
 pub trait ToolProvider: Send + Sync {
     /// The extra tools to merge into this turn's registry. May be empty.
     async fn tools_for(&self, ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>>;
+
+    /// Whether the tools this provider returns emit their OWN `gen_ai.tool` span
+    /// per execution (e.g. a host decorator that records real start/end times,
+    /// result size and an `exception` event). When `true`, the server runner
+    /// does not emit its span for these tools, so each call is traced once — two
+    /// spans per call doubled every tool-call count. Built-in and extension tools
+    /// keep the runner's span either way.
+    ///
+    /// Defaults to `false`: the runner traces every tool, as before.
+    fn traces_own_tools(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

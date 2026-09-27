@@ -13,7 +13,8 @@ turn, carrying :data:`GEN_AI_SYSTEM`, :data:`GEN_AI_REQUEST_MODEL`,
 and — on completion — :data:`GEN_AI_USAGE_INPUT_TOKENS` /
 :data:`GEN_AI_USAGE_OUTPUT_TOKENS` when the engine reported token usage. Each
 tool call opens a child :data:`SPAN_TOOL` (``gen_ai.tool``) carrying
-:data:`GEN_AI_TOOL_NAME` and the redacted :data:`GEN_AI_TOOL_ARGUMENTS`.
+:data:`GEN_AI_TOOL_NAME` and the argument KEY NAMES
+(:data:`GEN_AI_TOOL_ARGUMENT_KEYS`) — never the argument values (SMOODEV-3364).
 
 ## Exporter gating (no collector needed for tests/binaries)
 :func:`init_telemetry` installs an OTLP exporter **only** when
@@ -49,8 +50,15 @@ GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 #: ``gen_ai.tool.name`` — the name of an invoked tool.
 GEN_AI_TOOL_NAME = "gen_ai.tool.name"
-#: ``gen_ai.tool.call.arguments`` — the (redacted) JSON arguments passed to a tool.
+#: ``gen_ai.tool.call.arguments`` — the JSON arguments passed to a tool. Kept for API
+#: compatibility, but the tool span NO LONGER records it (SMOODEV-3364): argument
+#: values are customer PII — names, emails, phones, addresses in CRM writes — and a
+#: secret-NAME denylist cannot catch them. See :data:`GEN_AI_TOOL_ARGUMENT_KEYS`.
 GEN_AI_TOOL_ARGUMENTS = "gen_ai.tool.call.arguments"
+#: ``gen_ai.tool.argument_keys`` — the sorted top-level argument KEY NAMES of a tool
+#: call (see :func:`tool_argument_keys`). What the tool span records instead of the
+#: values: "did the update include ``phone``?" stays answerable; the number is not stored.
+GEN_AI_TOOL_ARGUMENT_KEYS = "gen_ai.tool.argument_keys"
 #: ``gen_ai.agent.name`` — the agent/persona driving the turn.
 GEN_AI_AGENT_NAME = "gen_ai.agent.name"
 #: ``smooai.org_id`` — the owning org. Matches the monorepo TS chat handler so the
@@ -130,12 +138,16 @@ def _redact_in_place(value: object) -> None:
 
 
 def redact_tool_arguments(arguments: str) -> str:
-    """Redact a tool's serialized JSON arguments for span recording.
+    """Redact a tool's serialized JSON arguments.
 
     Best-effort scrub keyed on argument *names* (mirrors the Rust
     ``redact_tool_arguments``): the value of any object key whose name looks
     secret-bearing is replaced with ``"[REDACTED]"``. Non-JSON input passes
     through as-is. The result is always length-capped at :data:`MAX_TOOL_ARGS_LEN`.
+
+    Spans no longer record argument values at all (SMOODEV-3364) — they record
+    :func:`tool_argument_keys` — because the values are customer PII that no
+    name-keyed denylist can catch. Kept for API compatibility.
     """
     try:
         parsed = json.loads(arguments)
@@ -147,6 +159,28 @@ def redact_tool_arguments(arguments: str) -> str:
     if len(redacted) > MAX_TOOL_ARGS_LEN:
         return redacted[:MAX_TOOL_ARGS_LEN] + "…"
     return redacted
+
+
+def tool_argument_keys(arguments: str) -> str:
+    """The sorted top-level key names of a tool's serialized JSON arguments, comma-joined.
+
+    Mirrors the Rust ``tool_argument_keys``. NEVER returns a value: a JSON object
+    yields its keys; ``null`` or empty input yields ``""``; an array ``"<array>"``;
+    any other scalar ``"<scalar>"``; unparseable input ``"<unparsed>"``.
+    """
+    if not arguments or not arguments.strip():
+        return ""
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError):
+        return "<unparsed>"
+    if parsed is None:
+        return ""
+    if isinstance(parsed, dict):
+        return ",".join(sorted(parsed.keys()))
+    if isinstance(parsed, list):
+        return "<array>"
+    return "<scalar>"
 
 
 def tracer() -> trace.Tracer:

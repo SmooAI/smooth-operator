@@ -175,7 +175,8 @@ public sealed class TurnRunner
         toolSpan.SetTag(Telemetry.GenAiConversationId, conversationId);
         toolSpan.SetTag(Telemetry.GenAiToolName, call.Name);
         var args = call.Arguments is null ? "{}" : JsonSerializer.Serialize(call.Arguments);
-        toolSpan.SetTag(Telemetry.GenAiToolArguments, Telemetry.RedactToolArguments(args));
+        // Argument KEY NAMES only — the values are customer PII (SMOODEV-3364).
+        toolSpan.SetTag(Telemetry.GenAiToolArgumentKeys, Telemetry.ToolArgumentKeys(args));
     }
 
     /// <summary>The configured preamble model id, or <c>null</c> when the feature is off (env unset,

@@ -7,8 +7,8 @@ emits:
 
 1. A ``gen_ai.chat`` turn span carrying ``gen_ai.system``, ``gen_ai.request.model``,
    ``gen_ai.conversation.id``, ``gen_ai.agent.name``, and ``smooai.org_id``.
-2. A child ``gen_ai.tool`` span carrying ``gen_ai.tool.name`` and the (redacted)
-   ``gen_ai.tool.call.arguments`` the model passed.
+2. A child ``gen_ai.tool`` span carrying ``gen_ai.tool.name`` and the argument KEY
+   NAMES (``gen_ai.tool.argument_keys``) — never the argument values (SMOODEV-3364).
 """
 
 from __future__ import annotations
@@ -84,12 +84,16 @@ async def test_turn_emits_gen_ai_spans_with_org_and_tool_args(span_exporter: InM
     assert chat.attributes[telemetry.GEN_AI_AGENT_NAME] == telemetry.AGENT_NAME
     assert chat.attributes[telemetry.SMOOAI_ORG_ID] == "org-telemetry"
 
-    # (2) A child tool span with the tool name + arguments, parented to the turn span.
+    # (2) A child tool span with the tool name + argument KEY NAMES only, parented to
+    # the turn span. SMOODEV-3364: argument values are customer PII, so the span
+    # carries the shape of the call and never its content.
     assert telemetry.SPAN_TOOL in spans, f"expected a gen_ai.tool span; got {list(spans)}"
     tool = spans[telemetry.SPAN_TOOL]
     assert tool.attributes[telemetry.GEN_AI_TOOL_NAME] == "knowledge_search"
-    args = tool.attributes[telemetry.GEN_AI_TOOL_ARGUMENTS]
-    assert "return policy refund window" in args, f"tool args should carry the query; got {args!r}"
+    assert tool.attributes[telemetry.GEN_AI_TOOL_ARGUMENT_KEYS] == "query"
+    assert telemetry.GEN_AI_TOOL_ARGUMENTS not in tool.attributes
+    for key, value in tool.attributes.items():
+        assert "return policy refund window" not in str(value), f"span attribute {key} leaked the argument value"
     assert tool.parent is not None and tool.parent.span_id == chat.context.span_id
 
     # Being a child is NOT enough. The OTLP ingest builds a span's attributes from the
@@ -124,3 +128,21 @@ def test_redact_tool_arguments_scrubs_secret_named_keys() -> None:
     assert telemetry.redact_tool_arguments("not json") == "not json"
     long = "x" * (telemetry.MAX_TOOL_ARGS_LEN + 50)
     assert len(telemetry.redact_tool_arguments(long)) <= telemetry.MAX_TOOL_ARGS_LEN + 1
+
+
+def test_tool_argument_keys_never_carry_values() -> None:
+    vectors = [
+        ('{"name":"Jane Customer","email":"jane@example.com","phone":"(317) 555-0142"}', "email,name,phone"),
+        ('{"b":1,"a":{"nested":"jane@example.com"}}', "a,b"),
+        ("{}", ""),
+        ("null", ""),
+        ("", ""),
+        ('["jane@example.com"]', "<array>"),
+        ('"jane@example.com"', "<scalar>"),
+        ('{"email":"jane@exa', "<unparsed>"),
+    ]
+    for raw_input, expected in vectors:
+        out = telemetry.tool_argument_keys(raw_input)
+        assert out == expected, f"tool_argument_keys({raw_input!r}) = {out!r}"
+        for raw in ("jane@example.com", "Jane Customer", "555-0142"):
+            assert raw not in out
