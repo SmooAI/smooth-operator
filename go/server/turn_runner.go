@@ -499,7 +499,8 @@ consume:
 			attribute.String(GenAIOperationName, OperationTool),
 			attribute.String(GenAIConversationID, conversationID),
 			attribute.String(GenAIToolName, rec.name),
-			attribute.String(GenAIToolArguments, redactToolArguments(rec.arguments)),
+			// Argument KEY NAMES only — the values are customer PII (SMOODEV-3364).
+			attribute.String(GenAIToolArgumentKeys, toolArgumentKeys(rec.arguments)),
 			attribute.Int64("duration_ms", rec.durationMs),
 			attribute.Bool("is_error", rec.isError),
 		}

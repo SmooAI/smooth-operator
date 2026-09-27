@@ -7,29 +7,34 @@
 //! 1. A `gen_ai.chat` turn span carrying `gen_ai.system`, `gen_ai.request.model`,
 //!    `gen_ai.conversation.id`, `gen_ai.agent.name`, and `smooai.org_id` (the
 //!    monorepo TS chat handler's org attribute, so the studio groups by org).
-//! 2. A child `gen_ai.tool` span carrying `gen_ai.tool.name` and the (redacted)
-//!    `gen_ai.tool.call.arguments` the model passed — plus its OWN copy of
+//! 2. A child `gen_ai.tool` span carrying `gen_ai.tool.name` and the argument
+//!    KEY NAMES (`gen_ai.tool.argument_keys`) — never the argument values, which
+//!    are customer PII (SMOODEV-3364) — plus its OWN copy of
 //!    `gen_ai.system`, `gen_ai.operation.name`, `gen_ai.conversation.id` and
 //!    `smooai.org_id`, since the OTLP ingest does not inherit attributes from a
 //!    parent span.
 //! 3. `gen_ai.usage.cost_usd` on the turn span when the gateway reported a
 //!    cost — and NO such attribute when it didn't, so an unpriced turn reads as
 //!    "not measured" instead of a confident `$0.00`.
+//! 4. No runner `gen_ai.tool` span for a host tool whose provider traces it
+//!    itself (`ToolProvider::traces_own_tools`) — one call, one span.
 
 #![allow(clippy::missing_panics_doc)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::mpsc::unbounded_channel;
 
 use smooth_operator::access_control::AccessContext;
 use smooth_operator::adapter::StorageAdapter;
+use smooth_operator::tool_provider::{ToolProvider, ToolProviderContext};
 use smooth_operator_adapter_memory::InMemoryStorageAdapter;
 use smooth_operator_core::llm::{StreamEvent, Usage};
 use smooth_operator_core::llm_provider::MockLlmClient;
-use smooth_operator_core::{Document, DocumentType, LlmConfig};
+use smooth_operator_core::{Document, DocumentType, LlmConfig, Tool, ToolSchema};
 use smooth_operator_server::runner::{self, TurnRequest};
 
 use tracing::field::{Field, Visit};
@@ -261,7 +266,9 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
         chat.fields
     );
 
-    // (2) A child tool span with the tool name + redacted arguments.
+    // (2) A child tool span with the tool name + argument KEY NAMES — never the
+    // values (SMOODEV-3364: a CRM write's arguments are a customer's name,
+    // email, phone and address).
     let tool = spans
         .iter()
         .find(|s| s.name == "gen_ai.tool")
@@ -270,14 +277,26 @@ async fn streaming_turn_emits_gen_ai_spans_with_org_and_tool_args() {
         tool.fields.get("gen_ai.tool.name").map(String::as_str),
         Some("knowledge_search")
     );
-    let args = tool
-        .fields
-        .get("gen_ai.tool.call.arguments")
-        .map(String::as_str)
-        .unwrap_or_default();
+    assert_eq!(
+        tool.fields
+            .get("gen_ai.tool.argument_keys")
+            .map(String::as_str),
+        Some("query"),
+        "the argument SHAPE must survive; fields: {:?}",
+        tool.fields
+    );
     assert!(
-        args.contains("return policy refund window"),
-        "tool arguments should carry the model's query; got: {args:?}"
+        !tool.fields.contains_key("gen_ai.tool.call.arguments"),
+        "the tool span must not carry argument values; fields: {:?}",
+        tool.fields
+    );
+    assert!(
+        !tool
+            .fields
+            .values()
+            .any(|v| v.contains("return policy refund window")),
+        "the model's argument value leaked into a span field: {:?}",
+        tool.fields
     );
 
     // (3) The tool span repeats the identifiers itself. The OTLP ingest merges
@@ -514,5 +533,130 @@ async fn fabricated_usage_omits_both_token_counts() {
         "a locally-priced turn must be labelled an estimate, not passed off as \
          the gateway's figure; fields: {:?}",
         chat.fields
+    );
+}
+
+/// A host tool standing in for a CRM write the host decorator already traces.
+struct HostCrmTool;
+
+#[async_trait]
+impl Tool for HostCrmTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "host_crm_create_contact".into(),
+            description: "Create a contact in the host CRM.".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+    async fn execute(&self, _arguments: serde_json::Value) -> anyhow::Result<String> {
+        Ok("created".into())
+    }
+}
+
+/// Contributes [`HostCrmTool`], declaring whether it traces its own calls.
+struct HostProvider {
+    traces_own_tools: bool,
+}
+
+#[async_trait]
+impl ToolProvider for HostProvider {
+    async fn tools_for(&self, _ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
+        vec![Arc::new(HostCrmTool) as Arc<dyn Tool>]
+    }
+    fn traces_own_tools(&self) -> bool {
+        self.traces_own_tools
+    }
+}
+
+/// Drive one turn that calls the host tool AND the built-in `knowledge_search`,
+/// and return the names of the runner's `gen_ai.tool` spans.
+async fn runner_tool_span_names(traces_own_tools: bool) -> Vec<String> {
+    let sink: SpanSink = Arc::new(Mutex::new(Vec::new()));
+    let layer = CapturingLayer {
+        sink: Arc::clone(&sink),
+        index: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockLlmClient::new();
+    mock.push_stream(vec![
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call_crm_1".into(),
+            name: "host_crm_create_contact".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            arguments_chunk: json!({ "email": "jane@example.com" }).to_string(),
+        },
+        StreamEvent::ToolCallStart {
+            index: 1,
+            id: "call_kb_1".into(),
+            name: "knowledge_search".into(),
+        },
+        StreamEvent::ToolCallArgumentsDelta {
+            index: 1,
+            arguments_chunk: json!({ "query": "return policy" }).to_string(),
+        },
+        StreamEvent::Done {
+            finish_reason: "tool_calls".into(),
+        },
+    ])
+    .push_stream(vec![
+        StreamEvent::Delta {
+            content: "Done.".into(),
+        },
+        StreamEvent::Done {
+            finish_reason: "stop".into(),
+        },
+    ]);
+
+    let (tx, mut rx) = unbounded_channel::<serde_json::Value>();
+    runner::run_streaming_turn(
+        TurnRequest {
+            llm_provider: Some(Arc::new(mock.clone())),
+            tool_provider: Some(Arc::new(HostProvider { traces_own_tools })),
+            ..base_turn_request()
+        },
+        &tx,
+    )
+    .await
+    .expect("run_streaming_turn");
+    drop(tx);
+    while rx.try_recv().is_ok() {}
+
+    let spans = sink.lock().expect("sink poisoned").clone();
+    let mut names: Vec<String> = spans
+        .iter()
+        .filter(|s| s.name == "gen_ai.tool")
+        .filter_map(|s| s.fields.get("gen_ai.tool.name").cloned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// SMOODEV-3364: a host decorator AND the runner each emitted a `gen_ai.tool`
+/// span for the same call, doubling every tool-call count. A provider that
+/// traces its own tools suppresses the runner's span for THOSE tools only; the
+/// built-in `knowledge_search` keeps its span.
+#[tokio::test]
+async fn self_traced_host_tools_get_no_runner_span() {
+    assert_eq!(
+        runner_tool_span_names(true).await,
+        vec!["knowledge_search".to_string()]
+    );
+}
+
+/// The default (`traces_own_tools() == false`) keeps today's behaviour: the
+/// runner traces every tool, host tools included.
+#[tokio::test]
+async fn host_tools_keep_the_runner_span_by_default() {
+    assert_eq!(
+        runner_tool_span_names(false).await,
+        vec![
+            "host_crm_create_contact".to_string(),
+            "knowledge_search".to_string()
+        ]
     );
 }

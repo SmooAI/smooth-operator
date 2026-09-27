@@ -8,8 +8,8 @@
  *
  * 1. A `gen_ai.chat` span carrying `gen_ai.system`, `gen_ai.request.model`,
  *    `gen_ai.conversation.id`, `gen_ai.agent.name`, and `smooai.org_id`.
- * 2. A child `gen_ai.tool` span carrying `gen_ai.tool.name` and the (redacted)
- *    `gen_ai.tool.call.arguments` the model passed.
+ * 2. A child `gen_ai.tool` span carrying `gen_ai.tool.name` and the argument KEY NAMES
+ *    (`gen_ai.tool.argument_keys`) — never the argument values (SMOODEV-3364).
  */
 import { MockLlmProvider } from '@smooai/smooth-operator-core';
 import { trace } from '@opentelemetry/api';
@@ -18,7 +18,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import type { Frame } from '../src/protocol.js';
 import { InMemorySessionStore } from '../src/sessionStore.js';
-import { redactToolArguments } from '../src/telemetry.js';
+import { redactToolArguments, toolArgumentKeys } from '../src/telemetry.js';
 import { TurnRunner } from '../src/turnRunner.js';
 
 const exporter = new InMemorySpanExporter();
@@ -55,11 +55,17 @@ describe('TurnRunner GenAI OTel spans', () => {
         expect(attr(chatSpan!, 'gen_ai.agent.name')).toBe('smooth-agent-chat');
         expect(attr(chatSpan!, 'smooai.org_id')).toBe('org-telemetry');
 
-        // (2) A child tool span with the tool name + the model's arguments.
+        // (2) A child tool span with the tool name + the argument KEY NAMES only.
+        // SMOODEV-3364: argument values are customer PII, so the span carries the
+        // shape of the call and never its content.
         const toolSpan = spans.find((s) => s.name === 'gen_ai.tool');
         expect(toolSpan, 'expected a gen_ai.tool span').toBeDefined();
         expect(attr(toolSpan!, 'gen_ai.tool.name')).toBe('knowledge_search');
-        expect(String(attr(toolSpan!, 'gen_ai.tool.call.arguments'))).toContain('return policy refund window');
+        expect(attr(toolSpan!, 'gen_ai.tool.argument_keys')).toBe('query');
+        expect(attr(toolSpan!, 'gen_ai.tool.call.arguments')).toBeUndefined();
+        for (const [key, value] of Object.entries(toolSpan!.attributes)) {
+            expect(String(value), `span attribute ${key} leaked the argument value`).not.toContain('return policy refund window');
+        }
 
         // The tool span is a child of the turn span (same trace).
         expect(toolSpan!.spanContext().traceId).toBe(chatSpan!.spanContext().traceId);
@@ -102,5 +108,27 @@ describe('redactToolArguments', () => {
 
     it('passes non-JSON through as-is', () => {
         expect(redactToolArguments('not json')).toBe('not json');
+    });
+});
+
+describe('toolArgumentKeys', () => {
+    it('tool_argument_keys_never_carry_values', () => {
+        const vectors: Array<[string, string]> = [
+            ['{"name":"Jane Customer","email":"jane@example.com","phone":"(317) 555-0142"}', 'email,name,phone'],
+            ['{"b":1,"a":{"nested":"jane@example.com"}}', 'a,b'],
+            ['{}', ''],
+            ['null', ''],
+            ['', ''],
+            ['["jane@example.com"]', '<array>'],
+            ['"jane@example.com"', '<scalar>'],
+            ['{"email":"jane@exa', '<unparsed>'],
+        ];
+        for (const [input, expected] of vectors) {
+            const out = toolArgumentKeys(input);
+            expect(out, `toolArgumentKeys(${input})`).toBe(expected);
+            for (const raw of ['jane@example.com', 'Jane Customer', '555-0142']) {
+                expect(out).not.toContain(raw);
+            }
+        }
     });
 });

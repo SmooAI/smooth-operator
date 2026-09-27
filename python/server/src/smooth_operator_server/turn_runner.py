@@ -802,7 +802,8 @@ def _record_turn_usage(turn_span: Any, prompt: int, completion: int, cost_usd: f
 
 def _emit_tool_span(event: ToolCallEvent, conversation_id: str, org_id: str | None) -> None:
     """Emit a ``gen_ai.tool`` child span for a tool call, carrying the tool name and
-    the redacted JSON arguments (mirrors the Rust runner's per-tool child span). The
+    the argument KEY NAMES — never the values, which are customer PII (SMOODEV-3364)
+    (mirrors the Rust runner's per-tool child span). The
     span opens as a child of the current ``gen_ai.chat`` turn span and closes
     immediately — a marker, not a duration measured around execution (the engine owns
     tool execution). No-op cost until a tracer provider is installed.
@@ -817,7 +818,7 @@ def _emit_tool_span(event: ToolCallEvent, conversation_id: str, org_id: str | No
         telemetry.GEN_AI_OPERATION_NAME: telemetry.OPERATION_TOOL,
         telemetry.GEN_AI_CONVERSATION_ID: conversation_id,
         telemetry.GEN_AI_TOOL_NAME: event.name,
-        telemetry.GEN_AI_TOOL_ARGUMENTS: telemetry.redact_tool_arguments(event.arguments or ""),
+        telemetry.GEN_AI_TOOL_ARGUMENT_KEYS: telemetry.tool_argument_keys(event.arguments or ""),
     }
     if org_id:
         attributes[telemetry.SMOOAI_ORG_ID] = org_id

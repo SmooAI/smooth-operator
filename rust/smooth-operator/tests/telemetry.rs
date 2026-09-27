@@ -7,8 +7,9 @@
 //! 1. A `gen_ai.chat` span is recorded carrying the GenAI semantic-convention
 //!    attributes `gen_ai.system`, `gen_ai.request.model`, and
 //!    `gen_ai.conversation.id`.
-//! 2. A per-tool span (`gen_ai.tool`) is recorded with `gen_ai.tool.name` when
-//!    a tool fires during the turn, carrying its OWN `gen_ai.system`,
+//! 2. A per-tool span (`gen_ai.tool`) is recorded with `gen_ai.tool.name` and the
+//!    argument KEY NAMES (never values — SMOODEV-3364) when a tool fires during
+//!    the turn, carrying its OWN `gen_ai.system`,
 //!    `gen_ai.operation.name` and `gen_ai.conversation.id` — the OTLP ingest
 //!    merges resource attrs with the span's own and inherits nothing from the
 //!    parent, so a bare child span is unjoinable (and, without `gen_ai.system`,
@@ -204,7 +205,7 @@ async fn run_turn_records_gen_ai_spans() {
     );
 
     // (2) A tool span fired for the knowledge_search call, carrying the tool
-    //     name AND the (redacted) arguments the model passed.
+    //     name AND the argument KEY NAMES — never the values the model passed.
     let tool = spans
         .iter()
         .find(|s| s.name == "gen_ai.tool")
@@ -215,14 +216,26 @@ async fn run_turn_records_gen_ai_spans() {
         "gen_ai.tool.name should name the fired tool; span fields: {:?}",
         tool.fields
     );
-    let args = tool
-        .fields
-        .get("gen_ai.tool.call.arguments")
-        .map(String::as_str)
-        .unwrap_or_default();
+    assert_eq!(
+        tool.fields
+            .get("gen_ai.tool.argument_keys")
+            .map(String::as_str),
+        Some("query"),
+        "the argument SHAPE must survive; span fields: {:?}",
+        tool.fields
+    );
     assert!(
-        args.contains("return policy refund window"),
-        "gen_ai.tool.call.arguments should carry the model's query; got: {args:?}"
+        !tool.fields.contains_key("gen_ai.tool.call.arguments"),
+        "the tool span must not carry argument values; span fields: {:?}",
+        tool.fields
+    );
+    assert!(
+        !tool
+            .fields
+            .values()
+            .any(|v| v.contains("return policy refund window")),
+        "the model's argument value leaked into a span field: {:?}",
+        tool.fields
     );
 
     // (3) The tool span repeats its identifiers. The OTLP ingest builds a span's

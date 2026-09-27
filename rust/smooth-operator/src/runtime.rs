@@ -22,9 +22,9 @@ use crate::adapter::{MessageQuery, StorageAdapter};
 use crate::curation::{CuratedKnowledgeStore, RetrievalFilter};
 use crate::domain::{Citation, Direction, Message as DomainMessage, MessageContent};
 use crate::telemetry::{
-    record_turn_usage, redact_tool_arguments, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
+    record_turn_usage, tool_argument_keys, AGENT_NAME, COST_UNAVAILABLE, GEN_AI_AGENT_NAME,
     GEN_AI_CONVERSATION_ID, GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
-    GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENTS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_SOURCE,
+    GEN_AI_SYSTEM, GEN_AI_TOOL_ARGUMENT_KEYS, GEN_AI_TOOL_NAME, GEN_AI_USAGE_COST_SOURCE,
     GEN_AI_USAGE_COST_USD, GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS, OPERATION_CHAT,
     OPERATION_TOOL, OTEL_STATUS_CODE, OTEL_STATUS_MESSAGE, SPAN_CHAT, SPAN_TOOL, SYSTEM_NAME,
 };
@@ -595,8 +595,9 @@ impl KnowledgeChatRuntime {
         // independent, named, timed span in the trace. We materialize these from
         // the collected events (rather than inside the event handler) so the
         // spans hang off the turn span without restructuring the runtime. The
-        // arguments come from the matching `ToolCallStart` (redacted); on failure
-        // the span is marked ERROR with the tool's error text.
+        // argument KEY NAMES come from the matching `ToolCallStart` — never the
+        // values, which are customer PII (SMOODEV-3364); on failure the span is
+        // marked ERROR with the tool's error text.
         for event in &outcome.events {
             if let AgentEvent::ToolCallComplete {
                 iteration,
@@ -622,7 +623,7 @@ impl KnowledgeChatRuntime {
                     { GEN_AI_OPERATION_NAME } = OPERATION_TOOL,
                     { GEN_AI_CONVERSATION_ID } = %conversation_id,
                     { GEN_AI_TOOL_NAME } = %tool_name,
-                    { GEN_AI_TOOL_ARGUMENTS } = %redact_tool_arguments(&arguments),
+                    { GEN_AI_TOOL_ARGUMENT_KEYS } = %tool_argument_keys(&arguments),
                     { OTEL_STATUS_CODE } = tracing::field::Empty,
                     { OTEL_STATUS_MESSAGE } = tracing::field::Empty,
                     duration_ms = *duration_ms,

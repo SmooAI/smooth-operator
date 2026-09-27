@@ -6,8 +6,9 @@
  * `gen_ai.request.model`, `gen_ai.conversation.id`, `gen_ai.agent.name`, and
  * `smooai.org_id`; token usage is recorded onto it on completion. Each tool call the
  * engine emits opens a child {@link SPAN_TOOL} (`gen_ai.tool`) span with the tool name
- * and its redacted arguments — matching the Rust reference attribute names so the
- * studio groups the polyglot servers identically.
+ * and its argument KEY NAMES ({@link GEN_AI_TOOL_ARGUMENT_KEYS}) — never the argument
+ * values — matching the Rust reference attribute names so the studio groups the
+ * polyglot servers identically.
  *
  * {@link initTelemetry} is env-gated exactly like the Rust `init_telemetry`: it wires a
  * real OTLP exporter only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Unset ⇒ no
@@ -23,7 +24,19 @@ export const GEN_AI_CONVERSATION_ID = 'gen_ai.conversation.id';
 export const GEN_AI_USAGE_INPUT_TOKENS = 'gen_ai.usage.input_tokens';
 export const GEN_AI_USAGE_OUTPUT_TOKENS = 'gen_ai.usage.output_tokens';
 export const GEN_AI_TOOL_NAME = 'gen_ai.tool.name';
+/**
+ * `gen_ai.tool.call.arguments` — the tool's JSON arguments. Kept exported for API
+ * compatibility, but the tool span NO LONGER records it (SMOODEV-3364): argument
+ * values are customer PII — names, emails, phones, addresses in CRM writes — and a
+ * secret-NAME denylist cannot catch them. See {@link GEN_AI_TOOL_ARGUMENT_KEYS}.
+ */
 export const GEN_AI_TOOL_ARGUMENTS = 'gen_ai.tool.call.arguments';
+/**
+ * `gen_ai.tool.argument_keys` — the sorted top-level argument KEY NAMES of a tool
+ * call (see {@link toolArgumentKeys}). What the tool span records instead of the
+ * values: "did the update include `phone`?" stays answerable, the number is not stored.
+ */
+export const GEN_AI_TOOL_ARGUMENT_KEYS = 'gen_ai.tool.argument_keys';
 export const GEN_AI_AGENT_NAME = 'gen_ai.agent.name';
 export const SMOOAI_ORG_ID = 'smooai.org_id';
 /**
@@ -113,10 +126,14 @@ function truncate(s: string, max: number): string {
 }
 
 /**
- * Redact a tool's serialized JSON arguments for span recording — the TS parity of
+ * Redact a tool's serialized JSON arguments — the TS parity of
  * `telemetry.rs::redact_tool_arguments`. Replaces the value of any object key whose
  * name looks secret-bearing with `"[REDACTED]"`, passes non-JSON through as-is, and
  * always length-caps the result. Best-effort scrub keyed on argument *names*.
+ *
+ * Spans no longer record argument values at all (SMOODEV-3364) — they record
+ * {@link toolArgumentKeys} — because the values are customer PII that no name-keyed
+ * denylist can catch. Kept for API compatibility.
  */
 export function redactToolArguments(argumentsJson: string): string {
     let out: string;
@@ -126,6 +143,30 @@ export function redactToolArguments(argumentsJson: string): string {
         out = argumentsJson;
     }
     return truncate(out, MAX_TOOL_ARGS_LEN);
+}
+
+/**
+ * The sorted top-level key names of a tool's serialized JSON arguments, comma-joined —
+ * the TS parity of `telemetry.rs::tool_argument_keys`. NEVER returns a value: a JSON
+ * object yields its keys; `null` or empty input yields `""`; an array `"<array>"`; any
+ * other scalar `"<scalar>"`; unparseable input `"<unparsed>"`.
+ */
+export function toolArgumentKeys(argumentsJson: string): string {
+    if (argumentsJson.trim() === '') return '';
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(argumentsJson);
+    } catch {
+        return '<unparsed>';
+    }
+    if (parsed === null) return '';
+    if (Array.isArray(parsed)) return '<array>';
+    if (typeof parsed === 'object') {
+        return Object.keys(parsed as Record<string, unknown>)
+            .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+            .join(',');
+    }
+    return '<scalar>';
 }
 
 /** The tracer the turn/tool spans are emitted under. */
@@ -174,7 +215,8 @@ export function recordTurnUsage(turnSpan: Span, usage: { promptTokens: number; c
 
 /**
  * Emit a child `gen_ai.tool` span for one tool call under `turnSpan`, carrying the
- * tool name and redacted arguments. `durationMs`, when known, is recorded too.
+ * tool name and the argument KEY NAMES — never the values (SMOODEV-3364).
+ * `durationMs`, when known, is recorded too.
  */
 export function recordToolSpan(
     turnSpan: Span,
@@ -195,7 +237,7 @@ export function recordToolSpan(
         [GEN_AI_OPERATION_NAME]: OPERATION_TOOL,
         [GEN_AI_CONVERSATION_ID]: conversationId,
         [GEN_AI_TOOL_NAME]: toolName,
-        [GEN_AI_TOOL_ARGUMENTS]: redactToolArguments(argumentsJson),
+        [GEN_AI_TOOL_ARGUMENT_KEYS]: toolArgumentKeys(argumentsJson),
     };
     if (orgId) attributes[SMOOAI_ORG_ID] = orgId;
     if (durationMs !== undefined) attributes.duration_ms = durationMs;
