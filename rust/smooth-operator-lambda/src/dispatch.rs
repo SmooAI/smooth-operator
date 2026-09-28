@@ -619,6 +619,8 @@ async fn send_message(
     // org, so only fall back to the session's persisted org for an anonymous /
     // no-org frame. Behavior-preserving for the single-tenant default (the
     // built-in ACL ignores the org).
+    // The session's agent rides along too (SMOODEV-3292) so the host can narrow
+    // RAG to that agent's configured knowledge.
     let access = {
         let resolved = resolve_frame_access(auth, parsed);
         if resolved.organization_id.is_some() {
@@ -626,7 +628,8 @@ async fn send_message(
         } else {
             resolved.with_organization_id(session.organization_id.clone())
         }
-    };
+    }
+    .with_agent_id(session.agent_id.clone());
 
     let result = runner::run_streaming_turn(
         TurnRequest {

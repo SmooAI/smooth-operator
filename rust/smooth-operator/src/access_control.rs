@@ -214,6 +214,13 @@ pub struct AccessContext {
     /// type-level "Org scoping" note). `None` when no org is resolved (the
     /// single-tenant / anonymous default).
     pub organization_id: Option<String>,
+    /// The agent answering this turn, when the session names one. Carried so a
+    /// host adapter's `knowledge_for_access` can narrow retrieval to the
+    /// knowledge that agent is configured to use (e.g. a public website agent
+    /// restricted to a few documents must not ground on the whole org's
+    /// knowledge). The operator's built-in ACL ignores it. `None` when the
+    /// session names no agent.
+    pub agent_id: Option<String>,
 }
 
 impl AccessContext {
@@ -226,6 +233,7 @@ impl AccessContext {
             user_id,
             groups,
             organization_id: None,
+            agent_id: None,
         }
     }
 
@@ -236,6 +244,7 @@ impl AccessContext {
             user_id: Some(user_id.into()),
             groups: Vec::new(),
             organization_id: None,
+            agent_id: None,
         }
     }
 
@@ -262,6 +271,18 @@ impl AccessContext {
     #[must_use]
     pub fn with_organization_id(mut self, organization_id: impl Into<String>) -> Self {
         self.organization_id = Some(organization_id.into());
+        self
+    }
+
+    /// Attach the agent answering this turn (builder), or clear it with `None`.
+    /// Carried so a host adapter's
+    /// [`knowledge_for_access`](crate::adapter::StorageAdapter::knowledge_for_access)
+    /// can narrow retrieval to that agent's configured knowledge. The
+    /// operator's built-in ACL ignores it, so this is behavior-preserving for
+    /// the single-tenant default.
+    #[must_use]
+    pub fn with_agent_id(mut self, agent_id: Option<String>) -> Self {
+        self.agent_id = agent_id;
         self
     }
 

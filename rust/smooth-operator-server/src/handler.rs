@@ -2029,13 +2029,19 @@ async fn handle_send_message(
     // (every session carries `organization_id` since the create-session path
     // derives it). The operator's built-in single-tenant ACL ignores the org, so
     // this is behavior-preserving for the reference flavor.
+    //
+    // The session's agent rides along too (SMOODEV-3292), so the host can narrow
+    // RAG to the knowledge THAT agent is configured with. Without it a host has no
+    // way to tell which agent a turn belongs to, and a restricted public agent
+    // grounded on the whole org's knowledge.
     let access_owned = if access.organization_id.is_some() {
         access.clone()
     } else {
         access
             .clone()
             .with_organization_id(session.organization_id.clone())
-    };
+    }
+    .with_agent_id(session.agent_id.clone());
     let sink_owned = sink.clone();
     let request_id_owned = request_id.to_string();
     let conversation_id = session.conversation_id.clone();
