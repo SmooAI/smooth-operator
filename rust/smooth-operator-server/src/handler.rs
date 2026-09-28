@@ -183,6 +183,15 @@ async fn may_read_conversation(
                 p.participant_type == smooth_operator::domain::ParticipantType::User
                     && p.email.as_deref().is_some_and(|e| !e.trim().is_empty())
             });
+            // An org-authenticated host can require ownership, which makes the
+            // ownerless-is-open allowance below not apply. Ownerless conversations
+            // there are the ones MACHINES made — phone, SMS, widget — so treating
+            // them as open let the operator list and resume customer conversations.
+            // Checked before the match so it covers `Denied` too, which owns
+            // nothing and must therefore reach nothing.
+            if state.require_owned_conversations && !owned {
+                return false;
+            }
             match scope {
                 // Ownerless ⇒ open (see above); owned ⇒ must match.
                 UserScope::User(email) => {
