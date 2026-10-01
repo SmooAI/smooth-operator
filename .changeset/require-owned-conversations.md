@@ -1,5 +1,5 @@
 ---
-'@smooai/smooth-operator-js': minor
+'@smooai/smooth-operator': minor
 ---
 
 SMOODEV-3412: `AppState::with_require_owned_conversations(true)` — let an org-authenticated host make ownerless conversations unreachable.
