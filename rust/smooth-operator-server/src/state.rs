@@ -267,6 +267,25 @@ pub struct AppState {
     /// [`with_strict_auth`](Self::with_strict_auth) so a tokenless peer can't
     /// drive the agent.
     pub strict_auth: bool,
+    /// **Require owned conversations.** When `true`, a conversation with NO user
+    /// participant (an "ownerless" one) is unreachable: it cannot be listed,
+    /// resumed by id, or read. Off by default, because ownerless-is-open is
+    /// load-bearing for anonymous/widget flows — those principals own nothing,
+    /// and the conversations they create are exactly the ownerless ones, so
+    /// denying them locked callers out of their own sessions (th-909995).
+    ///
+    /// An ORG-AUTHENTICATED pot is the opposite case: every caller is a real
+    /// user, and the ownerless conversations in its org are the ones machines
+    /// made — phone calls, SMS, widget chats. There, ownerless-is-open means the
+    /// operator's history picker lists customer conversations and can resume
+    /// them. Such a host opts in via
+    /// [`with_require_owned_conversations`](Self::with_require_owned_conversations).
+    ///
+    /// Pair it with a verifier whose principals carry an `email` claim: without
+    /// one every principal is [`UserScope::Denied`](crate::handler::UserScope),
+    /// which owns nothing, so this flag would deny EVERYTHING. It fails closed
+    /// by design — a broken picker beats a picker showing customer chats.
+    pub require_owned_conversations: bool,
     /// **Default agent persona / system prompt.** When `Some`, it is used as the
     /// turn's system prompt whenever the per-org [`AgentSettings::persona`] is
     /// `None` — i.e. a host-supplied default that replaces the built-in
@@ -358,6 +377,7 @@ impl AppState {
             serve_widget: false,
             widget_token: None,
             strict_auth: false,
+            require_owned_conversations: false,
             default_persona: None,
             model_costs_cache: Arc::new(tokio::sync::OnceCell::new()),
         }
@@ -440,6 +460,17 @@ impl AppState {
     #[must_use]
     pub fn with_strict_auth(mut self, strict: bool) -> Self {
         self.strict_auth = strict;
+        self
+    }
+
+    /// Require **owned conversations** (builder): make ownerless conversations
+    /// unreachable — unlistable, unresumable, unreadable. For an
+    /// org-authenticated host whose callers are all real users; see
+    /// [`require_owned_conversations`](Self::require_owned_conversations) for why
+    /// it is off by default and why it needs an `email`-bearing verifier.
+    #[must_use]
+    pub fn with_require_owned_conversations(mut self, require: bool) -> Self {
+        self.require_owned_conversations = require;
         self
     }
 

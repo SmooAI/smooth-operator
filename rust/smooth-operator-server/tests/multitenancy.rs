@@ -290,3 +290,145 @@ async fn the_owning_org_still_reads_its_own_session() {
     );
     assert_eq!(ev["data"]["sessionId"], session_id);
 }
+
+// ── require_owned_conversations (SMOODEV-3412) ───────────────────────────────
+//
+// An ORG-AUTHENTICATED pot (copilot-ws) has the opposite problem to the widget:
+// every caller is a real user, and the ownerless conversations in its org are
+// the ones MACHINES made — phone calls, SMS, widget chats. The documented
+// ownerless-is-open rule therefore let the operator's history picker LIST and
+// RESUME customer conversations. `with_require_owned_conversations(true)` closes
+// that, and these prove it closes for a same-org member, not just across orgs.
+
+/// A same-org member of `ORG_A` — the copilot's actual caller. Not an attacker;
+/// the point is that even a legitimate org member must not reach a conversation
+/// that no user owns.
+fn same_org_member() -> UserScope {
+    UserScope::User("brent@smoo.ai".into())
+}
+
+#[tokio::test]
+async fn ownerless_conversation_is_unlistable_when_ownership_is_required() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state = AppState::new(storage.clone(), base_config());
+    let (_session_id, conversation_id) = victim_session(&state, &storage).await;
+
+    // `list_conversations` drops conversations with NO messages (every page-load
+    // mints an empty one), so an empty fixture would be absent for a reason that
+    // has nothing to do with ownership — which is exactly what the positive
+    // control below caught. Give it a message so the row is genuinely listable.
+    storage
+        .append_message(smooth_operator::domain::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            external_id: None,
+            organization_id: Some(ORG_A.to_string()),
+            conversation_id: Some(conversation_id.clone()),
+            direction: smooth_operator::domain::Direction::Inbound,
+            content: smooth_operator::domain::MessageContent::from_text("what's my pipeline?"),
+            from: None,
+            to: None,
+            metadata_json: None,
+            analytics_json: None,
+            created_at: chrono::Utc::now(),
+            updated_at: None,
+        })
+        .await
+        .expect("append a message so the conversation is listable at all");
+
+    // Baseline: the default (ownerless-is-open) DOES list it. Without this the
+    // assertion below could pass because listing is broken for another reason.
+    let ev = drive(
+        &state,
+        ORG_A,
+        &same_org_member(),
+        &json!({ "action": "list_conversations", "requestId": "lc" }),
+    )
+    .await;
+    let listed_by_default = ev["data"]["conversations"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .any(|r| r["conversationId"].as_str() == Some(conversation_id.as_str()))
+        })
+        .unwrap_or(false);
+
+    let hardened =
+        AppState::new(storage.clone(), base_config()).with_require_owned_conversations(true);
+    let ev = drive(
+        &hardened,
+        ORG_A,
+        &same_org_member(),
+        &json!({ "action": "list_conversations", "requestId": "lc" }),
+    )
+    .await;
+    let rows = ev["data"]["conversations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r["conversationId"].as_str() == Some(conversation_id.as_str())),
+        "an ownerless (machine-made) conversation must not appear in the operator's \
+         history picker: {ev}"
+    );
+
+    // Stated last so a failure above reads as the real defect, not a fixture bug.
+    assert!(
+        listed_by_default,
+        "fixture no longer exercises the open branch — the default must still list it"
+    );
+}
+
+#[tokio::test]
+async fn ownerless_conversation_cannot_be_resumed_when_ownership_is_required() {
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state =
+        AppState::new(storage.clone(), base_config()).with_require_owned_conversations(true);
+    let (_session_id, conversation_id) = victim_session(&state, &storage).await;
+
+    // Resume by id is the path that MATTERS: hiding a row from the picker does
+    // nothing if a stored pointer can still bind a session to it on every open.
+    let ev = drive(
+        &state,
+        ORG_A,
+        &same_org_member(),
+        &json!({
+            "action": "create_conversation_session",
+            "requestId": "cs",
+            "agentId": uuid::Uuid::new_v4().to_string(),
+            "conversationId": conversation_id,
+        }),
+    )
+    .await;
+    assert_ne!(
+        ev["data"]["conversationId"].as_str(),
+        Some(conversation_id.as_str()),
+        "a resume of an ownerless (customer) conversation must NOT bind to it — the \
+         server answers an unreachable id by minting a fresh conversation: {ev}"
+    );
+}
+
+#[tokio::test]
+async fn requiring_ownership_fails_closed_for_an_emailless_principal() {
+    // `Denied` owns nothing, so with ownership required it must reach nothing —
+    // including the ownerless conversations it would otherwise be allowed. This
+    // is why the flag needs an `email`-bearing verifier: turning it on without
+    // one breaks the picker rather than leaking through it.
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    let state =
+        AppState::new(storage.clone(), base_config()).with_require_owned_conversations(true);
+    let (session_id, _conv) = victim_session(&state, &storage).await;
+
+    let ev = drive(
+        &state,
+        ORG_A,
+        &UserScope::Denied,
+        &json!({ "action": "get_session", "requestId": "gs", "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(
+        ev["type"], "error",
+        "an emailless principal must be refused, not handed an ownerless session: {ev}"
+    );
+}
