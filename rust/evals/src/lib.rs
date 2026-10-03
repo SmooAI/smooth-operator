@@ -76,6 +76,21 @@ pub const GATEWAY_URL: &str = "https://llm.smoo.ai/v1";
 /// `SMOOTH_AGENT_JUDGE_MODEL`.
 pub const CHEAP_MODEL: &str = "gpt-6-luna";
 
+/// `max_tokens` for the **agent** under test. Matches `smooth-operator-server`'s
+/// `DEFAULT_MAX_TOKENS`, so the eval grades the budget production turns get.
+///
+/// A reasoning model spends `max_tokens` on reasoning BEFORE it writes the reply,
+/// so a chat-widget-sized cap does not shorten the answer, it starves it:
+/// `gpt-6-luna` came back `incomplete: max_output_tokens` and the gateway
+/// reported `unable to complete request` (SMOODEV-3631). The cap only bounds
+/// runaway output; it is not what a turn costs.
+pub const AGENT_MAX_TOKENS: u32 = 8192;
+
+/// `max_tokens` for the **judge**. The verdict is a small JSON object, but the
+/// judge is a reasoning model too, and 300 left it no room to think first
+/// (SMOODEV-3631).
+pub const JUDGE_MAX_TOKENS: u32 = 4096;
+
 /// One seeded knowledge-base document for a scenario.
 #[derive(Debug, Clone)]
 pub struct KbDoc {
@@ -354,29 +369,28 @@ impl JudgeConfig {
     }
 
     /// An `LlmConfig` for the **agent** runtime, pointed at the live gateway.
-    /// `max_tokens` is modest because this is a paid endpoint.
+    /// See [`AGENT_MAX_TOKENS`] for why the budget is not small.
     #[must_use]
     pub fn agent_llm_config(&self) -> LlmConfig {
         LlmConfig {
             api_url: self.api_url.clone(),
             api_key: self.api_key.clone(),
             model: self.agent_model.clone(),
-            max_tokens: 512,
+            max_tokens: AGENT_MAX_TOKENS,
             temperature: 0.0,
             retry_policy: RetryPolicy::default(),
             api_format: ApiFormat::OpenAiCompat,
         }
     }
 
-    /// An `LlmConfig` for the **judge** client. Slightly smaller token budget —
-    /// the judge only emits a small JSON object.
+    /// An `LlmConfig` for the **judge** client. See [`JUDGE_MAX_TOKENS`].
     #[must_use]
     pub fn judge_llm_config(&self) -> LlmConfig {
         LlmConfig {
             api_url: self.api_url.clone(),
             api_key: self.api_key.clone(),
             model: self.judge_model.clone(),
-            max_tokens: 300,
+            max_tokens: JUDGE_MAX_TOKENS,
             temperature: 0.0,
             retry_policy: RetryPolicy::default(),
             api_format: ApiFormat::OpenAiCompat,
@@ -971,6 +985,16 @@ mod tests {
             assert_eq!(cfg.judge_model, cfg.agent_model);
             assert_eq!(cfg.judge_model, CHEAP_MODEL);
         }
+    }
+
+    /// SMOODEV-3631: the default models reason before they answer, so a
+    /// chat-widget-sized budget (the old 512 / 300) ends the call at
+    /// `max_output_tokens` with no reply. Keep both budgets reasoning-sized.
+    #[test]
+    fn token_budgets_leave_room_for_reasoning() {
+        let cfg = JudgeConfig::from_key("placeholder".to_string());
+        assert!(cfg.agent_llm_config().max_tokens >= 4096);
+        assert!(cfg.judge_llm_config().max_tokens >= 2048);
     }
 
     /// SMOODEV-3342: an unconfigured eval grades the model production runs.
