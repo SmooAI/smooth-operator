@@ -36,7 +36,11 @@ repository = "https://github.com/SmooAI/smooth-operator"
 # parity runner seeds into the stream so `eventual_response.usage` is assertable
 # (th-4f1263). NOTE: crates.io numbering DIVERGES from npm's — the same release
 # wave published this crate as 1.8.0 and the npm package as 1.7.16.
-smooai-smooth-operator-core = "1.10.0"
+# 1.14.1 is the first that stops replaying assistant `reasoning_content` to
+# `groq-*` models (core SMOODEV-3342). Groq 400s on it, and the gateway then
+# serves the turn from a fallback model, so on 1.10.0 every multi-turn Groq eval
+# row graded the fallback, not Groq (SMOODEV-3630).
+smooai-smooth-operator-core = "1.14.1"
 # Intra-workspace dep on the reference lib carries its version so the adapters /
 # ingestion / server that depend on it are publishable (path = local dev,
 # version = the crates.io requirement).
