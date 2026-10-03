@@ -55,8 +55,12 @@ async fn sent_messages(model: &str) -> Vec<serde_json::Value> {
         .await
         .expect("chat against the mock upstream");
 
-    let requests = server.received_requests().await.expect("request recording is on");
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("JSON request body");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("JSON request body");
     body["messages"].as_array().expect("messages array").clone()
 }
 
