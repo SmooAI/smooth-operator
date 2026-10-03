@@ -1,5 +1,12 @@
 # @smooai/smooth-operator-web-chat-example
 
+## 0.0.128
+
+### Patch Changes
+
+- Updated dependencies [7a31f27]
+  - @smooai/smooth-operator@1.62.1
+
 ## 0.0.127
 
 ### Patch Changes
