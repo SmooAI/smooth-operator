@@ -762,8 +762,10 @@ def _build_user_content(text: str, images: list[dict[str, Any]]) -> list[dict[st
 
     Fail-soft (per the ``images`` schema): an entry without a usable string ``url`` is
     skipped rather than rejecting the turn; a ``detail`` that is not a string is
-    dropped. A leading text part is always present so the message is never image-only."""
-    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    dropped. The text part is omitted when the text is empty and an image survives — an
+    image-only turn (SMOODEV-3706); some vision shims reject an empty text block. This
+    mirrors the Rust core's ``to_chat_message``."""
+    parts: list[dict[str, Any]] = []
     for image in images:
         if not isinstance(image, dict):
             continue
@@ -775,6 +777,8 @@ def _build_user_content(text: str, images: list[dict[str, Any]]) -> list[dict[st
         if isinstance(detail, str) and detail:
             image_url["detail"] = detail
         parts.append({"type": "image_url", "image_url": image_url})
+    if text or not parts:
+        parts.insert(0, {"type": "text", "text": text})
     return parts
 
 

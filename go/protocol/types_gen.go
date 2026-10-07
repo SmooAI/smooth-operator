@@ -1533,7 +1533,10 @@ type SendMessageRequest struct {
 	// malformed entry is ignored rather than rejecting the turn.
 	Images []RequestImagesElem `json:"images,omitempty,omitzero"`
 
-	// The user's message text. Between 1 and 10 000 characters.
+	// The user's message text, up to 10 000 characters. May be empty ("") when the
+	// turn carries at least one `images` or `files` attachment — a photo sent with no
+	// caption. A blank message with no attachment is rejected with a
+	// `VALIDATION_ERROR`.
 	Message string `json:"message"`
 
 	// Optional gateway model id to run THIS turn on (e.g. a /smooth-mode preset).

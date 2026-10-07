@@ -47,6 +47,18 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `cancel` | stop the in-flight turn (the "Stop button") | `requestId` (of the `send_message` to cancel), `sessionId?` | `cancelled` (or nothing, if no turn is running) |
 | `ping` | keepalive | — | `pong` |
 
+### Images on a turn and in history
+
+`send_message.message` may be empty (`""`, or absent) when the turn carries at
+least one `images[]` or `files[]` attachment — a photo sent with no caption. A
+blank message with no attachment is still a `VALIDATION_ERROR` (SMOODEV-3706).
+
+A user turn's images are persisted on its stored message as `image` content items,
+and **replayed to the model on later turns**: the newest 3 image-bearing user
+messages carry their images, older ones are replaced by an `[image omitted]` note
+(`[N images omitted]` for several) so the model knows a picture was there without
+every old photo being re-sent on every request.
+
 ### When a conversation actually exists
 
 `create_conversation_session` answers with a `conversationId` immediately, but a
@@ -175,28 +187,50 @@ fixtures: `cancel_request` / `cancelled_event`):
 
 Semantics every language server + the frontend **must** replicate:
 
-- **One active turn per connection.** A `send_message` runs at most one turn on a
-  socket at a time. A second `send_message` arriving while one is in flight is
-  rejected with `error` code `TURN_IN_PROGRESS` — it is **not** run concurrently.
-  (`confirm_tool_action` / `submit_interaction` / `verify_otp` are turn *resumes*,
-  not new turns, so they are unaffected.)
+- **One active turn per conversation.** A `send_message` runs at most one turn on a
+  conversation at a time. A second `send_message` arriving while one is in flight —
+  on the same socket, or on a new one after a reconnect — is rejected with `error`
+  code `TURN_IN_PROGRESS`; it is **not** run concurrently. (`confirm_tool_action` /
+  `submit_interaction` / `verify_otp` are turn *resumes*, not new turns, so they are
+  unaffected.)
 - **`cancel` aborts the running turn** by dropping the turn future at its next
   `await` point, abandoning the in-flight LLM/tool call, and emits a terminal
   `cancelled` event (status **499**, "client closed request") echoing the
   cancelled turn's `requestId`. It replaces the `eventual_response` that turn
   would otherwise have sent — exactly one terminal event per turn.
-- **No active turn ⇒ no-op.** A `cancel` with nothing running emits nothing and
-  leaves the connection live.
+- **Cancelling a turn from another connection.** When the connection has no turn
+  of its own, a `cancel` carrying a `sessionId` cancels the turn still running on
+  that session's conversation from an earlier connection (the client dropped and
+  reconnected). The `cancelled` event echoes *that* turn's `requestId`, and is
+  also sent to the starting connection if it is still open. The session goes
+  through the usual ownership check.
+- **No active turn ⇒ no-op.** A `cancel` with nothing running (or naming a session
+  that is unknown or not the caller's) emits nothing and leaves the connection live.
 - **Partial output is discarded.** The user's message is persisted at the start of
   the turn (before the agent loop), so it stays; the assistant reply is persisted
   only at the end, which the abort skips — so a cancelled turn leaves the user
   message with **no** assistant reply. The streamed `stream_token`s the client
   already saw are ephemeral UI, never persisted. (The engine's Groove checkpoint
   store may retain partial mid-turn state, independent of the message log.)
-- **Disconnect mid-turn also aborts the turn** (no client remains to receive its
-  output) — a strict improvement. This is distinct from **graceful shutdown**
-  (SIGTERM), which deliberately lets an in-flight turn *drain* to completion within
-  the pod termination window rather than aborting it.
+- **Disconnect mid-turn does NOT stop the turn** (SMOODEV-3705). Turns are
+  detached from the socket that started them: a client that drops mid-turn — a
+  phone backgrounded behind a relay, a closed laptop — leaves the turn running to
+  completion, and the turn persists its reply. A turn that **fails** persists an
+  outbound message recording the error, marked `metadataJson.turnError =
+  {code, requestId}` (history replay to the model skips it). Either way the
+  reconnecting client reads the outcome back with `get_conversation_messages`.
+  Frames the turn emits after the disconnect are dropped; the server logs the
+  disconnect at `info`. Only `cancel` stops a turn. Graceful shutdown (SIGTERM)
+  likewise lets an in-flight turn drain within the pod termination window.
+
+  The abuse surface is unchanged by this: a client could always keep its socket
+  open for a turn's full length, and the per-conversation rule above stops a
+  reconnect loop from piling turns up on one conversation. So it is on for every
+  deployment rather than opt-in.
+
+> **Polyglot parity:** Rust is the reference. The TS / Python / Go / .NET servers
+> still abort a turn when its socket closes and keep the one-turn rule per
+> connection; porting the detached-turn semantics is tracked as a follow-up.
 
 Implementation is connection-local: the reader loop tracks the spawned turn's task
 handle and `abort()`s it on `cancel`/disconnect. There is no engine change — the

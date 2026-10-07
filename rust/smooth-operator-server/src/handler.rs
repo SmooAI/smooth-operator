@@ -288,11 +288,17 @@ fn session_storage_error(request_id: Option<&str>, session_id: &str, e: &anyhow:
 /// the turn tail re-reads it immediately before each side effect. A late abort is then
 /// harmless: the tail sees the flag and produces nothing.
 pub struct SpawnedTurn {
-    /// The turn's task handle — aborted by the cancel path and the disconnect path.
+    /// The turn's task handle — aborted by the cancel path. A client disconnect
+    /// does NOT abort it (SMOODEV-3705): the turn runs to completion and persists
+    /// its result for the client to read back on reconnect.
     pub handle: tokio::task::JoinHandle<()>,
     /// Raised before `cancelled` is emitted; read by the turn tail before every
     /// side effect it would otherwise perform.
     pub cancelled: Arc<AtomicBool>,
+    /// The turn's claim on its conversation in [`AppState::running_turns`]. The
+    /// cancel path releases it eagerly, so the next `send_message` is accepted
+    /// without waiting for the aborted task to next yield.
+    pub releaser: crate::running_turns::TurnReleaser,
 }
 
 /// Parse and dispatch a single inbound text frame. Any produced events are sent
@@ -367,15 +373,20 @@ pub async fn handle_frame(
         // The only action that spawns a turn — its handle flows back to the reader
         // loop so a later `cancel` (or a disconnect) can abort it.
         Some("send_message") => {
-            handle_send_message(state, auth_org, access, scope, &parsed, request_id, sink).await
+            handle_send_message(
+                state, conn_id, auth_org, access, scope, &parsed, request_id, sink,
+            )
+            .await
         }
         // May ALSO spawn a turn (th-db0816): resolving a DURABLE pending
         // confirmation — the parked turn lived on another pod, or died — spawns
         // a continuation turn to carry out the approved action, and its handle
         // flows back for `cancel`/disconnect exactly like `send_message`'s.
         Some("confirm_tool_action") => {
-            handle_confirm_tool_action(state, auth_org, access, scope, &parsed, request_id, sink)
-                .await
+            handle_confirm_tool_action(
+                state, conn_id, auth_org, access, scope, &parsed, request_id, sink,
+            )
+            .await
         }
         Some("verify_otp") => {
             handle_verify_otp(state, auth_org, scope, &parsed, request_id, sink).await;
@@ -402,6 +413,34 @@ pub async fn handle_frame(
             None
         }
     }
+}
+
+/// `cancel` for a turn this connection did not start (SMOODEV-3705): the frame
+/// names a session, and that session's conversation has a turn still running —
+/// typically one whose client dropped and has now reconnected on a new socket.
+///
+/// The session goes through the same ownership check as every other session-
+/// addressed action, so a connection can only stop turns in conversations it
+/// could read. Not found, not owned, a storage blip and "nothing running" all
+/// return `None`, which the caller turns into the documented no-op — a cancel
+/// must not become an oracle for which sessions exist.
+pub async fn cancel_conversation_turn(
+    state: &AppState,
+    auth_org: Option<&str>,
+    scope: &UserScope,
+    session_id: &str,
+) -> Option<crate::running_turns::CancelledTurn> {
+    let session = scoped_session(state, session_id, auth_org, scope)
+        .await
+        .ok()
+        .flatten()?;
+    let cancelled = state.running_turns.cancel(&session.conversation_id)?;
+    tracing::info!(
+        session_id,
+        request_id = %cancelled.request_id,
+        "cancel: stopped a turn started on another connection"
+    );
+    Some(cancelled)
 }
 
 /// Outcome of widget-auth enforcement: whether to proceed, and (when an agent
@@ -1568,8 +1607,10 @@ async fn persist_workflow_step(
 /// the connection loop can track it as the connection's single active turn and
 /// abort it on a `cancel` frame (or disconnect). Returns `None` on any validation
 /// failure (an `error` event was already emitted) — no turn was spawned.
+#[allow(clippy::too_many_arguments)]
 async fn handle_send_message(
     state: &AppState,
+    conn_id: &str,
     auth_org: Option<&str>,
     access: &AccessContext,
     scope: &UserScope,
@@ -1596,29 +1637,10 @@ async fn handle_send_message(
         return None;
     };
 
-    let message = match parsed.get("message").and_then(Value::as_str) {
-        Some(m) if !m.trim().is_empty() => m.to_string(),
-        _ => {
-            let _ = sink.send(protocol::error(
-                Some(request_id),
-                "VALIDATION_ERROR",
-                "missing or empty 'message'",
-            ));
-            return None;
-        }
-    };
-
-    // th-694c22: one line per turn — enough to correlate a visitor's report
-    // ("I sent a message and nothing happened") to a session and requestId.
-    tracing::info!(
-        session_id,
-        request_id,
-        message_chars = message.len(),
-        "send_message: turn requested"
-    );
-
     // Optional multimodal attachments. Fail-soft: absent ⇒ text-only; a malformed
     // `images` array is dropped rather than rejecting the turn (per the schema).
+    // Parsed BEFORE the `message` check, because an attachment makes an empty
+    // message legitimate (SMOODEV-3706).
     let images: Vec<smooth_operator::tool_provider::UserImage> = parsed
         .get("images")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1632,6 +1654,34 @@ async fn handle_send_message(
         .get("files")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+
+    // A photo sent with no caption is an ordinary turn: the message may be empty
+    // (or absent) when the turn carries an attachment. Only a turn with nothing
+    // at all in it is rejected.
+    let message = parsed
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if message.trim().is_empty() && images.is_empty() && files.is_empty() {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "VALIDATION_ERROR",
+            "missing or empty 'message' (an empty message needs at least one 'images' or 'files' attachment)",
+        ));
+        return None;
+    }
+
+    // th-694c22: one line per turn — enough to correlate a visitor's report
+    // ("I sent a message and nothing happened") to a session and requestId.
+    tracing::info!(
+        session_id,
+        request_id,
+        message_chars = message.len(),
+        images = images.len(),
+        files = files.len(),
+        "send_message: turn requested"
+    );
 
     // Optional named skill. The wire carries the INTENT ("use skill X"); the
     // server resolves the body here and composes it into the turn's system
@@ -1681,6 +1731,33 @@ async fn handle_send_message(
             let _ = sink.send(session_storage_error(Some(request_id), session_id, &e));
             return None;
         }
+    };
+
+    // See `SpawnedTurn`: raised by the cancel path before `cancelled` goes out, and
+    // read by this turn's tail before every side effect. `abort()` is asynchronous,
+    // so this flag — not the abort — is what makes `cancelled` terminal.
+    let cancelled = Arc::new(AtomicBool::new(false));
+
+    // One running turn per CONVERSATION (SMOODEV-3705). Turns outlive the socket
+    // that started them, so the connection's own one-turn rule no longer covers a
+    // client that reconnects and sends again while its first turn is still
+    // running. Claimed before anything is persisted or acked, so a refused send
+    // has no side effects; every early return below releases the claim (drop),
+    // and the turn task owns it from the spawn on.
+    let Some(reservation) = state.running_turns.try_reserve(
+        &session.conversation_id,
+        request_id,
+        conn_id,
+        sink,
+        &cancelled,
+    ) else {
+        let _ = sink.send(protocol::error(
+            Some(request_id),
+            "TURN_IN_PROGRESS",
+            "a turn is already in progress for this conversation (possibly from an earlier connection); \
+             cancel it or wait for it to complete",
+        ));
+        return None;
     };
 
     // SMOODEV-3057: this is the moment a deferred create earns its rows — the
@@ -2055,13 +2132,13 @@ async fn handle_send_message(
     let request_id_owned = request_id.to_string();
     let conversation_id = session.conversation_id.clone();
 
-    // See `SpawnedTurn`: raised by the cancel path before `cancelled` goes out, and
-    // read by this turn's tail before every side effect. `abort()` is asynchronous,
-    // so this flag — not the abort — is what makes `cancelled` terminal.
-    let cancelled = Arc::new(AtomicBool::new(false));
     let turn_cancelled = cancelled.clone();
+    let releaser = reservation.releaser();
 
     let turn_handle = tokio::spawn(async move {
+        // Owned by the task: released when the turn finishes, fails, or is
+        // aborted (the future is dropped with it).
+        let _reservation = reservation;
         // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW
         // is set; `None` otherwise, zero overhead). The delegate is bound to THIS
         // turn's sink/request/session so a hosted extension's `ui/confirm` routes
@@ -2252,17 +2329,40 @@ async fn handle_send_message(
                 if turn_cancelled.load(Ordering::SeqCst) {
                     return;
                 }
+                let detail = format!("agent turn failed: {e}");
+                // Record the failure in the conversation (SMOODEV-3705). The error
+                // frame below reaches only a client that is still connected; a
+                // client that dropped mid-turn reloads the history, and without
+                // this the user's message just sits there unanswered.
+                if let Err(persist_err) = runner::persist_turn_error(
+                    state_for_turn.storage.as_ref(),
+                    &conversation_id,
+                    &request_id_owned,
+                    "AGENT_ERROR",
+                    &detail,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        conversation_id = %conversation_id,
+                        request_id = %request_id_owned,
+                        error = %persist_err,
+                        "failed to persist the turn-error record"
+                    );
+                }
                 let _ = sink_owned.send(protocol::error(
                     Some(&request_id_owned),
                     "AGENT_ERROR",
-                    &format!("agent turn failed: {e}"),
+                    &detail,
                 ));
             }
         }
     });
+    releaser.set_abort(turn_handle.abort_handle());
     Some(SpawnedTurn {
         handle: turn_handle,
         cancelled,
+        releaser,
     })
 }
 
@@ -2279,8 +2379,10 @@ async fn handle_send_message(
 /// normal streaming sequence (`stream_chunk`/`stream_token` → `eventual_response`);
 /// we additionally ack with an `immediate_response`. Taking the sender makes a
 /// duplicate confirm a no-op (`NO_PENDING_CONFIRMATION`).
+#[allow(clippy::too_many_arguments)]
 async fn handle_confirm_tool_action(
     state: &AppState,
+    conn_id: &str,
     auth_org: Option<&str>,
     access: &AccessContext,
     scope: &UserScope,
@@ -2380,7 +2482,7 @@ async fn handle_confirm_tool_action(
     // persisted at park time — enough to carry out the verdict here with a
     // continuation turn instead of telling a human their approval went nowhere.
     durable_confirm_fallback(
-        state, auth_org, access, scope, session_id, approved, request_id, sink,
+        state, conn_id, auth_org, access, scope, session_id, approved, request_id, sink,
     )
     .await
 }
@@ -2403,6 +2505,7 @@ async fn handle_confirm_tool_action(
 #[allow(clippy::too_many_arguments)]
 async fn durable_confirm_fallback(
     state: &AppState,
+    conn_id: &str,
     auth_org: Option<&str>,
     access: &AccessContext,
     scope: &UserScope,
@@ -2512,7 +2615,10 @@ async fn durable_confirm_fallback(
         "sessionId": session_id,
         "message": message,
     });
-    handle_send_message(state, auth_org, access, scope, &synthetic, request_id, sink).await
+    handle_send_message(
+        state, conn_id, auth_org, access, scope, &synthetic, request_id, sink,
+    )
+    .await
 }
 
 /// Apply an optional per-turn `model` override (from a `send_message` body) to a

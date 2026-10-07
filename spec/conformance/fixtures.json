@@ -39,6 +39,17 @@
       "stream": true
     }
   },
+  "send_message_image_only_request": {
+    "$schema_ref": "actions/send-message.schema.json#/$defs/Request",
+    "description": "An image-only turn: an empty message is valid when the turn carries an attachment (a photo sent with no caption).",
+    "instance": {
+      "action": "send_message",
+      "requestId": "req-a1b2c3d4-0003",
+      "sessionId": "22222222-2222-2222-2222-222222222222",
+      "message": "",
+      "images": [{ "url": "data:image/png;base64,iVBORw0KGgo=" }]
+    }
+  },
   "stream_chunk_event": {
     "$schema_ref": "events/stream-chunk.schema.json",
     "description": "A per-node state snapshot emitted as the knowledge_search node completes.",

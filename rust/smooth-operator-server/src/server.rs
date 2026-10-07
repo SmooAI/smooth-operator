@@ -828,11 +828,14 @@ async fn connection_loop(
     // turn's `requestId` (echoed on the `cancelled` event) + its task handle. A
     // `send_message` spawns a turn (so the reader stays free to receive
     // `confirm_tool_action` while the turn parks); we track that handle here so a
-    // later `cancel` frame — or a disconnect — can abort it, dropping the turn
-    // future at its next `.await` (abandoning the in-flight LLM/tool call). Only
-    // ONE turn runs at a time: a second `send_message` while one is in flight is
-    // rejected, never run concurrently.
+    // later `cancel` frame can abort it, dropping the turn future at its next
+    // `.await` (abandoning the in-flight LLM/tool call). Only ONE turn runs at a
+    // time: a second `send_message` while one is in flight is rejected, never run
+    // concurrently.
     let mut current_turn: Option<(Option<String>, crate::handler::SpawnedTurn)> = None;
+    // Set when the CLIENT went away (Close/Err/EOF), as opposed to a graceful
+    // shutdown. Decides whether the writer is drained or dropped below.
+    let mut client_gone = false;
 
     // Reader: dispatch inbound frames. Handlers emit events via `sink_tx`.
     //
@@ -842,8 +845,10 @@ async fn connection_loop(
     // in-flight turn: the detached turn task holds a `sink` clone, so the writer
     // (and `writer.await` below) blocks until it finishes — that is the in-flight
     // drain the k8s termination window relies on. A client *disconnect*
-    // (Close/Err/None), by contrast, DOES abort the turn — no client remains to
-    // receive its output.
+    // (Close/Err/None) does not abort the turn either (SMOODEV-3705): it runs to
+    // completion and persists its reply, so a client that dropped — a phone
+    // backgrounded behind a relay — finds the answer in the history when it
+    // reconnects. Only an explicit `cancel` stops a turn.
     loop {
         tokio::select! {
             biased;
@@ -878,17 +883,22 @@ async fn connection_loop(
                             "binary frames are not supported; send JSON text frames",
                         ));
                     }
-                    // Client disconnected mid-turn: abort the in-flight turn so it
-                    // stops generating (no client remains to receive its output).
+                    // Client disconnected. A turn in flight is NOT aborted: it is
+                    // detached and keeps running to completion, persisting its result
+                    // (reply, or a turn-error record) for the client to read back on
+                    // reconnect. Its frames go nowhere from here on — the writer is
+                    // dropped below, so the turn's sink sends become no-ops.
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
-                        if let Some((_, turn)) = current_turn.take() {
-                            // Raise the flag before aborting for the same reason the
-                            // `cancel` path does: the abort may land too late to stop a
-                            // turn already past its last `.await`, and there is no client
-                            // left to receive anything it would emit.
-                            turn.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                            turn.handle.abort();
+                        if let Some((request_id, turn)) = current_turn.take() {
+                            if !turn.handle.is_finished() {
+                                tracing::info!(
+                                    conn_id = %conn_id,
+                                    request_id = request_id.as_deref().unwrap_or(""),
+                                    "client disconnected mid-turn; the turn continues detached and persists its result"
+                                );
+                            }
                         }
+                        client_gone = true;
                         break;
                     }
                     // Ping/Pong control frames are handled by axum automatically.
@@ -906,7 +916,15 @@ async fn connection_loop(
     // drop its held-back create rather than carrying it for the pod's lifetime.
     state.discard_pending_sessions_for_conn(&conn_id);
     drop(sink_tx);
-    let _ = writer.await;
+    if client_gone {
+        // Nobody is left to write to, and a detached turn still holds a sink
+        // clone — awaiting the writer would pin this task (and the dead socket)
+        // for as long as that turn runs. Dropping the receiver makes the turn's
+        // sends fail silently instead.
+        writer.abort();
+    } else {
+        let _ = writer.await;
+    }
 }
 
 /// Peek a frame's `action` + `requestId` without doing full dispatch parsing —
@@ -926,11 +944,23 @@ fn frame_action_and_request_id(raw: &str) -> (Option<String>, Option<String>) {
     (action, request_id)
 }
 
+/// Peek a frame's `sessionId` (the `cancel` path's cross-connection lookup).
+fn frame_session_id(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Handle one inbound text frame, threading the connection's single-active-turn
 /// slot through and returning the (possibly updated) slot.
 ///
 /// - `cancel` → abort the in-flight turn (if any) and emit a `cancelled` event
-///   echoing its `requestId`; a cancel with no active turn is a silent no-op.
+///   echoing its `requestId`. With no turn on this connection, a `sessionId` on
+///   the frame cancels that conversation's turn started on an earlier connection;
+///   otherwise the cancel is a silent no-op.
 /// - `send_message` while a turn is already in flight → reject with a
 ///   `TURN_IN_PROGRESS` error (never run two turns concurrently on one socket);
 ///   otherwise dispatch and track the spawned turn's handle.
@@ -977,6 +1007,9 @@ async fn handle_text_frame(
                 // (falling back to the cancel frame's own) so the client correlates
                 // the reset.
                 turn.handle.abort();
+                // Free the conversation now; the aborted task releases it again
+                // (a no-op) when it next yields.
+                turn.releaser.release();
                 let echo = turn_req_id.or(request_id);
                 // Queue `cancelled` BEFORE arming the writer gate: the gate exempts the
                 // event by type, but ordering it this way keeps the intent obvious — the
@@ -986,6 +1019,23 @@ async fn handle_text_frame(
                     *cancelled_request
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(echo);
+                }
+            }
+            // No turn on THIS connection, but the frame names a session: the turn
+            // may have been started on an earlier connection that dropped (turns
+            // outlive their socket — SMOODEV-3705). Stop it there.
+            else if let Some(session_id) = frame_session_id(text) {
+                if let Some(stopped) =
+                    handler::cancel_conversation_turn(state, auth_org, user_scope, &session_id)
+                        .await
+                {
+                    let event = crate::protocol::cancelled(Some(&stopped.request_id));
+                    // Tell the connection that started the turn too, if it is still
+                    // open (a second device); a no-op once it has closed.
+                    if stopped.conn_id != conn_id {
+                        let _ = stopped.sink.send(event.clone());
+                    }
+                    let _ = sink_tx.send(event);
                 }
             }
             // else: no active turn → harmless no-op (emit nothing).

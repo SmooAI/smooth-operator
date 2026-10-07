@@ -1788,8 +1788,25 @@ fn collect_citations(auto: &[KnowledgeResult], tool: &[KnowledgeResult]) -> Vec<
         .collect()
 }
 
+/// How many of the most recent image-bearing user messages replay their images
+/// to the model (SMOODEV-3706). Older images are swapped for a short text note:
+/// every replayed image is re-sent on every turn, and a long photo thread would
+/// otherwise grow each request without bound.
+pub const MAX_REPLAYED_IMAGE_MESSAGES: usize = 3;
+
+/// `metadata_json` key marking an outbound message as a turn-error record (see
+/// [`persist_turn_error`]).
+pub const TURN_ERROR_METADATA_KEY: &str = "turnError";
+
 /// Load the conversation's persisted messages (oldest-first, capped) and convert
 /// them to engine `Message`s for replay: inbound → User, outbound → Assistant.
+///
+/// A user message's persisted `image` items become the engine message's images,
+/// for the [`MAX_REPLAYED_IMAGE_MESSAGES`] most recent image-bearing user
+/// messages; older ones are replaced by an `[image omitted]` note so the model
+/// still knows a picture was there. An image-only message (no text) is kept.
+/// Turn-error records are skipped: they tell the human what happened, and the
+/// model did not say them.
 async fn load_prior_messages(
     storage: &dyn StorageAdapter,
     conversation_id: &str,
@@ -1797,16 +1814,64 @@ async fn load_prior_messages(
     let page = storage
         .list_messages_by_conversation(MessageQuery::new(conversation_id, MAX_PRIOR_MESSAGES))
         .await?;
+    Ok(prior_messages_for_replay(page.messages))
+}
 
-    let mut out = Vec::with_capacity(page.messages.len());
-    for m in page.messages {
-        let text = m
+fn prior_messages_for_replay(messages: Vec<DomainMessage>) -> Vec<EngineMessage> {
+    let image_urls = |m: &DomainMessage| -> Vec<String> {
+        if m.direction != Direction::Inbound {
+            return Vec::new();
+        }
+        m.content
+            .items
+            .iter()
+            .filter(|it| it.item_type == "image")
+            .filter_map(|it| it.url.clone())
+            .filter(|url| !url.is_empty())
+            .collect()
+    };
+    // Which messages keep their images: the newest N image-bearing user ones.
+    let keep_images_from: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| !image_urls(m).is_empty())
+        .map(|(i, _)| i)
+        .rev()
+        .take(MAX_REPLAYED_IMAGE_MESSAGES)
+        .collect();
+
+    let mut out = Vec::with_capacity(messages.len());
+    for (i, m) in messages.into_iter().enumerate() {
+        if is_turn_error(&m) {
+            continue;
+        }
+        let mut text = m
             .content
             .text
             .clone()
             .or_else(|| m.content.items.iter().find_map(|it| it.text.clone()))
             .unwrap_or_default();
-        if text.is_empty() {
+        let urls = image_urls(&m);
+        let images = if urls.is_empty() {
+            vec![]
+        } else if keep_images_from.contains(&i) {
+            urls.into_iter()
+                .map(|url| smooth_operator_core::conversation::ImageContent { url, detail: None })
+                .collect()
+        } else {
+            let note = if urls.len() == 1 {
+                "[image omitted]".to_string()
+            } else {
+                format!("[{} images omitted]", urls.len())
+            };
+            text = if text.trim().is_empty() {
+                note
+            } else {
+                format!("{text}\n{note}")
+            };
+            vec![]
+        };
+        if text.is_empty() && images.is_empty() {
             continue;
         }
         let role = match m.direction {
@@ -1821,11 +1886,42 @@ async fn load_prior_messages(
             tool_name: None,
             tool_calls: vec![],
             reasoning_content: None,
-            images: vec![],
+            images,
             timestamp: m.created_at,
         });
     }
-    Ok(out)
+    out
+}
+
+fn is_turn_error(m: &DomainMessage) -> bool {
+    m.metadata_json
+        .as_ref()
+        .is_some_and(|meta| meta.get(TURN_ERROR_METADATA_KEY).is_some())
+}
+
+/// Record a failed turn in the conversation as an outbound message
+/// (SMOODEV-3705), so a client that reloads the history — typically one that
+/// dropped mid-turn and missed the live `error` frame — sees that the turn
+/// failed and why, instead of its own message sitting there unanswered.
+///
+/// `metadata_json.turnError` (`{code, requestId}`) marks the record so a client
+/// can render it as an error, and so history replay leaves it out.
+pub async fn persist_turn_error(
+    storage: &dyn StorageAdapter,
+    conversation_id: &str,
+    request_id: &str,
+    code: &str,
+    detail: &str,
+) -> Result<DomainMessage> {
+    let mut message = new_message(
+        conversation_id,
+        Direction::Outbound,
+        MessageContent::from_text(format!("This reply failed before it finished ({detail}).")),
+    );
+    message.metadata_json = Some(json!({
+        TURN_ERROR_METADATA_KEY: { "code": code, "requestId": request_id }
+    }));
+    storage.append_message(message).await
 }
 
 /// Append a single message to the conversation's log via the adapter.
@@ -1841,13 +1937,22 @@ async fn persist_message(
     text: &str,
     image_urls: &[String],
 ) -> Result<DomainMessage> {
-    let now = chrono::Utc::now();
     let content = if image_urls.is_empty() {
         MessageContent::from_text(text)
     } else {
         MessageContent::from_text_and_images(text, image_urls.iter().cloned())
     };
-    let message = DomainMessage {
+    storage
+        .append_message(new_message(conversation_id, direction, content))
+        .await
+}
+
+fn new_message(
+    conversation_id: &str,
+    direction: Direction,
+    content: MessageContent,
+) -> DomainMessage {
+    DomainMessage {
         id: uuid::Uuid::new_v4().to_string(),
         external_id: None,
         organization_id: None,
@@ -1858,10 +1963,9 @@ async fn persist_message(
         to: None,
         metadata_json: None,
         analytics_json: None,
-        created_at: now,
+        created_at: chrono::Utc::now(),
         updated_at: None,
-    };
-    storage.append_message(message).await
+    }
 }
 
 /// Build the structured `GeneralAgentResponse`-shaped payload the protocol's
@@ -1929,5 +2033,100 @@ mod tests {
             assert!(!durable_requested(Some(off)), "{off:?} should stay off");
         }
         assert!(!durable_requested(None), "unset should stay off");
+    }
+
+    // ---- history replay (SMOODEV-3706) -----------------------------------
+
+    use super::{
+        prior_messages_for_replay, Direction, DomainMessage, MessageContent,
+        MAX_REPLAYED_IMAGE_MESSAGES, TURN_ERROR_METADATA_KEY,
+    };
+    use smooth_operator_core::conversation::Role;
+
+    fn msg(direction: Direction, text: &str, images: &[&str]) -> DomainMessage {
+        let content = if images.is_empty() {
+            MessageContent::from_text(text)
+        } else {
+            MessageContent::from_text_and_images(text, images.iter().map(|s| (*s).to_string()))
+        };
+        super::new_message("conv", direction, content)
+    }
+
+    #[test]
+    fn replay_keeps_images_on_user_messages_including_image_only_ones() {
+        let replayed = prior_messages_for_replay(vec![
+            msg(Direction::Inbound, "", &["data:image/png;base64,AAA"]),
+            msg(Direction::Outbound, "a cat", &[]),
+            msg(
+                Direction::Inbound,
+                "and this?",
+                &["https://x/1.png", "https://x/2.png"],
+            ),
+        ]);
+        assert_eq!(replayed.len(), 3, "the image-only message is not skipped");
+        assert_eq!(replayed[0].role, Role::User);
+        assert_eq!(replayed[0].content, "");
+        assert_eq!(replayed[0].images.len(), 1);
+        assert_eq!(replayed[0].images[0].url, "data:image/png;base64,AAA");
+        assert!(replayed[1].images.is_empty());
+        assert_eq!(replayed[2].content, "and this?");
+        let urls: Vec<_> = replayed[2].images.iter().map(|i| i.url.as_str()).collect();
+        assert_eq!(urls, ["https://x/1.png", "https://x/2.png"]);
+    }
+
+    #[test]
+    fn replay_omits_images_older_than_the_newest_image_messages() {
+        let total = MAX_REPLAYED_IMAGE_MESSAGES + 2;
+        let log: Vec<_> = (0..total)
+            .map(|i| {
+                let url = format!("https://x/{i}.png");
+                let text = if i == 0 {
+                    String::new()
+                } else {
+                    format!("photo {i}")
+                };
+                msg(Direction::Inbound, &text, &[url.as_str()])
+            })
+            .collect();
+        let replayed = prior_messages_for_replay(log);
+        assert_eq!(replayed.len(), total);
+        // The two oldest lose their images to a note; an image-only one keeps a
+        // non-empty turn so the model still knows a picture was sent.
+        assert!(replayed[0].images.is_empty());
+        assert_eq!(replayed[0].content, "[image omitted]");
+        assert!(replayed[1].images.is_empty());
+        assert_eq!(replayed[1].content, "photo 1\n[image omitted]");
+        for (i, m) in replayed.iter().enumerate().skip(2) {
+            assert_eq!(m.images.len(), 1, "message {i} keeps its image");
+            assert_eq!(m.content, format!("photo {i}"));
+        }
+    }
+
+    #[test]
+    fn replay_counts_multiple_omitted_images() {
+        let mut log = vec![msg(Direction::Inbound, "two", &["https://a", "https://b"])];
+        log.extend(
+            (0..MAX_REPLAYED_IMAGE_MESSAGES).map(|_| msg(Direction::Inbound, "x", &["https://c"])),
+        );
+        let replayed = prior_messages_for_replay(log);
+        assert_eq!(replayed[0].content, "two\n[2 images omitted]");
+    }
+
+    #[test]
+    fn replay_skips_turn_error_records_and_empty_messages() {
+        let mut error = msg(
+            Direction::Outbound,
+            "This reply failed before it finished (boom).",
+            &[],
+        );
+        error.metadata_json =
+            Some(serde_json::json!({ TURN_ERROR_METADATA_KEY: { "code": "AGENT_ERROR" } }));
+        let replayed = prior_messages_for_replay(vec![
+            msg(Direction::Inbound, "hello", &[]),
+            error,
+            msg(Direction::Outbound, "", &[]),
+        ]);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].content, "hello");
     }
 }

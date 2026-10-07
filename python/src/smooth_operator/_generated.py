@@ -514,9 +514,9 @@ class SendMessageRequest(BaseModel):
     """
     Session ID returned by `create_conversation_session`.
     """
-    message: Annotated[str, Field(max_length=10000, min_length=1)]
+    message: Annotated[str, Field(max_length=10000)]
     """
-    The user's message text. Between 1 and 10 000 characters.
+    The user's message text, up to 10 000 characters. May be empty ("") when the turn carries at least one `images` or `files` attachment — a photo sent with no caption. A blank message with no attachment is rejected with a `VALIDATION_ERROR`.
     """
     stream: bool | None = True
     """
