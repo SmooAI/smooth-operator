@@ -155,6 +155,17 @@ pub struct MessageContent {
 }
 
 impl MessageContent {
+    /// The message's flat text: the `text` mirror, else the first text item,
+    /// trimmed. `None` when blank.
+    #[must_use]
+    pub fn flat_text(&self) -> Option<String> {
+        self.text
+            .clone()
+            .or_else(|| self.items.iter().find_map(|i| i.text.clone()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Convenience: a single text item plus the flat-text mirror.
     pub fn from_text(text: impl Into<String>) -> Self {
         let text = text.into();
