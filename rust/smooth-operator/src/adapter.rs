@@ -89,6 +89,28 @@ impl MessageQuery {
     }
 }
 
+/// One row of a conversation sidebar: the conversation plus what the row shows
+/// beside it, computed by the storage layer so a listing costs one read rather
+/// than one per conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub conversation: Conversation,
+    /// Flat text of the conversation's FIRST inbound (user) message — the title
+    /// fallback when the conversation carries no meaningful `name`.
+    pub first_inbound_text: Option<String>,
+    /// How many messages the conversation holds. Always > 0: empty
+    /// conversations are not summarized. The default implementation counts at
+    /// most [`SUMMARY_MESSAGE_CAP`]; an adapter that counts in the query may
+    /// report the exact figure.
+    pub message_count: usize,
+}
+
+/// The most messages the default [`StorageAdapter::list_owned_conversation_summaries`]
+/// reads per conversation (it pages oldest-first, so the first inbound message
+/// is always inside the cap).
+pub const SUMMARY_MESSAGE_CAP: usize = 200;
+
 /// Whether `participant` is the conversation's owning **user** with
 /// `user_email`. Emails are compared case-insensitively (mail domains are, and
 /// IdPs differ on local-part casing), and a blank email never matches — so a
@@ -148,6 +170,53 @@ pub trait StorageAdapter: Send + Sync {
             }
         }
         Ok(owned)
+    }
+
+    /// The sidebar rows for the conversations in `organization_id` that
+    /// `user_email` **owns** (exactly the set
+    /// [`list_conversations_by_org_and_user`](Self::list_conversations_by_org_and_user)
+    /// returns), dropping conversations with no messages, most recently updated
+    /// first, at most `limit` rows.
+    ///
+    /// This is the `list_conversations` read for a host that requires owned
+    /// conversations. The default composes the per-conversation reads, so it is
+    /// correct for any adapter but costs a message read per owned conversation —
+    /// and a host that mints a conversation on every page load owns a lot of
+    /// empty ones. Override it when the backend can answer in one query.
+    async fn list_owned_conversation_summaries(
+        &self,
+        organization_id: &str,
+        user_email: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationSummary>> {
+        let mut rows = Vec::new();
+        for conversation in self
+            .list_conversations_by_org_and_user(organization_id, user_email)
+            .await?
+        {
+            let page = self
+                .list_messages_by_conversation(MessageQuery::new(
+                    &conversation.id,
+                    SUMMARY_MESSAGE_CAP,
+                ))
+                .await?;
+            if page.messages.is_empty() {
+                continue;
+            }
+            let first_inbound_text = page
+                .messages
+                .iter()
+                .find(|m| matches!(m.direction, crate::domain::Direction::Inbound))
+                .and_then(|m| m.content.flat_text());
+            rows.push(ConversationSummary {
+                conversation,
+                first_inbound_text,
+                message_count: page.messages.len(),
+            });
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r.conversation.updated_at));
+        rows.truncate(limit);
+        Ok(rows)
     }
 
     /// Apply a partial update to a conversation; returns the updated row.

@@ -1054,6 +1054,16 @@ async fn handle_list_conversations(
     // the create-session derivation's fallback for the local/no-auth flavor.
     let org_id = auth_org.unwrap_or(crate::server::SEED_ORG_ID);
 
+    // A host that requires owned conversations (copilot-ws) can only ever list
+    // what the caller OWNS, and that set is one storage query away. The scan
+    // below instead reads EVERY conversation in the org — phone calls, SMS and
+    // widget chats included — with a participant read and a message read per
+    // row, which on a real org is thousands of round trips per picker open.
+    if state.require_owned_conversations && !matches!(scope, UserScope::Unscoped) {
+        send_owned_conversations(state, org_id, scope, limit, request_id, sink).await;
+        return;
+    }
+
     // User scope, on top of (never instead of) the org scope, applied below via
     // `may_read_conversation` — the SAME predicate the session reads use, so the
     // list can never disagree with what `get_session` will hand over. It runs
@@ -1115,6 +1125,69 @@ async fn handle_list_conversations(
     ));
 }
 
+/// `list_conversations` for a host that requires owned conversations: the
+/// caller's own conversations, summarized by the storage layer in one read.
+///
+/// Exactly the rows the generic scan would produce under that flag. There,
+/// [`may_read_conversation`] admits a conversation only when it is owned AND a
+/// `User(email)` scope owns it — which is precisely
+/// `list_conversations_by_org_and_user` — and admits nothing at all for
+/// `Denied`, which owns nothing (the listing exception is `Reach::ById` only).
+async fn send_owned_conversations(
+    state: &AppState,
+    org_id: &str,
+    scope: &UserScope,
+    limit: usize,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    let summaries = match scope {
+        UserScope::User(email) => {
+            match state
+                .storage
+                .list_owned_conversation_summaries(org_id, email, limit)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    let _ = sink.send(protocol::error(
+                        request_id,
+                        "STORAGE_ERROR",
+                        &format!("failed to list conversations: {e}"),
+                    ));
+                    return;
+                }
+            }
+        }
+        UserScope::Denied | UserScope::Unscoped => Vec::new(),
+    };
+    let conversations: Vec<Value> = summaries
+        .into_iter()
+        .map(|row| {
+            json!({
+                "conversationId": row.conversation.id,
+                "title": summary_title(row.first_inbound_text.as_deref(), &row.conversation.name),
+                "updatedAt": row.conversation.updated_at.to_rfc3339(),
+                "messageCount": row.message_count,
+            })
+        })
+        .collect();
+    let _ = sink.send(protocol::immediate_response(
+        request_id,
+        200,
+        "Conversations",
+        json!({ "conversations": conversations }),
+    ));
+}
+
+/// [`conversation_title`] from an already-extracted first inbound text.
+fn summary_title(first_inbound_text: Option<&str>, name: &str) -> String {
+    if !name.starts_with(DEFAULT_NAME_PREFIX) && !name.trim().is_empty() {
+        return truncate_preview(name, TITLE_MAX);
+    }
+    first_inbound_text.map_or_else(|| name.to_string(), |t| truncate_preview(t, TITLE_MAX))
+}
+
 /// Derive a sidebar title. A **meaningful** conversation `name` — an auto-title
 /// or a manual rename, i.e. anything not the default `Session <uuid>` — wins, so
 /// titles set by [`maybe_auto_title`] / [`handle_rename_conversation`] surface in
@@ -1124,25 +1197,17 @@ async fn handle_list_conversations(
 /// Back-compat: every pre-titling conversation carried the default name, so this
 /// is byte-for-byte the old message-preview behavior for them.
 fn conversation_title(messages: &[smooth_operator::domain::Message], name: &str) -> String {
-    if !name.starts_with(DEFAULT_NAME_PREFIX) && !name.trim().is_empty() {
-        return truncate_preview(name, TITLE_MAX);
-    }
-    messages
+    let first_inbound = messages
         .iter()
         .find(|m| matches!(m.direction, smooth_operator::domain::Direction::Inbound))
-        .and_then(message_text)
-        .map_or_else(|| name.to_string(), |t| truncate_preview(&t, TITLE_MAX))
+        .and_then(message_text);
+    summary_title(first_inbound.as_deref(), name)
 }
 
 /// Flat text of a message: the content's `text` mirror, else the first text item.
 /// `None` when blank.
 fn message_text(m: &smooth_operator::domain::Message) -> Option<String> {
-    m.content
-        .text
-        .clone()
-        .or_else(|| m.content.items.iter().find_map(|i| i.text.clone()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    m.content.flat_text()
 }
 
 /// Truncate to `max` characters (char-safe), appending `…` when clipped.
