@@ -1,5 +1,5 @@
 ---
-'@smooai/smooth-operator-js': minor
+'@smooai/smooth-operator': minor
 ---
 
 SMOODEV-3710: `list_conversations` reads the caller's own conversations in one storage call when the host requires owned conversations.
