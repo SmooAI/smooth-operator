@@ -153,4 +153,4 @@ Two portability rules that bite:
 - **Never assert a fixed number of `stream_token` events** — the mocks chunk text differently per language. Always `repeat` + `accumulate` + `assertAccumulated`, and only on the top-level `token` field.
 - **Never assert `null`** to mean "field absent" — .NET's dot-path resolver returns `null` for a missing final segment while the other four fail, so such an assertion passes on exactly one server.
 
-Still uncovered: auth gating, and graceful-drain (disconnect mid-turn → the turn still finishes).
+Still uncovered: auth gating, and disconnect mid-turn → the turn still finishes and persists its reply (SMOODEV-3705; Rust covers it in `rust/smooth-operator-server/tests/detached_turns.rs`, the other servers do not implement it yet).

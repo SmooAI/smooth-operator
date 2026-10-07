@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://smooth-agent.dev/spec/actions/send-message.schema.json",
   "title": "SendMessage",
-  "description": "Action: `send_message`. Submits a user message to the active session. The server immediately acknowledges with `immediate_response` (status 202), then emits zero or more `stream_chunk` / `stream_token` events as the agent workflow runs, and finally emits `eventual_response` (status 200) with the terminal output. If the agent requires human confirmation mid-stream, a `write_confirmation_required` event is sent and processing pauses until the client sends `confirm_tool_action`.",
+  "description": "Action: `send_message`. Submits a user message to the active session. The server immediately acknowledges with `immediate_response` (status 202), then emits zero or more `stream_chunk` / `stream_token` events as the agent workflow runs, and finally emits `eventual_response` (status 200) with the terminal output. If the agent requires human confirmation mid-stream, a `write_confirmation_required` event is sent and processing pauses until the client sends `confirm_tool_action`. A turn is NOT tied to the socket that started it: if the client disconnects mid-turn the turn runs to completion and persists its reply (or, on failure, an outbound message whose `metadataJson.turnError` is `{code, requestId}`), so a reconnecting client reads the outcome back with `get_conversation_messages`. Only `cancel` stops a turn. One turn runs per conversation at a time: a `send_message` for a conversation whose turn is still running — from this connection or an earlier one — is rejected with `TURN_IN_PROGRESS`.",
 
   "$defs": {
     "Request": {
@@ -28,9 +28,8 @@
         },
         "message": {
           "type": "string",
-          "minLength": 1,
           "maxLength": 10000,
-          "description": "The user's message text. Between 1 and 10 000 characters."
+          "description": "The user's message text, up to 10 000 characters. May be empty (\"\") when the turn carries at least one `images` or `files` attachment — a photo sent with no caption. A blank message with no attachment is rejected with a `VALIDATION_ERROR`."
         },
         "stream": {
           "type": "boolean",

@@ -254,3 +254,69 @@ async def test_dispatcher_parses_images_and_files_onto_context(monkeypatch: pyte
     ctx: TurnContext = seen["context"]
     assert ctx.images == [{"url": "https://a/1.png"}]
     assert ctx.files == [{"name": "r.csv", "url": "data:text/csv;base64,AA"}]
+
+
+# ── image-only turns (SMOODEV-3706) ──────────────────────────────────────────
+
+
+def test_build_user_content_image_only_omits_empty_text_part() -> None:
+    """An image with no caption emits only the image part (mirrors the Rust core's
+    ``to_chat_message_image_only_omits_text_part``)."""
+    assert _build_user_content("", [{"url": "https://x/y.jpg"}]) == [
+        {"type": "image_url", "image_url": {"url": "https://x/y.jpg"}},
+    ]
+    # Nothing usable at all still yields a (blank) text part, never an empty list.
+    assert _build_user_content("", [{"detail": "high"}]) == [{"type": "text", "text": ""}]
+
+
+async def _dispatch_send(frame_extra: dict, monkeypatch: pytest.MonkeyPatch) -> tuple[list[dict], dict]:
+    import smooth_operator_server.dispatcher as disp
+    from smooth_operator_server.turn_runner import TurnResult
+
+    store = InMemorySessionStore()
+    session = await store.create_session("agent-x", None, None)
+    seen: dict = {}
+
+    class _CaptureRunner:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        async def run(self, conversation_id, request_id, message, sink, session_id=None, context=None):
+            seen["message"] = message
+            seen["context"] = context
+            return TurnResult(reply="ok", message_id="m-1")
+
+    monkeypatch.setattr(disp, "TurnRunner", _CaptureRunner)
+    dispatcher = FrameDispatcher(
+        store, MockLlmProvider(), tools=[], agent_config_resolver=StaticAgentConfigResolver({})
+    )
+    events: list[dict] = []
+    await dispatcher.dispatch(
+        json.dumps({"action": "send_message", "sessionId": session.session_id, **frame_extra}),
+        events.append,
+    )
+    await dispatcher.wait_for_turns()
+    return events, seen
+
+
+@pytest.mark.asyncio
+async def test_image_only_send_runs_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    events, seen = await _dispatch_send({"message": "", "images": [{"url": "https://a/1.png"}]}, monkeypatch)
+    assert not [e for e in events if e["type"] == "error"], events
+    assert seen["message"] == ""
+    assert seen["context"].images == [{"url": "https://a/1.png"}]
+
+
+@pytest.mark.asyncio
+async def test_file_only_send_without_message_field_runs_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    events, seen = await _dispatch_send({"files": [{"name": "r.csv", "url": "data:text/csv;base64,AA"}]}, monkeypatch)
+    assert not [e for e in events if e["type"] == "error"], events
+    assert seen["context"].files == [{"name": "r.csv", "url": "data:text/csv;base64,AA"}]
+
+
+@pytest.mark.asyncio
+async def test_blank_send_without_attachments_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A malformed image (no url) is dropped fail-soft, so it does not count as an attachment.
+    events, seen = await _dispatch_send({"message": "  ", "images": [{"detail": "high"}]}, monkeypatch)
+    assert [e["error"]["code"] for e in events if e["type"] == "error"] == ["VALIDATION_ERROR"]
+    assert "context" not in seen

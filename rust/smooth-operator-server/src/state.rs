@@ -38,6 +38,7 @@ use smooth_operator_core::tool::ToolHook;
 use smooth_operator_ingestion::indexing::{InMemoryIndexingStore, IndexingStore};
 
 use crate::config::ServerConfig;
+use crate::running_turns::RunningTurns;
 
 /// A create-session's storage writes, held back until the conversation earns a
 /// row (SMOODEV-3057).
@@ -251,6 +252,11 @@ pub struct AppState {
     /// decline) to resume the parked turn. One outstanding interaction per
     /// session (mirrors `pending_confirmations`).
     pending_interactions: Arc<RwLock<HashMap<String, PendingInteraction>>>,
+    /// **Running turns, one per conversation** (SMOODEV-3705). Turns are detached
+    /// from the socket that started them, so this — not the connection — is what
+    /// stops a reconnecting client from starting a second turn on a conversation,
+    /// and what lets it `cancel` the orphaned one. See [`RunningTurns`].
+    pub running_turns: Arc<RunningTurns>,
     /// When `true`, the router mounts the embedded widget host page at `/` and
     /// the widget bundle at `/chat-widget.iife.js`. Off by default (the
     /// K8s/Lambda flavors never serve the widget); the local flavor opts in via
@@ -374,6 +380,7 @@ impl AppState {
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
             pre_approved_confirmations: Arc::new(RwLock::new(HashMap::new())),
             pending_interactions: Arc::new(RwLock::new(HashMap::new())),
+            running_turns: Arc::new(RunningTurns::default()),
             serve_widget: false,
             widget_token: None,
             strict_auth: false,

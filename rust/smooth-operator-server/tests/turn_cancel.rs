@@ -11,8 +11,9 @@
 //!      stays live).
 //!   3. **A normal turn still completes** with an `eventual_response` (cancellation
 //!      wiring doesn't disturb the happy path).
-//!   4. **Disconnect mid-turn also aborts the turn** (no client remains to receive
-//!      its output).
+//!   4. **Disconnect mid-turn does NOT abort the turn** (SMOODEV-3705): the turn
+//!      is detached and keeps running so it can persist its result; only `cancel`
+//!      stops it. The run-to-completion half lives in `detached_turns.rs`.
 //!
 //! Runs fully offline: a `MockLlmClient` scripts the turn and a host `ToolProvider`
 //! installs a deterministic tool that parks the turn on a long sleep, giving a
@@ -329,7 +330,7 @@ async fn normal_turn_still_completes() {
 }
 
 #[tokio::test]
-async fn disconnect_mid_turn_aborts_the_turn() {
+async fn disconnect_mid_turn_does_not_abort_the_turn() {
     let started = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicBool::new(false));
@@ -361,15 +362,12 @@ async fn disconnect_mid_turn_aborts_the_turn() {
     // Client hangs up mid-turn.
     drop(client);
 
-    // The server aborts the in-flight turn: the future is dropped (guard fires),
-    // and the tool never reaches its post-await completion.
-    wait_until("turn future dropped on disconnect", || {
-        dropped.load(Ordering::SeqCst)
-    })
-    .await;
+    // The turn is detached, not aborted: its future is still parked in the tool.
+    // (Before SMOODEV-3705 the drop-guard fired here within milliseconds.)
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
-        !finished.load(Ordering::SeqCst),
-        "disconnect must abort the turn before it completes"
+        !dropped.load(Ordering::SeqCst),
+        "a client disconnect must not abort the running turn"
     );
 }
 

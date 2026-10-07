@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://smooth-agent.dev/spec/actions/cancel.schema.json",
   "title": "Cancel",
-  "description": "Action: `cancel`. Client-initiated cancellation of the connection's in-flight agent turn (the \"Stop button\"). Aborts the running `send_message` turn: the server drops the turn future at its next await point, abandoning the in-flight LLM/tool call, and replies with a terminal `cancelled` event. Correlation convention: send the SAME `requestId` as the `send_message` being cancelled, so the `cancelled` event echoes it. A connection runs at most ONE turn at a time; a `cancel` with no active turn is a harmless no-op that emits nothing.",
+  "description": "Action: `cancel`. Client-initiated cancellation of the connection's in-flight agent turn (the \"Stop button\"). Aborts the running `send_message` turn: the server drops the turn future at its next await point, abandoning the in-flight LLM/tool call, and replies with a terminal `cancelled` event. Correlation convention: send the SAME `requestId` as the `send_message` being cancelled, so the `cancelled` event echoes it. A connection runs at most ONE turn at a time. Turns outlive their socket (a client that disconnects mid-turn does not stop it), so a `cancel` on a connection with no active turn that carries a `sessionId` cancels the turn still running on that session's conversation from an earlier connection, and the `cancelled` event echoes THAT turn's `requestId`. With no active turn to cancel, a `cancel` is a harmless no-op that emits nothing.",
 
   "$defs": {
     "Request": {
       "title": "CancelRequest",
-      "description": "A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional and advisory — the server cancels the connection's single active turn regardless.",
+      "description": "A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional: the connection's own active turn is cancelled regardless, and when there is none, `sessionId` names the session whose conversation's turn (started on an earlier, dropped connection) to cancel.",
       "type": "object",
       "required": ["action"],
       "additionalProperties": false,
@@ -23,7 +23,7 @@
         },
         "sessionId": {
           "type": "string",
-          "description": "Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time."
+          "description": "Optional. Ignored when this connection has an active turn (that turn is cancelled). Otherwise it names a session whose conversation still has a turn running from an earlier connection — e.g. a client that dropped mid-turn and reconnected — and that turn is cancelled. Subject to the same ownership check as every session-addressed action; an unknown or foreign session is a silent no-op."
         }
       }
     }

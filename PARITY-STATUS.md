@@ -80,6 +80,8 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
 | Backplane `publish` (event fan-out) | ✅ | — | ✅ | ✅ | — |
 | **Cross-pod backplane (Redis / NATS)** | ✅ | — | — | — | — |
 | Deferred conversation create (a bare open writes no row until its first message) [^deferred] | ✅ | — | — | — | — |
+| Detached turns (a disconnect doesn't abort the turn · one turn per conversation · cancel by `sessionId`) [^detached] | ✅ | — | — | — | — |
+| History replay keeps user images (newest 3 image messages; older → `[image omitted]`) | ✅ | — | — | — | — |
 
 [^ingest]: The api-prime OTLP ingest builds a span's attribute set from the resource
     attrs plus **that span's own**, with no inheritance from the parent. A tool span
@@ -98,6 +100,14 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
     (park the create, flush it on the first `send_message`, drop it on disconnect,
     and keep the write ORDER — a host adapter may hook the `user` participant write
     to capture the visitor into a CRM, reading the conversation's `metadata_json`).
+
+[^detached]: SMOODEV-3705. The Rust server lets a turn whose client disconnects run
+    to completion and persist its reply (or a `metadataJson.turnError` record), keys
+    the one-turn rule on the conversation instead of the socket, and lets a `cancel`
+    with a `sessionId` stop a turn started on an earlier connection. The other four
+    still abort the turn on socket close and keep the one-turn rule per connection.
+    The wire shape is unchanged (the same `cancelled` / `TURN_IN_PROGRESS` frames), so
+    the scenario corpus passes in all five.
 
 [^provenance]: Rust-only because it needs engine support that exists only in the Rust
     core (1.10.0): `usage_estimated` / `cost_estimated` on `AgentEvent::Completed`, plus

@@ -519,9 +519,23 @@ class FrameDispatcher:
             sink(protocol.error(request_id, "SESSION_NOT_FOUND", f"session '{session_id}' not found"))
             return
 
+        # Attachments are parsed before the `message` check: a photo sent with no
+        # caption is an ordinary turn, so an empty (or absent) message is valid when the
+        # turn carries an image or file (SMOODEV-3706, mirrors Rust). Only a turn with
+        # nothing in it at all is rejected.
+        images = _parse_attachments(frame.get("images"), ("url",))
+        files = _parse_attachments(frame.get("files"), ("name", "url"))
         message = frame.get("message")
-        if not isinstance(message, str) or not message.strip():
-            sink(protocol.error(request_id, "VALIDATION_ERROR", "missing or empty 'message'"))
+        if not isinstance(message, str):
+            message = ""
+        if not message.strip() and not images and not files:
+            sink(
+                protocol.error(
+                    request_id,
+                    "VALIDATION_ERROR",
+                    "missing or empty 'message' (an empty message needs at least one 'images' or 'files' attachment)",
+                )
+            )
             return
 
         # No chat client → can't run an LLM turn. Return a clean error; the server
@@ -583,10 +597,7 @@ class FrameDispatcher:
         # reach the model as `image_url` parts; files are surfaced for a host tool to
         # land into the workspace; the context's directive sink lets a host tool hand a
         # client-side directive (e.g. `send_file`) back onto `eventual_response`.
-        turn_context = TurnContext(
-            images=_parse_attachments(frame.get("images"), ("url",)),
-            files=_parse_attachments(frame.get("files"), ("name", "url")),
-        )
+        turn_context = TurnContext(images=images, files=files)
         runner = TurnRunner(
             self._chat_client,
             self._store,
