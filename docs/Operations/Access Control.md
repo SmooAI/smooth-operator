@@ -121,6 +121,12 @@ its **`email` claim**, matched against the conversation's owning `user`
 participant (`StorageAdapter::list_conversations_by_org_and_user`; Postgres
 pushes it into the query, other adapters filter participants).
 
+A `list_conversations` **search** (`query`) and **page** (`cursor`) run inside
+that scope, never instead of it: a host that requires owned conversations
+answers both from `StorageAdapter::list_owned_conversation_summaries_page`,
+which filters by owner first and only then by the search text, so a matching
+chat that belongs to another member (or to nobody) is never returned.
+
 The rules, in order:
 
 | connection | conversation reads |

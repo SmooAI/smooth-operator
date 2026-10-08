@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"runtime/debug"
@@ -215,10 +216,14 @@ type inboundFrame struct {
 	ConversationID string `json:"conversationId"`
 	// list_conversations / get_conversation_messages — optional max rows returned (default 50).
 	Limit int `json:"limit"`
-	// get_conversation_messages — optional opaque pagination cursor from a prior response's
-	// nextCursor (a message id today); return only messages older than the one it names.
-	// th-669d48.
+	// list_conversations / get_conversation_messages — optional opaque pagination cursor
+	// from a prior response's nextCursor. For get_conversation_messages it is a message id
+	// (return only messages older than the one it names; th-669d48); for
+	// list_conversations it is an encoded conversationKey (SMOODEV-3744).
 	Cursor string `json:"cursor"`
+	// list_conversations — optional server-side search (trimmed; blank = no filter).
+	// SMOODEV-3744.
+	Query string `json:"query"`
 	// get_session / send_message / confirm_tool_action
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
@@ -414,49 +419,209 @@ func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFra
 // defaultListLimit caps list_conversations when the caller doesn't ask for a specific limit.
 const defaultListLimit = 50
 
+// maxListConversationsLimit caps a list_conversations page. Clamped, not rejected: a
+// client from before paging may still ask for more, and gets a full page plus a
+// nextCursor for the rest.
+const maxListConversationsLimit = 200
+
 // defaultConversationName is the title fallback for a conversation with messages but no
 // inbound (user) message to preview. The Go store carries no per-conversation name (unlike
 // the Rust reference's conversation.name), so a generic label stands in.
 const defaultConversationName = "Conversation"
 
+// defaultConversationNamePrefix marks the placeholder name the Rust server mints at
+// create-session time ("Session <uuid>"). A name with this prefix is not a title: the
+// sidebar shows the first inbound message instead, and a search never matches it. The Go
+// analog of the Rust DEFAULT_CONVERSATION_NAME_PREFIX.
+const defaultConversationNamePrefix = "Session "
+
+// meaningfulConversationName returns name when it is a real title (non-blank and not the
+// default placeholder), else "".
+func meaningfulConversationName(name string) string {
+	if strings.TrimSpace(name) == "" || strings.HasPrefix(name, defaultConversationNamePrefix) {
+		return ""
+	}
+	return name
+}
+
+// conversationKey is a position in the conversation sidebar's order — newest UpdatedAt
+// first, ties broken by ID descending. Rows strictly AFTER a key in that order are the
+// next page (keyset paging; never an offset). On the wire it travels as an opaque cursor
+// (encode): unpadded base64url of "<RFC 3339 updatedAt, full precision>|<id>". The Go
+// analog of the Rust ConversationKey; a cursor minted by either decodes in the other.
+type conversationKey struct {
+	UpdatedAt time.Time
+	ID        string
+}
+
+// precedes reports whether a row keyed (updatedAt, id) sorts strictly after k — i.e.
+// belongs to a later page. Ids compare as plain strings, which for canonical lowercase
+// UUIDs is the order Postgres gives `uuid`. Times compare at full stored precision.
+func (k conversationKey) precedes(updatedAt time.Time, id string) bool {
+	return updatedAt.Before(k.UpdatedAt) || (updatedAt.Equal(k.UpdatedAt) && id < k.ID)
+}
+
+// encode is the opaque wire cursor for k.
+func (k conversationKey) encode() string {
+	raw := k.UpdatedAt.UTC().Format(time.RFC3339Nano) + "|" + k.ID
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// decodeConversationKey parses a wire cursor; ok=false when it isn't one a server
+// minted (bad base64, no "|", empty id, or a timestamp that isn't RFC 3339 — any
+// offset and fractional precision is accepted).
+func decodeConversationKey(cursor string) (conversationKey, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(cursor))
+	if err != nil {
+		return conversationKey{}, false
+	}
+	ts, id, found := strings.Cut(string(raw), "|")
+	if !found || id == "" {
+		return conversationKey{}, false
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return conversationKey{}, false
+	}
+	return conversationKey{UpdatedAt: updatedAt.UTC(), ID: id}, true
+}
+
+// matchesConversationSearch reports whether a row with this stored name and first inbound
+// text matches needle (already trimmed; "" matches everything): a case-insensitive
+// substring of the meaningful name or the first inbound message — i.e. of what the
+// sidebar shows. The Go analog of the Rust ConversationSummaryQuery::matches_search.
+func matchesConversationSearch(needle, name, firstInbound string) bool {
+	if needle == "" {
+		return true
+	}
+	needle = strings.ToLower(needle)
+	for _, haystack := range []string{meaningfulConversationName(name), firstInbound} {
+		if haystack != "" && strings.Contains(strings.ToLower(haystack), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// sortConversationsNewestFirst orders summaries newest UpdatedAt first, then
+// ConversationID descending — the sidebar order every page (and every conversationKey)
+// is defined against. The Go analog of the Rust sort_conversations_newest_first.
+func sortConversationsNewestFirst(summaries []ConversationSummary) {
+	sort.Slice(summaries, func(i, j int) bool {
+		a, b := summaries[i], summaries[j]
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		return a.ConversationID > b.ConversationID
+	})
+}
+
 // handleListConversations — the conversation-sidebar / resume substrate. Returns the store's
 // conversations that have at least one message (empty conversations, minted every page-load,
-// are filtered out by the store), most-recent-first, each with a short title preview + message
-// count. Reply is an immediate_response carrying { conversations: [ { conversationId, title,
-// updatedAt, messageCount } ] }. Optional input: limit (default 50). Mirrors the Rust
-// list_conversations. th-d5b446.
+// are filtered out by the store), most-recent-first (ties by id, descending), each with a
+// short title preview + message count. Reply is an immediate_response carrying
+// { conversations: [ { conversationId, title, updatedAt, messageCount } ], nextCursor,
+// hasMore }. Mirrors the Rust list_conversations. th-d5b446, SMOODEV-3744.
+//
+// Optional input (see spec/actions/list-conversations.schema.json):
+//   - limit (default 50) — the max conversations in this page.
+//   - cursor — a prior reply's nextCursor: continue strictly after its last row (keyset on
+//     (updatedAt, id), never an offset). Absent/empty = first page. A cursor that doesn't
+//     decode is a VALIDATION_ERROR.
+//   - query — keep only rows whose meaningful name or first inbound message contains it,
+//     case-insensitively. A search narrows the caller's scope; it never widens it.
+//
+// Keyset semantics under concurrent writes: a page never repeats a row an earlier page
+// returned, and a row that isn't touched while paging is never skipped. A row whose
+// updatedAt is bumped mid-paging moves ABOVE the cursor, so the remaining pages don't
+// return it (it is the newest row on a fresh first page instead).
 func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inboundFrame, sink EventSink) {
 	limit := defaultListLimit
 	if frame.Limit > 0 {
-		limit = frame.Limit
+		limit = min(frame.Limit, maxListConversationsLimit)
 	}
+	var after *conversationKey
+	if strings.TrimSpace(frame.Cursor) != "" {
+		key, ok := decodeConversationKey(frame.Cursor)
+		if !ok {
+			sink(errorEvent(frame.RequestID, "VALIDATION_ERROR", "list_conversations 'cursor' is not a cursor this server issued"))
+			return
+		}
+		after = &key
+	}
+	needle := strings.TrimSpace(frame.Query)
 
-	// Scoped in the store's selection, before the sort+cap below — a filter applied to an
-	// already-capped page would silently return short/empty pages. th-8fe998.
+	// Scoped in the store's selection, before the sort, search and cap below — a filter
+	// applied to an already-capped page would silently return short/empty pages, and a
+	// search that ran before scoping could reach other users' conversations. th-8fe998.
+	// ponytail: the store returns every visible conversation and the handler pages in
+	// memory; push the keyset + search into SessionStore if an org's list gets big enough
+	// to care (would change the interface for implementers).
 	summaries, err := d.store.ListConversations(ctx, d.access.ConversationScope())
 	if err != nil {
 		sink(errorEvent(frame.RequestID, "STORAGE_ERROR", "Failed to list conversations."))
 		return
 	}
+	for i := range summaries {
+		// Wall clock only: a cursor decoded off the wire carries no monotonic reading,
+		// so the sort must not use one either or the two orders could disagree.
+		summaries[i].UpdatedAt = summaries[i].UpdatedAt.Round(0)
+	}
+	sortConversationsNewestFirst(summaries)
 
-	// Most-recent-first (stable so equal timestamps keep insertion order), then cap.
-	sort.SliceStable(summaries, func(i, j int) bool {
-		return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt)
-	})
-	if len(summaries) > limit {
-		summaries = summaries[:limit]
+	// Keyset + search, in page order, stopping once the page plus one look-ahead row (which
+	// tells us whether there is a next page) is full.
+	page := make([]ConversationSummary, 0, min(limit+1, len(summaries)))
+	for _, c := range summaries {
+		if len(page) > limit {
+			break
+		}
+		if after != nil && !after.precedes(c.UpdatedAt, c.ConversationID) {
+			continue
+		}
+		if !matchesConversationSearch(needle, c.Name, c.FirstInbound) {
+			continue
+		}
+		page = append(page, c)
+	}
+	hasMore := len(page) > limit
+	if hasMore {
+		page = page[:limit]
+	}
+	var nextCursor any // explicit JSON null on the last page
+	if hasMore {
+		last := page[len(page)-1]
+		nextCursor = conversationKey{UpdatedAt: last.UpdatedAt, ID: last.ConversationID}.encode()
 	}
 
-	conversations := make([]map[string]any, 0, len(summaries))
-	for _, c := range summaries {
+	conversations := make([]map[string]any, 0, len(page))
+	for _, c := range page {
 		conversations = append(conversations, map[string]any{
 			"conversationId": c.ConversationID,
-			"title":          conversationTitle(c.FirstInbound, defaultConversationName),
-			"updatedAt":      c.UpdatedAt.UTC().Format(time.RFC3339),
+			"title":          summaryTitle(c.Name, c.FirstInbound),
+			"updatedAt":      c.UpdatedAt.UTC().Format(time.RFC3339Nano),
 			"messageCount":   c.MessageCount,
 		})
 	}
-	sink(immediateResponse(frame.RequestID, 200, "Conversations", map[string]any{"conversations": conversations}))
+	sink(immediateResponse(frame.RequestID, 200, "Conversations", map[string]any{
+		"conversations": conversations,
+		"nextCursor":    nextCursor,
+		"hasMore":       hasMore,
+	}))
+}
+
+// summaryTitle is a sidebar row's title: the conversation's meaningful name, else a
+// preview of its first inbound message, else its stored name, else a generic label.
+// Mirrors the Rust summary_title.
+func summaryTitle(name, firstInbound string) string {
+	if meaningful := meaningfulConversationName(name); meaningful != "" {
+		return truncatePreview(meaningful, 60)
+	}
+	fallback := defaultConversationName
+	if strings.TrimSpace(name) != "" {
+		fallback = name
+	}
+	return conversationTitle(firstInbound, fallback)
 }
 
 // maxMessageLimit caps get_conversation_messages' limit per the contract (1..100).

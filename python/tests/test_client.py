@@ -414,6 +414,60 @@ async def test_create_session_resolves_with_immediate_response_data() -> None:
     assert session.agent_name == "Aria"
 
 
+async def test_list_conversations_sends_cursor_and_query_and_parses_a_page() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    coro = asyncio.create_task(client.list_conversations(limit=20, cursor="abc", query="invoice"))
+    await asyncio.sleep(0)
+    sent = transport.last_sent()
+    assert sent["action"] == "list_conversations"
+    assert (sent["limit"], sent["cursor"], sent["query"]) == (20, "abc", "invoice")
+
+    transport.emit(
+        {
+            "type": "immediate_response",
+            "requestId": sent["requestId"],
+            "status": 200,
+            "data": {
+                "conversations": [
+                    {
+                        "conversationId": "33333333-3333-3333-3333-333333333333",
+                        "title": "Where is the Acme invoice?",
+                        "updatedAt": "2026-10-08T14:30:00.123456+00:00",
+                        "messageCount": 4,
+                    }
+                ],
+                "nextCursor": "next",
+                "hasMore": True,
+            },
+        }
+    )
+    page = await coro
+    assert [c.conversation_id for c in page.conversations] == ["33333333-3333-3333-3333-333333333333"]
+    assert page.next_cursor == "next"
+    assert page.has_more is True
+
+
+async def test_list_conversations_omits_absent_options_and_accepts_a_pre_paging_reply() -> None:
+    client, transport = make_client()
+    await client.connect()
+
+    coro = asyncio.create_task(client.list_conversations())
+    await asyncio.sleep(0)
+    sent = transport.last_sent()
+    assert set(sent) == {"action", "requestId"}
+
+    # A server that predates paging omits nextCursor/hasMore.
+    transport.emit(
+        {"type": "immediate_response", "requestId": sent["requestId"], "status": 200, "data": {"conversations": []}}
+    )
+    page = await coro
+    assert page.conversations == []
+    assert page.next_cursor is None
+    assert not page.has_more
+
+
 async def test_ping_resolves_with_the_pong_timestamp() -> None:
     client, transport = make_client()
     await client.connect()

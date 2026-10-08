@@ -27,6 +27,8 @@ import type {
     InteractionInvalid,
     InteractionRequired,
     Keepalive,
+    ListConversationsRequest,
+    ListConversationsResponse,
     OtpInvalid,
     OtpSent,
     OtpVerificationRequired,
@@ -60,6 +62,7 @@ export const ACTION_TYPES = [
     'send_message',
     'get_session',
     'get_conversation_messages',
+    'list_conversations',
     'confirm_tool_action',
     'verify_otp',
     'submit_interaction',
@@ -101,6 +104,7 @@ export type ClientAction =
     | SendMessageRequest
     | GetSessionRequest
     | GetMessagesRequest
+    | ListConversationsRequest
     | ConfirmToolActionRequest
     | VerifyOtpRequest
     | SubmitInteractionRequest
@@ -161,6 +165,7 @@ export interface ClientActionByType {
     send_message: SendMessageRequest;
     get_session: GetSessionRequest;
     get_conversation_messages: GetMessagesRequest;
+    list_conversations: ListConversationsRequest;
     confirm_tool_action: ConfirmToolActionRequest;
     verify_otp: VerifyOtpRequest;
     submit_interaction: SubmitInteractionRequest;
@@ -208,5 +213,6 @@ export type {
     CreateConversationSessionResponse,
     GetSessionResponse,
     GetMessagesResponse,
+    ListConversationsResponse,
     SendMessageResponse,
 };

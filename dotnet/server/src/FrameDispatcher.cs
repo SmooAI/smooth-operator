@@ -530,30 +530,65 @@ public sealed class FrameDispatcher
     private const string DefaultConversationName = "Conversation";
     private const int TitleMaxChars = 60;
     private const int DefaultListLimit = 50;
+    // Clamped, not rejected: a client from before paging may still ask for more, and gets a full
+    // page plus a nextCursor for the rest.
+    private const int MaxListLimit = 200;
 
     /// <summary>
-    /// <c>list_conversations</c> — the conversation-sidebar / resume substrate. Returns the store's
-    /// conversations that have at least one message (empty ones, minted every page-load, are filtered
-    /// out), most-recent-first, each with a short first-inbound title preview + message count. Reply is
-    /// an <c>immediate_response</c> carrying <c>{ conversations: [ { conversationId, title, updatedAt,
-    /// messageCount } ] }</c>. Optional input: <c>limit</c> (default 50). Mirrors the Rust
-    /// <c>handle_list_conversations</c>. th-d5b446.
+    /// <c>list_conversations</c> — the conversation-sidebar / resume substrate, keyset-paged and
+    /// searchable. Returns the caller's conversations that have at least one message (empty ones,
+    /// minted every page-load, are filtered out), newest <c>updatedAt</c> first with ties broken by
+    /// conversation id descending (ordinal), each with a short first-inbound title preview + message
+    /// count. Reply is an <c>immediate_response</c> carrying <c>{ conversations: [ { conversationId,
+    /// title, updatedAt, messageCount } ], nextCursor, hasMore }</c> (<c>nextCursor</c> is an explicit
+    /// null on the last page). Mirrors the Rust <c>handle_list_conversations</c>. th-d5b446, SMOODEV-3744.
+    /// <para>
+    /// Inputs: <c>limit</c> (default 50, at most 200 — larger values are clamped); <c>cursor</c> (a prior page's <c>nextCursor</c>; empty/absent
+    /// = first page; one that does not decode is a <c>VALIDATION_ERROR</c> and nothing else);
+    /// <c>query</c> (trimmed, case-insensitive substring of the first inbound message — this server's
+    /// only title source; blank = no filter). No cursor and no query is exactly the pre-paging listing.
+    /// </para>
+    /// <para>
+    /// Concurrency: pages are positions in the <c>(updatedAt, conversationId)</c> order, never offsets.
+    /// A page never repeats a row an earlier page returned, and a row that is not updated while the
+    /// client pages is never skipped. A row whose <c>updatedAt</c> moves while the client pages jumps
+    /// ABOVE the cursor, so the remaining pages do not return it; it heads a fresh first page instead.
+    /// </para>
     /// </summary>
     private async Task HandleListConversationsAsync(JsonObject frame, string? requestId, Action<JsonObject> sink, CancellationToken cancellationToken)
     {
         var limit = DefaultListLimit;
         if (frame["limit"] is JsonValue lv && lv.TryGetValue<int>(out var l) && l > 0)
         {
-            limit = l;
+            limit = Math.Min(l, MaxListLimit);
         }
+
+        ConversationKey? after = null;
+        var cursor = frame["cursor"].Str();
+        if (!string.IsNullOrEmpty(cursor))
+        {
+            if (!ConversationKey.TryDecode(cursor, out after))
+            {
+                sink(ProtocolEvents.Error(requestId, "VALIDATION_ERROR", "list_conversations 'cursor' is not a cursor this server issued"));
+                return;
+            }
+        }
+
+        // One row past the page tells us whether there is a next one.
+        var query = ConversationPageQuery.Create(limit == int.MaxValue ? limit : limit + 1, after, frame["query"].Str());
 
         // SECURITY (th-966fab): scoped to the connection's authenticated principal. Unscoped ONLY when
         // no auth is configured; an authenticated principal without an email gets an empty list, never
-        // everyone's. The store applies this in its query — filtering here would break the LIMIT below.
-        var summaries = await _store.ListConversationsAsync(_access.ConversationScope, cancellationToken).ConfigureAwait(false);
+        // everyone's. The store applies the scope in its query, BEFORE the search and the LIMIT — so a
+        // page is never short and a search can only narrow what the caller could already list.
+        var rows = await _store.ListConversationsPageAsync(_access.ConversationScope, query, cancellationToken).ConfigureAwait(false);
+
+        var hasMore = rows.Count > limit;
+        var page = hasMore ? rows.Take(limit).ToList() : rows.ToList();
+        var nextCursor = hasMore && page.Count > 0 ? ConversationKey.Of(page[^1]).Encode() : null;
 
         var conversations = new JsonArray();
-        foreach (var c in summaries.Where(s => s.MessageCount > 0).OrderByDescending(s => s.UpdatedAt).Take(limit))
+        foreach (var c in page)
         {
             conversations.Add(new JsonObject
             {
@@ -564,7 +599,12 @@ public sealed class FrameDispatcher
             });
         }
 
-        sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Conversations", new JsonObject { ["conversations"] = conversations }));
+        sink(ProtocolEvents.ImmediateResponse(requestId, 200, "Conversations", new JsonObject
+        {
+            ["conversations"] = conversations,
+            ["nextCursor"] = nextCursor is null ? null : JsonValue.Create(nextCursor),
+            ["hasMore"] = hasMore,
+        }));
     }
 
     /// <summary>Sidebar title: a trimmed, ~60-char preview of the first inbound message with leading

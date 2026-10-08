@@ -8,7 +8,7 @@
 
 // ── from actions/cancel.schema.json ──
 /**
- * A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional and advisory — the server cancels the connection's single active turn regardless.
+ * A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional: the connection's own active turn is cancelled regardless, and when there is none, `sessionId` names the session whose conversation's turn (started on an earlier, dropped connection) to cancel.
  */
 export interface CancelRequest {
     /**
@@ -20,7 +20,7 @@ export interface CancelRequest {
      */
     requestId?: string;
     /**
-     * Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+     * Optional. Ignored when this connection has an active turn (that turn is cancelled). Otherwise it names a session whose conversation still has a turn running from an earlier connection — e.g. a client that dropped mid-turn and reconnected — and that turn is cancelled. Subject to the same ownership check as every session-addressed action; an unknown or foreign session is a silent no-op.
      */
     sessionId?: string;
 }
@@ -297,6 +297,73 @@ export interface GetSessionResponse {
      * Current lifecycle status of the session.
      */
     status?: 'active' | 'idle' | 'ended';
+}
+
+// ── from actions/list-conversations.schema.json ──
+/**
+ * Fields sent by the client to page through or search its conversations. With no `cursor` and no `query` this is the original first-page listing.
+ */
+export interface ListConversationsRequest {
+    /**
+     * Action discriminator.
+     */
+    action: 'list_conversations';
+    /**
+     * Client-generated correlation ID echoed back on the response.
+     */
+    requestId?: string;
+    /**
+     * Maximum number of conversations in this page. Must be 1–200; defaults to 50. Servers clamp a larger value to 200 rather than rejecting it, so a client from before paging that asked for more still gets a page (and pages the rest with `nextCursor`).
+     */
+    limit?: number;
+    /**
+     * Opaque cursor from a prior response's `nextCursor`, issued for the same `query`. Returns only conversations after the one it names in the listing order. Omit (or send an empty string) for the first page. A cursor the server did not issue is rejected with a `VALIDATION_ERROR` error event. Treat it as opaque: servers encode it as unpadded base64url of `<RFC 3339 updatedAt, full precision>|<conversationId>` today, and that may change.
+     */
+    cursor?: string;
+    /**
+     * Server-side search. Keeps only conversations where this text (trimmed; matched case-insensitively as a substring) appears in the conversation's meaningful name (an auto-title or rename, never the default `Session …` placeholder) or in the text of its first inbound message. Blank means no filter. It narrows the caller's scope and never widens it.
+     */
+    query?: string;
+}
+
+// ── from actions/list-conversations.schema.json ──
+/**
+ * Data payload carried in the `immediate_response` event.
+ */
+export interface ListConversationsResponse {
+    /**
+     * One page of conversations, newest first.
+     */
+    conversations: ConversationListItem[];
+    /**
+     * Opaque cursor naming the last conversation in this page. Pass it (with the same `query`) as the next request's `cursor`. Non-null if and only if `hasMore` is true. Servers that predate paging omit it.
+     */
+    nextCursor?: string | null;
+    /**
+     * True if more conversations follow this page. Servers that predate paging omit it; treat absence as false.
+     */
+    hasMore?: boolean;
+}
+/**
+ * One sidebar row: enough to render the entry and resume the conversation on click.
+ */
+export interface ConversationListItem {
+    /**
+     * Pass to `create_conversation_session` as `conversationId` to resume.
+     */
+    conversationId: string;
+    /**
+     * The conversation's meaningful name, else a truncated preview of its first inbound message, else its default name.
+     */
+    title: string;
+    /**
+     * ISO 8601 last-activity timestamp.
+     */
+    updatedAt: string;
+    /**
+     * Number of messages in the conversation.
+     */
+    messageCount: number;
 }
 
 // ── from actions/ping.schema.json ──
@@ -737,17 +804,21 @@ export interface MessageContent {
     } | null;
 }
 /**
- * A single content element within a message. Currently only `text` items are defined; additional types (image, file, tool_result) may be added in future protocol versions.
+ * A single content element within a message. `text` and `image` items are defined; further types (file, tool_result) may be added in future protocol versions.
  */
 export interface ContentItem {
     /**
      * Content item type discriminator.
      */
-    type: 'text';
+    type: 'text' | 'image';
     /**
      * The text content (required when type = `text`).
      */
     text?: string;
+    /**
+     * A `data:`/`https` image URL (required when type = `image`). Persisted on the user turn so any client can re-render an image another client attached.
+     */
+    url?: string;
 }
 
 // ── from domain/participant.schema.json ──
@@ -925,7 +996,8 @@ export interface ActionEnvelope {
         | 'confirm_tool_action'
         | 'verify_otp'
         | 'submit_interaction'
-        | 'ping';
+        | 'ping'
+        | 'list_conversations';
     /**
      * Client-generated correlation ID. Will be echoed back on all related server events. Should be unique per in-flight request. If omitted the server may generate one, but correlating responses becomes the client's problem.
      */

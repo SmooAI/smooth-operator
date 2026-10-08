@@ -52,6 +52,7 @@ class Action(StrEnum):
     verify_otp = 'verify_otp'
     submit_interaction = 'submit_interaction'
     ping = 'ping'
+    list_conversations = 'list_conversations'
 
 
 class ActionEnvelope(BaseModel):
@@ -144,7 +145,7 @@ class CancelRequest(BaseModel):
     """
     session_id: Annotated[str | None, Field(alias='sessionId')] = None
     """
-    Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+    Optional. Ignored when this connection has an active turn (that turn is cancelled). Otherwise it names a session whose conversation still has a turn running from an earlier connection — e.g. a client that dropped mid-turn and reconnected — and that turn is cancelled. Subject to the same ownership check as every session-addressed action; an unknown or foreign session is a silent no-op.
     """
 
 
@@ -428,6 +429,56 @@ class GetSessionResponse(BaseModel):
     status: Status | None = None
     """
     Current lifecycle status of the session.
+    """
+
+
+class ListConversationsRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    action: Literal['list_conversations']
+    """
+    Action discriminator.
+    """
+    request_id: Annotated[str | None, Field(alias='requestId')] = None
+    """
+    Client-generated correlation ID echoed back on the response.
+    """
+    limit: Annotated[int | None, Field(ge=1, le=200)] = 50
+    """
+    Maximum number of conversations in this page. Must be 1–200; defaults to 50. Servers clamp a larger value to 200 rather than rejecting it, so a client from before paging that asked for more still gets a page (and pages the rest with `nextCursor`).
+    """
+    cursor: str | None = None
+    """
+    Opaque cursor from a prior response's `nextCursor`, issued for the same `query`. Returns only conversations after the one it names in the listing order. Omit (or send an empty string) for the first page. A cursor the server did not issue is rejected with a `VALIDATION_ERROR` error event. Treat it as opaque: servers encode it as unpadded base64url of `<RFC 3339 updatedAt, full precision>|<conversationId>` today, and that may change.
+    """
+    query: str | None = None
+    """
+    Server-side search. Keeps only conversations where this text (trimmed; matched case-insensitively as a substring) appears in the conversation's meaningful name (an auto-title or rename, never the default `Session …` placeholder) or in the text of its first inbound message. Blank means no filter. It narrows the caller's scope and never widens it.
+    """
+
+
+class ConversationListItem(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    conversation_id: Annotated[str, Field(alias='conversationId')]
+    """
+    Pass to `create_conversation_session` as `conversationId` to resume.
+    """
+    title: str
+    """
+    The conversation's meaningful name, else a truncated preview of its first inbound message, else its default name.
+    """
+    updated_at: Annotated[AwareDatetime, Field(alias='updatedAt')]
+    """
+    ISO 8601 last-activity timestamp.
+    """
+    message_count: Annotated[int, Field(alias='messageCount', ge=1)]
+    """
+    Number of messages in the conversation.
     """
 
 
@@ -1749,6 +1800,7 @@ class Conversation(BaseModel):
 
 class Type1(StrEnum):
     text = 'text'
+    image = 'image'
 
 
 class ContentItem(BaseModel):
@@ -1763,6 +1815,10 @@ class ContentItem(BaseModel):
     text: str | None = None
     """
     The text content (required when type = `text`).
+    """
+    url: str | None = None
+    """
+    A `data:`/`https` image URL (required when type = `image`). Persisted on the user turn so any client can re-render an image another client attached.
     """
 
 
@@ -1966,6 +2022,25 @@ class GetMessagesResponse(BaseModel):
     has_more: Annotated[bool, Field(alias='hasMore')]
     """
     True if more messages exist before the oldest message in this page — equivalently, if `nextCursor` is non-null.
+    """
+
+
+class ListConversationsResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        populate_by_name=True,
+    )
+    conversations: list[ConversationListItem]
+    """
+    One page of conversations, newest first.
+    """
+    next_cursor: Annotated[str | None, Field(alias='nextCursor')] = None
+    """
+    Opaque cursor naming the last conversation in this page. Pass it (with the same `query`) as the next request's `cursor`. Non-null if and only if `hasMore` is true. Servers that predate paging omit it.
+    """
+    has_more: Annotated[bool | None, Field(alias='hasMore')] = None
+    """
+    True if more conversations follow this page. Servers that predate paging omit it; treat absence as false.
     """
 
 

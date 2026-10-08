@@ -429,6 +429,58 @@ describe('SmoothAgentClient request correlation', () => {
         const res = await promise;
         expect(res.conversations).toHaveLength(2);
         expect(res.conversations[0]).toMatchObject({ conversationId: 'c1', messageCount: 4 });
+        // A server that predates paging omits both: absent means no more pages.
+        expect(res.hasMore).toBeUndefined();
+        expect(res.nextCursor).toBeUndefined();
+    });
+
+    it('listConversations sends cursor + query and surfaces nextCursor / hasMore (SMOODEV-3744)', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+
+        const promise = client.listConversations({ limit: 20, cursor: 'MjAyNi0xMC0wOFQxNDozMDowMFp8YzE', query: 'invoice' });
+        const sent = transport.lastSent<{ requestId: string }>();
+        expect(sent).toMatchObject({ action: 'list_conversations', limit: 20, cursor: 'MjAyNi0xMC0wOFQxNDozMDowMFp8YzE', query: 'invoice' });
+
+        transport.emit({
+            type: 'immediate_response',
+            requestId: sent.requestId,
+            status: 200,
+            data: {
+                conversations: [{ conversationId: 'c3', title: 'Where is the Acme invoice?', updatedAt: '2026-10-08T14:30:00.123456+00:00', messageCount: 4 }],
+                nextCursor: 'next-page',
+                hasMore: true,
+            },
+        });
+        const res = await promise;
+        expect(res.conversations.map((c) => c.conversationId)).toEqual(['c3']);
+        expect(res.nextCursor).toBe('next-page');
+        expect(res.hasMore).toBe(true);
+
+        // The last page: explicit null cursor, hasMore false.
+        const last = client.listConversations({ cursor: 'next-page', query: 'invoice' });
+        transport.emit({
+            type: 'immediate_response',
+            requestId: transport.lastSent<{ requestId: string }>().requestId,
+            status: 200,
+            data: { conversations: [], nextCursor: null, hasMore: false },
+        });
+        await expect(last).resolves.toEqual({ conversations: [], nextCursor: null, hasMore: false });
+    });
+
+    it('listConversations rejects with the VALIDATION_ERROR a foreign cursor gets', async () => {
+        const { client, transport } = makeClient();
+        await client.connect();
+        const promise = client.listConversations({ cursor: 'not-a-cursor' });
+        const reqId = transport.lastSent<{ requestId: string }>().requestId;
+        transport.emit({
+            type: 'error',
+            requestId: reqId,
+            error: { code: 'VALIDATION_ERROR', message: "list_conversations 'cursor' is not a cursor this server issued" },
+            data: { error: { code: 'VALIDATION_ERROR', message: "list_conversations 'cursor' is not a cursor this server issued" }, requestId: reqId },
+            timestamp: 1,
+        });
+        await expect(promise).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
     });
 
     it('ping resolves with the pong timestamp', async () => {

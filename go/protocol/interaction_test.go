@@ -38,6 +38,7 @@ func TestActionTypesCoverSpec(t *testing.T) {
 		string(ActionSendMessage):               {},
 		string(ActionGetSession):                {},
 		string(ActionGetConversationMessages):   {},
+		string(ActionListConversations):         {},
 		string(ActionConfirmToolAction):         {},
 		string(ActionVerifyOTP):                 {},
 		string(ActionSubmitInteraction):         {},

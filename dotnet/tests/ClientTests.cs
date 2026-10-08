@@ -300,6 +300,53 @@ public sealed class ClientTests
     }
 
     [Fact]
+    public async Task ListConversations_SendsCursorAndQuery_AndDecodesThePage()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        var task = client.ListConversationsAsync(new ListConversationsAction { Limit = 20, Cursor = "abc", Query = "invoice" });
+        var reqId = transport.LastRequestId();
+
+        var sent = transport.LastSent();
+        Assert.Equal("list_conversations", sent.GetProperty("action").GetString());
+        Assert.Equal(20, sent.GetProperty("limit").GetInt32());
+        Assert.Equal("abc", sent.GetProperty("cursor").GetString());
+        Assert.Equal("invoice", sent.GetProperty("query").GetString());
+
+        transport.Emit(Frame("""{"type":"immediate_response","requestId":"{rid}","status":200,"responseType":"Conversations","data":{"conversations":[{"conversationId":"c1","title":"Acme invoice","updatedAt":"2026-10-08T14:30:00.123456+00:00","messageCount":4}],"nextCursor":"next-1","hasMore":true}}""", reqId));
+
+        var page = await task;
+        Assert.Single(page.Conversations);
+        Assert.Equal("c1", page.Conversations[0].ConversationId);
+        Assert.Equal("Acme invoice", page.Conversations[0].Title);
+        Assert.Equal(4, page.Conversations[0].MessageCount);
+        Assert.Equal("next-1", page.NextCursor);
+        Assert.True(page.HasMore);
+    }
+
+    [Fact]
+    public async Task ListConversations_PrePagingServer_ReadsAsLastPage()
+    {
+        var (client, transport) = MakeClient();
+        await client.ConnectAsync();
+
+        var task = client.ListConversationsAsync(new ListConversationsAction());
+        var reqId = transport.LastRequestId();
+        var sent = transport.LastSent();
+        Assert.False(sent.TryGetProperty("cursor", out _));
+        Assert.False(sent.TryGetProperty("query", out _));
+
+        // A server that predates paging omits nextCursor + hasMore.
+        transport.Emit(Frame("""{"type":"immediate_response","requestId":"{rid}","status":200,"data":{"conversations":[]}}""", reqId));
+
+        var page = await task;
+        Assert.Empty(page.Conversations);
+        Assert.Null(page.NextCursor);
+        Assert.False(page.HasMore);
+    }
+
+    [Fact]
     public async Task ForwardsUncorrelatedKeepaliveToEventListeners()
     {
         var (client, transport) = MakeClient();

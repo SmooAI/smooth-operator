@@ -177,6 +177,28 @@ func (c *Client) GetMessages(ctx context.Context, p GetMessagesParams) (GetMessa
 	return extractImmediateData[GetMessagesResponse](ev)
 }
 
+// ListConversationsParams holds the caller-supplied fields for ListConversations.
+type ListConversationsParams struct {
+	// Limit is the page size; 0 leaves it to the server (default 50).
+	Limit int `json:"limit,omitempty"`
+	// Cursor is a prior response's NextCursor (sent with the same Query); empty for
+	// the first page.
+	Cursor string `json:"cursor,omitempty"`
+	// Query is the server-side search (case-insensitive substring of the title or
+	// first user message); empty for no filter.
+	Query string `json:"query,omitempty"`
+}
+
+// ListConversations fetches one page of the caller's conversation history, newest
+// first. Page by feeding the response's NextCursor back as Cursor while HasMore.
+func (c *Client) ListConversations(ctx context.Context, p ListConversationsParams) (ListConversationsResponse, error) {
+	ev, err := c.request(ctx, ActionListConversations, p)
+	if err != nil {
+		return ListConversationsResponse{}, err
+	}
+	return extractImmediateData[ListConversationsResponse](ev)
+}
+
 // Ping issues a keepalive ping and returns the server timestamp from the pong.
 func (c *Client) Ping(ctx context.Context) (int, error) {
 	ev, err := c.request(ctx, ActionPing, struct{}{})

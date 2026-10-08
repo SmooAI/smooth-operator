@@ -33,6 +33,7 @@ from .types import (
     EventualResponse,
     GetMessagesResponse,
     GetSessionResponse,
+    ListConversationsResponse,
     ServerEvent,
     is_server_event,
     parse_event,
@@ -327,6 +328,30 @@ class SmoothAgentClient:
             frame["before"] = before
         event = await self._request(frame)
         return GetMessagesResponse.model_validate(_immediate_data(event))
+
+    async def list_conversations(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        query: str | None = None,
+    ) -> ListConversationsResponse:
+        """List the caller's conversations, newest first, one page at a time.
+
+        Page by passing a response's ``next_cursor`` back as ``cursor`` (with the same
+        ``query``) while ``has_more`` is true. ``query`` is a server-side,
+        case-insensitive search over each conversation's title and first message.
+        Pages are keyset positions, so merge them by ``conversation_id``: a conversation
+        updated while you page moves to the top of a fresh first page."""
+        frame: dict = {"action": "list_conversations"}
+        if limit is not None:
+            frame["limit"] = limit
+        if cursor is not None:
+            frame["cursor"] = cursor
+        if query is not None:
+            frame["query"] = query
+        event = await self._request(frame)
+        return ListConversationsResponse.model_validate(_immediate_data(event))
 
     async def ping(self) -> int:
         """Keepalive ping. Resolves with the server timestamp from the ``pong``."""

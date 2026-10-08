@@ -45,6 +45,7 @@ CreateConversationSessionRequest = _g.CreateConversationSessionRequest
 SendMessageRequest = _g.SendMessageRequest
 GetSessionRequest = _g.GetSessionRequest
 GetMessagesRequest = _g.GetMessagesRequest
+ListConversationsRequest = _g.ListConversationsRequest
 ConfirmToolActionRequest = _g.ConfirmToolActionRequest
 VerifyOtpRequest = _g.VerifyOtpRequest
 SubmitInteractionRequest = _g.SubmitInteractionRequest
@@ -56,6 +57,8 @@ AuthContext = _g.AuthContext
 CreateConversationSessionResponse = _g.CreateConversationSessionResponse
 GetSessionResponse = _g.GetSessionResponse
 GetMessagesResponse = _g.GetMessagesResponse
+ListConversationsResponse = _g.ListConversationsResponse
+ConversationListItem = _g.ConversationListItem
 SendMessageResponse = _g.SendMessageResponse
 PongResponse = _g.PongResponse
 GeneralAgentResponse = _g.GeneralAgentResponse
@@ -112,6 +115,7 @@ class ActionType(StrEnum):
     send_message = "send_message"
     get_session = "get_session"
     get_conversation_messages = "get_conversation_messages"
+    list_conversations = "list_conversations"
     confirm_tool_action = "confirm_tool_action"
     verify_otp = "verify_otp"
     submit_interaction = "submit_interaction"
@@ -189,6 +193,7 @@ ClientAction = Annotated[
         SendMessageRequest,
         GetSessionRequest,
         GetMessagesRequest,
+        ListConversationsRequest,
         ConfirmToolActionRequest,
         VerifyOtpRequest,
         SubmitInteractionRequest,

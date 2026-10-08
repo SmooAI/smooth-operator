@@ -159,6 +159,11 @@ type ConversationSummary struct {
 	// FirstInbound is the first inbound (user) message text, "" when the conversation has
 	// no inbound message (title falls back to a generic name).
 	FirstInbound string
+	// Name is the stored conversation name, "" when the store has none (the in-memory
+	// store, and every conversation the Go server mints). A Postgres row written by the
+	// Rust server carries one — "Session <uuid>" by default, a title once renamed — so
+	// the list handler titles and searches by it exactly as Rust does. SMOODEV-3744.
+	Name string
 }
 
 // SessionStore is persistence for sessions + conversation message logs — the Go
@@ -183,7 +188,7 @@ type SessionStore interface {
 	ResumeSession(ctx context.Context, agentID, userName, userEmail string, scope ConversationScope, conversationID string) (session StoredSession, resumed bool, err error)
 	// ListConversations returns a summary per conversation that is visible to scope and has at
 	// least one message (empty conversations — every page-load currently mints one — are
-	// filtered out), in no particular order; the handler sorts most-recent-first and caps.
+	// filtered out), in no particular order; the handler sorts, searches and pages.
 	//
 	// The scope filter MUST be applied during selection, never to an already-truncated page:
 	// filtering after a limit silently returns short or empty pages. The scope parameter is
@@ -243,6 +248,8 @@ type InMemorySessionStore struct {
 	// owner and never rewritten, for the same reason: a resume must not re-home a
 	// conversation into the resumer's org.
 	org map[string]string
+	// lastStamp is the latest updatedAt this store has issued; see stamp.
+	lastStamp time.Time
 	// supports maps conversation id → the render capabilities its client last declared.
 	// Conversation-scoped so a reconnect (a resume on a NEW session id) inherits them —
 	// see StoredSession.Supports. th-13df6d.
@@ -321,7 +328,7 @@ func (s *InMemorySessionStore) ResumeSession(_ context.Context, agentID, _ /*use
 	s.sessions[session.SessionID] = session
 	if !resumed {
 		s.messages[convID] = nil
-		s.updatedAt[convID] = time.Now()
+		s.updatedAt[convID] = s.stamp()
 		s.owner[convID] = scope.Email
 		s.org[convID] = scope.OrgID
 	}
@@ -354,8 +361,23 @@ func (s *InMemorySessionStore) AppendMessage(_ context.Context, conversationID s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messages[conversationID] = append(s.messages[conversationID], message)
-	s.updatedAt[conversationID] = time.Now()
+	s.updatedAt[conversationID] = s.stamp()
 	return message, nil
+}
+
+// stamp returns a last-activity time strictly after every one this store issued before.
+// Wall clock only (no monotonic reading) and strictly increasing, because the listing
+// order — and its keyset cursor, which round-trips through RFC 3339 — compares wall
+// times: two appends inside one tick of a coarse wall clock would otherwise tie and fall
+// back to the id tiebreak, ranking an older conversation above a newer one. Callers hold
+// s.mu. SMOODEV-3744.
+func (s *InMemorySessionStore) stamp() time.Time {
+	now := time.Now().Round(0)
+	if !now.After(s.lastStamp) {
+		now = s.lastStamp.Add(time.Nanosecond)
+	}
+	s.lastStamp = now
+	return now
 }
 
 // ListConversations returns a summary per non-empty conversation (unordered). Empty

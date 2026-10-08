@@ -86,6 +86,53 @@ public sealed class PostgresSessionStoreContractTests : SessionStoreContractTest
         return Task.FromResult<ISessionStore>(_fixture.Store!);
     }
 
+    /// <summary>
+    /// A timestamp tie group straddling a page boundary, at Postgres' microsecond precision: the keyset
+    /// comparison must break ties by conversation id (byte order, not the DB collation) so every row of
+    /// the group comes back exactly once. Forces the tie by rewriting <c>created_at</c> directly.
+    /// </summary>
+    [SkippableFact]
+    public async Task ListConversationsPage_TieGroupStraddlingAPageBoundary_PagesOnceEach()
+    {
+        Skip.IfNot(_fixture.Available, "Docker/Postgres unavailable — skipping Postgres paging test.");
+        var store = _fixture.Store!;
+        var me = $"tie-{Guid.NewGuid():N}@example.com";
+        var ids = await SeedOwnedAsync(store, me, 5);
+
+        await using (var conn = new Npgsql.NpgsqlConnection(_fixture.ConnectionString))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            // Three tied at one µs-precision instant; the other two strictly newer / older.
+            cmd.CommandText = """
+                UPDATE conversation_messages SET created_at = CASE conversation_id
+                    WHEN @a THEN TIMESTAMPTZ '2026-10-08 14:30:00.123456+00'
+                    WHEN @e THEN TIMESTAMPTZ '2026-10-08 14:29:00.000001+00'
+                    ELSE TIMESTAMPTZ '2026-10-08 14:29:30.654321+00' END
+                WHERE conversation_id = ANY(@ids)
+                """;
+            cmd.Parameters.AddWithValue("a", ids[0]);
+            cmd.Parameters.AddWithValue("e", ids[4]);
+            cmd.Parameters.AddWithValue("ids", ids.ToArray());
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var scope = ConversationScope.ForUser(me);
+        var expected = NewestFirst(await store.ListConversationsAsync(scope));
+        Assert.Equal(ids[0], expected[0]);
+        Assert.Equal(ids[4], expected[4]);
+        Assert.Equal(ids.Skip(1).Take(3).OrderByDescending(x => x, StringComparer.Ordinal), expected.Skip(1).Take(3));
+
+        var pages = await AllPagesAsync(store, scope, 2); // [a, t1] [t2, t3] [e] — the tie group straddles
+        Assert.Equal(new[] { 2, 2, 1 }, pages.Select(p => p.Count));
+        Assert.Equal(expected, pages.SelectMany(p => p));
+
+        // The cursor round-trips the stored µs exactly (no drift that would skip or repeat a tied row).
+        var first = await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(1, null, null));
+        Assert.True(ConversationKey.TryDecode(ConversationKey.Of(first[0]).Encode(), out var key));
+        Assert.Equal(first[0].UpdatedAt, key!.UpdatedAt);
+    }
+
     [SkippableFact]
     public async Task Session_And_History_SurviveAcrossStoreInstances()
     {

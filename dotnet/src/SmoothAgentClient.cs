@@ -341,6 +341,18 @@ public sealed class SmoothAgentClient : IAsyncDisposable
         return ExtractImmediateData<GetMessagesResult>(ev);
     }
 
+    /// <summary>
+    /// List one page of the caller's conversations (newest first). Pass the result's
+    /// <see cref="ListConversationsResult.NextCursor"/> back as <see cref="ListConversationsAction.Cursor"/>
+    /// (with the same query) for the next page; merge pages by <c>conversationId</c>.
+    /// </summary>
+    public async Task<ListConversationsResult> ListConversationsAsync(
+        ListConversationsAction request, CancellationToken cancellationToken = default)
+    {
+        var ev = await RequestAsync(request, cancellationToken).ConfigureAwait(false);
+        return ExtractImmediateData<ListConversationsResult>(ev);
+    }
+
     /// <summary>Keepalive ping. Resolves with the server timestamp from the <c>pong</c> event.</summary>
     public async Task<long> PingAsync(CancellationToken cancellationToken = default)
     {
@@ -636,6 +648,26 @@ public sealed class GetMessagesResult
     /// <summary>Cursor naming the oldest message in this page; non-null exactly when <see cref="HasMore"/>.</summary>
     public string? NextCursor { get; set; }
     public bool HasMore { get; set; }
+}
+
+public sealed class ListConversationsResult
+{
+    public List<ConversationListEntry> Conversations { get; set; } = new();
+
+    /// <summary>Cursor naming the last conversation in this page; non-null exactly when <see cref="HasMore"/>.
+    /// Null from servers that predate paging.</summary>
+    public string? NextCursor { get; set; }
+
+    /// <summary>More conversations follow. False from servers that predate paging.</summary>
+    public bool HasMore { get; set; }
+}
+
+public sealed class ConversationListEntry
+{
+    public string ConversationId { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string UpdatedAt { get; set; } = string.Empty;
+    public int MessageCount { get; set; }
 }
 
 public sealed class MessageItem

@@ -35,7 +35,7 @@ from .confirmation import ConfirmationRegistry
 from .interaction import InteractionOutcome, InteractionRegistry, PendingInteractions
 from .memory import MemoryProvider
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
-from .session_store import SessionStore
+from .session_store import ConversationKey, ConversationSummaryQuery, SessionStore
 from .skills import SkillResolver, resolve_section
 from .turn_runner import Sink, TurnContext, TurnRunner
 
@@ -397,30 +397,69 @@ class FrameDispatcher:
         sink(protocol.immediate_response(request_id, 200, "Session", data))
 
     async def _handle_list_conversations(self, frame: dict, request_id: str | None, sink: Sink) -> None:
-        """``list_conversations`` — the conversation-sidebar / resume substrate. Returns
-        the store's conversations that have at least one message (empties, minted every
-        page-load, are dropped), most-recent-first, each ``{conversationId, title,
-        updatedAt, messageCount}`` where ``title`` is a first-inbound preview. Optional
-        input: ``limit`` (default 50). A client resumes one by passing its
-        ``conversationId`` to ``create_conversation_session``. Mirrors the Rust/Go/TS
-        reference. th-d5b446."""
+        """``list_conversations`` — the conversation-sidebar / resume substrate, per
+        ``spec/actions/list-conversations.schema.json``. Returns the caller's
+        conversations that have at least one message (empties, minted every page-load,
+        are dropped), newest ``updatedAt`` first with ties broken by ``conversationId``
+        descending, each ``{conversationId, title, updatedAt, messageCount}`` where
+        ``title`` is a first-inbound preview. The reply's ``data`` also carries
+        ``nextCursor`` (explicit ``null`` on the last page) and ``hasMore``. A client
+        resumes a row by passing its ``conversationId`` to
+        ``create_conversation_session``. Mirrors the Rust ``handle_list_conversations``.
+        th-d5b446, SMOODEV-3744.
+
+        Optional input:
+
+        - ``limit`` (default 50, at most 200; larger values are clamped) — the max
+          conversations in this page.
+        - ``cursor`` — a prior reply's ``nextCursor``: continue strictly after its last
+          row (keyset on ``(updatedAt, conversationId)``, never an offset). Absent or
+          ``""`` = first page. One that doesn't decode is a ``VALIDATION_ERROR``.
+        - ``query`` — keep only rows whose first inbound message contains it (trimmed,
+          case-insensitive). It narrows the caller's scope and never widens it.
+
+        Keyset semantics under concurrent writes: a page never repeats a row an earlier
+        page returned, and a row that isn't touched while paging is never skipped. A row
+        whose ``updatedAt`` is bumped mid-paging moves ABOVE the cursor, so the remaining
+        pages don't return it (it is the newest row on a fresh first page instead)."""
         raw_limit = frame.get("limit")
-        limit = (
+        # Clamped, not rejected: a client from before paging may still ask for more,
+        # and gets a full page plus a ``nextCursor`` for the rest.
+        limit = min(
             raw_limit
             if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0
-            else _DEFAULT_LIST_LIMIT
+            else _DEFAULT_LIST_LIMIT,
+            _MAX_LIST_LIMIT,
+        )
+
+        raw_cursor = frame.get("cursor")
+        after: ConversationKey | None = None
+        if isinstance(raw_cursor, str) and raw_cursor:
+            after = ConversationKey.decode(raw_cursor)
+            if after is None:
+                sink(
+                    protocol.error(
+                        request_id, "VALIDATION_ERROR", "list_conversations 'cursor' is not a cursor this server issued"
+                    )
+                )
+                return
+        raw_query = frame.get("query")
+        # One row past the page tells us whether there is a next one.
+        query = ConversationSummaryQuery.create(
+            limit + 1, after=after, search=raw_query if isinstance(raw_query, str) else None
         )
 
         # Scope to the authenticated principal: their own conversations plus ownerless
         # ones (th-909995 — an emailless/anonymous principal must still see the
         # conversations it created, which are ownerless by construction). The store
-        # applies the filter in its selection, so `limit` below caps an already-scoped
-        # list rather than paging over other users' rows. th-8fe998.
-        summaries = await self._store.list_conversations(
-            self._scope_email(), enforced=self._auth_enforced, org_id=self._access.principal.org
+        # applies the scope in its selection, BEFORE the cursor, search and limit, so a
+        # page is never short because of scoping and a search can't reach a row the
+        # caller couldn't list. th-8fe998.
+        rows = await self._store.list_conversations_page(
+            self._scope_email(), query, enforced=self._auth_enforced, org_id=self._access.principal.org
         )
-        # Most-recent-first (empties already dropped by the store), then cap.
-        summaries.sort(key=lambda c: c.updated_at, reverse=True)
+        has_more = len(rows) > limit
+        page = rows[:limit]
         conversations = [
             {
                 "conversationId": c.conversation_id,
@@ -428,9 +467,17 @@ class FrameDispatcher:
                 "updatedAt": c.updated_at.isoformat(),
                 "messageCount": c.message_count,
             }
-            for c in summaries[:limit]
+            for c in page
         ]
-        sink(protocol.immediate_response(request_id, 200, "Conversations", {"conversations": conversations}))
+        next_cursor = ConversationKey.of(page[-1]).encode() if has_more and page else None
+        sink(
+            protocol.immediate_response(
+                request_id,
+                200,
+                "Conversations",
+                {"conversations": conversations, "nextCursor": next_cursor, "hasMore": has_more},
+            )
+        )
 
     async def _handle_get_conversation_messages(self, frame: dict, request_id: str | None, sink: Sink) -> None:
         """``get_conversation_messages`` — the conversation-resume substrate. Returns a
@@ -929,6 +976,9 @@ class FrameDispatcher:
 
 #: Default cap for list_conversations when the caller doesn't ask for a specific limit.
 _DEFAULT_LIST_LIMIT = 50
+
+#: Contract cap on list_conversations' `limit` (1..200); a larger value is clamped to it.
+_MAX_LIST_LIMIT = 200
 
 #: Contract cap on get_conversation_messages' `limit` (1..100). th-89b698.
 _MAX_MESSAGE_LIMIT = 100

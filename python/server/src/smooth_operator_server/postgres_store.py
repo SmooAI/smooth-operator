@@ -41,6 +41,7 @@ from .session_store import (
     AGENT_NAME,
     DEFAULT_ORG_ID,
     ConversationSummary,
+    ConversationSummaryQuery,
     MessageDirection,
     SessionStore,
     StoredMessage,
@@ -440,25 +441,73 @@ class PostgresStore(SessionStore):
 
         ``enforced=False`` is the single-tenant, auth-disabled flavor: unscoped by
         OWNER. It is NOT unscoped by ORG — widening ownership must never widen tenancy."""
+        return await self._summaries(user_email, enforced=enforced, org_id=org_id, query=None)
+
+    async def list_conversations_page(
+        self,
+        user_email: str | None,
+        query: ConversationSummaryQuery,
+        *,
+        enforced: bool = False,
+        org_id: str = DEFAULT_ORG_ID,
+    ) -> list[ConversationSummary]:
+        """One sidebar page, with the keyset, search and limit pushed into SQL instead
+        of reading the caller's whole listing per page (the base-class default).
+        Scoped exactly like :meth:`list_conversations` — the scope predicates are the
+        same SQL — and ordered by :func:`sort_conversations_newest_first`'s key.
+        SMOODEV-3744."""
+        return await self._summaries(user_email, enforced=enforced, org_id=org_id, query=query)
+
+    async def _summaries(
+        self,
+        user_email: str | None,
+        *,
+        enforced: bool,
+        org_id: str,
+        query: ConversationSummaryQuery | None,
+    ) -> list[ConversationSummary]:
+        """The scoped summary read behind both listings. ``query=None`` is the whole
+        scoped set; otherwise rows strictly after ``query.after`` in
+        ``(updated_at DESC, id DESC)`` order, whose first inbound message contains
+        ``query.search`` (case-insensitive), at most ``query.limit`` of them.
+
+        Ids compare with ``COLLATE "C"`` (byte order) so the tiebreak is the same plain
+        string order the in-memory store and every other server use — the database's
+        default collation can order mixed-case text differently, and a cursor minted
+        under one order skips or repeats rows under another. ``strpos`` rather than
+        ``LIKE``/``ILIKE`` so ``%`` and ``_`` in a search are literal."""
         scope = normalize_email(user_email)
+        after = query.after if query is not None else None
         rows = await self._pool.fetch(
-            """SELECT c.id,
-                      c.updated_at,
-                      (SELECT count(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
-                      (SELECT m.content->>'text' FROM conversation_messages m
-                        WHERE m.conversation_id = c.id AND m.direction = 'inbound'
-                        ORDER BY m.seq ASC LIMIT 1) AS first_inbound
-                 FROM conversations c
-                WHERE c.organization_id = $1
-                  AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.conversation_id = c.id)
-                  AND (NOT $2::boolean OR EXISTS (
-                        SELECT 1 FROM conversation_participants p
-                         WHERE p.conversation_id = c.id AND p.type = 'user'
-                           AND (COALESCE(btrim(p.email), '') = ''
-                                OR ($3::text IS NOT NULL AND lower(btrim(p.email)) = lower(btrim($3))))))""",
+            """SELECT s.id, s.updated_at, s.message_count, s.first_inbound
+                 FROM (SELECT c.id,
+                              c.updated_at,
+                              (SELECT count(*) FROM conversation_messages m WHERE m.conversation_id = c.id)
+                                  AS message_count,
+                              (SELECT m.content->>'text' FROM conversation_messages m
+                                WHERE m.conversation_id = c.id AND m.direction = 'inbound'
+                                ORDER BY m.seq ASC LIMIT 1) AS first_inbound
+                         FROM conversations c
+                        WHERE c.organization_id = $1
+                          AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.conversation_id = c.id)
+                          AND (NOT $2::boolean OR EXISTS (
+                                SELECT 1 FROM conversation_participants p
+                                 WHERE p.conversation_id = c.id AND p.type = 'user'
+                                   AND (COALESCE(btrim(p.email), '') = ''
+                                        OR ($3::text IS NOT NULL AND lower(btrim(p.email)) = lower(btrim($3))))))
+                          AND ($4::timestamptz IS NULL
+                               OR c.updated_at < $4
+                               OR (c.updated_at = $4 AND c.id COLLATE "C" < $5::text COLLATE "C"))) s
+                WHERE $6::text IS NULL OR strpos(lower(COALESCE(s.first_inbound, '')), lower($6)) > 0
+                ORDER BY s.updated_at DESC, s.id COLLATE "C" DESC
+                LIMIT $7::bigint""",
             org_id,
             enforced,
             scope,
+            after.updated_at if after is not None else None,
+            after.conversation_id if after is not None else None,
+            query.search if query is not None else None,
+            max(query.limit, 0) if query is not None else None,
         )
         return [
             ConversationSummary(

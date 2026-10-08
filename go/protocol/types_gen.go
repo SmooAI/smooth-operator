@@ -26,6 +26,7 @@ const ActionEnvelopeActionConfirmToolAction ActionEnvelopeAction = "confirm_tool
 const ActionEnvelopeActionCreateConversationSession ActionEnvelopeAction = "create_conversation_session"
 const ActionEnvelopeActionGetConversationMessages ActionEnvelopeAction = "get_conversation_messages"
 const ActionEnvelopeActionGetSession ActionEnvelopeAction = "get_session"
+const ActionEnvelopeActionListConversations ActionEnvelopeAction = "list_conversations"
 const ActionEnvelopeActionPing ActionEnvelopeAction = "ping"
 const ActionEnvelopeActionSendMessage ActionEnvelopeAction = "send_message"
 const ActionEnvelopeActionSubmitInteraction ActionEnvelopeAction = "submit_interaction"
@@ -250,6 +251,23 @@ type Conversation struct {
 
 // Analytics and scoring data aggregated from messages in this conversation.
 type ConversationAnalyticsJSON map[string]interface{}
+
+// One sidebar row: enough to render the entry and resume the conversation on
+// click.
+type ConversationListItem struct {
+	// Pass to `create_conversation_session` as `conversationId` to resume.
+	ConversationID string `json:"conversationId"`
+
+	// Number of messages in the conversation.
+	MessageCount int `json:"messageCount"`
+
+	// The conversation's meaningful name, else a truncated preview of its first
+	// inbound message, else its default name.
+	Title string `json:"title"`
+
+	// ISO 8601 last-activity timestamp.
+	UpdatedAt time.Time `json:"updatedAt"`
+}
 
 // A single message as returned on the wire. This is a subset of the full `Message`
 // domain object — it omits server-only fields (metadataJson, analyticsJson) and
@@ -977,6 +995,52 @@ type Keepalive struct {
 type KeepaliveData struct {
 	// The request ID of the in-flight request this keepalive belongs to.
 	RequestID string `json:"requestId"`
+}
+
+// Fields sent by the client to page through or search its conversations. With no
+// `cursor` and no `query` this is the original first-page listing.
+type ListConversationsRequest struct {
+	// Action discriminator.
+	Action string `json:"action"`
+
+	// Opaque cursor from a prior response's `nextCursor`, issued for the same
+	// `query`. Returns only conversations after the one it names in the listing
+	// order. Omit (or send an empty string) for the first page. A cursor the server
+	// did not issue is rejected with a `VALIDATION_ERROR` error event. Treat it as
+	// opaque: servers encode it as unpadded base64url of `<RFC 3339 updatedAt, full
+	// precision>|<conversationId>` today, and that may change.
+	Cursor *string `json:"cursor,omitempty,omitzero"`
+
+	// Maximum number of conversations in this page. Must be 1–200; defaults to 50.
+	// Servers clamp a larger value to 200 rather than rejecting it, so a client from
+	// before paging that asked for more still gets a page (and pages the rest with
+	// `nextCursor`).
+	Limit int `json:"limit,omitempty,omitzero"`
+
+	// Server-side search. Keeps only conversations where this text (trimmed; matched
+	// case-insensitively as a substring) appears in the conversation's meaningful
+	// name (an auto-title or rename, never the default `Session …` placeholder) or in
+	// the text of its first inbound message. Blank means no filter. It narrows the
+	// caller's scope and never widens it.
+	Query *string `json:"query,omitempty,omitzero"`
+
+	// Client-generated correlation ID echoed back on the response.
+	RequestID *string `json:"requestId,omitempty,omitzero"`
+}
+
+// Data payload carried in the `immediate_response` event.
+type ListConversationsResponse struct {
+	// One page of conversations, newest first.
+	Conversations []ConversationListItem `json:"conversations"`
+
+	// True if more conversations follow this page. Servers that predate paging omit
+	// it; treat absence as false.
+	HasMore bool `json:"hasMore,omitempty,omitzero"`
+
+	// Opaque cursor naming the last conversation in this page. Pass it (with the
+	// same `query`) as the next request's `cursor`. Non-null if and only if `hasMore`
+	// is true. Servers that predate paging omit it.
+	NextCursor *string `json:"nextCursor,omitempty,omitzero"`
 }
 
 // A single message within a conversation. Direction is from the conversation's

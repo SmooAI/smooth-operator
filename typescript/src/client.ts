@@ -33,6 +33,9 @@ import type {
     GetMessagesResponse,
     GetSessionRequest,
     GetSessionResponse,
+    ConversationListItem,
+    ListConversationsRequest,
+    ListConversationsResponse as GeneratedListConversationsResponse,
     SendMessageRequest,
     ServerEvent,
 } from './types.js';
@@ -69,22 +72,19 @@ export interface SmoothAgentClientOptions {
 }
 
 /** One row returned by {@link SmoothAgentClient.listConversations} — enough to
- * render a sidebar entry and resume the conversation on click. */
-export interface ConversationSummary {
-    /** Pass to {@link SmoothAgentClient.createConversationSession} as `conversationId` to resume. */
-    conversationId: string;
-    /** Short preview title derived from the first message (may be empty). */
-    title: string;
-    /** ISO-8601 last-activity timestamp (rows come most-recent first). */
-    updatedAt: string;
-    /** Number of messages in the conversation. */
-    messageCount: number;
-}
+ * render a sidebar entry and resume the conversation on click: `conversationId`
+ * (pass it to {@link SmoothAgentClient.createConversationSession} to resume),
+ * `title`, ISO-8601 `updatedAt` (rows come newest first) and `messageCount`.
+ * The spec's `ConversationListItem` (`spec/actions/list-conversations.schema.json`). */
+export type ConversationSummary = ConversationListItem;
 
-/** Payload of the `list_conversations` `immediate_response`. */
-export interface ListConversationsResponse {
-    conversations: ConversationSummary[];
-}
+/**
+ * Payload of the `list_conversations` `immediate_response`: one page of
+ * `conversations`, plus `nextCursor` (pass it back as the next request's `cursor`)
+ * and `hasMore`. Both are optional because servers that predate paging omit them —
+ * treat an absent `hasMore` / `nextCursor` as "no more pages".
+ */
+export type ListConversationsResponse = GeneratedListConversationsResponse;
 
 /** Events that terminate a streaming turn (success or error). */
 const TURN_TERMINAL = new Set(['eventual_response', 'error']);
@@ -369,18 +369,25 @@ export class SmoothAgentClient {
     }
 
     /**
-     * List the org's conversations that have at least one message, most-recent
-     * first — the substrate for a conversation sidebar / resume picker. Each row
-     * carries a short title preview, `updatedAt`, and a message count. Pass
-     * `limit` to cap the result (server default 50).
+     * List the caller's conversations that have at least one message, newest first
+     * (ties by `conversationId` descending) — the substrate for a conversation
+     * sidebar / resume picker. Each row carries a short title, `updatedAt`, and a
+     * message count.
      *
-     * `list_conversations` has no dedicated action schema in `spec/` yet, so it is
-     * not a member of the generated `ClientAction` union — hence the local cast.
-     * ponytail: promote to a real spec/actions schema if a second consumer needs
-     * it typed end-to-end.
+     * - `limit` caps the page (server default 50).
+     * - `cursor` continues after a previous page: pass that response's `nextCursor`
+     *   (with the same `query`). Omit it for the first page. A cursor the server did
+     *   not issue rejects with a `VALIDATION_ERROR` {@link ProtocolError}.
+     * - `query` searches server-side (trimmed, case-insensitive substring of the
+     *   title / first message), within the caller's own scope.
+     *
+     * The response's `hasMore` / `nextCursor` say whether another page follows. A
+     * server that predates paging omits both — absent means no more. Paging is
+     * keyset, so a conversation updated while you page moves to the top instead of
+     * repeating; merge pages by `conversationId`.
      */
-    async listConversations(req: { limit?: number } = {}): Promise<ListConversationsResponse> {
-        const event = await this.request({ action: 'list_conversations', ...req } as unknown as Omit<ClientAction, 'requestId'>);
+    async listConversations(req: Omit<ListConversationsRequest, 'action' | 'requestId'> = {}): Promise<ListConversationsResponse> {
+        const event = await this.request({ action: 'list_conversations', ...req });
         return extractImmediateData<ListConversationsResponse>(event);
     }
 
