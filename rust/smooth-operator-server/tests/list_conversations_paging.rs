@@ -507,3 +507,37 @@ async fn an_emailless_principal_pages_nothing() {
     assert!(ids(&ev).is_empty(), "got: {ev}");
     assert_eq!(ev["data"]["hasMore"], false);
 }
+
+#[tokio::test]
+async fn a_limit_over_the_maximum_is_clamped_not_rejected() {
+    // 205 of mine: a pre-paging client asking for 1000 gets the 200-row
+    // maximum and a cursor for the rest, not an error.
+    let storage = Arc::new(InMemoryStorageAdapter::new());
+    for i in 0..205 {
+        seed(
+            &storage,
+            &format!("Session {i}"),
+            ago(i),
+            Some(ME),
+            "status update",
+        )
+        .await;
+    }
+    for state in [
+        AppState::new(storage.clone(), base_config()).with_require_owned_conversations(true),
+        AppState::new(storage.clone(), base_config()),
+    ] {
+        let ev = list(&state, &me(), json!({ "limit": 1000 })).await;
+        assert_eq!(ev["type"], "immediate_response", "got: {ev}");
+        assert_eq!(ids(&ev).len(), 200);
+        assert_eq!(ev["data"]["hasMore"], true);
+        let rest = list(
+            &state,
+            &me(),
+            json!({ "limit": 1000, "cursor": ev["data"]["nextCursor"] }),
+        )
+        .await;
+        assert_eq!(ids(&rest).len(), 5);
+        assert_eq!(rest["data"]["hasMore"], false);
+    }
+}

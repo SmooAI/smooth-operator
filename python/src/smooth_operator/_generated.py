@@ -52,6 +52,7 @@ class Action(StrEnum):
     verify_otp = 'verify_otp'
     submit_interaction = 'submit_interaction'
     ping = 'ping'
+    list_conversations = 'list_conversations'
 
 
 class ActionEnvelope(BaseModel):
@@ -144,7 +145,7 @@ class CancelRequest(BaseModel):
     """
     session_id: Annotated[str | None, Field(alias='sessionId')] = None
     """
-    Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+    Optional. Ignored when this connection has an active turn (that turn is cancelled). Otherwise it names a session whose conversation still has a turn running from an earlier connection — e.g. a client that dropped mid-turn and reconnected — and that turn is cancelled. Subject to the same ownership check as every session-addressed action; an unknown or foreign session is a silent no-op.
     """
 
 
@@ -444,9 +445,9 @@ class ListConversationsRequest(BaseModel):
     """
     Client-generated correlation ID echoed back on the response.
     """
-    limit: Annotated[int | None, Field(ge=1)] = 50
+    limit: Annotated[int | None, Field(ge=1, le=200)] = 50
     """
-    Maximum number of conversations in this page. Defaults to 50.
+    Maximum number of conversations in this page. Must be 1–200; defaults to 50. Servers clamp a larger value to 200 rather than rejecting it, so a client from before paging that asked for more still gets a page (and pages the rest with `nextCursor`).
     """
     cursor: str | None = None
     """
@@ -456,7 +457,6 @@ class ListConversationsRequest(BaseModel):
     """
     Server-side search. Keeps only conversations where this text (trimmed; matched case-insensitively as a substring) appears in the conversation's meaningful name (an auto-title or rename, never the default `Session …` placeholder) or in the text of its first inbound message. Blank means no filter. It narrows the caller's scope and never widens it.
     """
-
 
 
 class ConversationListItem(BaseModel):
@@ -480,7 +480,6 @@ class ConversationListItem(BaseModel):
     """
     Number of messages in the conversation.
     """
-
 
 
 class PingRequest(BaseModel):
@@ -1801,6 +1800,7 @@ class Conversation(BaseModel):
 
 class Type1(StrEnum):
     text = 'text'
+    image = 'image'
 
 
 class ContentItem(BaseModel):
@@ -1815,6 +1815,10 @@ class ContentItem(BaseModel):
     text: str | None = None
     """
     The text content (required when type = `text`).
+    """
+    url: str | None = None
+    """
+    A `data:`/`https` image URL (required when type = `image`). Persisted on the user turn so any client can re-render an image another client attached.
     """
 
 
@@ -2038,7 +2042,6 @@ class ListConversationsResponse(BaseModel):
     """
     True if more conversations follow this page. Servers that predate paging omit it; treat absence as false.
     """
-
 
 
 class SendMessageResponse(BaseModel):

@@ -39,7 +39,8 @@
             "confirm_tool_action",
             "verify_otp",
             "submit_interaction",
-            "ping"
+            "ping",
+            "list_conversations"
           ],
           "description": "The action to perform."
         },

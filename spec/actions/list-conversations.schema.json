@@ -24,8 +24,9 @@
         "limit": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 200,
           "default": 50,
-          "description": "Maximum number of conversations in this page. Defaults to 50."
+          "description": "Maximum number of conversations in this page. Must be 1–200; defaults to 50. Servers clamp a larger value to 200 rather than rejecting it, so a client from before paging that asked for more still gets a page (and pages the rest with `nextCursor`)."
         },
         "cursor": {
           "type": "string",

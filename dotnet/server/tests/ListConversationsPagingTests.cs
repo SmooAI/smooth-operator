@@ -427,4 +427,31 @@ public class ListConversationsPagingTests
 
     private static string Base64Url(string raw) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(raw)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    /// <summary>
+    /// A pre-paging client asking for 1000 gets the 200-row maximum and a cursor for the rest, not
+    /// an error. Rust: <c>a_limit_over_the_maximum_is_clamped_not_rejected</c>.
+    /// </summary>
+    [Fact]
+    public async Task ALimitOverTheMaximum_IsClampedNotRejected()
+    {
+        var clock = new ManualClock();
+        var store = new InMemorySessionStore(clock);
+        var t0 = clock.Now;
+        for (var i = 0; i < 205; i++)
+        {
+            await SeedAsync(store, clock, t0.AddSeconds(-i), Me, "status update");
+        }
+        clock.Now = t0;
+        var dispatcher = new FrameDispatcher(store, new MockChatClient(), access: AuthedAs(Me));
+
+        var first = await ListAsync(dispatcher, new JsonObject { ["limit"] = 1000 });
+        Assert.Equal("immediate_response", first["type"]!.GetValue<string>());
+        Assert.Equal(200, Ids(first).Count);
+        Assert.True(first["data"]!["hasMore"]!.GetValue<bool>());
+
+        var rest = await ListAsync(dispatcher, new JsonObject { ["limit"] = 1000, ["cursor"] = first["data"]!["nextCursor"]!.GetValue<string>() });
+        Assert.Equal(5, Ids(rest).Count);
+        Assert.False(rest["data"]!["hasMore"]!.GetValue<bool>());
+    }
 }

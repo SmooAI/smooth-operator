@@ -497,3 +497,20 @@ def test_search_matches_first_message_case_insensitively() -> None:
     assert blank.search is None
     assert blank.matches_search(None)
     assert blank.matches_search("anything")
+
+
+async def test_a_limit_over_the_maximum_is_clamped_not_rejected() -> None:
+    """A pre-paging client asking for 1000 gets the 200-row maximum and a cursor for
+    the rest, not an error."""
+    store = InMemorySessionStore()
+    set_ts = in_memory_setter(store)
+    for i in range(205):
+        await seed(store, set_ts, ago(i), ME, "status update", ORG)
+    world = World(store=store, org=ORG, visible=[], mine=[], acme="", theirs="", machine=None, foreign=None)
+    first = await list_page(world, {"limit": 1000})
+    assert first["type"] == "immediate_response", first
+    assert len(ids(first)) == 200
+    assert first["data"]["hasMore"] is True
+    rest = await list_page(world, {"limit": 1000, "cursor": first["data"]["nextCursor"]})
+    assert len(ids(rest)) == 5
+    assert rest["data"]["hasMore"] is False

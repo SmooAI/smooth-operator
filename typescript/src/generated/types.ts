@@ -8,7 +8,7 @@
 
 // ── from actions/cancel.schema.json ──
 /**
- * A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional and advisory — the server cancels the connection's single active turn regardless.
+ * A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional: the connection's own active turn is cancelled regardless, and when there is none, `sessionId` names the session whose conversation's turn (started on an earlier, dropped connection) to cancel.
  */
 export interface CancelRequest {
     /**
@@ -20,7 +20,7 @@ export interface CancelRequest {
      */
     requestId?: string;
     /**
-     * Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+     * Optional. Ignored when this connection has an active turn (that turn is cancelled). Otherwise it names a session whose conversation still has a turn running from an earlier connection — e.g. a client that dropped mid-turn and reconnected — and that turn is cancelled. Subject to the same ownership check as every session-addressed action; an unknown or foreign session is a silent no-op.
      */
     sessionId?: string;
 }
@@ -313,7 +313,7 @@ export interface ListConversationsRequest {
      */
     requestId?: string;
     /**
-     * Maximum number of conversations in this page. Defaults to 50.
+     * Maximum number of conversations in this page. Must be 1–200; defaults to 50. Servers clamp a larger value to 200 rather than rejecting it, so a client from before paging that asked for more still gets a page (and pages the rest with `nextCursor`).
      */
     limit?: number;
     /**
@@ -804,17 +804,21 @@ export interface MessageContent {
     } | null;
 }
 /**
- * A single content element within a message. Currently only `text` items are defined; additional types (image, file, tool_result) may be added in future protocol versions.
+ * A single content element within a message. `text` and `image` items are defined; further types (file, tool_result) may be added in future protocol versions.
  */
 export interface ContentItem {
     /**
      * Content item type discriminator.
      */
-    type: 'text';
+    type: 'text' | 'image';
     /**
      * The text content (required when type = `text`).
      */
     text?: string;
+    /**
+     * A `data:`/`https` image URL (required when type = `image`). Persisted on the user turn so any client can re-render an image another client attached.
+     */
+    url?: string;
 }
 
 // ── from domain/participant.schema.json ──
@@ -992,7 +996,8 @@ export interface ActionEnvelope {
         | 'confirm_tool_action'
         | 'verify_otp'
         | 'submit_interaction'
-        | 'ping';
+        | 'ping'
+        | 'list_conversations';
     /**
      * Client-generated correlation ID. Will be echoed back on all related server events. Should be unique per in-flight request. If omitted the server may generate one, but correlating responses becomes the client's problem.
      */

@@ -410,7 +410,8 @@ class FrameDispatcher:
 
         Optional input:
 
-        - ``limit`` (default 50) — the max conversations in this page.
+        - ``limit`` (default 50, at most 200; larger values are clamped) — the max
+          conversations in this page.
         - ``cursor`` — a prior reply's ``nextCursor``: continue strictly after its last
           row (keyset on ``(updatedAt, conversationId)``, never an offset). Absent or
           ``""`` = first page. One that doesn't decode is a ``VALIDATION_ERROR``.
@@ -422,10 +423,13 @@ class FrameDispatcher:
         whose ``updatedAt`` is bumped mid-paging moves ABOVE the cursor, so the remaining
         pages don't return it (it is the newest row on a fresh first page instead)."""
         raw_limit = frame.get("limit")
-        limit = (
+        # Clamped, not rejected: a client from before paging may still ask for more,
+        # and gets a full page plus a ``nextCursor`` for the rest.
+        limit = min(
             raw_limit
             if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0
-            else _DEFAULT_LIST_LIMIT
+            else _DEFAULT_LIST_LIMIT,
+            _MAX_LIST_LIMIT,
         )
 
         raw_cursor = frame.get("cursor")
@@ -972,6 +976,9 @@ class FrameDispatcher:
 
 #: Default cap for list_conversations when the caller doesn't ask for a specific limit.
 _DEFAULT_LIST_LIMIT = 50
+
+#: Contract cap on list_conversations' `limit` (1..200); a larger value is clamped to it.
+_MAX_LIST_LIMIT = 200
 
 #: Contract cap on get_conversation_messages' `limit` (1..100). th-89b698.
 _MAX_MESSAGE_LIMIT = 100

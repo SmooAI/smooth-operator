@@ -26,6 +26,7 @@ const ActionEnvelopeActionConfirmToolAction ActionEnvelopeAction = "confirm_tool
 const ActionEnvelopeActionCreateConversationSession ActionEnvelopeAction = "create_conversation_session"
 const ActionEnvelopeActionGetConversationMessages ActionEnvelopeAction = "get_conversation_messages"
 const ActionEnvelopeActionGetSession ActionEnvelopeAction = "get_session"
+const ActionEnvelopeActionListConversations ActionEnvelopeAction = "list_conversations"
 const ActionEnvelopeActionPing ActionEnvelopeAction = "ping"
 const ActionEnvelopeActionSendMessage ActionEnvelopeAction = "send_message"
 const ActionEnvelopeActionSubmitInteraction ActionEnvelopeAction = "submit_interaction"
@@ -1010,7 +1011,10 @@ type ListConversationsRequest struct {
 	// precision>|<conversationId>` today, and that may change.
 	Cursor *string `json:"cursor,omitempty,omitzero"`
 
-	// Maximum number of conversations in this page. Defaults to 50.
+	// Maximum number of conversations in this page. Must be 1–200; defaults to 50.
+	// Servers clamp a larger value to 200 rather than rejecting it, so a client from
+	// before paging that asked for more still gets a page (and pages the rest with
+	// `nextCursor`).
 	Limit int `json:"limit,omitempty,omitzero"`
 
 	// Server-side search. Keeps only conversations where this text (trimmed; matched

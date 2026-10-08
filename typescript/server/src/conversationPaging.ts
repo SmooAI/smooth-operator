@@ -19,6 +19,9 @@ import type { ConversationSummary } from './sessionStore.js';
 /** Default (and fallback for a non-positive / non-numeric) `list_conversations` page size. */
 export const DEFAULT_CONVERSATION_PAGE_LIMIT = 50;
 
+/** The most rows one `list_conversations` page returns; a larger `limit` is clamped to it. */
+export const MAX_CONVERSATION_PAGE_LIMIT = 200;
+
 /** A position in the sidebar order. `updatedAt` is RFC 3339 at full precision. */
 export interface ConversationKey {
     updatedAt: string;

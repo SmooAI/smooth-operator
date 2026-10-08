@@ -530,6 +530,9 @@ public sealed class FrameDispatcher
     private const string DefaultConversationName = "Conversation";
     private const int TitleMaxChars = 60;
     private const int DefaultListLimit = 50;
+    // Clamped, not rejected: a client from before paging may still ask for more, and gets a full
+    // page plus a nextCursor for the rest.
+    private const int MaxListLimit = 200;
 
     /// <summary>
     /// <c>list_conversations</c> — the conversation-sidebar / resume substrate, keyset-paged and
@@ -540,7 +543,7 @@ public sealed class FrameDispatcher
     /// title, updatedAt, messageCount } ], nextCursor, hasMore }</c> (<c>nextCursor</c> is an explicit
     /// null on the last page). Mirrors the Rust <c>handle_list_conversations</c>. th-d5b446, SMOODEV-3744.
     /// <para>
-    /// Inputs: <c>limit</c> (default 50); <c>cursor</c> (a prior page's <c>nextCursor</c>; empty/absent
+    /// Inputs: <c>limit</c> (default 50, at most 200 — larger values are clamped); <c>cursor</c> (a prior page's <c>nextCursor</c>; empty/absent
     /// = first page; one that does not decode is a <c>VALIDATION_ERROR</c> and nothing else);
     /// <c>query</c> (trimmed, case-insensitive substring of the first inbound message — this server's
     /// only title source; blank = no filter). No cursor and no query is exactly the pre-paging listing.
@@ -557,7 +560,7 @@ public sealed class FrameDispatcher
         var limit = DefaultListLimit;
         if (frame["limit"] is JsonValue lv && lv.TryGetValue<int>(out var l) && l > 0)
         {
-            limit = l;
+            limit = Math.Min(l, MaxListLimit);
         }
 
         ConversationKey? after = null;

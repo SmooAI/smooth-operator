@@ -466,7 +466,7 @@ namespace SmooAI.SmoothOperator.Generated
         public string? RequestId { get; set; } = default!;
 
         /// <summary>
-        /// Maximum number of conversations in this page. Defaults to 50.
+        /// Maximum number of conversations in this page. Must be 1–200; defaults to 50. Servers clamp a larger value to 200 rather than rejecting it, so a client from before paging that asked for more still gets a page (and pages the rest with `nextCursor`).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("limit")]
         public int? Limit { get; set; } = 50;
@@ -2438,6 +2438,10 @@ namespace SmooAI.SmoothOperator.Generated
 
         [System.Runtime.Serialization.EnumMember(Value = @"ping")]
         Ping = 7,
+
+
+        [System.Runtime.Serialization.EnumMember(Value = @"list_conversations")]
+        List_conversations = 8,
 
 
     }

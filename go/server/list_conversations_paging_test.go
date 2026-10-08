@@ -600,3 +600,30 @@ func TestPostgresStoreListConversationsPagesAndSearches(t *testing.T) {
 		t.Fatalf("acme search = %v, want only the ownerless %s (never Tara's %s)", got, machine, theirs)
 	}
 }
+
+// TestListConversationsALimitOverTheMaximumIsClampedNotRejected: a pre-paging client
+// asking for 1000 gets the 200-row maximum and a cursor for the rest, not an error.
+// Rust: a_limit_over_the_maximum_is_clamped_not_rejected.
+func TestListConversationsALimitOverTheMaximumIsClampedNotRejected(t *testing.T) {
+	store := NewInMemorySessionStore()
+	now := time.Now()
+	for i := range 205 {
+		seedPagingConversation(t, store, now.Add(-time.Duration(i)*time.Second), pagingMe, pagingOrg, "status update")
+	}
+	d := pagingDispatcher(store, pagingAccess())
+	first := listPage(t, d, map[string]any{"limit": 1000})
+	if got := len(pageIDs(t, first)); got != 200 {
+		t.Fatalf("want the 200-row maximum, got %d", got)
+	}
+	cursor := nextCursorOf(t, first)
+	if cursor == "" {
+		t.Fatal("a clamped page must still offer the rest")
+	}
+	rest := listPage(t, d, map[string]any{"limit": 1000, "cursor": cursor})
+	if got := len(pageIDs(t, rest)); got != 5 {
+		t.Fatalf("want the remaining 5, got %d", got)
+	}
+	if nextCursorOf(t, rest) != "" {
+		t.Fatal("the last page has no cursor")
+	}
+}

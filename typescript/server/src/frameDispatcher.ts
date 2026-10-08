@@ -34,6 +34,7 @@ import {
     type ConversationPageQuery,
     decodeConversationCursor,
     DEFAULT_CONVERSATION_PAGE_LIMIT,
+    MAX_CONVERSATION_PAGE_LIMIT,
     encodeConversationCursor,
     normalizeConversationSearch,
     pageConversationSummaries,
@@ -536,7 +537,8 @@ export class FrameDispatcher {
      * passing its `conversationId` to `create_conversation_session`.
      *
      * Optional input, mirroring the Rust reference `handle_list_conversations`:
-     * - `limit` (default 50) — the max conversations in this page.
+     * - `limit` (default 50, at most 200; larger values are clamped) — the max
+     *   conversations in this page.
      * - `cursor` — a prior reply's `nextCursor`: continue strictly after its last row
      *   (keyset on `(updatedAt, conversationId)`, never an offset). Absent or empty =
      *   first page. One that doesn't decode is a `VALIDATION_ERROR` and nothing else.
@@ -552,7 +554,9 @@ export class FrameDispatcher {
      */
     private async handleListConversations(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
         const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
-        const limit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_CONVERSATION_PAGE_LIMIT;
+        // Clamped, not rejected: a client from before paging may still ask for more,
+        // and gets a full page plus a `nextCursor` for the rest.
+        const limit = Math.min(rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_CONVERSATION_PAGE_LIMIT, MAX_CONVERSATION_PAGE_LIMIT);
 
         let after: ConversationKey | undefined;
         if (typeof frame.cursor === 'string' && frame.cursor.length > 0) {

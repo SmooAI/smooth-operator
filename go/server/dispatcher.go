@@ -419,6 +419,11 @@ func (d *FrameDispatcher) handleGetSession(ctx context.Context, frame inboundFra
 // defaultListLimit caps list_conversations when the caller doesn't ask for a specific limit.
 const defaultListLimit = 50
 
+// maxListConversationsLimit caps a list_conversations page. Clamped, not rejected: a
+// client from before paging may still ask for more, and gets a full page plus a
+// nextCursor for the rest.
+const maxListConversationsLimit = 200
+
 // defaultConversationName is the title fallback for a conversation with messages but no
 // inbound (user) message to preview. The Go store carries no per-conversation name (unlike
 // the Rust reference's conversation.name), so a generic label stands in.
@@ -533,7 +538,7 @@ func sortConversationsNewestFirst(summaries []ConversationSummary) {
 func (d *FrameDispatcher) handleListConversations(ctx context.Context, frame inboundFrame, sink EventSink) {
 	limit := defaultListLimit
 	if frame.Limit > 0 {
-		limit = frame.Limit
+		limit = min(frame.Limit, maxListConversationsLimit)
 	}
 	var after *conversationKey
 	if strings.TrimSpace(frame.Cursor) != "" {

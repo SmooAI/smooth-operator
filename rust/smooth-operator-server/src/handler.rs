@@ -1076,7 +1076,8 @@ async fn handle_get_conversation_messages(
 /// nextCursor, hasMore }`.
 ///
 /// Optional input (see `spec/actions/list-conversations.schema.json`):
-/// - `limit` (default 50) — the max conversations in this page.
+/// - `limit` (default 50, at most 200; larger values are clamped) — the max
+///   conversations in this page.
 /// - `cursor` — a prior reply's `nextCursor`: continue strictly after its last
 ///   row (keyset on `(updatedAt, id)`, never an offset). Absent = first page.
 /// - `query` — keep only rows whose title or first message contains it,
@@ -1096,12 +1097,14 @@ async fn handle_list_conversations(
     sink: &UnboundedSender<Value>,
 ) {
     const DEFAULT_LIMIT: usize = 50;
+    // Clamped, not rejected: a client from before paging may still ask for
+    // more, and gets a full page plus a `nextCursor` for the rest.
+    const MAX_LIMIT: u64 = 200;
     let limit = parsed
         .get("limit")
         .and_then(Value::as_u64)
-        .map(|n| n as usize)
         .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_LIMIT);
+        .map_or(DEFAULT_LIMIT, |n| n.min(MAX_LIMIT) as usize);
     let after = match parsed.get("cursor").and_then(Value::as_str) {
         None | Some("") => None,
         Some(cursor) => match ConversationKey::decode(cursor) {

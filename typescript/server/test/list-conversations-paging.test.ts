@@ -418,4 +418,19 @@ describe('list_conversations paging + search (list_conversations_paging.rs parit
         expect(data(ev).hasMore).toBe(false);
         expect(data(ev).nextCursor).toBeNull();
     });
+
+    it('a_limit_over_the_maximum_is_clamped_not_rejected', async () => {
+        // A pre-paging client asking for 1000 gets the 200-row maximum and a cursor
+        // for the rest, not an error.
+        const store = new InMemorySessionStore();
+        for (let i = 0; i < 205; i++) await seed(store, ago(i), ME, 'status update');
+        at(BASE);
+        const first = await list(store, me(), { limit: 1000 });
+        expect(first.type).toBe('immediate_response');
+        expect(ids(first)).toHaveLength(200);
+        expect(data(first).hasMore).toBe(true);
+        const rest = await list(store, me(), { limit: 1000, cursor: data(first).nextCursor });
+        expect(ids(rest)).toHaveLength(5);
+        expect(data(rest).hasMore).toBe(false);
+    });
 });

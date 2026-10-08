@@ -41,7 +41,7 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `send_message` | a turn | `sessionId`, `message`, `stream?`, `model?`, `images?`, `skill?` | streamed events, then `eventual_response` |
 | `get_session` | fetch session | `sessionId` | session snapshot |
 | `get_messages` | history | `sessionId`, paging | messages |
-| `list_conversations` | history sidebar: the caller's non-empty conversations, newest first | `limit?` (default 50), `cursor?`, `query?` | `conversations`, `nextCursor`, `hasMore` (see below) |
+| `list_conversations` | history sidebar: the caller's non-empty conversations, newest first | `limit?` (default 50, max 200), `cursor?`, `query?` | `conversations`, `nextCursor`, `hasMore` (see below) |
 | `confirm_tool_action` | resume after a write-confirmation | `sessionId`, `requestId`, `approved` | resumed stream |
 | `verify_otp` | submit an OTP code after an auth gate | `sessionId`, `requestId`, `code` | `otp_verified` or `otp_invalid` (see below) |
 | `submit_interaction` | resume a turn parked on a Rich Interaction (ANY kind) | `sessionId`, `requestId`, `interactionId`, `kind?`, `values?` or `declined: true` | resumed stream, or `interaction_invalid` (turn stays parked) |
@@ -71,6 +71,9 @@ after the caller's org and user scope is applied (on a
   whose `updatedAt` moves mid-paging jumps above the cursor, so the remaining
   pages don't return it; it heads a fresh first page. Merge pages by
   `conversationId`.
+- **`limit` is capped at 200.** A larger value is clamped, not rejected, so a
+  client from before paging that asked for more still gets a page (and a
+  `nextCursor` for the rest).
 - **Backward compatible.** No `cursor` and no `query` is the original
   first-page listing. Servers that predate paging omit `nextCursor`/`hasMore`;
   treat that as "no more".
