@@ -83,6 +83,27 @@ public sealed class ConformanceTests : IAsyncLifetime
         Assert.True(result.IsValid, result.FormatErrors());
     }
 
+    [Theory]
+    [InlineData("list_conversations_request")]
+    [InlineData("list_conversations_search_page_request")]
+    public void ValidateActionRoutesListConversationsToItsSchema(string fixtureName)
+    {
+        var request = _fixtures[fixtureName];
+        var result = _validator.ValidateAction(ActionTypes.ListConversations, request.InstanceJson);
+        Assert.True(result.IsValid, result.FormatErrors());
+    }
+
+    [Fact]
+    public void ListConversationsResponseFixtureDeserializesIntoGeneratedTypes()
+    {
+        var page = System.Text.Json.JsonSerializer.Deserialize<SmooAI.SmoothOperator.Generated.ListConversationsResponse>(
+            _fixtures["list_conversations_response"].InstanceJson)!;
+        Assert.Single(page.Conversations);
+        Assert.True(page.HasMore);
+        Assert.False(string.IsNullOrEmpty(page.NextCursor));
+        Assert.Equal("33333333-3333-3333-3333-333333333333", page.Conversations.First().ConversationId);
+    }
+
     [Fact]
     public void ValidateActionRejectsAMalformedAction()
     {

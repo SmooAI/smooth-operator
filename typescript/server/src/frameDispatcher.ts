@@ -29,6 +29,16 @@ import type { ModelCeilingResolver } from './modelCeiling.js';
 import * as protocol from './protocol.js';
 import type { Frame } from './protocol.js';
 import type { SessionStore } from './sessionStore.js';
+import {
+    type ConversationKey,
+    type ConversationPageQuery,
+    decodeConversationCursor,
+    DEFAULT_CONVERSATION_PAGE_LIMIT,
+    encodeConversationCursor,
+    normalizeConversationSearch,
+    pageConversationSummaries,
+    summaryKey,
+} from './conversationPaging.js';
 import { parseFiles, parseImages, type ToolContext, type ToolProvider } from './toolContext.js';
 import type { Sink } from './turnRunner.js';
 import { DEFAULT_SYSTEM_PROMPT, TurnCancelledError, TurnRunner } from './turnRunner.js';
@@ -517,34 +527,66 @@ export class FrameDispatcher {
     }
 
     /**
-     * `list_conversations` — return the resumable conversations, most-recent first.
+     * `list_conversations` — the conversation-sidebar / resume substrate. Returns the
+     * caller's non-empty conversations, newest `updatedAt` first (ties by
+     * `conversationId` descending), each `{conversationId, title, updatedAt,
+     * messageCount}` with a clean `title` from the FIRST inbound (user) message. Reply
+     * is an `immediate_response` carrying `{ conversations, nextCursor, hasMore }`
+     * (`spec/actions/list-conversations.schema.json`). A client resumes a row by
+     * passing its `conversationId` to `create_conversation_session`.
      *
-     * Mirrors the Rust reference: roll up every conversation, drop the empty ones
-     * (`messageCount === 0`), derive a clean `title` from the FIRST inbound (user)
-     * message, sort by `updatedAt` descending, and cap to `limit` (default 50). Each
-     * entry is `{conversationId, title, updatedAt, messageCount}`. A client resumes one
-     * by passing its `conversationId` to `create_conversation_session`.
+     * Optional input, mirroring the Rust reference `handle_list_conversations`:
+     * - `limit` (default 50) — the max conversations in this page.
+     * - `cursor` — a prior reply's `nextCursor`: continue strictly after its last row
+     *   (keyset on `(updatedAt, conversationId)`, never an offset). Absent or empty =
+     *   first page. One that doesn't decode is a `VALIDATION_ERROR` and nothing else.
+     * - `query` — keep only rows whose title source (the first inbound message)
+     *   contains it, trimmed and case-insensitively. Blank = no filter. Applied after
+     *   the org/user scoping and before the limit: it narrows the caller's scope and
+     *   never widens it.
+     *
+     * Keyset semantics under concurrent writes: a page never repeats a row an earlier
+     * page returned, and a row that isn't touched while paging is never skipped. A row
+     * whose `updatedAt` is bumped mid-paging moves ABOVE the cursor, so the remaining
+     * pages don't return it (it is the newest row on a fresh first page instead).
      */
     private async handleListConversations(frame: Record<string, unknown>, requestId: string | undefined, sink: Sink): Promise<void> {
-        const DEFAULT_LIMIT = 50;
         const rawLimit = typeof frame.limit === 'number' && Number.isFinite(frame.limit) ? Math.floor(frame.limit) : undefined;
-        const limit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_LIMIT;
+        const limit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : DEFAULT_CONVERSATION_PAGE_LIMIT;
 
-        // Scoped to the connection's principal. Applied in the store selection, ahead of
-        // the limit below — filtering after a limit silently yields short/empty pages.
-        const summaries = await this.store.listConversations(this.scopeEmail(), this.access.principal.org);
-        const conversations = summaries
-            .filter((c) => c.messageCount > 0)
-            .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-            .slice(0, limit)
-            .map((c) => ({
-                conversationId: c.conversationId,
-                title: conversationTitle(c.firstInboundText, `Conversation ${c.conversationId}`),
-                updatedAt: c.updatedAt,
-                messageCount: c.messageCount,
-            }));
+        let after: ConversationKey | undefined;
+        if (typeof frame.cursor === 'string' && frame.cursor.length > 0) {
+            after = decodeConversationCursor(frame.cursor);
+            if (!after) {
+                sink(protocol.error(requestId, 'VALIDATION_ERROR', "list_conversations 'cursor' is not a cursor this server issued"));
+                return;
+            }
+        }
+        // One row past the page tells us whether there is a next one.
+        const query: ConversationPageQuery = { limit: limit + 1, ...(after ? { after } : {}) };
+        const search = normalizeConversationSearch(frame.query);
+        if (search !== undefined) query.search = search;
 
-        sink(protocol.immediateResponse(requestId, 200, 'Conversations', { conversations }));
+        // Scoped to the connection's principal, in the store selection, AHEAD of the
+        // limit — filtering after a limit silently yields short/empty pages.
+        const scope = this.scopeEmail();
+        const org = this.access.principal.org;
+        const rows = this.store.listConversationsPage
+            ? await this.store.listConversationsPage(scope, org, query)
+            : pageConversationSummaries(await this.store.listConversations(scope, org), query);
+
+        const hasMore = rows.length > limit;
+        const page = rows.slice(0, limit);
+        const last = page[page.length - 1];
+        const nextCursor = hasMore && last ? encodeConversationCursor(summaryKey(last)) : null;
+        const conversations = page.map((c) => ({
+            conversationId: c.conversationId,
+            title: conversationTitle(c.firstInboundText, `Conversation ${c.conversationId}`),
+            updatedAt: c.updatedAt,
+            messageCount: c.messageCount,
+        }));
+
+        sink(protocol.immediateResponse(requestId, 200, 'Conversations', { conversations, nextCursor, hasMore }));
     }
 
     /**

@@ -252,6 +252,87 @@ public sealed class PostgresSessionStore : ISessionStore, IAsyncDisposable
         return results;
     }
 
+    /// <summary>
+    /// One <c>list_conversations</c> page, pushed down into a single query: the same scoped,
+    /// non-empty aggregate as <see cref="ListConversationsAsync"/>, then the keyset
+    /// (<c>updated_at</c>, <c>conversation_id</c>) &lt; cursor, the search, the sidebar ORDER BY and the
+    /// LIMIT — in that order, so the owner filter always runs before the search and the limit.
+    /// <c>updated_at</c> compares at the stored microsecond precision (the cursor round-trips it
+    /// exactly). Ids compare under <c>COLLATE "C"</c> — byte order, the same as the ordinal compare
+    /// the cursor is defined by; the database's default collation could order <c>-</c> and digits
+    /// differently and skip or repeat a tied row. SMOODEV-3744.
+    /// </summary>
+    public async Task<IReadOnlyList<ConversationSummary>> ListConversationsPageAsync(ConversationScope scope, ConversationPageQuery query, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (scope.IsEmpty || query.Limit <= 0)
+        {
+            return Array.Empty<ConversationSummary>();
+        }
+
+        const string ownerFilter = """
+            WHERE EXISTS (SELECT 1 FROM conversation_participants p
+                           WHERE p.conversation_id = m.conversation_id
+                             AND p.type = 'user'
+                             AND lower(p.email) = lower(@email))
+            """;
+        var where = new List<string>();
+        if (query.After is not null)
+        {
+            where.Add("""(t.updated_at < @after_ts OR (t.updated_at = @after_ts AND t.conversation_id COLLATE "C" < @after_id COLLATE "C"))""");
+        }
+        if (query.Search is not null)
+        {
+            // strpos, not LIKE: the user's text is a literal substring, never a pattern.
+            where.Add("strpos(lower(t.first_inbound), lower(@search)) > 0");
+        }
+        var sql = $"""
+            SELECT t.conversation_id, t.message_count, t.updated_at, t.first_inbound
+            FROM (
+                SELECT m.conversation_id,
+                       COUNT(*)              AS message_count,
+                       MAX(m.created_at)     AS updated_at,
+                       (SELECT i.content->>'text' FROM conversation_messages i
+                         WHERE i.conversation_id = m.conversation_id AND i.direction = 'inbound'
+                         ORDER BY i.seq ASC LIMIT 1) AS first_inbound
+                FROM conversation_messages m
+                {(scope.IsUnscoped ? string.Empty : ownerFilter)}
+                GROUP BY m.conversation_id
+            ) t
+            {(where.Count == 0 ? string.Empty : "WHERE " + string.Join(" AND ", where))}
+            ORDER BY t.updated_at DESC, t.conversation_id COLLATE "C" DESC
+            LIMIT @limit
+            """;
+
+        await using var command = _dataSource.CreateCommand(sql);
+        if (!scope.IsUnscoped)
+        {
+            command.Parameters.AddWithValue("email", scope.UserEmail!);
+        }
+        if (query.After is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter("after_ts", NpgsqlDbType.TimestampTz) { Value = query.After.UpdatedAt.ToUniversalTime() });
+            command.Parameters.Add(new NpgsqlParameter("after_id", NpgsqlDbType.Text) { Value = query.After.Id });
+        }
+        if (query.Search is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter("search", NpgsqlDbType.Text) { Value = query.Search });
+        }
+        command.Parameters.Add(new NpgsqlParameter("limit", NpgsqlDbType.Integer) { Value = query.Limit });
+
+        var results = new List<ConversationSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            results.Add(new ConversationSummary(
+                ConversationId: reader.GetString(0),
+                UpdatedAt: reader.GetFieldValue<DateTimeOffset>(2),
+                MessageCount: (int)reader.GetInt64(1),
+                FirstInboundText: reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+        return results;
+    }
+
     public async Task<StoredSession?> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default)
     {
         // The owner email is read from the conversation's user participant rather than duplicated onto

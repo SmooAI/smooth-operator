@@ -595,3 +595,70 @@ func waitForDifferentRequestID(t *testing.T, tr *mockTransport, prev string) str
 	t.Fatal("timed out waiting for second sent frame")
 	return ""
 }
+
+// TestListConversationsPaging asserts ListConversations sends the paging/search inputs
+// (cursor + query, omitted when empty) and decodes nextCursor + hasMore — the client
+// half of the SMOODEV-3744 list_conversations contract
+// (spec/actions/list-conversations.schema.json).
+func TestListConversationsPaging(t *testing.T) {
+	c, tr := makeClient(t)
+	defer c.Close()
+
+	type result struct {
+		resp ListConversationsResponse
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		resp, err := c.ListConversations(context.Background(), ListConversationsParams{Limit: 20, Cursor: "abc", Query: "invoice"})
+		resCh <- result{resp, err}
+	}()
+
+	reqID := waitForLastRequestID(t, tr)
+	sent := tr.lastSent(t)
+	if sent["action"] != string(ActionListConversations) || sent["cursor"] != "abc" || sent["query"] != "invoice" || sent["limit"] != float64(20) {
+		t.Fatalf("unexpected list_conversations frame: %v", sent)
+	}
+
+	tr.emit(t, map[string]any{"type": "immediate_response", "requestId": reqID, "status": 200,
+		"data": map[string]any{
+			"conversations": []map[string]any{{"conversationId": "c-1", "title": "Where is the Acme invoice?", "updatedAt": "2026-10-08T14:30:00.123456+00:00", "messageCount": 4}},
+			"nextCursor":    "next-1",
+			"hasMore":       true,
+		}})
+
+	r := <-resCh
+	if r.err != nil {
+		t.Fatalf("list: %v", r.err)
+	}
+	if len(r.resp.Conversations) != 1 || r.resp.Conversations[0].ConversationID != "c-1" || r.resp.Conversations[0].MessageCount != 4 {
+		t.Errorf("conversations = %+v", r.resp.Conversations)
+	}
+	if !r.resp.HasMore || r.resp.NextCursor == nil || *r.resp.NextCursor != "next-1" {
+		t.Errorf("paging = hasMore %v nextCursor %v", r.resp.HasMore, r.resp.NextCursor)
+	}
+
+	// A first page with no cursor/query leaves both off the wire, and an explicit null
+	// nextCursor decodes to nil.
+	go func() {
+		resp, err := c.ListConversations(context.Background(), ListConversationsParams{})
+		resCh <- result{resp, err}
+	}()
+	reqID2 := waitForDifferentRequestID(t, tr, reqID)
+	sent = tr.lastSent(t)
+	if _, ok := sent["cursor"]; ok {
+		t.Errorf("empty cursor should be omitted: %v", sent)
+	}
+	if _, ok := sent["query"]; ok {
+		t.Errorf("empty query should be omitted: %v", sent)
+	}
+	tr.emit(t, map[string]any{"type": "immediate_response", "requestId": reqID2, "status": 200,
+		"data": map[string]any{"conversations": []any{}, "nextCursor": nil, "hasMore": false}})
+	r = <-resCh
+	if r.err != nil {
+		t.Fatalf("list: %v", r.err)
+	}
+	if r.resp.HasMore || r.resp.NextCursor != nil {
+		t.Errorf("last page = hasMore %v nextCursor %v", r.resp.HasMore, r.resp.NextCursor)
+	}
+}

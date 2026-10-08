@@ -12,6 +12,9 @@ would implement.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
@@ -100,6 +103,140 @@ class ConversationSummary:
     first_inbound_text: str | None = None
 
 
+#: Unpadded base64url — the only alphabet a cursor this server minted can use. Checked
+#: up front because :func:`base64.urlsafe_b64decode` silently DISCARDS characters
+#: outside its alphabet, which would let a foreign string decode to something.
+_CURSOR_ALPHABET = re.compile(r"[A-Za-z0-9_-]+")
+
+#: RFC 3339 ``date-time``: a full date, ``T``/``t``/space, a full time with optional
+#: fractional seconds of ANY length, and a mandatory ``Z``/``z`` or ``±HH:MM`` offset.
+#: Stricter than :meth:`datetime.fromisoformat`, which also takes dates alone, naive
+#: times and ISO week dates.
+_RFC3339 = re.compile(
+    r"(?P<date>\d{4}-\d{2}-\d{2})[Tt ](?P<time>\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<offset>[Zz]|[+-]\d{2}:\d{2})",
+    re.ASCII,
+)
+
+
+def _parse_rfc3339(stamp: str) -> datetime | None:
+    """Parse an RFC 3339 timestamp into an aware UTC datetime, or ``None``.
+
+    Fractional seconds beyond microseconds (Rust emits nanoseconds when it has them)
+    are TRUNCATED, never rounded: rounding could carry into the next second and move a
+    cursor past the row it names."""
+    m = _RFC3339.fullmatch(stamp)
+    if m is None:
+        return None
+    frac = (m["frac"] or "")[:6].ljust(6, "0")
+    offset = "+00:00" if m["offset"] in ("Z", "z") else m["offset"]
+    try:
+        return datetime.fromisoformat(f"{m['date']}T{m['time']}.{frac}{offset}").astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _format_rfc3339(ts: datetime) -> str:
+    """``ts`` in UTC at full (microsecond) precision with a ``Z`` suffix — the Rust
+    ``to_rfc3339_opts(AutoSi, true)`` shape (fraction omitted when zero)."""
+    utc = ts.astimezone(timezone.utc)
+    frac = f".{utc.microsecond:06d}" if utc.microsecond else ""
+    return f"{utc:%Y-%m-%dT%H:%M:%S}{frac}Z"
+
+
+@dataclass(frozen=True)
+class ConversationKey:
+    """A position in the conversation sidebar's order — newest ``updated_at`` first,
+    ties broken by ``conversation_id`` descending. Rows strictly AFTER a key in that
+    order are the next page (keyset paging; never OFFSET). The Python analog of the
+    Rust ``ConversationKey``. SMOODEV-3744.
+
+    On the wire it travels as an opaque cursor (:meth:`encode`):
+    ``base64url(<RFC 3339 updated_at, full precision>|<conversation_id>)``, unpadded."""
+
+    updated_at: datetime
+    conversation_id: str
+
+    @classmethod
+    def of(cls, summary: ConversationSummary) -> ConversationKey:
+        return cls(summary.updated_at, summary.conversation_id)
+
+    def precedes(self, updated_at: datetime, conversation_id: str) -> bool:
+        """Whether a row keyed ``(updated_at, conversation_id)`` sorts strictly after
+        this key — i.e. belongs to a later page. Timestamps compare at full stored
+        precision; ids as plain strings (code-point order, which for the canonical
+        lowercase UUIDs every store mints is also Postgres ``COLLATE "C"`` order)."""
+        return updated_at < self.updated_at or (
+            updated_at == self.updated_at and conversation_id < self.conversation_id
+        )
+
+    def encode(self) -> str:
+        """The opaque wire cursor for this key."""
+        raw = f"{_format_rfc3339(self.updated_at)}|{self.conversation_id}"
+        return base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+
+    @classmethod
+    def decode(cls, cursor: str) -> ConversationKey | None:
+        """Parse a wire cursor. ``None`` when it isn't one a server minted: bad
+        base64url (incl. padding or the standard ``+``/``/`` alphabet), not UTF-8, no
+        ``|``, an empty id, or a timestamp that isn't RFC 3339. Accepts any RFC 3339
+        offset and any number of fractional digits, so a Rust-issued cursor decodes."""
+        cursor = cursor.strip()
+        if not _CURSOR_ALPHABET.fullmatch(cursor) or len(cursor) % 4 == 1:
+            return None
+        try:
+            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
+        except (binascii.Error, ValueError):
+            return None
+        stamp, sep, conversation_id = raw.partition("|")
+        if not sep or not conversation_id:
+            return None
+        updated_at = _parse_rfc3339(stamp)
+        return None if updated_at is None else cls(updated_at, conversation_id)
+
+
+@dataclass(frozen=True)
+class ConversationSummaryQuery:
+    """Paging + search for :meth:`SessionStore.list_conversations_page` — the Python
+    analog of the Rust ``ConversationSummaryQuery``. Build it with :meth:`create`, which
+    normalizes the search. SMOODEV-3744."""
+
+    #: Max rows to return.
+    limit: int
+    #: Return only rows strictly after this key (the previous page's last row).
+    after: ConversationKey | None = None
+    #: Case-insensitive substring a row's first inbound message must contain — the
+    #: Python server's only title source (it has no conversation name, so the
+    #: ``Conversation <id>`` placeholder is never searched). ``None`` = no filter.
+    search: str | None = None
+
+    @classmethod
+    def create(
+        cls, limit: int, *, after: ConversationKey | None = None, search: str | None = None
+    ) -> ConversationSummaryQuery:
+        """A query for at most ``limit`` rows after ``after``, filtered by ``search``
+        (trimmed; blank means no filter)."""
+        needle = search.strip() if isinstance(search, str) else ""
+        return cls(limit=limit, after=after, search=needle or None)
+
+    def admits_position(self, summary: ConversationSummary) -> bool:
+        """Whether ``summary`` is past the cursor (always, with no cursor)."""
+        return self.after is None or self.after.precedes(summary.updated_at, summary.conversation_id)
+
+    def matches_search(self, first_inbound_text: str | None) -> bool:
+        """Whether a row with this first inbound text matches (always, with no search)."""
+        if self.search is None:
+            return True
+        return first_inbound_text is not None and self.search.lower() in first_inbound_text.lower()
+
+
+def sort_conversations_newest_first(summaries: list[ConversationSummary]) -> None:
+    """Newest ``updated_at`` first, then ``conversation_id`` descending — the sidebar
+    order every listing (and every :class:`ConversationKey`) is defined against. Sorts
+    in place. A timestamp-only sort leaves ties in arbitrary order, which a keyset
+    cursor then repeats or skips across a page boundary."""
+    summaries.sort(key=lambda c: (c.updated_at, c.conversation_id), reverse=True)
+
+
 #: The reference agent's display name (mirrors the Rust ``AGENT_NAME`` and the C#
 #: ``InMemorySessionStore`` default).
 AGENT_NAME = "smooth-agent"
@@ -175,6 +312,29 @@ class SessionStore(ABC):
         Apply the filter in the SELECTION itself, never after the dispatcher's limit —
         filtering a limited page silently returns short or empty pages."""
         ...
+
+    async def list_conversations_page(
+        self,
+        user_email: str | None,
+        query: ConversationSummaryQuery,
+        *,
+        enforced: bool = False,
+        org_id: str = DEFAULT_ORG_ID,
+    ) -> list[ConversationSummary]:
+        """Up to ``query.limit`` summaries in sidebar order
+        (:func:`sort_conversations_newest_first`), strictly after ``query.after``,
+        matching ``query.search`` — scoped EXACTLY like :meth:`list_conversations`
+        (same ``user_email`` / ``enforced`` / ``org_id`` semantics). Scope, then
+        position + search, then the limit: a search narrows the caller's scope and
+        never widens it, and a page is never short because of scoping. SMOODEV-3744.
+
+        This default reads the whole scoped listing and pages it in memory — right for
+        the in-memory store. A durable store overrides it to push the keyset, search
+        and limit into its query (see ``PostgresStore``)."""
+        rows = await self.list_conversations(user_email, enforced=enforced, org_id=org_id)
+        sort_conversations_newest_first(rows)
+        page = [c for c in rows if query.admits_position(c) and query.matches_search(c.first_inbound_text)]
+        return page[: max(query.limit, 0)]
 
     @abstractmethod
     async def append_message(self, conversation_id: str, direction: MessageDirection, text: str) -> StoredMessage: ...

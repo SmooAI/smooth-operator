@@ -609,3 +609,103 @@ async def test_session_with_no_agent_has_no_agent(store, postgres_dsn: str) -> N
     fetched = await store.get_session(created.session_id)
     assert fetched is not None
     assert fetched.agent_id is None
+
+
+# ── list_conversations paging + search (SMOODEV-3744) ───────────────────────
+# The same scenarios test_list_conversations_paging.py runs on the in-memory store, run
+# against Postgres — where the keyset, search and limit are pushed into SQL. The Postgres
+# world also seeds a foreign-org chat, since this store scopes listings by org.
+
+
+def _postgres_setter(store):
+    async def set_ts(conversation_id: str, ts: datetime) -> None:
+        await store._pool.execute("UPDATE conversations SET updated_at = $2 WHERE id = $1", conversation_id, ts)  # noqa: SLF001
+
+    return set_ts
+
+
+async def _postgres_world(store, *, with_machine: bool):
+    from test_list_conversations_paging import build_world
+
+    return await build_world(store, _postgres_setter(store), org=org(), with_machine=with_machine, org_scoped=True)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "with_machine"),
+    [
+        ("check_owned_pages_are_disjoint_and_complete", False),
+        ("check_scan_pages_are_disjoint_and_complete", True),
+        ("check_a_page_the_size_of_the_rest_reports_no_more", False),
+        ("check_no_cursor_is_the_old_first_page", False),
+        ("check_owned_paging_survives_concurrent_updates", False),
+        ("check_scan_paging_survives_concurrent_updates", True),
+        ("check_owned_search_matches_my_titles_and_never_widens_scope", False),
+        ("check_scan_search_never_returns_another_members_chat", True),
+        ("check_search_pages_with_a_cursor", False),
+        ("check_an_unknown_cursor_is_a_validation_error", False),
+        ("check_an_emailless_principal_pages_only_ownerless", True),
+    ],
+)
+async def test_list_conversations_paging_on_postgres(store, scenario: str, with_machine: bool) -> None:
+    import test_list_conversations_paging as paging
+
+    await getattr(paging, scenario)(await _postgres_world(store, with_machine=with_machine))
+
+
+async def test_list_conversations_page_compares_at_microsecond_precision(store) -> None:
+    """Two rows a microsecond apart page as two distinct positions — the keyset compares
+    the stored ``timestamptz`` at full precision, not truncated to ms/s."""
+    from smooth_operator_server.session_store import ConversationKey, ConversationSummaryQuery
+
+    org_id = org()
+    base = datetime(2026, 10, 8, 14, 30, 0, 123456, tzinfo=timezone.utc)
+    set_ts = _postgres_setter(store)
+    convs = []
+    for offset in (0, 1):
+        session = await store.create_session("", "A", None, owner_email="a@example.test", enforced=True, org_id=org_id)
+        await store.append_message(session.conversation_id, MessageDirection.INBOUND, "hi")
+        await set_ts(session.conversation_id, base + timedelta(microseconds=offset))
+        convs.append(session.conversation_id)
+
+    first = await store.list_conversations_page(
+        "a@example.test", ConversationSummaryQuery.create(1), enforced=True, org_id=org_id
+    )
+    assert [c.conversation_id for c in first] == [convs[1]]
+    assert first[0].updated_at == base + timedelta(microseconds=1)
+    rest = await store.list_conversations_page(
+        "a@example.test",
+        ConversationSummaryQuery.create(5, after=ConversationKey.decode(ConversationKey.of(first[0]).encode())),
+        enforced=True,
+        org_id=org_id,
+    )
+    assert [c.conversation_id for c in rest] == [convs[0]]
+
+
+async def test_list_conversations_page_breaks_ties_in_byte_order(store) -> None:
+    """Ids compare as plain strings in BOTH stores. Postgres text comparison follows the
+    database collation (en_US sorts case-insensitively first), so the query pins
+    ``COLLATE "C"``; these ids order differently under the two."""
+    org_id = org()
+    tied = datetime(2026, 10, 8, 14, 30, tzinfo=timezone.utc)
+    ids_ = ["B-conv", "a-conv", "C-conv"]
+    async with store._pool.acquire() as conn:  # noqa: SLF001 — hand-made ids
+        for conv_id in ids_:
+            await conn.execute(
+                """INSERT INTO conversations (id, platform, name, organization_id, idempotency_key, created_at, updated_at)
+                   VALUES ($1, 'web', '', $2, $1, $3, $3)""",
+                conv_id,
+                org_id,
+                tied,
+            )
+            await conn.execute(
+                """INSERT INTO conversation_messages (id, organization_id, conversation_id, direction, content, created_at)
+                   VALUES ($1, $2, $3, 'inbound', '{"text": "hi"}'::jsonb, $4)""",
+                str(uuid.uuid4()),
+                org_id,
+                conv_id,
+                tied,
+            )
+    from smooth_operator_server.session_store import ConversationSummaryQuery
+
+    rows = await store.list_conversations_page(None, ConversationSummaryQuery.create(10), enforced=False, org_id=org_id)
+    assert [c.conversation_id for c in rows] == sorted(ids_, reverse=True) == ["a-conv", "C-conv", "B-conv"]

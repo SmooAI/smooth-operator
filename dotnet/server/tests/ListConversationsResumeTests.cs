@@ -76,8 +76,12 @@ public class ListConversationsResumeTests
 
         var older = await store.CreateSessionAsync("agent", "U", "u@example.com");
         await store.AppendMessageAsync(older.ConversationId, MessageDirection.Inbound, "older");
+        // Space the appends out: two appends in the same clock tick are a genuine updatedAt tie, which
+        // the listing breaks by conversation id (SMOODEV-3744), not by insertion order.
+        await Task.Delay(5);
         var newer = await store.CreateSessionAsync("agent", "U", "u@example.com");
         await store.AppendMessageAsync(newer.ConversationId, MessageDirection.Inbound, "newer");
+        await Task.Delay(5);
         // Touch `older` again so it becomes the most recently active.
         await store.AppendMessageAsync(older.ConversationId, MessageDirection.Outbound, "older reply");
 

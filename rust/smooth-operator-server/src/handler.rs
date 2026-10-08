@@ -14,7 +14,10 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use smooth_operator::access_control::AccessContext;
-use smooth_operator::adapter::{ConversationUpdate, StorageAdapter};
+use smooth_operator::adapter::{
+    sort_conversations_newest_first, ConversationKey, ConversationSummaryQuery, ConversationUpdate,
+    StorageAdapter,
+};
 use smooth_operator::agent_config::{AgentBehaviorConfig, AuthGateHook, AuthLevel};
 use smooth_operator::domain::{
     Conversation, Participant, ParticipantType, Platform, Session, SessionStatus,
@@ -1065,14 +1068,25 @@ async fn handle_get_conversation_messages(
 }
 
 /// `list_conversations` — the conversation-sidebar / resume substrate. Returns
-/// the org's conversations that have at least one message, most-recent-first,
-/// each with a short title preview + message count. Empty conversations (every
-/// page-load currently mints one) are filtered out so the sidebar isn't buried
-/// in blanks. Reply is an `immediate_response` carrying `{ conversations: [ {
-/// conversationId, title, updatedAt, messageCount } ] }`.
+/// the org's conversations that have at least one message, most-recent-first
+/// (ties by id, descending), each with a short title preview + message count.
+/// Empty conversations (every page-load currently mints one) are filtered out so
+/// the sidebar isn't buried in blanks. Reply is an `immediate_response` carrying
+/// `{ conversations: [ { conversationId, title, updatedAt, messageCount } ],
+/// nextCursor, hasMore }`.
 ///
-/// Optional input: `limit` (default 50) — the max conversations returned after
-/// filtering + sorting.
+/// Optional input (see `spec/actions/list-conversations.schema.json`):
+/// - `limit` (default 50) — the max conversations in this page.
+/// - `cursor` — a prior reply's `nextCursor`: continue strictly after its last
+///   row (keyset on `(updatedAt, id)`, never an offset). Absent = first page.
+/// - `query` — keep only rows whose title or first message contains it,
+///   case-insensitively. A search narrows the caller's scope; it never widens it.
+///
+/// Keyset semantics under concurrent writes: a page never repeats a row an
+/// earlier page returned, and a row that isn't touched while paging is never
+/// skipped. A row whose `updatedAt` is bumped mid-paging moves ABOVE the cursor,
+/// so the remaining pages don't return it (it is the newest row on a fresh
+/// first page instead).
 async fn handle_list_conversations(
     state: &AppState,
     auth_org: Option<&str>,
@@ -1088,6 +1102,24 @@ async fn handle_list_conversations(
         .map(|n| n as usize)
         .filter(|n| *n > 0)
         .unwrap_or(DEFAULT_LIMIT);
+    let after = match parsed.get("cursor").and_then(Value::as_str) {
+        None | Some("") => None,
+        Some(cursor) => match ConversationKey::decode(cursor) {
+            Some(key) => Some(key),
+            None => {
+                let _ = sink.send(protocol::error(
+                    request_id,
+                    "VALIDATION_ERROR",
+                    "list_conversations 'cursor' is not a cursor this server issued",
+                ));
+                return;
+            }
+        },
+    };
+    // One row past the page tells us whether there is a next one.
+    let query = ConversationSummaryQuery::new(limit.saturating_add(1))
+        .after(after)
+        .with_search(parsed.get("query").and_then(Value::as_str));
 
     // Org scope: the authenticated principal's org, else the seed org — matching
     // the create-session derivation's fallback for the local/no-auth flavor.
@@ -1099,7 +1131,7 @@ async fn handle_list_conversations(
     // widget chats included — with a participant read and a message read per
     // row, which on a real org is thousands of round trips per picker open.
     if state.require_owned_conversations && !matches!(scope, UserScope::Unscoped) {
-        send_owned_conversations(state, org_id, scope, limit, request_id, sink).await;
+        send_owned_conversations(state, org_id, scope, &query, limit, request_id, sink).await;
         return;
     }
 
@@ -1109,7 +1141,7 @@ async fn handle_list_conversations(
     // before the limit, so a page is never silently short.
     let listed = state.storage.list_conversations_by_org(org_id).await;
 
-    let conversations = match listed {
+    let mut conversations = match listed {
         Ok(c) => c,
         Err(e) => {
             let _ = sink.send(protocol::error(
@@ -1120,47 +1152,79 @@ async fn handle_list_conversations(
             return;
         }
     };
+    sort_conversations_newest_first(&mut conversations);
 
-    // Peek each conversation's messages for a preview + count, dropping empties.
+    // Peek each conversation's messages for a preview + count, dropping empties,
+    // in page order, stopping once the page (plus its look-ahead row) is full.
     // ponytail: per-conversation peek + owner check, capped at MSG_CAP — fine for
     // a local daemon's ~100 convos. If this ever fronts a multi-thousand-conversation
     // org, push count + first-inbound + the owner filter down into the storage
     // adapter as one query (`list_conversations_by_org_and_user` is that pushdown
     // for the owned half; it can't express "or ownerless" yet).
     const MSG_CAP: usize = 200;
-    let mut rows: Vec<(i64, Value)> = Vec::new();
+    let mut rows: Vec<(ConversationKey, Value)> = Vec::new();
     for conv in conversations {
+        if rows.len() >= query.limit {
+            break;
+        }
+        if !query.admits_position(&conv) {
+            continue;
+        }
         if !may_read_conversation(state, &conv.id, auth_org, scope, Reach::Listing).await {
             continue;
         }
-        let mut query = smooth_operator::adapter::MessageQuery::new(&conv.id, MSG_CAP);
-        query.descending = false; // oldest-first: the first inbound is the title source
-        let Ok(page) = state.storage.list_messages_by_conversation(query).await else {
+        let mut msg_query = smooth_operator::adapter::MessageQuery::new(&conv.id, MSG_CAP);
+        msg_query.descending = false; // oldest-first: the first inbound is the title source
+        let Ok(page) = state.storage.list_messages_by_conversation(msg_query).await else {
             continue;
         };
         if page.messages.is_empty() {
             continue;
         }
+        let first_inbound = first_inbound_text(&page.messages);
+        if !query.matches_search(&conv.name, first_inbound.as_deref()) {
+            continue;
+        }
         rows.push((
-            conv.updated_at.timestamp_millis(),
+            ConversationKey::of(&conv),
             json!({
                 "conversationId": conv.id,
-                "title": conversation_title(&page.messages, &conv.name),
+                "title": summary_title(first_inbound.as_deref(), &conv.name),
                 "updatedAt": conv.updated_at.to_rfc3339(),
                 "messageCount": page.messages.len(),
             }),
         ));
     }
 
-    // Most-recent-first, then cap.
-    rows.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
-    let conversations: Vec<Value> = rows.into_iter().take(limit).map(|(_, v)| v).collect();
+    send_conversation_page(rows, limit, request_id, sink);
+}
 
+/// Reply with one `list_conversations` page from up to `limit + 1` rows in
+/// sidebar order: the first `limit`, plus the cursor of the last of them when
+/// the look-ahead row shows there is more.
+fn send_conversation_page(
+    mut rows: Vec<(ConversationKey, Value)>,
+    limit: usize,
+    request_id: Option<&str>,
+    sink: &UnboundedSender<Value>,
+) {
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = if has_more {
+        rows.last().map(|(key, _)| key.encode())
+    } else {
+        None
+    };
+    let conversations: Vec<Value> = rows.into_iter().map(|(_, row)| row).collect();
     let _ = sink.send(protocol::immediate_response(
         request_id,
         200,
         "Conversations",
-        json!({ "conversations": conversations }),
+        json!({
+            "conversations": conversations,
+            "nextCursor": next_cursor,
+            "hasMore": has_more,
+        }),
     ));
 }
 
@@ -1176,6 +1240,7 @@ async fn send_owned_conversations(
     state: &AppState,
     org_id: &str,
     scope: &UserScope,
+    query: &ConversationSummaryQuery,
     limit: usize,
     request_id: Option<&str>,
     sink: &UnboundedSender<Value>,
@@ -1184,7 +1249,7 @@ async fn send_owned_conversations(
         UserScope::User(email) => {
             match state
                 .storage
-                .list_owned_conversation_summaries(org_id, email, limit)
+                .list_owned_conversation_summaries_page(org_id, email, query)
                 .await
             {
                 Ok(rows) => rows,
@@ -1200,26 +1265,31 @@ async fn send_owned_conversations(
         }
         UserScope::Denied | UserScope::Unscoped => Vec::new(),
     };
-    let conversations: Vec<Value> = summaries
+    let rows = summaries
         .into_iter()
         .map(|row| {
-            json!({
-                "conversationId": row.conversation.id,
-                "title": summary_title(row.first_inbound_text.as_deref(), &row.conversation.name),
-                "updatedAt": row.conversation.updated_at.to_rfc3339(),
-                "messageCount": row.message_count,
-            })
+            (
+                ConversationKey::of(&row.conversation),
+                json!({
+                    "conversationId": row.conversation.id,
+                    "title": summary_title(row.first_inbound_text.as_deref(), &row.conversation.name),
+                    "updatedAt": row.conversation.updated_at.to_rfc3339(),
+                    "messageCount": row.message_count,
+                }),
+            )
         })
         .collect();
-    let _ = sink.send(protocol::immediate_response(
-        request_id,
-        200,
-        "Conversations",
-        json!({ "conversations": conversations }),
-    ));
+    send_conversation_page(rows, limit, request_id, sink);
 }
 
-/// [`conversation_title`] from an already-extracted first inbound text.
+/// Derive a sidebar title. A **meaningful** conversation `name` — an auto-title
+/// or a manual rename, i.e. anything not the default `Session <uuid>` — wins, so
+/// titles set by [`maybe_auto_title`] / [`handle_rename_conversation`] surface in
+/// the sidebar. Otherwise fall back to a truncated preview of the FIRST inbound
+/// (user) message, then the default name.
+///
+/// Back-compat: every pre-titling conversation carried the default name, so this
+/// is byte-for-byte the old message-preview behavior for them.
 fn summary_title(first_inbound_text: Option<&str>, name: &str) -> String {
     if !name.starts_with(DEFAULT_NAME_PREFIX) && !name.trim().is_empty() {
         return truncate_preview(name, TITLE_MAX);
@@ -1227,20 +1297,12 @@ fn summary_title(first_inbound_text: Option<&str>, name: &str) -> String {
     first_inbound_text.map_or_else(|| name.to_string(), |t| truncate_preview(t, TITLE_MAX))
 }
 
-/// Derive a sidebar title. A **meaningful** conversation `name` — an auto-title
-/// or a manual rename, i.e. anything not the default `Session <uuid>` — wins, so
-/// titles set by [`maybe_auto_title`] / [`handle_rename_conversation`] surface in
-/// the sidebar. Otherwise fall back to a truncated preview of the FIRST inbound
-/// (user) message, then the default name. `messages` is oldest-first.
-///
-/// Back-compat: every pre-titling conversation carried the default name, so this
-/// is byte-for-byte the old message-preview behavior for them.
-fn conversation_title(messages: &[smooth_operator::domain::Message], name: &str) -> String {
-    let first_inbound = messages
+/// Flat text of the first inbound (user) message in oldest-first `messages`.
+fn first_inbound_text(messages: &[smooth_operator::domain::Message]) -> Option<String> {
+    messages
         .iter()
         .find(|m| matches!(m.direction, smooth_operator::domain::Direction::Inbound))
-        .and_then(message_text);
-    summary_title(first_inbound.as_deref(), name)
+        .and_then(message_text)
 }
 
 /// Flat text of a message: the content's `text` mirror, else the first text item.
@@ -1263,7 +1325,7 @@ fn truncate_preview(s: &str, max: usize) -> String {
 /// (`Session <uuid>`). The auto-titler only fires while a conversation still
 /// carries this prefix, so a manual rename (or a prior successful auto-title) is
 /// never clobbered.
-const DEFAULT_NAME_PREFIX: &str = "Session ";
+const DEFAULT_NAME_PREFIX: &str = smooth_operator::adapter::DEFAULT_CONVERSATION_NAME_PREFIX;
 
 /// Fast/cheap model used to auto-title a conversation from its first exchange.
 const AUTO_TITLE_MODEL: &str = "groq-gpt-oss-20b";

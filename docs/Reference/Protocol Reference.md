@@ -41,11 +41,39 @@ A **schema-driven WebSocket protocol**. It is the single contract between any cl
 | `send_message` | a turn | `sessionId`, `message`, `stream?`, `model?`, `images?`, `skill?` | streamed events, then `eventual_response` |
 | `get_session` | fetch session | `sessionId` | session snapshot |
 | `get_messages` | history | `sessionId`, paging | messages |
+| `list_conversations` | history sidebar: the caller's non-empty conversations, newest first | `limit?` (default 50), `cursor?`, `query?` | `conversations`, `nextCursor`, `hasMore` (see below) |
 | `confirm_tool_action` | resume after a write-confirmation | `sessionId`, `requestId`, `approved` | resumed stream |
 | `verify_otp` | submit an OTP code after an auth gate | `sessionId`, `requestId`, `code` | `otp_verified` or `otp_invalid` (see below) |
 | `submit_interaction` | resume a turn parked on a Rich Interaction (ANY kind) | `sessionId`, `requestId`, `interactionId`, `kind?`, `values?` or `declined: true` | resumed stream, or `interaction_invalid` (turn stays parked) |
 | `cancel` | stop the in-flight turn (the "Stop button") | `requestId` (of the `send_message` to cancel), `sessionId?` | `cancelled` (or nothing, if no turn is running) |
 | `ping` | keepalive | — | `pong` |
+
+### Paging and searching `list_conversations`
+
+Schema: [`spec/actions/list-conversations.schema.json`](../../spec/actions/list-conversations.schema.json).
+Rows come newest `updatedAt` first, ties broken by `conversationId` descending,
+after the caller's org and user scope is applied (on a
+`require_owned_conversations` host, only conversations the caller owns).
+
+- **Paging is keyset, never offset.** Feed a reply's `nextCursor` back as the
+  next request's `cursor` to get the rows after it. `nextCursor` is non-null
+  if and only if `hasMore` is true. The cursor is opaque (today: unpadded
+  base64url of `<RFC 3339 updatedAt, full precision>|<conversationId>`), and one
+  the server didn't issue is a `VALIDATION_ERROR`.
+- **`query` searches on the server.** It keeps rows whose meaningful name (an
+  auto-title or rename, never the default `Session …` placeholder) or first
+  inbound message contains the trimmed text, case-insensitively. It is applied
+  inside the caller's scope, so it can only narrow what the caller could
+  already list: another member's chat or a widget chat that matches stays out.
+  Send the same `query` with each page's `cursor`.
+- **Under concurrent writes**, a page never repeats a row an earlier page
+  returned, and a row nobody touches while you page is never skipped. A row
+  whose `updatedAt` moves mid-paging jumps above the cursor, so the remaining
+  pages don't return it; it heads a fresh first page. Merge pages by
+  `conversationId`.
+- **Backward compatible.** No `cursor` and no `query` is the original
+  first-page listing. Servers that predate paging omit `nextCursor`/`hasMore`;
+  treat that as "no more".
 
 ### Images on a turn and in history
 

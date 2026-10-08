@@ -299,6 +299,73 @@ export interface GetSessionResponse {
     status?: 'active' | 'idle' | 'ended';
 }
 
+// ── from actions/list-conversations.schema.json ──
+/**
+ * Fields sent by the client to page through or search its conversations. With no `cursor` and no `query` this is the original first-page listing.
+ */
+export interface ListConversationsRequest {
+    /**
+     * Action discriminator.
+     */
+    action: 'list_conversations';
+    /**
+     * Client-generated correlation ID echoed back on the response.
+     */
+    requestId?: string;
+    /**
+     * Maximum number of conversations in this page. Defaults to 50.
+     */
+    limit?: number;
+    /**
+     * Opaque cursor from a prior response's `nextCursor`, issued for the same `query`. Returns only conversations after the one it names in the listing order. Omit (or send an empty string) for the first page. A cursor the server did not issue is rejected with a `VALIDATION_ERROR` error event. Treat it as opaque: servers encode it as unpadded base64url of `<RFC 3339 updatedAt, full precision>|<conversationId>` today, and that may change.
+     */
+    cursor?: string;
+    /**
+     * Server-side search. Keeps only conversations where this text (trimmed; matched case-insensitively as a substring) appears in the conversation's meaningful name (an auto-title or rename, never the default `Session …` placeholder) or in the text of its first inbound message. Blank means no filter. It narrows the caller's scope and never widens it.
+     */
+    query?: string;
+}
+
+// ── from actions/list-conversations.schema.json ──
+/**
+ * Data payload carried in the `immediate_response` event.
+ */
+export interface ListConversationsResponse {
+    /**
+     * One page of conversations, newest first.
+     */
+    conversations: ConversationListItem[];
+    /**
+     * Opaque cursor naming the last conversation in this page. Pass it (with the same `query`) as the next request's `cursor`. Non-null if and only if `hasMore` is true. Servers that predate paging omit it.
+     */
+    nextCursor?: string | null;
+    /**
+     * True if more conversations follow this page. Servers that predate paging omit it; treat absence as false.
+     */
+    hasMore?: boolean;
+}
+/**
+ * One sidebar row: enough to render the entry and resume the conversation on click.
+ */
+export interface ConversationListItem {
+    /**
+     * Pass to `create_conversation_session` as `conversationId` to resume.
+     */
+    conversationId: string;
+    /**
+     * The conversation's meaningful name, else a truncated preview of its first inbound message, else its default name.
+     */
+    title: string;
+    /**
+     * ISO 8601 last-activity timestamp.
+     */
+    updatedAt: string;
+    /**
+     * Number of messages in the conversation.
+     */
+    messageCount: number;
+}
+
 // ── from actions/ping.schema.json ──
 /**
  * A ping frame. Only `action` and the optional `requestId` are required.

@@ -59,6 +59,7 @@ public sealed class ProtocolValidator
         [ActionTypes.SendMessage] = "actions/send-message.schema.json#/$defs/Request",
         [ActionTypes.GetSession] = "actions/get-session.schema.json#/$defs/Request",
         [ActionTypes.GetConversationMessages] = "actions/get-messages.schema.json#/$defs/Request",
+        [ActionTypes.ListConversations] = "actions/list-conversations.schema.json#/$defs/Request",
         [ActionTypes.ConfirmToolAction] = "actions/confirm-tool-action.schema.json#/$defs/Request",
         [ActionTypes.VerifyOtp] = "actions/verify-otp.schema.json#/$defs/Request",
         [ActionTypes.Cancel] = "actions/cancel.schema.json#/$defs/Request",

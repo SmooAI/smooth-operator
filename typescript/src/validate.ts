@@ -62,6 +62,7 @@ const ACTION_SCHEMA_REF: Record<ActionType, string> = {
     send_message: 'actions/send-message.schema.json#/$defs/Request',
     get_session: 'actions/get-session.schema.json#/$defs/Request',
     get_conversation_messages: 'actions/get-messages.schema.json#/$defs/Request',
+    list_conversations: 'actions/list-conversations.schema.json#/$defs/Request',
     confirm_tool_action: 'actions/confirm-tool-action.schema.json#/$defs/Request',
     verify_otp: 'actions/verify-otp.schema.json#/$defs/Request',
     submit_interaction: 'actions/submit-interaction.schema.json#/$defs/Request',

@@ -44,6 +44,7 @@ from urllib.request import Request, urlopen
 
 from .auth import AccessContext, Principal
 from .backplane import TARGET_KINDS, Target
+from .session_store import sort_conversations_newest_first
 from .turn_runner import DEFAULT_MODEL
 
 # Role ranks, mirroring Rust's ``role_rank``.
@@ -372,7 +373,9 @@ async def _route(state: Any, method: str, path: str, query: str, headers: Any, b
             return p.response
         limit = int(params.get("limit", ["50"])[0] or 50)
         cursor = int(params.get("cursor", ["0"])[0] or 0)
-        summaries = sorted(await state.store.list_conversations(p.email), key=lambda c: c.updated_at, reverse=True)
+        summaries = await state.store.list_conversations(p.email)
+        # Ties broken by id, so equal timestamps hold still between offset pages.
+        sort_conversations_newest_first(summaries)
         page = summaries[cursor : cursor + limit]
         end = cursor + len(page)
         return _json(

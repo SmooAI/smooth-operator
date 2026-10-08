@@ -45,7 +45,9 @@
 use chrono::Utc;
 
 use smooth_operator::access_control::AccessContext;
-use smooth_operator::adapter::{MessageQuery, SessionUpdate, StorageAdapter};
+use smooth_operator::adapter::{
+    ConversationSummaryQuery, MessageQuery, SessionUpdate, StorageAdapter,
+};
 use smooth_operator::domain::{
     Conversation, Direction, Message, MessageContent, Participant, ParticipantType, Platform,
     Session, SessionStatus,
@@ -264,6 +266,28 @@ pub async fn assert_multitenancy(a: &dyn StorageAdapter, b: &dyn StorageAdapter,
     assert!(
         !owned_a.iter().any(|c| c.id == conv_b),
         "CROSS-TENANT LEAK: the shared user saw org B's conversation while scoped to org A"
+    );
+
+    // A sidebar SEARCH narrows that scope and never widens it: the shared user
+    // searching org A for org B's message text finds nothing.
+    let searched = |q: &'static str| ConversationSummaryQuery::new(50).with_search(Some(q));
+    let found_a = a
+        .list_owned_conversation_summaries_page(ORG_A, SHARED_EMAIL, &searched("org A private"))
+        .await
+        .expect("org A search");
+    assert!(
+        found_a.iter().any(|r| r.conversation.id == conv_a),
+        "the shared user's search must find their own org-A conversation"
+    );
+    let leaked = a
+        .list_owned_conversation_summaries_page(ORG_A, SHARED_EMAIL, &searched("org B private"))
+        .await
+        .expect("org A search for org B text");
+    assert!(
+        leaked
+            .iter()
+            .all(|r| r.conversation.organization_id == ORG_A),
+        "CROSS-TENANT LEAK: a search scoped to org A returned org B's conversation"
     );
 
     let page_a = a

@@ -25,7 +25,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InMemoryAdminStore } from '../src/admin.js';
 import { PostgresStore, resolveStorage } from '../src/postgresStore.js';
 import { InMemorySessionStore } from '../src/sessionStore.js';
-import { InMemorySessionStore } from '../src/sessionStore.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -562,6 +561,159 @@ describe('PostgresStore (needs Docker)', () => {
             expect(textOnly.supports).toBeUndefined();
             const afterOptOut = await store.createSession('agent', 'Alice', 'alice@example.test', first.conversationId, orgId);
             expect(afterOptOut.supports, 'the text-only declaration replaced the durable record').toBeUndefined();
+        } finally {
+            await store.close();
+        }
+    });
+
+    // ── list_conversations paging + search (SMOODEV-3744) ─────────────────────
+    // The pushed-down keyset query, at Postgres's microsecond precision, driven
+    // through the dispatcher exactly as a client would page it. Port of
+    // rust/smooth-operator-server/tests/list_conversations_paging.rs.
+
+    /** A world in `orgId`: five of alice's rows (three inside ONE millisecond, two of
+     *  those on the exact same microsecond), bob's, an ownerless one, and alice's in
+     *  another org. Every timestamp is in the past so a live append bumps above it. */
+    async function pagingWorld(store: PostgresStore, orgId: string) {
+        const pool = new Pool({ connectionString });
+        try {
+            const mk = async (email: string | undefined, text: string, ts: string, inOrg = orgId) => {
+                const s = await store.createSession('agent', 'U', email, undefined, inOrg);
+                await store.appendMessage(s.conversationId, 'inbound', text);
+                await pool.query('UPDATE conversations SET updated_at = $2 WHERE id = $1', [s.conversationId, ts]);
+                return { id: s.conversationId, ts };
+            };
+            const mine = [
+                await mk('alice@example.test', 'status update', '2020-01-01T00:00:00.123456Z'),
+                await mk('alice@example.test', 'status update', '2020-01-01T00:00:00.123456Z'),
+                await mk('alice@example.test', 'status update', '2020-01-01T00:00:00.123457Z'),
+                await mk('alice@example.test', 'Where is the Acme invoice?', '2020-01-01T00:00:00.123455Z'),
+                await mk('alice@example.test', 'status update', '2019-12-31T00:00:00Z'),
+            ];
+            const bob = await mk('bob@example.test', 'acme renewal', '2020-01-02T00:00:00Z');
+            const ownerless = await mk(undefined, 'ACME widget chat', '2019-06-01T00:00:00Z');
+            const foreign = await mk('alice@example.test', 'acme elsewhere', '2020-01-03T00:00:00Z', org('foreign'));
+            // Newest first, ties by id descending (byte order). ISO strings of one
+            // fixed width sort chronologically as strings.
+            mine.sort((a, b) => (a.ts === b.ts ? (a.id < b.id ? 1 : -1) : a.ts < b.ts ? 1 : -1));
+            return { mine: mine.map((m) => m.id), acmeId: mine.find((m) => m.ts.endsWith('123455Z'))!.id, bob: bob.id, ownerless: ownerless.id, foreign: foreign.id };
+        } finally {
+            await pool.end();
+        }
+    }
+
+    async function pgList(store: PostgresStore, orgId: string, email: string, args: Record<string, unknown>) {
+        const { FrameDispatcher } = await import('../src/frameDispatcher.js');
+        const { MockLlmProvider } = await import('@smooai/smooth-operator-core');
+        const access = { principal: { sub: 's', org: orgId, role: 'basic', groups: [], email }, isAnonymous: false, authEnabled: true };
+        const dispatcher = new FrameDispatcher({ store, chatClient: new MockLlmProvider(), access });
+        const sink: Array<Record<string, unknown>> = [];
+        await dispatcher.dispatch(JSON.stringify({ action: 'list_conversations', requestId: 'lc', ...args }), (f) => sink.push(f));
+        expect(sink).toHaveLength(1);
+        const data = sink[0]!.data as { conversations: Array<{ conversationId: string; updatedAt: string }>; nextCursor: string | null; hasMore: boolean };
+        return { event: sink[0]!, data, ids: (data.conversations ?? []).map((c) => c.conversationId) };
+    }
+
+    async function pgAllPages(store: PostgresStore, orgId: string, limit: number, query?: string) {
+        const pages: string[][] = [];
+        let cursor: string | null = null;
+        for (let guard = 0; guard < 50; guard++) {
+            const page = await pgList(store, orgId, 'alice@example.test', { limit, ...(cursor ? { cursor } : {}), ...(query ? { query } : {}) });
+            expect(page.data.nextCursor !== null).toBe(page.data.hasMore);
+            pages.push(page.ids);
+            if (!page.data.hasMore) return pages;
+            cursor = page.data.nextCursor;
+        }
+        throw new Error('paging never terminated');
+    }
+
+    pgIt('owned_pages_are_disjoint_and_complete (microsecond ties across page boundaries)', async () => {
+        const store = await newStore();
+        try {
+            const orgId = org();
+            const w = await pagingWorld(store, orgId);
+            const unpaged = await pgList(store, orgId, 'alice@example.test', { limit: 100 });
+            // PG scoping lists ownerless (emailless user participant) rows too — never bob's or another org's.
+            expect(unpaged.ids).toEqual([...w.mine, w.ownerless]);
+            expect(unpaged.ids).not.toContain(w.bob);
+            expect(unpaged.ids).not.toContain(w.foreign);
+            // Every page size, including 1 (a page boundary between every µs tie).
+            for (const limit of [1, 2, 3, 6]) {
+                const pages = await pgAllPages(store, orgId, limit);
+                expect(pages.flat(), `limit ${limit}`).toEqual(unpaged.ids);
+            }
+            // The cursor carries the full microsecond precision, not the ms wire updatedAt.
+            const first = await pgList(store, orgId, 'alice@example.test', { limit: 1 });
+            const raw = Buffer.from(first.data.nextCursor!, 'base64url').toString('utf8');
+            expect(raw).toBe(`2020-01-01T00:00:00.123457Z|${w.mine[0]}`);
+            expect(first.data.conversations[0]!.updatedAt).toBe('2020-01-01T00:00:00.123Z');
+        } finally {
+            await store.close();
+        }
+    });
+
+    pgIt('a_page_the_size_of_the_rest_reports_no_more + no_cursor_is_the_old_first_page', async () => {
+        const store = await newStore();
+        try {
+            const orgId = org();
+            await pagingWorld(store, orgId);
+            const all = await pgList(store, orgId, 'alice@example.test', {});
+            expect(all.ids).toHaveLength(6);
+            expect(all.data.hasMore).toBe(false);
+            expect(all.data.nextCursor).toBeNull();
+            const exact = await pgList(store, orgId, 'alice@example.test', { limit: 6, cursor: '' });
+            expect(exact.ids).toEqual(all.ids);
+            expect(exact.data.hasMore).toBe(false);
+            expect(exact.data.nextCursor).toBeNull();
+        } finally {
+            await store.close();
+        }
+    });
+
+    pgIt('owned_paging_survives_concurrent_updates', async () => {
+        const store = await newStore();
+        try {
+            const orgId = org();
+            const w = await pagingWorld(store, orgId);
+            const first = await pgList(store, orgId, 'alice@example.test', { limit: 2 });
+            const bumpedAhead = w.mine[3]!; // would have been on a later page
+            const bumpedBehind = first.ids[1]!; // already returned
+            await store.appendMessage(bumpedAhead, 'inbound', 'one more thing');
+            await new Promise((r) => setTimeout(r, 5));
+            await store.appendMessage(bumpedBehind, 'inbound', 'one more thing');
+
+            const rest: string[] = [];
+            let cursor = first.data.nextCursor;
+            while (cursor) {
+                const page = await pgList(store, orgId, 'alice@example.test', { limit: 2, cursor });
+                rest.push(...page.ids);
+                cursor = page.data.nextCursor;
+            }
+            const seen = [...first.ids, ...rest];
+            expect(new Set(seen).size, `no row returned twice: ${seen}`).toBe(seen.length);
+            for (const id of [...w.mine, w.ownerless]) if (id !== bumpedAhead) expect(seen).toContain(id);
+            expect(rest).not.toContain(bumpedAhead);
+            expect((await pgList(store, orgId, 'alice@example.test', { limit: 1 })).ids).toEqual([bumpedBehind]);
+        } finally {
+            await store.close();
+        }
+    });
+
+    pgIt('search is trimmed, case-insensitive, pages with a cursor, and never widens scope', async () => {
+        const store = await newStore();
+        try {
+            const orgId = org();
+            const w = await pagingWorld(store, orgId);
+            const acme = await pgList(store, orgId, 'alice@example.test', { query: '  AcMe ' });
+            // Mine + the ownerless widget chat PG scoping lists; never bob's, never another org's.
+            expect(acme.ids).toEqual([w.acmeId, w.ownerless]);
+            expect(acme.data.hasMore).toBe(false);
+            // Search + cursor: the four "status update" rows, one per page, once each, in order.
+            const pages = await pgAllPages(store, orgId, 1, 'STATUS');
+            expect(pages.flat()).toEqual(w.mine.filter((id) => id !== w.acmeId));
+            // The placeholder title is not searchable; a LIKE wildcard is a literal.
+            expect((await pgList(store, orgId, 'alice@example.test', { query: 'conversation' })).ids).toEqual([]);
+            expect((await pgList(store, orgId, 'alice@example.test', { query: '%' })).ids).toEqual([]);
         } finally {
             await store.close();
         }

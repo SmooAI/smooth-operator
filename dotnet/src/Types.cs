@@ -57,6 +57,7 @@ public static class ActionTypes
     public const string SendMessage = "send_message";
     public const string GetSession = "get_session";
     public const string GetConversationMessages = "get_conversation_messages";
+    public const string ListConversations = "list_conversations";
     public const string ConfirmToolAction = "confirm_tool_action";
     public const string VerifyOtp = "verify_otp";
     public const string SubmitInteraction = "submit_interaction";
@@ -66,7 +67,7 @@ public static class ActionTypes
     public static readonly IReadOnlySet<string> All = new HashSet<string>
     {
         CreateConversationSession, SendMessage, GetSession, GetConversationMessages,
-        ConfirmToolAction, VerifyOtp, SubmitInteraction, Cancel, Ping,
+        ListConversations, ConfirmToolAction, VerifyOtp, SubmitInteraction, Cancel, Ping,
     };
 }
 
@@ -643,6 +644,7 @@ public sealed class NestedData<T> where T : new()
 [JsonDerivedType(typeof(SendMessageAction), ActionTypes.SendMessage)]
 [JsonDerivedType(typeof(GetSessionAction), ActionTypes.GetSession)]
 [JsonDerivedType(typeof(GetMessagesAction), ActionTypes.GetConversationMessages)]
+[JsonDerivedType(typeof(ListConversationsAction), ActionTypes.ListConversations)]
 [JsonDerivedType(typeof(ConfirmToolAction), ActionTypes.ConfirmToolAction)]
 [JsonDerivedType(typeof(VerifyOtpAction), ActionTypes.VerifyOtp)]
 [JsonDerivedType(typeof(SubmitInteractionAction), ActionTypes.SubmitInteraction)]
@@ -715,6 +717,29 @@ public sealed class GetMessagesAction : ClientAction
     /// timestamps drop or repeat messages. th-f63e4b.</summary>
     [JsonPropertyName("cursor")]
     public string? Cursor { get; set; }
+}
+
+/// <summary>
+/// <c>list_conversations</c>: one page of the caller's conversation history (the sidebar), newest
+/// <c>updatedAt</c> first. With no <see cref="Cursor"/> and no <see cref="Query"/> this is the original
+/// first-page listing. Page by feeding a response's <c>nextCursor</c> back as <see cref="Cursor"/>
+/// (with the same <see cref="Query"/>). See <c>spec/actions/list-conversations.schema.json</c>.
+/// </summary>
+public sealed class ListConversationsAction : ClientAction
+{
+    public override string Action => ActionTypes.ListConversations;
+
+    /// <summary>Max conversations in the page (server default 50).</summary>
+    [JsonPropertyName("limit")]
+    public int? Limit { get; set; }
+
+    /// <summary>Opaque cursor from a prior page's <c>nextCursor</c>; omit for the first page.</summary>
+    [JsonPropertyName("cursor")]
+    public string? Cursor { get; set; }
+
+    /// <summary>Server-side search: trimmed, case-insensitive substring of the row's title source. Blank = no filter.</summary>
+    [JsonPropertyName("query")]
+    public string? Query { get; set; }
 }
 
 public sealed class ConfirmToolAction : ClientAction

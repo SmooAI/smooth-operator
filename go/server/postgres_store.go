@@ -566,6 +566,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, scope Conversatio
 	// owned one only to the matching principal, case-insensitively.
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id,
+		        c.name,
 		        c.updated_at,
 		        (SELECT count(*) FROM conversation_messages m WHERE m.conversation_id = c.id),
 		        (SELECT m.content->>'text' FROM conversation_messages m
@@ -592,7 +593,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, scope Conversatio
 			messageCount int64
 			firstInbound *string
 		)
-		if err := rows.Scan(&summary.ConversationID, &summary.UpdatedAt, &messageCount, &firstInbound); err != nil {
+		if err := rows.Scan(&summary.ConversationID, &summary.Name, &summary.UpdatedAt, &messageCount, &firstInbound); err != nil {
 			return nil, fmt.Errorf("postgres: scan conversation: %w", err)
 		}
 		summary.MessageCount = int(messageCount)

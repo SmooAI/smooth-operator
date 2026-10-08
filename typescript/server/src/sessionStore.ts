@@ -11,6 +11,8 @@
  */
 import { randomUUID } from 'node:crypto';
 
+import type { ConversationPageQuery } from './conversationPaging.js';
+
 /**
  * The organization every connection belongs to when its principal carries no `org`
  * claim — the same `'public'` {@link Principal.org} defaults to in `auth.ts`.
@@ -126,6 +128,13 @@ export interface ConversationSummary {
     conversationId: string;
     /** ISO-8601 timestamp of the conversation's last activity (create or last appended message). */
     updatedAt: string;
+    /**
+     * `updatedAt` at the store's FULL precision (RFC 3339), when that is finer than the
+     * millisecond `updatedAt` carries — a Postgres `TIMESTAMPTZ` keeps microseconds.
+     * The `list_conversations` order and cursor are defined on this, so rows inside one
+     * millisecond keep distinct positions. Absent → `updatedAt` is already exact.
+     */
+    updatedAtExact?: string;
     /** Total messages in the conversation. The dispatcher drops empties (`0`). */
     messageCount: number;
     /** Text of the FIRST inbound (user) message — the dispatcher's title source. Undefined when none. */
@@ -190,6 +199,20 @@ export interface SessionStore {
      * empty pages, which reads as "no conversations" rather than as a bug.
      */
     listConversations(userEmail: string | undefined, orgId?: string): Promise<ConversationSummary[]>;
+    /**
+     * One `list_conversations` page (SMOODEV-3744): the non-empty conversations
+     * {@link listConversations} would return for the same scope, newest `updatedAt`
+     * first (ties by `conversationId` descending, plain string order), restricted to
+     * those strictly after `query.after` and matching `query.search` (a
+     * case-insensitive substring of the first inbound message), at most `query.limit`.
+     *
+     * The search narrows the caller's scope; it never widens it — apply it after the
+     * org/owner filter and before the limit. Optional: a store without it is paged by
+     * the dispatcher over {@link listConversations} (correct for any store, but reads
+     * the whole scoped set). Implement it when the backend can answer in one keyset
+     * query — Postgres does, at its full timestamp precision.
+     */
+    listConversationsPage?(userEmail: string | undefined, orgId: string | undefined, query: ConversationPageQuery): Promise<ConversationSummary[]>;
     /**
      * SMOODEV-590 — persist the conversation's current workflow step id (set by the
      * post-turn judge). A no-op for an unknown session. Optional so existing stores

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smooth-agent.dev/spec/actions/list-conversations.schema.json",
+  "title": "ListConversations",
+  "description": "Action: `list_conversations`. Lists the caller's conversations for a history sidebar: those with at least one message, newest `updatedAt` first, ties broken by `conversationId` descending. The server applies the caller's org and user scope before paging and searching, so a page is never short because of scoping and a search can never reach a conversation the caller couldn't list. Page by feeding a response's `nextCursor` back as the next request's `cursor`. The server replies with an `immediate_response` event (`responseType` `Conversations`) whose `data` matches the `Response` schema below.\n\nKeyset semantics under concurrent writes: pages are positions in the `(updatedAt, conversationId)` order, never offsets. A page never repeats a row an earlier page returned, and a row that is not updated while the client pages is never skipped. A row whose `updatedAt` moves while the client pages jumps ABOVE the cursor, so the remaining pages do not return it; it heads a fresh first page instead. Clients merge pages by `conversationId`.",
+
+  "$defs": {
+    "Request": {
+      "title": "ListConversationsRequest",
+      "description": "Fields sent by the client to page through or search its conversations. With no `cursor` and no `query` this is the original first-page listing.",
+      "type": "object",
+      "required": ["action"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "list_conversations",
+          "description": "Action discriminator."
+        },
+        "requestId": {
+          "type": "string",
+          "description": "Client-generated correlation ID echoed back on the response."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 50,
+          "description": "Maximum number of conversations in this page. Defaults to 50."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque cursor from a prior response's `nextCursor`, issued for the same `query`. Returns only conversations after the one it names in the listing order. Omit (or send an empty string) for the first page. A cursor the server did not issue is rejected with a `VALIDATION_ERROR` error event. Treat it as opaque: servers encode it as unpadded base64url of `<RFC 3339 updatedAt, full precision>|<conversationId>` today, and that may change."
+        },
+        "query": {
+          "type": "string",
+          "description": "Server-side search. Keeps only conversations where this text (trimmed; matched case-insensitively as a substring) appears in the conversation's meaningful name (an auto-title or rename, never the default `Session …` placeholder) or in the text of its first inbound message. Blank means no filter. It narrows the caller's scope and never widens it."
+        }
+      }
+    },
+
+    "Response": {
+      "title": "ListConversationsResponse",
+      "description": "Data payload carried in the `immediate_response` event.",
+      "type": "object",
+      "required": ["conversations"],
+      "additionalProperties": false,
+      "properties": {
+        "conversations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConversationListItem" },
+          "description": "One page of conversations, newest first."
+        },
+        "nextCursor": {
+          "type": ["string", "null"],
+          "description": "Opaque cursor naming the last conversation in this page. Pass it (with the same `query`) as the next request's `cursor`. Non-null if and only if `hasMore` is true. Servers that predate paging omit it."
+        },
+        "hasMore": {
+          "type": "boolean",
+          "description": "True if more conversations follow this page. Servers that predate paging omit it; treat absence as false."
+        }
+      }
+    },
+
+    "ConversationListItem": {
+      "title": "ConversationListItem",
+      "description": "One sidebar row: enough to render the entry and resume the conversation on click.",
+      "type": "object",
+      "required": ["conversationId", "title", "updatedAt", "messageCount"],
+      "additionalProperties": false,
+      "properties": {
+        "conversationId": {
+          "type": "string",
+          "description": "Pass to `create_conversation_session` as `conversationId` to resume."
+        },
+        "title": {
+          "type": "string",
+          "description": "The conversation's meaningful name, else a truncated preview of its first inbound message, else its default name."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 last-activity timestamp."
+        },
+        "messageCount": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of messages in the conversation."
+        }
+      }
+    }
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Response" }
+  ]
+}

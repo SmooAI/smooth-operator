@@ -111,6 +111,153 @@ pub struct ConversationSummary {
 /// is always inside the cap).
 pub const SUMMARY_MESSAGE_CAP: usize = 200;
 
+/// The default conversation name minted at create-session time
+/// (`Session <uuid>`). A name with this prefix is a placeholder, not a title:
+/// the sidebar shows the first inbound message instead, and a search never
+/// matches it.
+pub const DEFAULT_CONVERSATION_NAME_PREFIX: &str = "Session ";
+
+/// A position in the conversation sidebar's order — newest `updated_at` first,
+/// ties broken by `id` descending. Rows strictly AFTER a key in that order are
+/// the next page (keyset paging; never OFFSET).
+///
+/// On the wire it travels as an opaque cursor ([`encode`](Self::encode)):
+/// `base64url(<RFC 3339 updated_at, full precision>|<id>)`, unpadded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationKey {
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub id: String,
+}
+
+impl ConversationKey {
+    /// The key of `conversation`.
+    #[must_use]
+    pub fn of(conversation: &Conversation) -> Self {
+        Self {
+            updated_at: conversation.updated_at,
+            id: conversation.id.clone(),
+        }
+    }
+
+    /// Whether a conversation keyed `(updated_at, id)` sorts strictly after
+    /// this key — i.e. belongs to a later page. Ids compare as strings, which
+    /// for canonical lowercase UUIDs is the same order Postgres gives `uuid`.
+    #[must_use]
+    pub fn precedes(&self, updated_at: chrono::DateTime<chrono::Utc>, id: &str) -> bool {
+        updated_at < self.updated_at || (updated_at == self.updated_at && id < self.id.as_str())
+    }
+
+    /// The opaque wire cursor for this key.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        use base64::Engine as _;
+        let raw = format!(
+            "{}|{}",
+            self.updated_at
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            self.id
+        );
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+    }
+
+    /// Parse a wire cursor. `None` when it isn't one this server minted.
+    #[must_use]
+    pub fn decode(cursor: &str) -> Option<Self> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(cursor.trim())
+            .ok()?;
+        let raw = String::from_utf8(bytes).ok()?;
+        let (ts, id) = raw.split_once('|')?;
+        if id.is_empty() {
+            return None;
+        }
+        let updated_at = chrono::DateTime::parse_from_rfc3339(ts)
+            .ok()?
+            .with_timezone(&chrono::Utc);
+        Some(Self {
+            updated_at,
+            id: id.to_string(),
+        })
+    }
+}
+
+/// Paging + search for [`StorageAdapter::list_owned_conversation_summaries_page`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationSummaryQuery {
+    /// Max rows to return.
+    pub limit: usize,
+    /// Return only rows strictly after this key (the previous page's last row).
+    pub after: Option<ConversationKey>,
+    /// Case-insensitive substring a row must contain in its meaningful `name`
+    /// (one without [`DEFAULT_CONVERSATION_NAME_PREFIX`]) or its first inbound
+    /// message's text — i.e. in what the sidebar shows. `None` = no filter.
+    /// Always set through [`with_search`](Self::with_search), which trims it.
+    pub search: Option<String>,
+}
+
+impl ConversationSummaryQuery {
+    /// A first page of at most `limit` rows, unfiltered.
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            after: None,
+            search: None,
+        }
+    }
+
+    /// Continue after `key`.
+    #[must_use]
+    pub fn after(mut self, key: Option<ConversationKey>) -> Self {
+        self.after = key;
+        self
+    }
+
+    /// Filter by `search` (trimmed; blank means no filter).
+    #[must_use]
+    pub fn with_search(mut self, search: Option<&str>) -> Self {
+        self.search = search
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self
+    }
+
+    /// Whether `conversation` is past the cursor (always, with no cursor).
+    #[must_use]
+    pub fn admits_position(&self, conversation: &Conversation) -> bool {
+        self.after
+            .as_ref()
+            .is_none_or(|key| key.precedes(conversation.updated_at, &conversation.id))
+    }
+
+    /// Whether a row with this `name` and first inbound text matches the search
+    /// (always, with no search).
+    #[must_use]
+    pub fn matches_search(&self, name: &str, first_inbound_text: Option<&str>) -> bool {
+        let Some(needle) = self.search.as_deref() else {
+            return true;
+        };
+        let needle = needle.to_lowercase();
+        let meaningful_name = (!name.starts_with(DEFAULT_CONVERSATION_NAME_PREFIX)).then_some(name);
+        [meaningful_name, first_inbound_text]
+            .into_iter()
+            .flatten()
+            .any(|haystack| haystack.to_lowercase().contains(&needle))
+    }
+}
+
+/// Newest `updated_at` first, then `id` descending — the sidebar order every
+/// listing (and every [`ConversationKey`]) is defined against.
+pub fn sort_conversations_newest_first(conversations: &mut [Conversation]) {
+    conversations.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+}
+
 /// Whether `participant` is the conversation's owning **user** with
 /// `user_email`. Emails are compared case-insensitively (mail domains are, and
 /// IdPs differ on local-part casing), and a blank email never matches — so a
@@ -189,11 +336,45 @@ pub trait StorageAdapter: Send + Sync {
         user_email: &str,
         limit: usize,
     ) -> Result<Vec<ConversationSummary>> {
-        let mut rows = Vec::new();
-        for conversation in self
+        self.list_owned_conversation_summaries_page(
+            organization_id,
+            user_email,
+            &ConversationSummaryQuery::new(limit),
+        )
+        .await
+    }
+
+    /// One page of [`list_owned_conversation_summaries`](Self::list_owned_conversation_summaries):
+    /// the same rows in the same order (newest `updated_at` first, then `id`
+    /// descending), restricted to those strictly after `query.after` and
+    /// matching `query.search`, at most `query.limit` of them.
+    ///
+    /// The search narrows the owned set; it never widens it. A row matches when
+    /// the search is a case-insensitive substring of its meaningful `name` or
+    /// its first inbound message's text ([`ConversationSummaryQuery::matches_search`]).
+    ///
+    /// The default composes the per-conversation reads and stops once the page
+    /// is full, so it is correct for any adapter. Override it when the backend
+    /// can answer in one keyset query; this, not the unpaged method, is what
+    /// the server calls.
+    async fn list_owned_conversation_summaries_page(
+        &self,
+        organization_id: &str,
+        user_email: &str,
+        query: &ConversationSummaryQuery,
+    ) -> Result<Vec<ConversationSummary>> {
+        let mut owned = self
             .list_conversations_by_org_and_user(organization_id, user_email)
-            .await?
-        {
+            .await?;
+        sort_conversations_newest_first(&mut owned);
+        let mut rows = Vec::new();
+        for conversation in owned {
+            if rows.len() >= query.limit {
+                break;
+            }
+            if !query.admits_position(&conversation) {
+                continue;
+            }
             let page = self
                 .list_messages_by_conversation(MessageQuery::new(
                     &conversation.id,
@@ -208,14 +389,15 @@ pub trait StorageAdapter: Send + Sync {
                 .iter()
                 .find(|m| matches!(m.direction, crate::domain::Direction::Inbound))
                 .and_then(|m| m.content.flat_text());
+            if !query.matches_search(&conversation.name, first_inbound_text.as_deref()) {
+                continue;
+            }
             rows.push(ConversationSummary {
                 conversation,
                 first_inbound_text,
                 message_count: page.messages.len(),
             });
         }
-        rows.sort_by_key(|r| std::cmp::Reverse(r.conversation.updated_at));
-        rows.truncate(limit);
         Ok(rows)
     }
 
@@ -334,5 +516,77 @@ pub trait StorageAdapter: Send + Sync {
     fn memory_for_access(&self, access: &AccessContext) -> Option<Arc<dyn Memory>> {
         let _ = access;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(secs: i64, nanos: u32, id: &str) -> ConversationKey {
+        ConversationKey {
+            updated_at: chrono::DateTime::from_timestamp(secs, nanos).expect("valid ts"),
+            id: id.into(),
+        }
+    }
+
+    #[test]
+    fn cursor_round_trips_at_full_precision() {
+        let k = key(
+            1_790_000_000,
+            123_456_789,
+            "3f2a0c4e-0000-4000-8000-000000000001",
+        );
+        assert_eq!(ConversationKey::decode(&k.encode()), Some(k));
+        let whole = key(1_790_000_000, 0, "a");
+        assert_eq!(ConversationKey::decode(&whole.encode()), Some(whole));
+    }
+
+    #[test]
+    fn foreign_cursors_do_not_decode() {
+        for bad in [
+            "",
+            "not base64!",
+            "bm9waXBl",
+            "MjAyNi0xMC0wOFQwMDowMDowMFp8",
+        ] {
+            assert_eq!(ConversationKey::decode(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn precedes_is_newest_first_then_id_descending() {
+        let k = key(100, 0, "m");
+        let at = |s| chrono::DateTime::from_timestamp(s, 0).expect("valid ts");
+        assert!(k.precedes(at(99), "z"), "older sorts after");
+        assert!(!k.precedes(at(101), "a"), "newer sorts before");
+        assert!(
+            k.precedes(at(100), "a"),
+            "same time, smaller id sorts after"
+        );
+        assert!(
+            !k.precedes(at(100), "m"),
+            "the key itself is not after itself"
+        );
+        assert!(
+            !k.precedes(at(100), "z"),
+            "same time, larger id sorts before"
+        );
+    }
+
+    #[test]
+    fn search_matches_meaningful_name_or_first_message_case_insensitively() {
+        let q = ConversationSummaryQuery::new(10).with_search(Some("  ACME "));
+        assert_eq!(q.search.as_deref(), Some("ACME"));
+        assert!(q.matches_search("Acme renewal", None));
+        assert!(q.matches_search("Session 1", Some("where is the acme invoice")));
+        assert!(
+            !q.matches_search("Session acme", None),
+            "the placeholder name is not a title"
+        );
+        assert!(!q.matches_search("Q3", Some("nothing here")));
+        let blank = ConversationSummaryQuery::new(10).with_search(Some("   "));
+        assert_eq!(blank.search, None);
+        assert!(blank.matches_search("anything", None));
     }
 }

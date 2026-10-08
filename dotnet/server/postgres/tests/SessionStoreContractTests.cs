@@ -240,6 +240,122 @@ public abstract class SessionStoreContractTests
         Assert.Contains(unscoped, s => s.ConversationId == theirs.ConversationId);
     }
 
+    // ---- list_conversations keyset paging + search (SMOODEV-3744) — asserted against EVERY adapter --
+
+    /// <summary>Seed <paramref name="count"/> non-empty conversations for <paramref name="email"/>.</summary>
+    protected static async Task<List<string>> SeedOwnedAsync(ISessionStore store, string email, int count, Func<int, string>? firstLine = null)
+    {
+        var ids = new List<string>();
+        for (var i = 0; i < count; i++)
+        {
+            var s = await store.CreateSessionAsync("agent", "U", email);
+            await store.AppendMessageAsync(s.ConversationId, MessageDirection.Inbound, firstLine?.Invoke(i) ?? $"status update {i}");
+            ids.Add(s.ConversationId);
+        }
+        return ids;
+    }
+
+    /// <summary>The listing order every page is defined against: updatedAt DESC, then id DESC (ordinal).</summary>
+    protected static List<string> NewestFirst(IEnumerable<ConversationSummary> rows) =>
+        rows.OrderByDescending(r => r.UpdatedAt).ThenByDescending(r => r.ConversationId, StringComparer.Ordinal).Select(r => r.ConversationId).ToList();
+
+    protected static async Task<List<List<string>>> AllPagesAsync(ISessionStore store, ConversationScope scope, int limit, string? search = null)
+    {
+        var pages = new List<List<string>>();
+        ConversationKey? after = null;
+        while (true)
+        {
+            var rows = await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(limit + 1, after, search));
+            var page = rows.Take(limit).ToList();
+            pages.Add(page.Select(r => r.ConversationId).ToList());
+            if (rows.Count <= limit)
+            {
+                return pages;
+            }
+            after = ConversationKey.Of(page[^1]);
+            Assert.True(pages.Count < 50, "paging never terminated");
+        }
+    }
+
+    [SkippableFact]
+    public async Task ListConversationsPage_PagesAreDisjointAndComplete()
+    {
+        var store = await CreateStoreAsync();
+        var me = $"me-{Guid.NewGuid():N}@example.com";
+        await SeedOwnedAsync(store, me, 5);
+        var expected = NewestFirst(await store.ListConversationsAsync(ConversationScope.ForUser(me)));
+        Assert.Equal(5, expected.Count);
+
+        var pages = await AllPagesAsync(store, ConversationScope.ForUser(me), 2);
+        Assert.Equal(new[] { 2, 2, 1 }, pages.Select(p => p.Count));
+        Assert.Equal(expected, pages.SelectMany(p => p));
+
+        // A page exactly the size of the rest has no look-ahead row.
+        var all = await store.ListConversationsPageAsync(ConversationScope.ForUser(me), ConversationPageQuery.Create(6, null, null));
+        Assert.Equal(expected, all.Select(r => r.ConversationId));
+    }
+
+    [SkippableFact]
+    public async Task ListConversationsPage_SurvivesConcurrentUpdates()
+    {
+        var store = await CreateStoreAsync();
+        var me = $"me-{Guid.NewGuid():N}@example.com";
+        await SeedOwnedAsync(store, me, 6);
+        var scope = ConversationScope.ForUser(me);
+        var expected = NewestFirst(await store.ListConversationsAsync(scope));
+
+        var first = await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(3, null, null));
+        var page1 = first.Take(2).Select(r => r.ConversationId).ToList();
+        var after = ConversationKey.Of(first[1]);
+
+        var bumpedAhead = expected[3]; // would have been on page 2
+        await Task.Delay(5);
+        await store.AppendMessageAsync(bumpedAhead, MessageDirection.Outbound, "bump");
+
+        var rest = (await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(100, after, null))).Select(r => r.ConversationId).ToList();
+        var seen = page1.Concat(rest).ToList();
+        Assert.Equal(seen.Count, seen.Distinct().Count());
+        Assert.DoesNotContain(bumpedAhead, rest);
+        foreach (var id in expected.Where(id => id != bumpedAhead))
+        {
+            Assert.Contains(id, seen);
+        }
+        var fresh = await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(1, null, null));
+        Assert.Equal(bumpedAhead, Assert.Single(fresh).ConversationId);
+    }
+
+    [SkippableFact]
+    public async Task ListConversationsPage_SearchIsCaseInsensitive_AndNeverWidensScope()
+    {
+        var store = await CreateStoreAsync();
+        var me = $"me-{Guid.NewGuid():N}@example.com";
+        var other = $"other-{Guid.NewGuid():N}@example.com";
+        var token = $"zq{Guid.NewGuid():N}"[..12]; // unique per run: the Postgres DB is shared across tests
+        var mine = await SeedOwnedAsync(store, me, 4, i => i % 2 == 0 ? $"Where is the {token.ToUpperInvariant()} invoice? {i}" : $"status {i}");
+        var theirs = await SeedOwnedAsync(store, other, 1, _ => $"{token} renewal");
+        var ownerless = await store.CreateSessionAsync("agent", "L", null);
+        await store.AppendMessageAsync(ownerless.ConversationId, MessageDirection.Inbound, $"{token} widget chat");
+
+        var scope = ConversationScope.ForUser(me);
+        var hits = await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(50, null, $"  {token} "));
+        Assert.Equal(new[] { mine[0], mine[2] }.OrderBy(x => x), hits.Select(h => h.ConversationId).OrderBy(x => x));
+        Assert.All(hits, h => Assert.Contains(token.ToUpperInvariant(), h.FirstInboundText));
+
+        // Paging a search with a cursor: one per page, in order, once each.
+        var pages = await AllPagesAsync(store, scope, 1, token);
+        Assert.Equal(NewestFirst(hits), pages.SelectMany(p => p));
+
+        // Unscoped (no auth) sees every match; None sees nothing.
+        var unscoped = await store.ListConversationsPageAsync(ConversationScope.Unscoped, ConversationPageQuery.Create(50, null, token));
+        Assert.Equal(4, unscoped.Count);
+        Assert.Contains(unscoped, h => h.ConversationId == theirs[0]);
+        Assert.Contains(unscoped, h => h.ConversationId == ownerless.ConversationId);
+        Assert.Empty(await store.ListConversationsPageAsync(ConversationScope.None, ConversationPageQuery.Create(50, null, token)));
+
+        // A query that matches nothing of mine; a LIKE wildcard is a literal, not a pattern.
+        Assert.Empty(await store.ListConversationsPageAsync(scope, ConversationPageQuery.Create(50, null, "%")));
+    }
+
     [SkippableFact]
     public async Task ConversationBelongsToUser_IsFalseForOtherUsers_UnknownIds_AndOwnerlessRows()
     {

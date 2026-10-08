@@ -430,5 +430,37 @@
       "userParticipantId": "44444444-4444-4444-4444-444444444444",
       "agentParticipantId": "55555555-5555-5555-5555-555555555555"
     }
+  },
+  "list_conversations_request": {
+    "$schema_ref": "actions/list-conversations.schema.json#/$defs/Request",
+    "description": "First page of the history sidebar (no cursor, no search) — the pre-paging request.",
+    "instance": { "action": "list_conversations", "requestId": "req-a1b2c3d4-0101", "limit": 50 }
+  },
+  "list_conversations_search_page_request": {
+    "$schema_ref": "actions/list-conversations.schema.json#/$defs/Request",
+    "description": "A later page of a server-side search: the prior page's nextCursor plus the same query.",
+    "instance": {
+      "action": "list_conversations",
+      "requestId": "req-a1b2c3d4-0102",
+      "limit": 20,
+      "cursor": "MjAyNi0xMC0wOFQxNDozMDowMC4xMjM0NTZafDMzMzMzMzMzLTMzMzMtMzMzMy0zMzMzLTMzMzMzMzMzMzMzMw",
+      "query": "invoice"
+    }
+  },
+  "list_conversations_response": {
+    "$schema_ref": "actions/list-conversations.schema.json#/$defs/Response",
+    "description": "One page of conversations carried in an immediate_response event's data field, with more to come.",
+    "instance": {
+      "conversations": [
+        {
+          "conversationId": "33333333-3333-3333-3333-333333333333",
+          "title": "Where is the Acme invoice?",
+          "updatedAt": "2026-10-08T14:30:00.123456+00:00",
+          "messageCount": 4
+        }
+      ],
+      "nextCursor": "MjAyNi0xMC0wOFQxNDozMDowMC4xMjM0NTZafDMzMzMzMzMzLTMzMzMtMzMzMy0zMzMzLTMzMzMzMzMzMzMzMw",
+      "hasMore": true
+    }
   }
 }

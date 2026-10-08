@@ -65,6 +65,7 @@ const (
 	ActionSendMessage               ActionType = "send_message"
 	ActionGetSession                ActionType = "get_session"
 	ActionGetConversationMessages   ActionType = "get_conversation_messages"
+	ActionListConversations         ActionType = "list_conversations"
 	ActionConfirmToolAction         ActionType = "confirm_tool_action"
 	ActionVerifyOTP                 ActionType = "verify_otp"
 	ActionSubmitInteraction         ActionType = "submit_interaction"

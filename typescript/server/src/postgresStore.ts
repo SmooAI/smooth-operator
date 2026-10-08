@@ -27,6 +27,7 @@ import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 
 import type { AdminStore, AgentSettings, ConnectorConfig, IndexingRun } from './admin.js';
+import type { ConversationPageQuery } from './conversationPaging.js';
 import { DEFAULT_ORG_ID, type ConversationSummary, type MessageDirection, type SessionStore, type StoredMessage, type StoredSession } from './sessionStore.js';
 
 /**
@@ -199,6 +200,42 @@ interface SessionMetadata {
 /** ISO-8601 in UTC, the shape every timestamp crosses this interface as. */
 function iso(value: Date | string): string {
     return (value instanceof Date ? value : new Date(value)).toISOString();
+}
+
+/**
+ * The summary columns over `conversations c`: message count and the first inbound
+ * message's text (the sidebar title source and the search haystack).
+ */
+const SUMMARY_COLUMNS = `(SELECT count(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
+                    (SELECT m.content->>'text' FROM conversation_messages m
+                      WHERE m.conversation_id = c.id AND m.direction = 'inbound'
+                      ORDER BY m.seq ASC LIMIT 1) AS first_inbound`;
+
+/**
+ * The `list_conversations` scope over `conversations c`, on parameters `$1` = org,
+ * `$2` = unscoped-by-owner, `$3` = owner email: the org's non-empty conversations
+ * the caller may list. Shared by the unpaged and the paged read so they can never
+ * disagree about scope.
+ */
+const SCOPED_CONVERSATIONS = `c.organization_id = $1
+                AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.conversation_id = c.id)
+                AND ($2::boolean OR EXISTS (
+                      SELECT 1 FROM conversation_participants p
+                       WHERE p.conversation_id = c.id AND p.type = 'user'
+                         AND COALESCE(btrim(p.email), '') = ''
+                    ) OR EXISTS (
+                      SELECT 1 FROM conversation_participants p
+                       WHERE p.conversation_id = c.id AND p.type = 'user'
+                         AND lower(btrim(p.email)) = lower(btrim($3))))`;
+
+/** A summary row (id, updated_at, SUMMARY_COLUMNS) as a {@link ConversationSummary}. */
+function toSummary(row: Record<string, unknown>): ConversationSummary {
+    return {
+        conversationId: row.id as string,
+        updatedAt: iso(row.updated_at as Date | string),
+        messageCount: Number(row.message_count),
+        ...(row.first_inbound ? { firstInboundText: row.first_inbound as string } : {}),
+    };
 }
 
 /** Durable {@link SessionStore} + {@link AdminStore} on one Postgres pool. */
@@ -480,29 +517,55 @@ export class PostgresStore implements SessionStore, AdminStore {
         const { rows } = await this.pool.query(
             `SELECT c.id,
                     c.updated_at,
-                    (SELECT count(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
-                    (SELECT m.content->>'text' FROM conversation_messages m
-                      WHERE m.conversation_id = c.id AND m.direction = 'inbound'
-                      ORDER BY m.seq ASC LIMIT 1) AS first_inbound
+                    ${SUMMARY_COLUMNS}
                FROM conversations c
-              WHERE c.organization_id = $1
-                AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.conversation_id = c.id)
-                AND ($2::boolean OR EXISTS (
-                      SELECT 1 FROM conversation_participants p
-                       WHERE p.conversation_id = c.id AND p.type = 'user'
-                         AND COALESCE(btrim(p.email), '') = ''
-                    ) OR EXISTS (
-                      SELECT 1 FROM conversation_participants p
-                       WHERE p.conversation_id = c.id AND p.type = 'user'
-                         AND lower(btrim(p.email)) = lower(btrim($3))))`,
+              WHERE ${SCOPED_CONVERSATIONS}`,
             [orgId, userEmail === undefined, userEmail ?? ''],
         );
-        return rows.map((row) => ({
-            conversationId: row.id,
-            updatedAt: iso(row.updated_at),
-            messageCount: Number(row.message_count),
-            ...(row.first_inbound ? { firstInboundText: row.first_inbound as string } : {}),
-        }));
+        return rows.map((row) => toSummary(row));
+    }
+
+    /**
+     * One `list_conversations` page in ONE keyset query (SMOODEV-3744): the rows
+     * {@link listConversations} returns for the same scope, newest `updated_at` first
+     * (ties by id descending, byte order via `COLLATE "C"` so it matches the JS string
+     * compare the cursor is defined on), strictly after `query.after`, matching
+     * `query.search` against the first inbound message, at most `query.limit`.
+     *
+     * The keyset compares `updated_at` at its full microsecond precision — the cursor
+     * carries the `to_char` rendering, not the millisecond JS `Date` — so rows inside
+     * one millisecond (the Rust server writes µs timestamps into these same tables)
+     * are neither dropped nor repeated at a page boundary.
+     *
+     * The search is applied AFTER the org/owner filter, so it can only narrow it.
+     */
+    async listConversationsPage(userEmail: string | undefined, orgId: string | undefined, query: ConversationPageQuery): Promise<ConversationSummary[]> {
+        const { rows } = await this.pool.query(
+            `SELECT * FROM (
+                SELECT c.id,
+                       c.updated_at,
+                       to_char(c.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_exact,
+                       ${SUMMARY_COLUMNS}
+                  FROM conversations c
+                 WHERE ${SCOPED_CONVERSATIONS}
+                   AND ($4::timestamptz IS NULL
+                        OR c.updated_at < $4::timestamptz
+                        OR (c.updated_at = $4::timestamptz AND c.id COLLATE "C" < $5::text COLLATE "C"))
+             ) summary
+             WHERE $6::text IS NULL OR strpos(lower(summary.first_inbound), lower($6::text)) > 0
+             ORDER BY summary.updated_at DESC, summary.id COLLATE "C" DESC
+             LIMIT $7`,
+            [
+                orgId ?? DEFAULT_ORG_ID,
+                userEmail === undefined,
+                userEmail ?? '',
+                query.after?.updatedAt ?? null,
+                query.after?.conversationId ?? null,
+                query.search ?? null,
+                Math.max(0, query.limit),
+            ],
+        );
+        return rows.map((row) => ({ ...toSummary(row), updatedAtExact: row.updated_at_exact as string }));
     }
 
     /** Persist a session's workflow step id. A no-op for an unknown session. */

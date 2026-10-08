@@ -15,6 +15,9 @@
 //   ConversationMessage                ← actions/get-messages.schema.json
 //   GetSessionRequest                  ← actions/get-session.schema.json
 //   GetSessionResponse                 ← actions/get-session.schema.json
+//   ListConversationsRequest           ← actions/list-conversations.schema.json
+//   ListConversationsResponse          ← actions/list-conversations.schema.json
+//   ConversationListItem               ← actions/list-conversations.schema.json
 //   PingRequest                        ← actions/ping.schema.json
 //   PongResponse                       ← actions/ping.schema.json
 //   SendMessageRequest                 ← actions/send-message.schema.json
@@ -59,7 +62,7 @@
 namespace SmooAI.SmoothOperator.Generated
 {
     /// <summary>
-    /// A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional and advisory — the server cancels the connection's single active turn regardless.
+    /// A cancel frame. `action` is required; `requestId` SHOULD be the requestId of the `send_message` turn to cancel (echoed on the `cancelled` event). `sessionId` is optional: the connection's own active turn is cancelled regardless, and when there is none, `sessionId` names the session whose conversation's turn (started on an earlier, dropped connection) to cancel.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
     public partial class CancelRequest
@@ -78,7 +81,7 @@ namespace SmooAI.SmoothOperator.Generated
         public string? RequestId { get; set; } = default!;
 
         /// <summary>
-        /// Optional, advisory. The server cancels the connection's single active turn; a per-connection socket carries one turn at a time.
+        /// Optional. Ignored when this connection has an active turn (that turn is cancelled). Otherwise it names a session whose conversation still has a turn running from an earlier connection — e.g. a client that dropped mid-turn and reconnected — and that turn is cancelled. Subject to the same ownership check as every session-addressed action; an unknown or foreign session is a silent no-op.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sessionId")]
         public string? SessionId { get; set; } = default!;
@@ -440,6 +443,105 @@ namespace SmooAI.SmoothOperator.Generated
         [System.Text.Json.Serialization.JsonPropertyName("status")]
         [System.Text.Json.Serialization.JsonConverter(typeof(SmooAI.SmoothOperator.Generated.EnumMemberStringConverter<GetSessionResponseStatus>))]
         public GetSessionResponseStatus? Status { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// Fields sent by the client to page through or search its conversations. With no `cursor` and no `query` this is the original first-page listing.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class ListConversationsRequest
+    {
+
+        /// <summary>
+        /// Action discriminator.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("action")]
+        public string Action { get; set; } = default!;
+
+        /// <summary>
+        /// Client-generated correlation ID echoed back on the response.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requestId")]
+        public string? RequestId { get; set; } = default!;
+
+        /// <summary>
+        /// Maximum number of conversations in this page. Defaults to 50.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("limit")]
+        public int? Limit { get; set; } = 50;
+
+        /// <summary>
+        /// Opaque cursor from a prior response's `nextCursor`, issued for the same `query`. Returns only conversations after the one it names in the listing order. Omit (or send an empty string) for the first page. A cursor the server did not issue is rejected with a `VALIDATION_ERROR` error event. Treat it as opaque: servers encode it as unpadded base64url of `&lt;RFC 3339 updatedAt, full precision&gt;|&lt;conversationId&gt;` today, and that may change.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("cursor")]
+        public string? Cursor { get; set; } = default!;
+
+        /// <summary>
+        /// Server-side search. Keeps only conversations where this text (trimmed; matched case-insensitively as a substring) appears in the conversation's meaningful name (an auto-title or rename, never the default `Session …` placeholder) or in the text of its first inbound message. Blank means no filter. It narrows the caller's scope and never widens it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("query")]
+        public string? Query { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// Data payload carried in the `immediate_response` event.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class ListConversationsResponse
+    {
+
+        /// <summary>
+        /// One page of conversations, newest first.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("conversations")]
+        public System.Collections.Generic.ICollection<ConversationListItem> Conversations { get; set; } = new System.Collections.ObjectModel.Collection<ConversationListItem>();
+
+        /// <summary>
+        /// Opaque cursor naming the last conversation in this page. Pass it (with the same `query`) as the next request's `cursor`. Non-null if and only if `hasMore` is true. Servers that predate paging omit it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("nextCursor")]
+        public string? NextCursor { get; set; } = default!;
+
+        /// <summary>
+        /// True if more conversations follow this page. Servers that predate paging omit it; treat absence as false.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("hasMore")]
+        public bool? HasMore { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One sidebar row: enough to render the entry and resume the conversation on click.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
+    public partial class ConversationListItem
+    {
+
+        /// <summary>
+        /// Pass to `create_conversation_session` as `conversationId` to resume.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("conversationId")]
+        public string ConversationId { get; set; } = default!;
+
+        /// <summary>
+        /// The conversation's meaningful name, else a truncated preview of its first inbound message, else its default name.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("title")]
+        public string Title { get; set; } = default!;
+
+        /// <summary>
+        /// ISO 8601 last-activity timestamp.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("updatedAt")]
+        public System.DateTimeOffset UpdatedAt { get; set; } = default!;
+
+        /// <summary>
+        /// Number of messages in the conversation.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("messageCount")]
+        public int MessageCount { get; set; } = default!;
 
     }
 
@@ -1007,7 +1109,7 @@ namespace SmooAI.SmoothOperator.Generated
     }
 
     /// <summary>
-    /// A single content element within a message. Currently only `text` items are defined; additional types (image, file, tool_result) may be added in future protocol versions.
+    /// A single content element within a message. `text` and `image` items are defined; further types (file, tool_result) may be added in future protocol versions.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "11.6.1.0 (Newtonsoft.Json v13.0.0.0)")]
     public partial class ContentItem
@@ -1025,6 +1127,12 @@ namespace SmooAI.SmoothOperator.Generated
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("text")]
         public string? Text { get; set; } = default!;
+
+        /// <summary>
+        /// A `data:`/`https` image URL (required when type = `image`). Persisted on the user turn so any client can re-render an image another client attached.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("url")]
+        public string? Url { get; set; } = default!;
 
     }
 
@@ -2252,6 +2360,10 @@ namespace SmooAI.SmoothOperator.Generated
 
         [System.Runtime.Serialization.EnumMember(Value = @"text")]
         Text = 0,
+
+
+        [System.Runtime.Serialization.EnumMember(Value = @"image")]
+        Image = 1,
 
 
     }
