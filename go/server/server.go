@@ -47,6 +47,9 @@ type Server struct {
 	// AgentOptions.Hooks (default none → no hooks, behavior unchanged). A host
 	// installs Narc-style hooks with WithToolHooks.
 	hooks []core.ToolHook
+	// promptComposer assembles every turn's system prompt (SMOODEV-3798); nil → the
+	// default section order.
+	promptComposer PromptComposer
 
 	// knowledge is the retriever the agent grounds on (default nil → no grounding). The
 	// dispatcher threads it into the turn runner, which both passes it to the engine
@@ -125,6 +128,12 @@ func WithBackplane(b Backplane) Option { return func(srv *Server) { srv.backplan
 
 // WithSystemPrompt overrides the agent system prompt (default: support-agent prompt).
 func WithSystemPrompt(p string) Option { return func(srv *Server) { srv.systemP = p } }
+
+// WithPromptComposer installs the PromptComposer that assembles every turn's system
+// prompt from its ordered sections (SMOODEV-3798). Unset → the default order.
+func WithPromptComposer(c PromptComposer) Option {
+	return func(srv *Server) { srv.promptComposer = c }
+}
 
 // WithSkillResolver installs the resolver for send_message.skill. Omitted → the
 // env-configured DirSkillResolver (SMOOTH_SKILLS_DIR) if set, else the feature stays off
@@ -369,6 +378,7 @@ func (s *Server) connectionLoop(conn *websocket.Conn, access AccessContext) {
 	// long constructor signature. Nil → no hooks.
 	dispatcher.hooks = s.hooks
 	dispatcher.memoryProvider = s.memory
+	dispatcher.promptComposer = s.promptComposer
 	// Same post-construction seam as hooks. Explicit resolver wins, else the
 	// env-configured default, else off — mirrors the Rust/TS rule.
 	if s.skills != nil {
