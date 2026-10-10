@@ -126,7 +126,12 @@ public static class SmoothOperatorWebSocketExtensions
             skillResolver: services.GetService<ISkillResolver>() ?? DirSkillResolver.FromEnv(),
             // Durable auto-recall (th-ebe27d / Rust #330). A host registers an IMemoryProvider — or a
             // StaticMemoryProvider over one store — to light it up; unregistered ⇒ no auto-recall.
-            memoryProvider: services.GetService<IMemoryProvider>());
+            memoryProvider: services.GetService<IMemoryProvider>())
+        {
+            // SMOODEV-3798 — a host-registered IPromptComposer assembles every turn's system prompt
+            // (null ⇒ the default section order).
+            PromptComposer = services.GetService<IPromptComposer>(),
+        };
     }
 
     private static async Task PumpAsync(

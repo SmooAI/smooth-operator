@@ -311,6 +311,63 @@ public class WorkflowTests
         Assert.DoesNotContain("helpful customer support agent", chat.LastSystemPrompt);
     }
 
+    private sealed class CapturingComposer : IPromptComposer
+    {
+        public PromptSections? Seen { get; private set; }
+
+        public IReadOnlyList<string> Compose(PromptSections s)
+        {
+            Seen = s;
+            var out_ = DefaultPromptComposer.Sections(s);
+            out_.Add("LAST");
+            return out_;
+        }
+    }
+
+    /// <summary>SMOODEV-3798: the runner composes through the host's PromptComposer, which sees the
+    /// base's source, the session's verification bit and the conversation.</summary>
+    [Fact]
+    public async Task TurnRunner_ComposesThroughTheHostComposer()
+    {
+        var chat = new CapturingChatClient("Sure!");
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var composer = new CapturingComposer();
+        var runner = new TurnRunner(chat, store, agentConfig: new AgentConfig(InstructionsPrompt: "You are Ziggy."))
+        {
+            PromptComposer = composer,
+            SessionAuthenticated = true,
+        };
+
+        await runner.RunAsync(session.ConversationId, "r1", "hello", _ => { });
+
+        Assert.StartsWith("You are Ziggy.", chat.LastSystemPrompt);
+        Assert.EndsWith("LAST", chat.LastSystemPrompt);
+        Assert.NotNull(composer.Seen);
+        Assert.Equal(BaseSource.Agent, composer.Seen!.BaseSource);
+        Assert.True(composer.Seen.SessionAuthenticated);
+        Assert.Equal(session.ConversationId, composer.Seen.ConversationId);
+    }
+
+    [Fact]
+    public async Task TurnRunner_BaseSource_TracksTheFallbackPrompt()
+    {
+        var store = new InMemorySessionStore();
+        var session = await store.CreateSessionAsync("agent-1", null, null);
+        var builtIn = new CapturingComposer();
+        await new TurnRunner(new CapturingChatClient("x"), store) { PromptComposer = builtIn }
+            .RunAsync(session.ConversationId, "r1", "hello", _ => { });
+        Assert.Equal(BaseSource.BuiltIn, builtIn.Seen!.BaseSource);
+
+        var persona = new CapturingComposer();
+        await new TurnRunner(new CapturingChatClient("x"), store, systemPrompt: "Host persona.")
+        {
+            PromptComposer = persona,
+            SystemPromptSource = BaseSource.DefaultPersona,
+        }.RunAsync(session.ConversationId, "r2", "hello", _ => { });
+        Assert.Equal(BaseSource.DefaultPersona, persona.Seen!.BaseSource);
+    }
+
     [Fact]
     public async Task TurnRunner_NoConfig_KeepsDefaultPersona()
     {

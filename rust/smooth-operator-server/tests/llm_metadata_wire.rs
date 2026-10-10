@@ -81,6 +81,7 @@ async fn capture_request_body(request_metadata: Option<serde_json::Map<String, V
     let _ = runner::run_streaming_turn(
         TurnRequest {
             demo_tools: false,
+            prompt: Default::default(),
             storage,
             llm,
             max_iterations: 1,

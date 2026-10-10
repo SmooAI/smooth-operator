@@ -27,6 +27,9 @@ type FrameDispatcher struct {
 	client  core.ChatClient
 	access  AccessContext
 	systemP string
+	// promptComposer assembles every turn's system prompt from its ordered sections
+	// (SMOODEV-3798). Set by the server after construction; nil → the default order.
+	promptComposer PromptComposer
 	// knowledge is the retriever the agent grounds on (nil → no grounding). Threaded
 	// into every turn the runner builds; it both grounds the engine and sources the
 	// turn's auto-context citations.
@@ -822,12 +825,37 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 	// turn's inbound message, so an empty log means "no prior reply yet".
 	prior, _ := d.store.ListMessages(ctx, session.ConversationID, 1)
 	isFirstTurn := len(prior) == 0
-	effectiveSystemPrompt := assembleSystemPrompt(d.systemP, agentConfig, session.CurrentStepID, isFirstTurn)
-	// The invoked skill goes LAST: it is this turn's explicit instruction and should read
-	// as the most recent, most specific directive the model sees.
-	if skillSection != "" {
-		effectiveSystemPrompt += "\n\n" + skillSection
+	// SMOODEV-3798: compose through the host's PromptComposer. Default order: base,
+	// greeting, workflow, then the invoked skill LAST — this turn's explicit instruction
+	// should read as the most recent, most specific directive the model sees.
+	baseSource := BaseSourceBuiltIn
+	if d.systemP != "" {
+		baseSource = BaseSourceDefaultPersona
 	}
+	if agentConfig != nil && agentConfig.Instructions != "" {
+		baseSource = BaseSourceAgent
+	}
+	base := d.systemP
+	if base == "" && agentConfig == nil {
+		// The runner would fall back to its default anyway; resolve it here so a host
+		// composer's added sections never replace the default prompt.
+		base = defaultSystemPrompt
+	}
+	parts := agentPromptParts(base, agentConfig, session.CurrentStepID, isFirstTurn)
+	// The session's OTP-verified bit, as the Rust reference hands its composer. The host
+	// SessionAuthenticator is not consulted here: the auth gate decides when to ask it.
+	sessionAuthed := session.OtpVerified
+	effectiveSystemPrompt := RenderPrompt(d.promptComposer, PromptSections{
+		Base:                 parts.Base,
+		BaseSource:           baseSource,
+		Greeting:             parts.Greeting,
+		Workflow:             parts.Workflow,
+		Skill:                skillSection,
+		Agent:                agentConfig,
+		Access:               d.access,
+		SessionAuthenticated: sessionAuthed,
+		ConversationID:       session.ConversationID,
+	})
 	// Thread the session's OTP-verified bit (from a prior successful verify_otp) into the
 	// auth gate so a verified caller's end_user tools run — the Go analog of Rust threading
 	// metadata.otpVerified into build_auth_gate. A verified session short-circuits to

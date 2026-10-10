@@ -78,6 +78,7 @@ All five servers carry the transport core: frame dispatch, per-turn engine, sess
 | Deep ingestion + ACL surface | ✅ | ✅ | ◐ | ◐ | ◐ |
 | Backplane `attach`/`detach` | ✅ | — | ✅ | ✅ | ✅ |
 | Backplane `publish` (event fan-out) | ✅ | — | ✅ | ✅ | — |
+| `PromptComposer` seam (host-ordered system-prompt sections + base source + caller context) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Cross-pod backplane (Redis / NATS)** | ✅ | — | — | — | — |
 | Deferred conversation create (a bare open writes no row until its first message) [^deferred] | ✅ | — | — | — | — |
 | Detached turns (a disconnect doesn't abort the turn · one turn per conversation · cancel by `sessionId`) [^detached] | ✅ | — | — | — | — |

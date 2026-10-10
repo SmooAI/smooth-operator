@@ -141,6 +141,7 @@ fn mock_llm() -> LlmConfig {
 fn base_turn_request() -> TurnRequest<'static> {
     TurnRequest {
         demo_tools: false,
+        prompt: Default::default(),
         storage: seeded_storage(),
         llm: mock_llm(),
         max_iterations: 4,

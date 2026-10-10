@@ -44,6 +44,7 @@ from .extensions import build_extension_host
 from .interaction import InteractionRegistry, PendingInteractions
 from .interaction_tools import build_interaction_tools
 from .model_info import model_output_ceiling
+from .prompt_composer import BaseSource, PromptComposer, PromptSections, render_prompt
 from .session_store import MessageDirection, SessionStore
 from .workflow import (
     WORKFLOW_JUDGE_MODEL,
@@ -259,6 +260,9 @@ class TurnRunner:
         interactions: InteractionRegistry | None = None,
         interaction_pending: PendingInteractions | None = None,
         capabilities: list[str] | None = None,
+        prompt_composer: PromptComposer | None = None,
+        access: Any = None,
+        session_authenticated: bool = False,
     ) -> None:
         self._chat_client = chat_client
         self._store = store
@@ -273,6 +277,14 @@ class TurnRunner:
         #: by the dispatcher (th-ebe27d / Rust #330). ``None`` → no auto-recall.
         self._memory = memory
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        #: Where the server-wide prompt came from (SMOODEV-3798): a host-supplied
+        #: prompt is the default persona; none is the built-in prompt.
+        self._system_prompt_source = BaseSource.DEFAULT_PERSONA if system_prompt else BaseSource.BUILT_IN
+        #: The host's prompt composer (SMOODEV-3798). ``None`` → the default order.
+        self._prompt_composer = prompt_composer
+        #: Who is asking + the session's verification bit, for the composer.
+        self._access = access
+        self._session_authenticated = session_authenticated
         #: Pre-rendered `## Skill: <name>` section for THIS turn (th-ebe27d / Rust
         #: #338), already resolved by the dispatcher. Appended last in
         #: :meth:`_assemble_system_prompt` so an invoked skill outranks the agent's
@@ -389,7 +401,9 @@ class TurnRunner:
         #    top hits into the system prompt — the engine handles retrieval + rerank
         #    internally, mirroring the C# `new SmoothAgent(..., Knowledge = ...)`.
         options_kwargs: dict[str, Any] = {
-            "instructions": self._assemble_system_prompt(current_step_id, is_first_turn=not prior_messages),
+            "instructions": self._assemble_system_prompt(
+                current_step_id, is_first_turn=not prior_messages, conversation_id=conversation_id
+            ),
             "knowledge": self._knowledge,
             # Raised, anti-starvation sizing (see the module constants). The engine
             # clamps max_tokens DOWN to the model's real output ceiling below.
@@ -668,39 +682,55 @@ class TurnRunner:
         except Exception as exc:  # noqa: BLE001 — best-effort by design
             logger.debug("preamble generation failed (ignored): %s", exc)
 
-    def _assemble_system_prompt(self, current_step_id: str | None, *, is_first_turn: bool) -> str:
-        """Assemble the turn's system prompt from the per-agent config, falling back
-        to the server-wide default.
+    def _assemble_system_prompt(
+        self, current_step_id: str | None, *, is_first_turn: bool, conversation_id: str = ""
+    ) -> str:
+        """Assemble the turn's system prompt through the host's
+        :class:`~.prompt_composer.PromptComposer` (SMOODEV-3798; default order when
+        none is installed).
 
         Precedence for the base body: the agent's ``instructions`` prompt →
         the server-wide ``system_prompt`` → :data:`DEFAULT_SYSTEM_PROMPT`. A
-        personality note and a first-turn greeting seed are appended when the agent
-        configured them, and the current workflow step (if any) is rendered last so
-        the model sees the active intent/criteria. With no agent config the result
-        is exactly the server-wide prompt (behavior unchanged)."""
+        personality note rides with the base, a first-turn greeting seed follows
+        when the agent configured one, then the current workflow step (if any) so
+        the model sees the active intent/criteria, then the invoked skill. With no
+        agent config and no composer the result is exactly the server-wide prompt
+        (behavior unchanged)."""
         config = self._agent_config
-        base = (config.instructions if config and config.instructions else None) or self._system_prompt
+        if config and config.instructions:
+            base, source = config.instructions, BaseSource.AGENT
+        else:
+            base, source = self._system_prompt, self._system_prompt_source
 
-        sections = [base]
+        greeting = None
+        workflow_section = None
         if config is not None:
             if config.personality:
-                sections.append(f"<Personality>\n{config.personality}\n</Personality>")
+                base = f"{base}\n\n<Personality>\n{config.personality}\n</Personality>"
             if is_first_turn and config.greeting:
-                sections.append(
+                greeting = (
                     "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, "
                     f'brief variant of: "{config.greeting}" — then address the user\'s message in the same reply. '
                     "Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>"
                 )
-            workflow_section = render_workflow_prompt_section(config.conversation_workflow, current_step_id)
-            if workflow_section:
-                sections.append(workflow_section)
+            workflow_section = render_workflow_prompt_section(config.conversation_workflow, current_step_id) or None
 
-        # The invoked skill goes LAST: it is this turn's explicit instruction and should
-        # read as the most recent, most specific directive the model sees.
-        if self._skill_section:
-            sections.append(self._skill_section)
-
-        return "\n\n".join(sections)
+        # The invoked skill goes LAST in the default order: it is this turn's explicit
+        # instruction and should read as the most recent, most specific directive.
+        return render_prompt(
+            self._prompt_composer,
+            PromptSections(
+                base=base,
+                base_source=source,
+                greeting=greeting,
+                workflow=workflow_section,
+                skill=self._skill_section or None,
+                agent=config,
+                access=self._access,
+                session_authenticated=self._session_authenticated,
+                conversation_id=conversation_id,
+            ),
+        )
 
     async def _advance_workflow(
         self,

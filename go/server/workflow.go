@@ -393,22 +393,44 @@ func assembleSystemPrompt(base string, cfg *AgentConfig, currentStepID string, i
 	if cfg == nil {
 		return base
 	}
-
-	var sections []string
-	if cfg.Personality != "" {
-		sections = append(sections, "<Personality>\n"+cfg.Personality+"\n</Personality>")
+	parts := agentPromptParts(base, cfg, currentStepID, isFirstTurn)
+	sections := []string{parts.Base}
+	if parts.Greeting != "" {
+		sections = append(sections, parts.Greeting)
 	}
-	if cfg.Instructions != "" {
-		sections = append(sections, "<AgentInstructions>\n"+cfg.Instructions+"\n</AgentInstructions>")
-	}
-	sections = append(sections, base)
-	if isFirstTurn && cfg.Greeting != "" {
-		sections = append(sections, "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \""+cfg.Greeting+"\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>")
-	}
-	if section := renderWorkflowPromptSection(cfg.Workflow, currentStepID); section != "" {
-		sections = append(sections, section)
+	if parts.Workflow != "" {
+		sections = append(sections, parts.Workflow)
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+// agentPromptSplit is the per-agent prompt split into the sections a PromptComposer
+// receives (SMOODEV-3798).
+type agentPromptSplit struct {
+	Base, Greeting, Workflow string
+}
+
+// agentPromptParts splits the per-agent prompt into the base body (personality, the
+// agent's instructions, then the server prompt), the first-turn greeting and the current
+// workflow step. Joined in that order they equal assembleSystemPrompt.
+func agentPromptParts(base string, cfg *AgentConfig, currentStepID string, isFirstTurn bool) agentPromptSplit {
+	if cfg == nil {
+		return agentPromptSplit{Base: base}
+	}
+	var baseParts []string
+	if cfg.Personality != "" {
+		baseParts = append(baseParts, "<Personality>\n"+cfg.Personality+"\n</Personality>")
+	}
+	if cfg.Instructions != "" {
+		baseParts = append(baseParts, "<AgentInstructions>\n"+cfg.Instructions+"\n</AgentInstructions>")
+	}
+	baseParts = append(baseParts, base)
+	out := agentPromptSplit{Base: strings.Join(baseParts, "\n\n")}
+	if isFirstTurn && cfg.Greeting != "" {
+		out.Greeting = "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \"" + cfg.Greeting + "\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>"
+	}
+	out.Workflow = renderWorkflowPromptSection(cfg.Workflow, currentStepID)
+	return out
 }
 
 // filterTools restricts tools to the agent's enabled tool_config entries: an empty

@@ -301,6 +301,14 @@ pub struct AppState {
     /// [`with_default_persona`](Self::with_default_persona). `None` (the default)
     /// keeps the const prompt, so the cloud flavor is byte-for-byte unchanged.
     pub default_persona: Option<String>,
+    /// **Prompt composer (SMOODEV-3798).** Assembles every turn's system prompt
+    /// from its ordered sections (base, greeting, workflow step, skill, the
+    /// suggested-replies trailer) plus who is asking and which agent answers.
+    /// A host installs one to put a section LAST on every turn (e.g. a platform
+    /// safety block) or to reorder. `None` (the default) ⇒
+    /// [`DefaultPromptComposer`](crate::prompt_composer::DefaultPromptComposer),
+    /// the historical order.
+    pub prompt_composer: Option<Arc<dyn crate::prompt_composer::PromptComposer>>,
     /// **Model-pricing cache** for `GET /admin/model-costs`. The gateway's
     /// `/v1/model/info` pricing is stable, so it's fetched at most once per
     /// process and reused for every subsequent request (the admin handler sets
@@ -386,6 +394,7 @@ impl AppState {
             strict_auth: false,
             require_owned_conversations: false,
             default_persona: None,
+            prompt_composer: None,
             model_costs_cache: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
@@ -495,6 +504,17 @@ impl AppState {
         } else {
             Some(persona)
         };
+        self
+    }
+
+    /// Install the [`PromptComposer`](crate::prompt_composer::PromptComposer) that
+    /// assembles every turn's system prompt (builder, SMOODEV-3798).
+    #[must_use]
+    pub fn with_prompt_composer(
+        mut self,
+        composer: Arc<dyn crate::prompt_composer::PromptComposer>,
+    ) -> Self {
+        self.prompt_composer = Some(composer);
         self
     }
 
@@ -1280,6 +1300,15 @@ mod tests {
 
     fn state_with(config: ServerConfig) -> AppState {
         AppState::new(Arc::new(InMemoryStorageAdapter::new()), config)
+    }
+
+    #[test]
+    fn prompt_composer_unset_by_default_and_installable() {
+        let state = state_with(config_with_env_key(None));
+        assert!(state.prompt_composer.is_none());
+        let state =
+            state.with_prompt_composer(Arc::new(crate::prompt_composer::DefaultPromptComposer));
+        assert!(state.prompt_composer.is_some());
     }
 
     #[test]

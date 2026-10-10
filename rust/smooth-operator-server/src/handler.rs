@@ -2126,11 +2126,15 @@ async fn handle_send_message(
     //   3. the host's installed default persona ([`AppState::default_persona`]).
     // All absent ⇒ `None`, so the runner stays on its const customer-support
     // prompt and behavior is byte-for-byte unchanged.
-    let system_prompt = agent_cfg
-        .as_ref()
-        .and_then(AgentBehaviorConfig::system_prompt)
-        .or_else(|| state.settings.get(&org_id).persona)
-        .or_else(|| state.default_persona.clone());
+    // SMOODEV-3798: also record WHERE the base came from, for the host's
+    // PromptComposer (a real agent prompt vs a fallback persona).
+    let (system_prompt, base_source) = resolve_base_prompt(
+        agent_cfg
+            .as_ref()
+            .and_then(AgentBehaviorConfig::system_prompt),
+        state.settings.get(&org_id).persona,
+        state.default_persona.clone(),
+    );
 
     // The agent's first-turn greeting section (the runner injects it only when
     // the conversation has no prior messages) + its tool allow-list (`None` ⇒ the
@@ -2184,6 +2188,8 @@ async fn handle_send_message(
     // OtpService installed + a known contact) offer the OTP flow. `None` when
     // there's no gate — the OTP flow can't trigger.
     let otp_gate = auth_gate.clone();
+    // The answering agent, handed to the host PromptComposer (SMOODEV-3798).
+    let prompt_agent = agent_cfg.clone();
 
     // The agent's conversation workflow (if any) + the durable step this
     // CONVERSATION is on. The pointer + attempt count load from shared storage
@@ -2356,6 +2362,15 @@ async fn handle_send_message(
                 // demo gates approval on a write. False in every other flavor
                 // (byte-for-byte unchanged).
                 demo_tools: state_for_turn.config.seed_kb,
+                // SEAM — prompt composition (SMOODEV-3798): the base's source,
+                // the answering agent, the session's verification bit and the
+                // host composer (None ⇒ the default section order).
+                prompt: crate::prompt_composer::TurnPrompt {
+                    base_source,
+                    agent: prompt_agent,
+                    session_authenticated: session_authed,
+                    composer: state_for_turn.prompt_composer.clone(),
+                },
             },
             &sink_owned,
         )
@@ -2803,6 +2818,31 @@ fn apply_org_model_override(mut llm: LlmConfig, settings: &AgentSettings) -> Llm
         }
     }
     llm
+}
+
+/// SEAM 2/3 — resolve the turn's base system prompt in priority order, with
+/// its [`BaseSource`](crate::prompt_composer::BaseSource) (SMOODEV-3798):
+///   1. the per-AGENT instructions (+ personality), when set,
+///   2. the per-ORG persona override ([`AgentSettings::persona`]),
+///   3. the host's installed default persona ([`AppState::default_persona`]).
+///
+/// All absent ⇒ `(None, BuiltIn)`: the runner stays on its const prompt.
+fn resolve_base_prompt(
+    agent: Option<String>,
+    org_persona: Option<String>,
+    default_persona: Option<String>,
+) -> (Option<String>, crate::prompt_composer::BaseSource) {
+    use crate::prompt_composer::BaseSource;
+    if let Some(p) = agent {
+        return (Some(p), BaseSource::Agent);
+    }
+    if let Some(p) = org_persona {
+        return (Some(p), BaseSource::OrgPersona);
+    }
+    match default_persona {
+        Some(p) => (Some(p), BaseSource::DefaultPersona),
+        None => (None, BaseSource::BuiltIn),
+    }
 }
 
 /// Apply a per-agent `model` override (from the resolved [`AgentBehaviorConfig`])
@@ -3392,6 +3432,29 @@ fn judge_llm_config(judge_model: &str, turn_llm: &LlmConfig) -> LlmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SMOODEV-3798: the base prompt's source rides along for the composer.
+    #[test]
+    fn base_prompt_resolution_records_its_source() {
+        use crate::prompt_composer::BaseSource;
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            resolve_base_prompt(s("agent"), s("org"), s("host")),
+            (s("agent"), BaseSource::Agent)
+        );
+        assert_eq!(
+            resolve_base_prompt(None, s("org"), s("host")),
+            (s("org"), BaseSource::OrgPersona)
+        );
+        assert_eq!(
+            resolve_base_prompt(None, None, s("host")),
+            (s("host"), BaseSource::DefaultPersona)
+        );
+        assert_eq!(
+            resolve_base_prompt(None, None, None),
+            (None, BaseSource::BuiltIn)
+        );
+    }
     use smooth_operator_core::llm::{ApiFormat, RetryPolicy};
 
     /// The `send_message.files[]` parse (mirrors the inline handler expression):

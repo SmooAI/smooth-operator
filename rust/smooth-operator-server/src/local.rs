@@ -92,6 +92,7 @@ pub struct LocalServerBuilder {
     auth: Option<Arc<dyn AuthVerifier>>,
     tool_provider: Option<Arc<dyn ToolProvider>>,
     tool_hooks: Vec<Arc<dyn ToolHook>>,
+    prompt_composer: Option<Arc<dyn crate::prompt_composer::PromptComposer>>,
     skill_resolver: Option<Arc<dyn crate::skills::SkillResolver>>,
     host_approver: Option<crate::runner::HostApprover>,
     serve_widget: bool,
@@ -128,6 +129,7 @@ impl Default for LocalServerBuilder {
             auth: None,
             tool_provider: None,
             tool_hooks: Vec::new(),
+            prompt_composer: None,
             skill_resolver: None,
             host_approver: None,
             serve_widget: false,
@@ -194,6 +196,19 @@ impl LocalServerBuilder {
     #[must_use]
     pub fn tool_hooks(mut self, hooks: Vec<Arc<dyn ToolHook>>) -> Self {
         self.tool_hooks = hooks;
+        self
+    }
+
+    /// Install the [`PromptComposer`](crate::prompt_composer::PromptComposer) that
+    /// assembles every turn's system prompt (SMOODEV-3798). Threads to
+    /// [`AppState::prompt_composer`](crate::state::AppState::prompt_composer).
+    /// Unset ⇒ the default section order (unchanged behavior).
+    #[must_use]
+    pub fn prompt_composer(
+        mut self,
+        composer: Arc<dyn crate::prompt_composer::PromptComposer>,
+    ) -> Self {
+        self.prompt_composer = Some(composer);
         self
     }
 
@@ -352,6 +367,9 @@ impl LocalServerBuilder {
         }
         if let Some(resolver) = &self.skill_resolver {
             state = state.with_skill_resolver(Arc::clone(resolver));
+        }
+        if let Some(composer) = &self.prompt_composer {
+            state = state.with_prompt_composer(Arc::clone(composer));
         }
         if self.serve_widget {
             state = state.with_widget(self.widget_token.clone());
@@ -660,6 +678,18 @@ mod tests {
             "widget off by default (K8s/Lambda never serve it)"
         );
         assert_eq!(state.widget_token, None);
+    }
+
+    #[test]
+    fn prompt_composer_seam_installs_the_composer() {
+        assert!(LocalServerBuilder::default()
+            .build()
+            .prompt_composer
+            .is_none());
+        let state = LocalServerBuilder::default()
+            .prompt_composer(Arc::new(crate::prompt_composer::DefaultPromptComposer))
+            .build();
+        assert!(state.prompt_composer.is_some());
     }
 
     #[test]

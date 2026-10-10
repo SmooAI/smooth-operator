@@ -67,6 +67,7 @@ async fn run_against(chunks: Vec<String>) -> (String, Vec<String>, Vec<String>, 
     let result = runner::run_streaming_turn(
         TurnRequest {
             demo_tools: false,
+            prompt: Default::default(),
             storage,
             llm,
             max_iterations: 4,

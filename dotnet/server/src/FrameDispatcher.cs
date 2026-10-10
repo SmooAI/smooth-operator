@@ -36,6 +36,10 @@ public sealed class FrameDispatcher
     /// before the gate denies the tool and frees the connection's turn slot. Forwarded to every turn;
     /// narrowed only by tests. See <see cref="TurnRunner.DefaultConfirmationTimeout"/>.</summary>
     public TimeSpan ConfirmationTimeout { get; init; } = TurnRunner.DefaultConfirmationTimeout;
+
+    /// <summary>Assembles every turn's system prompt from its ordered sections (SMOODEV-3798).
+    /// Null ⇒ the default section order.</summary>
+    public IPromptComposer? PromptComposer { get; init; }
     private readonly string? _systemPrompt;
     private readonly IReadOnlyList<AITool> _tools;
     private readonly IReadOnlyList<IToolHook> _toolHooks;
@@ -877,6 +881,13 @@ public sealed class FrameDispatcher
         var runner = new TurnRunner(_chatClient, _store, scopedKnowledge, _systemPrompt, _reranker, gatedTools, confirmTools, _confirmations, agentConfig, _judge, _limits, _logger, toolHooks: _toolHooks, interactions: _interactions, interactionPark: _interactionPark, capabilities: capabilities, interactionEffects: _sessionIdentity, memory: scopedMemory)
         {
             ConfirmationTimeout = ConfirmationTimeout,
+            // SMOODEV-3798 — the prompt composer and what it sees about this turn.
+            PromptComposer = PromptComposer,
+            SystemPromptSource = _systemPrompt is null ? BaseSource.BuiltIn : BaseSource.DefaultPersona,
+            Access = _access,
+            // The persisted OTP-verified bit, as the Rust reference hands its composer (the host
+            // authenticator is left to the auth gate).
+            SessionAuthenticated = await _store.GetSessionAuthenticatedAsync(session.ConversationId, cancellationToken).ConfigureAwait(false),
         };
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a

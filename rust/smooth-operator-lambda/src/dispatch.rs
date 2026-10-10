@@ -691,6 +691,7 @@ async fn send_message(
             // The seeded-demo flavor is a reference-server-only affordance; the
             // AWS lambda path never registers the demo write tool.
             demo_tools: false,
+            prompt: Default::default(),
         },
         &tx,
     )

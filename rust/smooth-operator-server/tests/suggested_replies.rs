@@ -47,6 +47,7 @@ async fn run_turn(deltas: &[&str]) -> (TurnResult, Vec<String>, String) {
     let result = runner::run_streaming_turn(
         TurnRequest {
             demo_tools: false,
+            prompt: Default::default(),
             storage,
             llm: LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o"),
             max_iterations: 4,

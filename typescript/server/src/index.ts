@@ -39,7 +39,8 @@ export type { Sink, TurnResult, TurnRunnerOptions } from './turnRunner.js';
 
 export { StaticMemoryProvider, type MemoryProvider } from './memory.js';
 export { DirSkillResolver, isValidSkillName, resolveSection, skillSection, stripFrontmatter, SKILLS_DIR_ENV, type SkillResolver } from './skills.js';
-export { assembleSystemPrompt, parseAgentConfig, StaticAgentConfigResolver } from './agentConfig.js';
+export { agentPromptParts, assembleSystemPrompt, parseAgentConfig, StaticAgentConfigResolver } from './agentConfig.js';
+export { DefaultPromptComposer, joinSections, renderPrompt, type BaseSource, type PromptComposer, type PromptSections } from './promptComposer.js';
 export type { AgentConfig, AgentConfigResolver, EnabledTool } from './agentConfig.js';
 
 export { gateTools } from './toolGating.js';

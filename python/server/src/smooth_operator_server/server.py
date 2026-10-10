@@ -40,6 +40,7 @@ from .dispatcher import FrameDispatcher
 from .interaction import InteractionRegistry, PendingInteractions
 from .memory import MemoryProvider
 from .otp import OtpService
+from .prompt_composer import PromptComposer
 from .session_store import InMemorySessionStore, SessionStore
 from .skills import DirSkillResolver, SkillResolver
 from .workflow import WORKFLOW_JUDGE_MODEL
@@ -65,6 +66,9 @@ class ServerState:
     admin: AdminStore = field(default_factory=InMemoryAdminStore)
     backplane: Backplane = field(default_factory=InMemoryBackplane)
     system_prompt: str | None = None
+    #: Assembles every turn's system prompt from its ordered sections (SMOODEV-3798).
+    #: ``None`` → the default order (behavior unchanged).
+    prompt_composer: PromptComposer | None = None
     #: Resolves ``send_message.skill`` to its markdown body (th-ebe27d / Rust #338).
     #: ``None`` → fall back to the env-configured ``DirSkillResolver``
     #: (``SMOOTH_SKILLS_DIR``); with neither, any ``skill`` field is a clean
@@ -174,6 +178,7 @@ async def _connection_loop(websocket: Any, state: ServerState, access: AccessCon
         knowledge=state.knowledge,
         access=access,
         system_prompt=state.system_prompt,
+        prompt_composer=state.prompt_composer,
         # Mirrors the Rust/TS rule: explicit resolver wins, else the env-configured
         # default, else off.
         skill_resolver=state.skill_resolver or DirSkillResolver.from_env(),

@@ -23,6 +23,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import { ANONYMOUS_ACCESS } from './auth.js';
 import { Backplane, InMemoryBackplane } from './backplane.js';
+import type { PromptComposer } from './promptComposer.js';
 import type { AgentConfigResolver } from './agentConfig.js';
 import type { SessionAuthenticator } from './toolGating.js';
 import type { OtpService } from './otp.js';
@@ -55,6 +56,8 @@ export interface ServerOptions {
     auth?: AuthVerifier;
     backplane?: Backplane;
     systemPrompt?: string;
+    /** Assembles every turn's system prompt from its ordered sections (SMOODEV-3798). Unset ⇒ the default order. */
+    promptComposer?: PromptComposer;
     /**
      * Tools the agent may call during a turn (default none). Each is an engine
      * {@link Tool}; the dispatcher forwards them to the turn runner, which passes
@@ -200,6 +203,7 @@ export function buildServer(options: ServerOptions): {
             knowledge: options.knowledge,
             access,
             systemPrompt: options.systemPrompt,
+            promptComposer: options.promptComposer,
             tools: options.tools,
             toolHooks: options.toolHooks,
             confirmTools: options.confirmTools,
