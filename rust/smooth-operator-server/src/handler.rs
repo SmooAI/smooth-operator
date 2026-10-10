@@ -2825,6 +2825,7 @@ fn apply_org_model_override(mut llm: LlmConfig, settings: &AgentSettings) -> Llm
 ///   1. the per-AGENT instructions (+ personality), when set,
 ///   2. the per-ORG persona override ([`AgentSettings::persona`]),
 ///   3. the host's installed default persona ([`AppState::default_persona`]).
+///
 /// All absent ⇒ `(None, BuiltIn)`: the runner stays on its const prompt.
 fn resolve_base_prompt(
     agent: Option<String>,

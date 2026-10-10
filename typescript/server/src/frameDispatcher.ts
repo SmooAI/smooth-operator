@@ -741,7 +741,9 @@ export class FrameDispatcher {
         // SMOODEV-3798 — compose through the host's PromptComposer (default order:
         // base, greeting, workflow, then the invoked skill LAST so it is the most
         // salient instruction the model carries into the turn).
-        const sessionAuthenticated = (session.otpVerified ?? false) || (await this.sessionAuthenticator?.isAuthenticated(session.conversationId)) === true;
+        // The session's OTP-verified bit, as the Rust reference hands its composer. The host
+        // SessionAuthenticator is NOT consulted here: the auth gate decides when to ask it.
+        const sessionAuthenticated = session.otpVerified ?? false;
         const effectiveSystemPrompt = renderPrompt(this.promptComposer, {
             base: parts.base,
             baseSource,

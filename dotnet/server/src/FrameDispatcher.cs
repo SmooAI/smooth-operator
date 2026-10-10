@@ -885,7 +885,9 @@ public sealed class FrameDispatcher
             PromptComposer = PromptComposer,
             SystemPromptSource = _systemPrompt is null ? BaseSource.BuiltIn : BaseSource.DefaultPersona,
             Access = _access,
-            SessionAuthenticated = await _authenticator.IsAuthenticatedAsync(session.ConversationId, cancellationToken).ConfigureAwait(false),
+            // The persisted OTP-verified bit, as the Rust reference hands its composer (the host
+            // authenticator is left to the auth gate).
+            SessionAuthenticated = await _store.GetSessionAuthenticatedAsync(session.ConversationId, cancellationToken).ConfigureAwait(false),
         };
 
         // Run the turn as a background task, NOT awaited inline. A turn that calls a

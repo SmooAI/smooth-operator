@@ -842,10 +842,9 @@ func (d *FrameDispatcher) handleSendMessage(ctx context.Context, frame inboundFr
 		base = defaultSystemPrompt
 	}
 	parts := agentPromptParts(base, agentConfig, session.CurrentStepID, isFirstTurn)
+	// The session's OTP-verified bit, as the Rust reference hands its composer. The host
+	// SessionAuthenticator is not consulted here: the auth gate decides when to ask it.
 	sessionAuthed := session.OtpVerified
-	if !sessionAuthed && d.sessionAuth != nil {
-		sessionAuthed, _ = d.sessionAuth.IsAuthenticated(ctx, session.ConversationID)
-	}
 	effectiveSystemPrompt := RenderPrompt(d.promptComposer, PromptSections{
 		Base:                 parts.Base,
 		BaseSource:           baseSource,
