@@ -99,6 +99,20 @@ public sealed class TurnRunner
     /// — or a test — narrows it).</summary>
     public TimeSpan ConfirmationTimeout { get; init; } = DefaultConfirmationTimeout;
 
+    /// <summary>The host's prompt composer (SMOODEV-3798). Null ⇒ <see cref="DefaultPromptComposer"/>,
+    /// the historical section order.</summary>
+    public IPromptComposer? PromptComposer { get; init; }
+
+    /// <summary>Where the server-wide <c>systemPrompt</c> came from, for the composer
+    /// (<see cref="BaseSource.BuiltIn"/> when none was supplied).</summary>
+    public BaseSource SystemPromptSource { get; init; } = BaseSource.BuiltIn;
+
+    /// <summary>Who is asking, handed to the composer.</summary>
+    public AccessContext? Access { get; init; }
+
+    /// <summary>Whether the session's identity is verified, handed to the composer.</summary>
+    public bool SessionAuthenticated { get; init; }
+
     public TurnRunner(IChatClient chatClient, ISessionStore store, IKnowledgeBase? knowledge = null, string? systemPrompt = null, IReranker? reranker = null, IReadOnlyList<AITool>? tools = null, IReadOnlyList<string>? confirmTools = null, ConfirmationRegistry? confirmations = null, AgentConfig? agentConfig = null, IWorkflowJudge? judge = null, TurnLimits? limits = null, ILogger? logger = null, IChatClient? preambleChatClient = null, IReadOnlyList<IToolHook>? toolHooks = null, InteractionCatalog? interactions = null, InteractionParkRegistry? interactionPark = null, IReadOnlyCollection<string>? capabilities = null, SessionIdentityRegistry? interactionEffects = null, IAgentMemory? memory = null)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
@@ -191,9 +205,10 @@ public sealed class TurnRunner
     /// (agentInstructions + workflowSection). With an empty <see cref="AgentConfig"/> this returns the
     /// default persona verbatim — behavior unchanged.
     /// </summary>
-    private string BuildSystemPrompt(string? currentStepId, bool isFirstTurn, string? skillSection = null)
+    private string BuildSystemPrompt(string? currentStepId, bool isFirstTurn, string? skillSection = null, string conversationId = "")
     {
-        var basePrompt = string.IsNullOrWhiteSpace(_agentConfig.InstructionsPrompt) ? _systemPrompt : _agentConfig.InstructionsPrompt!;
+        var fromAgent = !string.IsNullOrWhiteSpace(_agentConfig.InstructionsPrompt);
+        var basePrompt = fromAgent ? _agentConfig.InstructionsPrompt! : _systemPrompt;
         var builder = new StringBuilder(basePrompt);
         if (!string.IsNullOrWhiteSpace(_agentConfig.Personality))
         {
@@ -202,27 +217,37 @@ public sealed class TurnRunner
         // First-turn greeting seed (mirrors the Python/TS lanes): weave the greeting into the opening
         // reply, not a separate message — this server has no message-seed path. Only on the first turn,
         // so the agent doesn't re-greet mid-conversation.
+        string? greeting = null;
         if (isFirstTurn && !string.IsNullOrWhiteSpace(_agentConfig.Greeting))
         {
-            builder.Append("\n\n<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \"")
-                .Append(_agentConfig.Greeting)
-                .Append("\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>");
+            greeting = "<GreetingAwareness>\nThis is your first reply in this conversation. Open with a natural, brief variant of: \""
+                + _agentConfig.Greeting
+                + "\" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>";
         }
+        string? workflow = null;
         if (_agentConfig.Workflow is not null)
         {
             var section = Workflows.RenderPromptSection(_agentConfig.Workflow, currentStepId);
             if (section.Length > 0)
             {
-                builder.Append("\n\n").Append(section);
+                workflow = section;
             }
         }
-        // The turn's invoked skill (`send_message.skill`), appended LAST so it is the most salient
-        // instruction the model carries into the turn. Null for an ordinary turn ⇒ byte-for-byte unchanged.
-        if (!string.IsNullOrEmpty(skillSection))
+        // SMOODEV-3798: compose through the host's PromptComposer. Default order: base, greeting,
+        // workflow, then the turn's invoked skill (`send_message.skill`) LAST so it is the most salient
+        // instruction the model carries into the turn. No composer ⇒ byte-for-byte unchanged.
+        return PromptComposition.Render(PromptComposer, new PromptSections
         {
-            builder.Append("\n\n").Append(skillSection);
-        }
-        return builder.ToString();
+            Base = builder.ToString(),
+            BaseSource = fromAgent ? BaseSource.Agent : SystemPromptSource,
+            Greeting = greeting,
+            Workflow = workflow,
+            Skill = string.IsNullOrEmpty(skillSection) ? null : skillSection,
+            Agent = _agentConfig,
+            Access = Access,
+            SessionAuthenticated = SessionAuthenticated,
+            ConversationId = conversationId,
+        });
     }
 
     /// <summary>True when <paramref name="toolName"/> matches a confirmation-gated pattern (substring,
@@ -320,7 +345,7 @@ public sealed class TurnRunner
         // Prior history drives both the memory replay (below) and the first-turn greeting seed: an
         // empty history means this is the agent's first reply, so the greeting section is rendered.
         var priorMessages = await _store.ListMessagesAsync(conversationId, MaxPriorMessages, cancellationToken).ConfigureAwait(false);
-        var resolvedPrompt = BuildSystemPrompt(currentStepId, isFirstTurn: priorMessages.Count == 0, skillSection: skillSection);
+        var resolvedPrompt = BuildSystemPrompt(currentStepId, isFirstTurn: priorMessages.Count == 0, skillSection: skillSection, conversationId: conversationId);
         // MaxOutputTokens is clamped to the model's ModelMaxOutputTokens ceiling by the engine so a
         // budget never exceeds what the model can physically emit (EPIC th-1cc9fa). The raised defaults
         // (8192 / 20) give reasoning models room to think AND answer, and iterations to actually use tools.
