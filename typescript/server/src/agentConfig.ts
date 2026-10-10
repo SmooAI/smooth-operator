@@ -147,32 +147,44 @@ export function parseAgentConfig(raw: unknown): AgentConfig | undefined {
  * step.
  */
 export function assembleSystemPrompt(base: string, config: AgentConfig | undefined, currentStepId: string | null | undefined, isFirstTurn: boolean): string {
-    if (!config) return base;
+    const parts = agentPromptParts(base, config, currentStepId, isFirstTurn);
+    return [parts.base, parts.greeting, parts.workflow].filter((p): p is string => p !== undefined).join('\n\n');
+}
 
-    const sections: string[] = [];
+/**
+ * The per-agent prompt split into the {@link PromptSections} a `PromptComposer`
+ * receives (SMOODEV-3798): the base body (personality, the agent's instructions,
+ * then the server prompt), the first-turn greeting and the current workflow step.
+ * Joined in that order they equal {@link assembleSystemPrompt}.
+ */
+export function agentPromptParts(
+    base: string,
+    config: AgentConfig | undefined,
+    currentStepId: string | null | undefined,
+    isFirstTurn: boolean,
+): { base: string; greeting?: string; workflow?: string } {
+    if (!config) return { base };
 
-    if (config.personality) sections.push(`<Personality>\n${config.personality}\n</Personality>`);
+    const baseParts: string[] = [];
+
+    if (config.personality) baseParts.push(`<Personality>\n${config.personality}\n</Personality>`);
 
     // The agent's own instructions are the primary persona; the base prompt's
     // grounding / behavior rules follow so they always apply.
     if (config.instructions) {
-        sections.push(`<AgentInstructions>\n${config.instructions}\n</AgentInstructions>`);
-        sections.push(base);
-    } else {
-        sections.push(base);
+        baseParts.push(`<AgentInstructions>\n${config.instructions}\n</AgentInstructions>`);
     }
+    baseParts.push(base);
 
     // Greeting is gated server-side to the FIRST turn only (mirrors the Python
     // server's `is_first_turn`): the section is dropped entirely on later turns so
     // the agent doesn't re-greet.
-    if (isFirstTurn && config.greeting) {
-        sections.push(
-            `<GreetingAwareness>\nThis is your first reply in the conversation. Open with a natural, brief variant of: "${config.greeting}" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>`,
-        );
-    }
+    const greeting =
+        isFirstTurn && config.greeting
+            ? `<GreetingAwareness>\nThis is your first reply in the conversation. Open with a natural, brief variant of: "${config.greeting}" — then address the user's message in the same reply. Do NOT repeat the greeting verbatim, and do not reintroduce yourself later.\n</GreetingAwareness>`
+            : undefined;
 
-    const workflowSection = renderWorkflowPromptSection(config.conversationWorkflow, currentStepId);
-    if (workflowSection) sections.push(workflowSection);
+    const workflow = renderWorkflowPromptSection(config.conversationWorkflow, currentStepId) || undefined;
 
-    return sections.join('\n\n');
+    return { base: baseParts.join('\n\n'), greeting, workflow };
 }

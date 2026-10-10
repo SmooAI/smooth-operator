@@ -15,7 +15,8 @@ import type { Target } from './backplane.js';
 import type { StoredSession } from './sessionStore.js';
 import { randomUUID } from 'node:crypto';
 
-import { type AgentConfigResolver, assembleSystemPrompt } from './agentConfig.js';
+import { type AgentConfigResolver, agentPromptParts } from './agentConfig.js';
+import { renderPrompt, type BaseSource, type PromptComposer } from './promptComposer.js';
 import type { MemoryProvider } from './memory.js';
 import { resolveSection, type SkillResolver } from './skills.js';
 import { gateTools, type SessionAuthenticator } from './toolGating.js';
@@ -60,6 +61,8 @@ export interface FrameDispatcherOptions {
     knowledge?: AccessKnowledge;
     access?: AccessContext;
     systemPrompt?: string;
+    /** Assembles every turn's system prompt from its ordered sections (SMOODEV-3798). Unset ⇒ the default order. */
+    promptComposer?: PromptComposer;
     /**
      * Resolves `send_message.skill` to a markdown body. Absent ⇒ any `skill` field is a clean
      * `SKILL_NOT_FOUND`, so a multi-tenant deploy never serves host skills by accident.
@@ -149,6 +152,7 @@ export class FrameDispatcher {
      */
     associate?: (target: Target) => void;
     private readonly systemPrompt?: string;
+    private readonly promptComposer?: PromptComposer;
     private readonly skillResolver?: SkillResolver;
     private readonly memoryProvider?: MemoryProvider;
     private readonly tools: Tool[];
@@ -182,6 +186,7 @@ export class FrameDispatcher {
         this.knowledge = options.knowledge;
         this.access = options.access ?? ANONYMOUS_ACCESS;
         this.systemPrompt = options.systemPrompt;
+        this.promptComposer = options.promptComposer;
         this.skillResolver = options.skillResolver;
         this.memoryProvider = options.memoryProvider;
         this.tools = options.tools ?? [];
@@ -731,12 +736,24 @@ export class FrameDispatcher {
         // AFTER this). Gates the greeting to turn one only, matching the Python server.
         const isFirstTurn = (await this.store.listMessages(session.conversationId, 1)).length === 0;
         const baseSystemPrompt = this.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-        let effectiveSystemPrompt = assembleSystemPrompt(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
-
-        if (skillSectionForTurn) {
-            // Appended LAST so it is the most salient instruction the model carries into the turn.
-            effectiveSystemPrompt = `${effectiveSystemPrompt}\n\n${skillSectionForTurn}`;
-        }
+        const baseSource: BaseSource = agentConfig?.instructions ? 'agent' : this.systemPrompt ? 'defaultPersona' : 'builtIn';
+        const parts = agentPromptParts(baseSystemPrompt, agentConfig, session.currentStepId, isFirstTurn);
+        // SMOODEV-3798 — compose through the host's PromptComposer (default order:
+        // base, greeting, workflow, then the invoked skill LAST so it is the most
+        // salient instruction the model carries into the turn).
+        const sessionAuthenticated = (session.otpVerified ?? false) || (await this.sessionAuthenticator?.isAuthenticated(session.conversationId)) === true;
+        const effectiveSystemPrompt = renderPrompt(this.promptComposer, {
+            base: parts.base,
+            baseSource,
+            greeting: parts.greeting,
+            workflow: parts.workflow,
+            skill: skillSectionForTurn || undefined,
+            suggestedReplies: '',
+            agent: agentConfig,
+            access: this.access,
+            sessionAuthenticated,
+            conversationId: session.conversationId,
+        });
         // SEP — build this turn's extension host (only when SMOOTH_EXTENSIONS_ALLOW is
         // set; undefined otherwise, zero overhead). The delegate is bound to THIS turn's
         // sink/request/session so a hosted extension's `ui/confirm` routes back over this
