@@ -49,6 +49,7 @@ async fn inbound_turn_images_are_persisted_for_cross_client_render() {
     runner::run_streaming_turn(
         TurnRequest {
             demo_tools: false,
+            prompt: Default::default(),
             storage: storage.clone(),
             llm: LlmConfig::openrouter("not-a-real-key").with_model("openai/gpt-4o"),
             max_iterations: 4,

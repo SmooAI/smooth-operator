@@ -44,6 +44,7 @@ pub mod embedder;
 pub mod extensions;
 pub mod handler;
 pub mod local;
+pub mod prompt_composer;
 pub mod protocol;
 pub mod reranker;
 pub mod runner;
@@ -56,6 +57,9 @@ pub mod suggestions;
 pub use config::ServerConfig;
 pub use embedder::{build_embedder, EmbedderConfig};
 pub use local::{serve_local, LocalServer, LocalServerBuilder, DEFAULT_LOCAL_ADDR};
+pub use prompt_composer::{
+    BaseSource, DefaultPromptComposer, PromptComposer, PromptSections, TurnPrompt,
+};
 pub use reranker::{build_reranker, RerankMode, RerankerConfig};
 pub use server::{
     bind, build_state, build_state_from_env, build_state_from_env_async, router, run, serve_state,

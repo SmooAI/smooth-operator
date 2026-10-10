@@ -676,6 +676,11 @@ pub struct TurnRequest<'a> {
     /// instead of a read. `false` (the default) registers nothing and keeps the
     /// const prompt, so production behavior is byte-for-byte unchanged.
     pub demo_tools: bool,
+    /// **SEAM — prompt composition (SMOODEV-3798).** Where the base prompt came
+    /// from, the answering agent, the session's verification bit and the host's
+    /// [`PromptComposer`](crate::prompt_composer::PromptComposer). `Default` ⇒ the
+    /// default composer, so the prompt keeps the historical section order.
+    pub prompt: crate::prompt_composer::TurnPrompt,
 }
 
 /// Runs one knowledge-grounded, streaming turn for a session's conversation and
@@ -731,6 +736,7 @@ pub async fn run_streaming_turn(
         files,
         request_metadata,
         demo_tools,
+        prompt,
     } = req;
 
     // Capture the OTel turn-span attributes up front, since `llm` is moved into
@@ -815,31 +821,31 @@ pub async fn run_streaming_turn(
         KNOWLEDGE_CHAT_SYSTEM_PROMPT
     };
     let base_prompt = system_prompt.as_deref().unwrap_or(default_prompt);
-    // Compose base → first-turn greeting → current workflow step. The greeting is
-    // injected only when this conversation has no prior messages (first turn).
-    let mut sections: Vec<String> = vec![base_prompt.to_string()];
-    if prior.is_empty() {
-        if let Some(greeting) = greeting_section.as_deref() {
-            sections.push(greeting.to_string());
-        }
-    }
-    if let Some(wt) = workflow.as_ref() {
-        sections.push(render_workflow_prompt_section(
-            &wt.workflow,
-            wt.current_step_id.as_deref(),
-        ));
-    }
-    // The turn's invoked skill (`send_message.skill`), last before the trailer
-    // contract so it is the most salient instruction the model carries into the
-    // turn. `None` for an ordinary turn.
-    if let Some(skill) = skill_section.as_deref() {
-        sections.push(skill.to_string());
-    }
-    // Suggested quick replies: teach the model the machine-parsed trailer
-    // contract (see `crate::suggestions`). Appended unconditionally — a model
-    // that emits no trailer costs nothing and yields empty suggestions.
-    sections.push(crate::suggestions::SUGGESTED_REPLIES_PROMPT_SECTION.to_string());
-    let resolved_prompt = sections.join("\n\n");
+    // Compose the sections through the host's PromptComposer (SMOODEV-3798),
+    // defaulting to base → first-turn greeting → current workflow step → skill →
+    // suggested-replies trailer. The greeting is offered only when this
+    // conversation has no prior messages (first turn). The skill is the turn's
+    // invoked `send_message.skill`; the trailer teaches the machine-parsed
+    // suggested-replies contract (see `crate::suggestions`).
+    let workflow_section = workflow
+        .as_ref()
+        .map(|wt| render_workflow_prompt_section(&wt.workflow, wt.current_step_id.as_deref()));
+    let resolved_prompt = prompt.render(&crate::prompt_composer::PromptSections {
+        base: base_prompt,
+        base_source: prompt.base_source,
+        greeting: if prior.is_empty() {
+            greeting_section.as_deref()
+        } else {
+            None
+        },
+        workflow: workflow_section.as_deref(),
+        skill: skill_section.as_deref(),
+        suggested_replies: crate::suggestions::SUGGESTED_REPLIES_PROMPT_SECTION,
+        agent: prompt.agent.as_ref(),
+        access: &access,
+        session_authenticated: prompt.session_authenticated,
+        conversation_id,
+    });
     let mut config = AgentConfig::new("smooth-agent-chat", &resolved_prompt, llm)
         .with_max_iterations(max_iterations)
         .with_knowledge(Arc::clone(&knowledge))

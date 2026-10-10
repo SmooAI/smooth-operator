@@ -119,6 +119,7 @@ async fn run(
     runner::run_streaming_turn(
         TurnRequest {
             demo_tools: false,
+            prompt: Default::default(),
             storage,
             llm: mock_llm(),
             max_iterations: 4,

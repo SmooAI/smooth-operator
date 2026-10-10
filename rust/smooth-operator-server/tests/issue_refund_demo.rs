@@ -142,6 +142,7 @@ fn spawn_turn(
                 request_metadata: None,
                 // Seeded-demo flavor: register the mock `issue_refund` write tool.
                 demo_tools: true,
+                prompt: Default::default(),
             },
             &sink,
         )
