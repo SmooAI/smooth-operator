@@ -35,6 +35,7 @@ from .confirmation import ConfirmationRegistry
 from .interaction import InteractionOutcome, InteractionRegistry, PendingInteractions
 from .memory import MemoryProvider
 from .otp import OtpContact, OtpInvalid, OtpService, OtpVerified
+from .prompt_composer import PromptComposer
 from .session_store import ConversationKey, ConversationSummaryQuery, SessionStore
 from .skills import SkillResolver, resolve_section
 from .turn_runner import Sink, TurnContext, TurnRunner
@@ -68,12 +69,15 @@ class FrameDispatcher:
         associate: Callable[[Target], Awaitable[None]] | None = None,
         skill_resolver: SkillResolver | None = None,
         memory_provider: MemoryProvider | None = None,
+        prompt_composer: PromptComposer | None = None,
     ) -> None:
         self._store = store
         self._chat_client = chat_client
         self._knowledge = knowledge
         self._access = access if access is not None else AccessContext.ANONYMOUS  # type: ignore[attr-defined]
         self._system_prompt = system_prompt
+        #: Host prompt composer (SMOODEV-3798); ``None`` → the default section order.
+        self._prompt_composer = prompt_composer
         #: Resolves `send_message.skill` to its markdown body (th-ebe27d / Rust #338).
         #: None → the feature is off and any `skill` field is a clean SKILL_NOT_FOUND,
         #: so a multi-tenant deploy never serves host skills by accident.
@@ -667,6 +671,9 @@ class FrameDispatcher:
             # Read from the conversation, the one source of truth: this turn may be
             # running on a reconnect whose frame never re-declared `supports` (th-13df6d).
             capabilities=await self._store.get_client_supports(session.conversation_id),
+            prompt_composer=self._prompt_composer,
+            access=self._access,
+            session_authenticated=session_authed,
         )
 
         # Run the turn as a background task, NOT awaited inline. A turn that calls a
